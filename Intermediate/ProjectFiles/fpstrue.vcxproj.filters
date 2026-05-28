@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <None Include="..\..\fpstrue.uproject" />
+    <Filter Include="Source">
+      <UniqueIdentifier>{F31BBDD1-B3E8-3BCC-9652-680E16935819}</UniqueIdentifier>
+    </Filter>
+    <None Include="..\..\Source\fpstrue.Target.cs">
+      <Filter>Source</Filter>
+    </None>
+    <None Include="..\..\Source\fpstrueEditor.Target.cs">
+      <Filter>Source</Filter>
+    </None>
+    <Filter Include="Config">
+      <UniqueIdentifier>{FA535FFB-25E1-3D20-B416-52F9BE21E06E}</UniqueIdentifier>
+    </Filter>
+    <None Include="..\..\Config\DefaultEditor.ini">
+      <Filter>Config</Filter>
+    </None>
+    <None Include="..\..\Config\DefaultEditorPerProjectUserSettings.ini">
+      <Filter>Config</Filter>
+    </None>
+    <None Include="..\..\Config\DefaultEngine.ini">
+      <Filter>Config</Filter>
+    </None>
+    <None Include="..\..\Config\DefaultGame.ini">
+      <Filter>Config</Filter>
+    </None>
+    <None Include="..\..\Config\DefaultInput.ini">
+      <Filter>Config</Filter>
+    </None>
+    <Filter Include="Source\fpstrue">
+      <UniqueIdentifier>{5897FFFE-8376-35C3-A55C-78193A48F2E2}</UniqueIdentifier>
+    </Filter>
+    <None Include="..\..\Source\fpstrue\fpstrue.Build.cs">
+      <Filter>Source\fpstrue</Filter>
+    </None>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrue.cpp">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrue.h">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueCharacter.cpp">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueCharacter.h">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueGameMode.cpp">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueGameMode.h">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstruePickUpComponent.cpp">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstruePickUpComponent.h">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueProjectile.cpp">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueProjectile.h">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueWeaponComponent.cpp">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\fpstrue\fpstrueWeaponComponent.h">
+      <Filter>Source\fpstrue</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

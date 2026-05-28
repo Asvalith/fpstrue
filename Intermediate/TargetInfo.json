@@ -1,0 +1,14 @@
+{
+	"Targets": [
+		{
+			"Name": "fpstrue",
+			"Path": "..\\Source\\fpstrue.Target.cs",
+			"Type": "Game"
+		},
+		{
+			"Name": "fpstrueEditor",
+			"Path": "..\\Source\\fpstrueEditor.Target.cs",
+			"Type": "Editor"
+		}
+	]
+}
