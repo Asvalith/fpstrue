@@ -204,10 +204,8 @@ void AfpstrueCharacter::FinishReload()
 	CurrentAmmo += AmmoToLoad;
 	ReserveAmmo -= AmmoToLoad;
 
-	// 换弹已经结束，先退出 Reloading 状态
-	CharacterState = EFPCharacterState::Idle;
 
-	// 然后根据当前速度修正成 Idle 或 Moving
+	CharacterState = EFPCharacterState::Idle;
 	UpdateCharacterState();
 
 	if (GEngine)
