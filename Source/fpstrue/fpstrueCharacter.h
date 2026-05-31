@@ -7,6 +7,7 @@
 #include "Logging/LogMacros.h"
 #include "fpstrueCharacter.generated.h"
 
+//声明类和结构体，告诉编译器它们的存在，减少头文件依赖，提高编译速度
 class UInputComponent;
 class USkeletalMeshComponent;
 class UCameraComponent;
@@ -14,10 +15,30 @@ class UInputAction;
 class UInputMappingContext;
 struct FInputActionValue;
 
+// 日志分类声明
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
+// LogTemplateCharacter 用于后续 UE_LOG 输出信息
+// Log: 默认级别
+// All: 所有类型消息都允许
 
-UCLASS(config=Game)
-class AfpstrueCharacter : public ACharacter
+
+// ----------------------
+// 枚举：角色状态
+// ----------------------
+UENUM(BlueprintType)   //蓝图可用
+enum class EFPCharacterState : uint8
+{
+	Idle        UMETA(DisplayName = "Idle"),
+	Moving      UMETA(DisplayName = "Moving"),
+	Reloading   UMETA(DisplayName = "Reloading"),
+	Dead        UMETA(DisplayName = "Dead")
+};
+
+// ----------------------
+// AfpstrueCharacter 类声明
+// ----------------------
+UCLASS(config=Game)// UE 反射宏，声明这是一个可被编辑器识别的类
+class AfpstrueCharacter : public ACharacter // 继承 ACharacter，获得基础移动和碰撞功能
 {
 	GENERATED_BODY()
 
@@ -44,24 +65,73 @@ class AfpstrueCharacter : public ACharacter
 	/** Look Input Action */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
 	class UInputAction* LookAction;
+
+	/** Reload Input Action */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+	UInputAction* ReloadAction;
 	
 public:
+
+	// ----------------------	
+	// 构造函数与生命周期
+	// ----------------------
 	AfpstrueCharacter();
+	virtual void Tick(float DeltaTime) override;
 
 protected:
+	//输入函数声明，供输入系统调用
 	/** Called for movement input */
 	void Move(const FInputActionValue& Value);
 
 	/** Called for looking input */
 	void Look(const FInputActionValue& Value);
 
+	/** Called for reload input */
+	void StartReload();
+
+	void FinishReload();
+
+	bool CanReload() const;
+
+	FString GetReloadBlockReason() const;
+
+	void UpdateCharacterState();
+
+	FString GetCharacterStateString() const;
+
 protected:
+
+	//弹药弹夹和状态变量
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
+	int32 MagazineSize = 30;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon")
+	int32 CurrentAmmo = 10;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
+	int32 ReserveAmmo = 90;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
+	float ReloadDuration = 0.8f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "State")
+	EFPCharacterState CharacterState = EFPCharacterState::Idle;
+
+	FTimerHandle ReloadTimerHandle;
+
+protected:
+	// ----------------------
+	// APawn 接口覆盖（UE 自带）
+	// ----------------------
 	// APawn interface
 	virtual void NotifyControllerChanged() override;
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 	// End of APawn interface
 
 public:
+	// ----------------------
+	// Getter 函数（方便 Blueprint 或 C++ 调用）
+	// ----------------------
 	/** Returns Mesh1P subobject **/
 	USkeletalMeshComponent* GetMesh1P() const { return Mesh1P; }
 	/** Returns FirstPersonCameraComponent subobject **/
