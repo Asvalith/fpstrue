@@ -34,7 +34,7 @@ AfpstrueCharacter::AfpstrueCharacter()
 	Mesh1P->bCastDynamicShadow = false;
 	Mesh1P->CastShadow = false;
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
-	//自定义：开启每帧调用Tick()函数
+	//Tick()
 	PrimaryActorTick.bCanEverTick = true;
 
 }
@@ -303,4 +303,91 @@ FString AfpstrueCharacter::GetCharacterStateString() const
 	default:
 		return TEXT("Unknown");
 	}
+}
+
+bool AfpstrueCharacter::IsReloading() const
+{
+	return CharacterState == EFPCharacterState::Reloading;
+}
+
+bool AfpstrueCharacter::HasAmmo() const
+{
+	return CurrentAmmo > 0;
+}
+
+bool AfpstrueCharacter::TryConsumeAmmo()
+{
+	// 换弹期间不能开火
+	if (IsReloading())
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(
+				6,
+				1.0f,
+				FColor::Red,
+				TEXT("Cannot fire: reloading")
+			);
+		}
+
+		return false;
+	}
+
+	// 死亡状态不能开火，当前只是预留
+	if (CharacterState == EFPCharacterState::Dead)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(
+				6,
+				1.0f,
+				FColor::Red,
+				TEXT("Cannot fire: dead")
+			);
+		}
+
+		return false;
+	}
+
+	// 没有子弹时，自动请求换弹
+	if (CurrentAmmo <= 0)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(
+				6,
+				1.0f,
+				FColor::Red,
+				TEXT("No ammo: auto reload")
+			);
+		}
+
+		RequestReload();
+		return false;
+	}
+
+	// 成功消耗一发子弹
+	CurrentAmmo--;
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			6,
+			0.5f,
+			FColor::White,
+			FString::Printf(
+				TEXT("Fire: Ammo %d / %d | Reserve %d"),
+				CurrentAmmo,
+				MagazineSize,
+				ReserveAmmo
+			)
+		);
+	}
+
+	return true;
+}
+
+void AfpstrueCharacter::RequestReload()
+{
+	StartReload();
 }

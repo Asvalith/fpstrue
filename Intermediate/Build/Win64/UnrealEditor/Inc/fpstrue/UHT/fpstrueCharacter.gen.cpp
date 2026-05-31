@@ -41,7 +41,7 @@ struct Z_Construct_UEnum_fpstrue_EFPCharacterState_Statics
 	static constexpr UECodeGen_Private::FMetaDataPairParam Enum_MetaDataParams[] = {
 		{ "BlueprintType", "true" },
 #if !UE_BUILD_SHIPPING
-		{ "Comment", "// ----------------------\n// \xc3\xb6\xef\xbf\xbd\xd9\xa3\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xc9\xab\xd7\xb4\xcc\xac\n// ----------------------\n//\xef\xbf\xbd\xef\xbf\xbd\xcd\xbc\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\n" },
+		{ "Comment", "// ----------------------\n// Character states\n// ----------------------\n//\xef\xbf\xbd\xef\xbf\xbd\xcd\xbc\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\n" },
 #endif
 		{ "Dead.DisplayName", "Dead" },
 		{ "Dead.Name", "EFPCharacterState::Dead" },
@@ -53,7 +53,7 @@ struct Z_Construct_UEnum_fpstrue_EFPCharacterState_Statics
 		{ "Reloading.DisplayName", "Reloading" },
 		{ "Reloading.Name", "EFPCharacterState::Reloading" },
 #if !UE_BUILD_SHIPPING
-		{ "ToolTip", "\xc3\xb6\xef\xbf\xbd\xd9\xa3\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xc9\xab\xd7\xb4\xcc\xac\n----------------------\n\xef\xbf\xbd\xef\xbf\xbd\xcd\xbc\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd" },
+		{ "ToolTip", "Character states\n----------------------\n\xef\xbf\xbd\xef\xbf\xbd\xcd\xbc\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd" },
 #endif
 	};
 #endif // WITH_METADATA
@@ -248,7 +248,7 @@ const UECodeGen_Private::FIntPropertyParams Z_Construct_UClass_AfpstrueCharacter
 const UECodeGen_Private::FIntPropertyParams Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_ReserveAmmo = { "ReserveAmmo", nullptr, (EPropertyFlags)0x0020080000000015, UECodeGen_Private::EPropertyGenFlags::Int, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(AfpstrueCharacter, ReserveAmmo), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_ReserveAmmo_MetaData), NewProp_ReserveAmmo_MetaData) };
 const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_ReloadDuration = { "ReloadDuration", nullptr, (EPropertyFlags)0x0020080000000015, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(AfpstrueCharacter, ReloadDuration), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_ReloadDuration_MetaData), NewProp_ReloadDuration_MetaData) };
 const UECodeGen_Private::FBytePropertyParams Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_CharacterState_Underlying = { "UnderlyingType", nullptr, (EPropertyFlags)0x0000000000000000, UECodeGen_Private::EPropertyGenFlags::Byte, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, 0, nullptr, METADATA_PARAMS(0, nullptr) };
-const UECodeGen_Private::FEnumPropertyParams Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_CharacterState = { "CharacterState", nullptr, (EPropertyFlags)0x0020080000020015, UECodeGen_Private::EPropertyGenFlags::Enum, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(AfpstrueCharacter, CharacterState), Z_Construct_UEnum_fpstrue_EFPCharacterState, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_CharacterState_MetaData), NewProp_CharacterState_MetaData) }; // 864381839
+const UECodeGen_Private::FEnumPropertyParams Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_CharacterState = { "CharacterState", nullptr, (EPropertyFlags)0x0020080000020015, UECodeGen_Private::EPropertyGenFlags::Enum, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(AfpstrueCharacter, CharacterState), Z_Construct_UEnum_fpstrue_EFPCharacterState, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_CharacterState_MetaData), NewProp_CharacterState_MetaData) }; // 1862084594
 const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UClass_AfpstrueCharacter_Statics::PropPointers[] = {
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_Mesh1P,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_AfpstrueCharacter_Statics::NewProp_FirstPersonCameraComponent,
@@ -305,13 +305,13 @@ AfpstrueCharacter::~AfpstrueCharacter() {}
 struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics
 {
 	static constexpr FEnumRegisterCompiledInInfo EnumInfo[] = {
-		{ EFPCharacterState_StaticEnum, TEXT("EFPCharacterState"), &Z_Registration_Info_UEnum_EFPCharacterState, CONSTRUCT_RELOAD_VERSION_INFO(FEnumReloadVersionInfo, 864381839U) },
+		{ EFPCharacterState_StaticEnum, TEXT("EFPCharacterState"), &Z_Registration_Info_UEnum_EFPCharacterState, CONSTRUCT_RELOAD_VERSION_INFO(FEnumReloadVersionInfo, 1862084594U) },
 	};
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
-		{ Z_Construct_UClass_AfpstrueCharacter, AfpstrueCharacter::StaticClass, TEXT("AfpstrueCharacter"), &Z_Registration_Info_UClass_AfpstrueCharacter, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(AfpstrueCharacter), 1844847892U) },
+		{ Z_Construct_UClass_AfpstrueCharacter, AfpstrueCharacter::StaticClass, TEXT("AfpstrueCharacter"), &Z_Registration_Info_UClass_AfpstrueCharacter, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(AfpstrueCharacter), 3588702256U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_539764091(TEXT("/Script/fpstrue"),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_1510397558(TEXT("/Script/fpstrue"),
 	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::ClassInfo),
 	nullptr, 0,
 	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::EnumInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::EnumInfo));

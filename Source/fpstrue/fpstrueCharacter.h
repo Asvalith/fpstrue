@@ -23,7 +23,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
 
 
 // ----------------------
-// 枚举：角色状态
+// Character states
 // ----------------------
 UENUM(BlueprintType)   //蓝图可用
 enum class EFPCharacterState : uint8
@@ -129,6 +129,28 @@ protected:
 	// End of APawn interface
 
 public:
+
+	// ----------------------
+	// WeaponComponent 调用的弹药接口
+	// ----------------------
+	/** 当前是否正在换弹 */
+	bool IsReloading() const;
+
+	/** 当前是否还有弹匣内子弹 */
+	bool HasAmmo() const;
+
+	/** 尝试消耗一发子弹。成功返回 true，失败返回 false */
+	bool TryConsumeAmmo();
+
+	/** 外部请求换弹，比如没子弹时自动换弹 */
+	void RequestReload();
+
+	/** 调试/UI 用：获取当前弹药信息 */
+	int32 GetCurrentAmmo() const { return CurrentAmmo; }
+	int32 GetMagazineSize() const { return MagazineSize; }
+	int32 GetReserveAmmo() const { return ReserveAmmo; }
+	
+	
 	// ----------------------
 	// Getter 函数（方便 Blueprint 或 C++ 调用）
 	// ----------------------

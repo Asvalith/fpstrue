@@ -28,6 +28,12 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
+	// Ammo check before firing
+	if (!Character->TryConsumeAmmo())
+	{
+		return;
+	}
+
 	// Try and fire a projectile
 	if (ProjectileClass != nullptr)
 	{
