@@ -6,12 +6,15 @@
 #include "fpstrueProjectile.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Camera/CameraComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Animation/AnimInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
+#include "DrawDebugHelpers.h"
+
 
 // Sets default values for this component's properties
 UfpstrueWeaponComponent::UfpstrueWeaponComponent()
@@ -34,32 +37,118 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	// Try and fire a projectile
-	if (ProjectileClass != nullptr)
+	UWorld* const World = GetWorld();
+	if (World == nullptr)
 	{
-		UWorld* const World = GetWorld();
-		if (World != nullptr)
+		return;
+	}
+
+	UCameraComponent* Camera = Character->GetFirstPersonCameraComponent();
+	if (Camera == nullptr)
+	{
+		return;
+	}
+
+	if (bUseLineTrace)
+	{
+		const FVector Start = Camera->GetComponentLocation();
+		const FVector Forward = Camera->GetForwardVector();
+		const FVector End = Start + Forward * LineTraceRange;
+
+		FHitResult HitResult;
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(Character);
+		QueryParams.AddIgnoredActor(GetOwner());
+		QueryParams.bTraceComplex = true;
+
+		const bool bHit = World->LineTraceSingleByChannel(
+			HitResult,
+			Start,
+			End,
+			ECC_Visibility,
+			QueryParams
+		);
+
+		const FVector DebugEnd = bHit ? HitResult.ImpactPoint : End;
+		DrawDebugLine(
+			World,
+			Start,
+			DebugEnd,
+			bHit ? FColor::Green : FColor::Red,
+			false,
+			1.0f,
+			0,
+			0.0f
+		);
+
+		if (bHit)
 		{
-			APlayerController* PlayerController = Cast<APlayerController>(Character->GetController());
-			const FRotator SpawnRotation = PlayerController->PlayerCameraManager->GetCameraRotation();
-			// MuzzleOffset is in camera space, so transform it to world space before offsetting from the character location to find the final muzzle position
-			const FVector SpawnLocation = GetOwner()->GetActorLocation() + SpawnRotation.RotateVector(MuzzleOffset);
-	
-			//Set Spawn Collision Handling Override
-			FActorSpawnParameters ActorSpawnParams;
-			ActorSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
-	
-			// Spawn the projectile at the muzzle
-			World->SpawnActor<AfpstrueProjectile>(ProjectileClass, SpawnLocation, SpawnRotation, ActorSpawnParams);
+			DrawDebugSphere(
+				World,
+				HitResult.ImpactPoint,
+				8.0f,
+				12,
+				FColor::Yellow,
+				false,
+				1.0f
+			);
+
+			if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
+			{
+				if (HitComponent->IsSimulatingPhysics())
+				{
+					HitComponent->AddImpulseAtLocation(Forward * LineTraceImpulse, HitResult.ImpactPoint);
+				}
+			}
+
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(
+					7,
+					1.0f,
+					FColor::Yellow,
+					FString::Printf(TEXT("Hit: %s"), *GetNameSafe(HitResult.GetActor()))
+				);
+			}
+		}
+		else if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(
+				7,
+				1.0f,
+				FColor::Red,
+				TEXT("LineTrace missed")
+			);
 		}
 	}
-	
+	else
+	{
+		// Try and fire a projectile. Kept as a fallback for later projectile-style weapons.
+		if (ProjectileClass != nullptr)
+		{
+			APlayerController* PlayerController = Cast<APlayerController>(Character->GetController());
+			if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+			{
+				const FRotator SpawnRotation = PlayerController->PlayerCameraManager->GetCameraRotation();
+				// MuzzleOffset is in camera space, so transform it to world space before offsetting from the character location to find the final muzzle position
+				const FVector SpawnLocation = GetOwner()->GetActorLocation() + SpawnRotation.RotateVector(MuzzleOffset);
+
+				//Set Spawn Collision Handling Override
+				FActorSpawnParameters ActorSpawnParams;
+				ActorSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
+
+				// Spawn the projectile at the muzzle
+				World->SpawnActor<AfpstrueProjectile>(ProjectileClass, SpawnLocation, SpawnRotation, ActorSpawnParams);
+			}
+		}
+	}
+
 	// Try and play the sound if specified
 	if (FireSound != nullptr)
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, FireSound, Character->GetActorLocation());
 	}
-	
+
 	// Try and play a firing animation if specified
 	if (FireAnimation != nullptr)
 	{

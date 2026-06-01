@@ -17,7 +17,6 @@ public:
 	/** Projectile class to spawn */
 	UPROPERTY(EditDefaultsOnly, Category=Projectile)
 	TSubclassOf<class AfpstrueProjectile> ProjectileClass;
-
 	/** Sound to play each time we fire */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Gameplay)
 	USoundBase* FireSound;
@@ -44,6 +43,18 @@ public:
 	/** Attaches the actor to a FirstPersonCharacter */
 	UFUNCTION(BlueprintCallable, Category="Weapon")
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
+
+	
+	/** Use LineTrace as the main fire mode. Projectile remains as a fallback. */
+	UPROPERTY(EditAnywhere, Category = "Weapon")
+	bool bUseLineTrace = true;
+	/** Linetrace length*/
+	UPROPERTY(EditAnywhere, Category = "Weapon")
+	float LineTraceRange = 10000.0f;
+
+	/** Impulse applied to physics objects hit by LineTrace */
+	UPROPERTY(EditAnywhere, Category = "Weapon")
+	float LineTraceImpulse = 300000.0f;
 
 	/** Make the weapon Fire a Projectile */
 	UFUNCTION(BlueprintCallable, Category="Weapon")
