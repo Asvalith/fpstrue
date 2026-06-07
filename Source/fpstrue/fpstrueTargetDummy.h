@@ -26,6 +26,9 @@ protected:
 	UFUNCTION()
 	void HandleDeath();
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Target")
+	float DestroyDelay = 2.0f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Target")
 	UStaticMeshComponent* MeshComponent;
 

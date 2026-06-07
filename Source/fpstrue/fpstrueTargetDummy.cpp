@@ -12,7 +12,7 @@ AfpstrueTargetDummy::AfpstrueTargetDummy()
 	MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
 	RootComponent = MeshComponent;
 	MeshComponent->SetCollisionProfileName(TEXT("BlockAllDynamic"));
-	MeshComponent->SetSimulatePhysics(true);
+	MeshComponent->SetSimulatePhysics(false);
 
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
 }
@@ -34,7 +34,7 @@ void AfpstrueTargetDummy::HandleHealthChanged(float NewHealth)
 	{
 		GEngine->AddOnScreenDebugMessage(
 			8,
-			1.0f,
+			2.0f,
 			FColor::Cyan,
 			FString::Printf(TEXT("%s Health: %.0f"), *GetName(), NewHealth)
 		);
@@ -46,12 +46,13 @@ void AfpstrueTargetDummy::HandleDeath()
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(
-			8,
-			2.0f,
+			9,
+			DestroyDelay,
 			FColor::Red,
-			FString::Printf(TEXT("%s Destroyed"), *GetName())
+			FString::Printf(TEXT("%s Dead"), *GetName())
 		);
 	}
 
-	Destroy();
+	SetActorEnableCollision(false);
+	SetLifeSpan(DestroyDelay);
 }
