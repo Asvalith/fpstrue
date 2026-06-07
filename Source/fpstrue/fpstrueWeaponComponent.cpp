@@ -3,10 +3,12 @@
 
 #include "fpstrueWeaponComponent.h"
 #include "fpstrueCharacter.h"
+#include "fpstrueHealthComponent.h"
 #include "fpstrueProjectile.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Camera/CameraComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -92,6 +94,13 @@ void UfpstrueWeaponComponent::Fire()
 				false,
 				1.0f
 			);
+			if (AActor* HitActor = HitResult.GetActor())
+			{
+				if (UfpstrueHealthComponent* HealthComponent = HitActor->FindComponentByClass<UfpstrueHealthComponent>())
+				{
+					HealthComponent->ApplyDamage(LineTraceDamage);
+				}
+			}
 
 			if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
 			{

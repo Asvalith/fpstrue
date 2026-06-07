@@ -290,6 +290,16 @@ struct Z_Construct_UClass_UfpstrueWeaponComponent_Statics
 		{ "ToolTip", "Impulse applied to physics objects hit by LineTrace" },
 #endif
 	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_LineTraceDamage_MetaData[] = {
+		{ "Category", "Weapon" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Damage applied to actors with a HealthComponent */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Damage applied to actors with a HealthComponent" },
+#endif
+	};
 #endif // WITH_METADATA
 	static const UECodeGen_Private::FClassPropertyParams NewProp_ProjectileClass;
 	static const UECodeGen_Private::FObjectPropertyParams NewProp_FireSound;
@@ -301,6 +311,7 @@ struct Z_Construct_UClass_UfpstrueWeaponComponent_Statics
 	static const UECodeGen_Private::FBoolPropertyParams NewProp_bUseLineTrace;
 	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceRange;
 	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceImpulse;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceDamage;
 	static const UECodeGen_Private::FPropertyParamsBase* const PropPointers[];
 	static UObject* (*const DependentSingletons[])();
 	static constexpr FClassFunctionLinkInfo FuncInfo[] = {
@@ -327,6 +338,7 @@ void Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bUseLineTrace_S
 const UECodeGen_Private::FBoolPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bUseLineTrace = { "bUseLineTrace", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Bool | UECodeGen_Private::EPropertyGenFlags::NativeBool, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, sizeof(bool), sizeof(UfpstrueWeaponComponent), &Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bUseLineTrace_SetBit, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_bUseLineTrace_MetaData), NewProp_bUseLineTrace_MetaData) };
 const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceRange = { "LineTraceRange", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceRange), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceRange_MetaData), NewProp_LineTraceRange_MetaData) };
 const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceImpulse = { "LineTraceImpulse", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceImpulse), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceImpulse_MetaData), NewProp_LineTraceImpulse_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceDamage = { "LineTraceDamage", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceDamage), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceDamage_MetaData), NewProp_LineTraceDamage_MetaData) };
 const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UClass_UfpstrueWeaponComponent_Statics::PropPointers[] = {
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_ProjectileClass,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_FireSound,
@@ -337,6 +349,7 @@ const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UClass_UfpstrueW
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bUseLineTrace,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceRange,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceImpulse,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceDamage,
 };
 static_assert(UE_ARRAY_COUNT(Z_Construct_UClass_UfpstrueWeaponComponent_Statics::PropPointers) < 2048);
 UObject* (*const Z_Construct_UClass_UfpstrueWeaponComponent_Statics::DependentSingletons[])() = {
@@ -379,10 +392,10 @@ UfpstrueWeaponComponent::~UfpstrueWeaponComponent() {}
 struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_Statics
 {
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
-		{ Z_Construct_UClass_UfpstrueWeaponComponent, UfpstrueWeaponComponent::StaticClass, TEXT("UfpstrueWeaponComponent"), &Z_Registration_Info_UClass_UfpstrueWeaponComponent, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UfpstrueWeaponComponent), 952633107U) },
+		{ Z_Construct_UClass_UfpstrueWeaponComponent, UfpstrueWeaponComponent::StaticClass, TEXT("UfpstrueWeaponComponent"), &Z_Registration_Info_UClass_UfpstrueWeaponComponent, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UfpstrueWeaponComponent), 22125896U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_1054357326(TEXT("/Script/fpstrue"),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_3882925970(TEXT("/Script/fpstrue"),
 	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_Statics::ClassInfo),
 	nullptr, 0,
 	nullptr, 0);
