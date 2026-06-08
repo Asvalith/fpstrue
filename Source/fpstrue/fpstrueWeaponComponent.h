@@ -7,6 +7,8 @@
 #include "fpstrueWeaponComponent.generated.h"
 
 class AfpstrueCharacter;
+class UCameraComponent;
+class UWorld;
 
 UCLASS(Blueprintable, BlueprintType, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
@@ -69,6 +71,11 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	bool CanFire() const;
+	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
+	void FireProjectile(UWorld* World);
+	void PlayFireFeedback() const;
+
 	/** The Character holding this weapon*/
 	AfpstrueCharacter* Character;
 };

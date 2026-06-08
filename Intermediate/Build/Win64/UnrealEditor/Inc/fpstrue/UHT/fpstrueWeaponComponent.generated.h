@@ -15,13 +15,13 @@ class AfpstrueCharacter;
 #endif
 #define FPSTRUE_fpstrueWeaponComponent_generated_h
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_RPC_WRAPPERS_NO_PURE_DECLS \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_RPC_WRAPPERS_NO_PURE_DECLS \
 	DECLARE_FUNCTION(execEndPlay); \
 	DECLARE_FUNCTION(execFire); \
 	DECLARE_FUNCTION(execAttachWeapon);
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_INCLASS_NO_PURE_DECLS \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_INCLASS_NO_PURE_DECLS \
 private: \
 	static void StaticRegisterNativesUfpstrueWeaponComponent(); \
 	friend struct Z_Construct_UClass_UfpstrueWeaponComponent_Statics; \
@@ -30,7 +30,7 @@ public: \
 	DECLARE_SERIALIZER(UfpstrueWeaponComponent)
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_ENHANCED_CONSTRUCTORS \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_ENHANCED_CONSTRUCTORS \
 private: \
 	/** Private move- and copy-constructors, should never be used */ \
 	UfpstrueWeaponComponent(UfpstrueWeaponComponent&&); \
@@ -42,13 +42,13 @@ public: \
 	NO_API virtual ~UfpstrueWeaponComponent();
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_11_PROLOG
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_GENERATED_BODY \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_13_PROLOG
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_RPC_WRAPPERS_NO_PURE_DECLS \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_INCLASS_NO_PURE_DECLS \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_14_ENHANCED_CONSTRUCTORS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_RPC_WRAPPERS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_INCLASS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_16_ENHANCED_CONSTRUCTORS \
 private: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 

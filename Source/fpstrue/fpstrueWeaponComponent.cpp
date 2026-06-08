@@ -28,13 +28,7 @@ UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 
 void UfpstrueWeaponComponent::Fire()
 {
-	if (Character == nullptr || Character->GetController() == nullptr)
-	{
-		return;
-	}
-
-	// Ammo check before firing
-	if (!Character->TryConsumeAmmo())
+	if (!CanFire())
 	{
 		return;
 	}
@@ -51,107 +45,134 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
+	// Ammo check before firing
+	if (!Character->TryConsumeAmmo())
+	{
+		return;
+	}
+
 	if (bUseLineTrace)
 	{
-		const FVector Start = Camera->GetComponentLocation();
-		const FVector Forward = Camera->GetForwardVector();
-		const FVector End = Start + Forward * LineTraceRange;
+		FireLineTrace(World, Camera);
+	}
+	else
+	{
+		FireProjectile(World);
+	}
 
-		FHitResult HitResult;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(Character);
-		QueryParams.AddIgnoredActor(GetOwner());
-		QueryParams.bTraceComplex = true;
+	PlayFireFeedback();
+}
 
-		const bool bHit = World->LineTraceSingleByChannel(
-			HitResult,
-			Start,
-			End,
-			ECC_Visibility,
-			QueryParams
-		);
+bool UfpstrueWeaponComponent::CanFire() const
+{
+	return Character != nullptr && Character->GetController() != nullptr;
+}
 
-		const FVector DebugEnd = bHit ? HitResult.ImpactPoint : End;
-		DrawDebugLine(
+void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
+{
+	const FVector Start = Camera->GetComponentLocation();
+	const FVector Forward = Camera->GetForwardVector();
+	const FVector End = Start + Forward * LineTraceRange;
+
+	FHitResult HitResult;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(Character);
+	QueryParams.AddIgnoredActor(GetOwner());
+	QueryParams.bTraceComplex = true;
+
+	const bool bHit = World->LineTraceSingleByChannel(
+		HitResult,
+		Start,
+		End,
+		ECC_Visibility,
+		QueryParams
+	);
+
+	const FVector DebugEnd = bHit ? HitResult.ImpactPoint : End;
+	DrawDebugLine(
+		World,
+		Start,
+		DebugEnd,
+		bHit ? FColor::Green : FColor::Red,
+		false,
+		1.0f,
+		0,
+		0.0f
+	);
+
+	if (bHit)
+	{
+		DrawDebugSphere(
 			World,
-			Start,
-			DebugEnd,
-			bHit ? FColor::Green : FColor::Red,
+			HitResult.ImpactPoint,
+			8.0f,
+			12,
+			FColor::Yellow,
 			false,
-			1.0f,
-			0,
-			0.0f
+			1.0f
 		);
 
-		if (bHit)
+		if (AActor* HitActor = HitResult.GetActor())
 		{
-			DrawDebugSphere(
-				World,
-				HitResult.ImpactPoint,
-				8.0f,
-				12,
-				FColor::Yellow,
-				false,
-				1.0f
-			);
-			if (AActor* HitActor = HitResult.GetActor())
+			if (UfpstrueHealthComponent* HealthComponent = HitActor->FindComponentByClass<UfpstrueHealthComponent>())
 			{
-				if (UfpstrueHealthComponent* HealthComponent = HitActor->FindComponentByClass<UfpstrueHealthComponent>())
-				{
-					HealthComponent->ApplyDamage(LineTraceDamage);
-				}
-			}
-
-			if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
-			{
-				if (HitComponent->IsSimulatingPhysics())
-				{
-					HitComponent->AddImpulseAtLocation(Forward * LineTraceImpulse, HitResult.ImpactPoint);
-				}
-			}
-
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(
-					7,
-					1.0f,
-					FColor::Yellow,
-					FString::Printf(TEXT("Hit: %s"), *GetNameSafe(HitResult.GetActor()))
-				);
+				HealthComponent->ApplyDamage(LineTraceDamage);
 			}
 		}
-		else if (GEngine)
+
+		if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
+		{
+			if (HitComponent->IsSimulatingPhysics())
+			{
+				HitComponent->AddImpulseAtLocation(Forward * LineTraceImpulse, HitResult.ImpactPoint);
+			}
+		}
+
+		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(
 				7,
 				1.0f,
-				FColor::Red,
-				TEXT("LineTrace missed")
+				FColor::Yellow,
+				FString::Printf(TEXT("Hit: %s"), *GetNameSafe(HitResult.GetActor()))
 			);
 		}
 	}
-	else
+	else if (GEngine)
 	{
-		// Try and fire a projectile. Kept as a fallback for later projectile-style weapons.
-		if (ProjectileClass != nullptr)
+		GEngine->AddOnScreenDebugMessage(
+			7,
+			1.0f,
+			FColor::Red,
+			TEXT("LineTrace missed")
+		);
+	}
+}
+
+void UfpstrueWeaponComponent::FireProjectile(UWorld* World)
+{
+	// Try and fire a projectile. Kept as a fallback for later projectile-style weapons.
+	if (ProjectileClass != nullptr)
+	{
+		APlayerController* PlayerController = Cast<APlayerController>(Character->GetController());
+		if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
 		{
-			APlayerController* PlayerController = Cast<APlayerController>(Character->GetController());
-			if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
-			{
-				const FRotator SpawnRotation = PlayerController->PlayerCameraManager->GetCameraRotation();
-				// MuzzleOffset is in camera space, so transform it to world space before offsetting from the character location to find the final muzzle position
-				const FVector SpawnLocation = GetOwner()->GetActorLocation() + SpawnRotation.RotateVector(MuzzleOffset);
+			const FRotator SpawnRotation = PlayerController->PlayerCameraManager->GetCameraRotation();
+			// MuzzleOffset is in camera space, so transform it to world space before offsetting from the character location to find the final muzzle position
+			const FVector SpawnLocation = GetOwner()->GetActorLocation() + SpawnRotation.RotateVector(MuzzleOffset);
 
-				//Set Spawn Collision Handling Override
-				FActorSpawnParameters ActorSpawnParams;
-				ActorSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
+			//Set Spawn Collision Handling Override
+			FActorSpawnParameters ActorSpawnParams;
+			ActorSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 
-				// Spawn the projectile at the muzzle
-				World->SpawnActor<AfpstrueProjectile>(ProjectileClass, SpawnLocation, SpawnRotation, ActorSpawnParams);
-			}
+			// Spawn the projectile at the muzzle
+			World->SpawnActor<AfpstrueProjectile>(ProjectileClass, SpawnLocation, SpawnRotation, ActorSpawnParams);
 		}
 	}
+}
 
+void UfpstrueWeaponComponent::PlayFireFeedback() const
+{
 	// Try and play the sound if specified
 	if (FireSound != nullptr)
 	{
