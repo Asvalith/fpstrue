@@ -54,7 +54,7 @@ public:
 
 	/** Impulse applied to physics objects hit by LineTrace */
 	UPROPERTY(EditAnywhere, Category = "Weapon")
-	float LineTraceImpulse = 300000.0f;
+	float LineTraceImpulse = 10000.0f;
 	/** Damage applied to actors with a HealthComponent */
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceDamage = 25.0f;
