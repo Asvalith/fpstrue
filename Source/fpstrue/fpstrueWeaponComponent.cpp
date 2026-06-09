@@ -3,7 +3,6 @@
 
 #include "fpstrueWeaponComponent.h"
 #include "fpstrueCharacter.h"
-#include "fpstrueHealthComponent.h"
 #include "fpstrueProjectile.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -114,10 +113,15 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 
 		if (AActor* HitActor = HitResult.GetActor())
 		{
-			if (UfpstrueHealthComponent* HealthComponent = HitActor->FindComponentByClass<UfpstrueHealthComponent>())
-			{
-				HealthComponent->ApplyDamage(LineTraceDamage);
-			}
+			UGameplayStatics::ApplyPointDamage(
+				HitActor,
+				LineTraceDamage,
+				Forward,
+				HitResult,
+				Character->GetController(),
+				GetOwner(),
+				nullptr
+			);
 		}
 
 		if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())

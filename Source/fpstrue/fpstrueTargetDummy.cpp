@@ -54,5 +54,8 @@ void AfpstrueTargetDummy::HandleDeath()
 	}
 
 	SetActorEnableCollision(false);
-	SetLifeSpan(DestroyDelay);
+	if (bDestroyOnDeath)
+	{
+		SetLifeSpan(DestroyDelay);
+	}
 }

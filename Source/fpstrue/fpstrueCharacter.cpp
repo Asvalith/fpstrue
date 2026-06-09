@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "fpstrueCharacter.h"
+#include "fpstrueHealthComponent.h"
 #include "fpstrueProjectile.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
@@ -8,6 +9,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "InputActionValue.h"
 #include "Engine/LocalPlayer.h"
 
@@ -21,11 +24,19 @@ AfpstrueCharacter::AfpstrueCharacter()
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 		
+	// Create a camera boom so the first person camera can use camera lag.
+	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	CameraBoom->SetupAttachment(GetCapsuleComponent());
+	CameraBoom->SetRelativeLocation(FVector(-10.f, 0.f, 60.f));
+	CameraBoom->TargetArmLength = 0.0f;
+	CameraBoom->bUsePawnControlRotation = true;
+	CameraBoom->bEnableCameraLag = true;
+	CameraBoom->CameraLagSpeed = 3.0f;
+
 	// Create a CameraComponent	
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
-	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
-	FirstPersonCameraComponent->SetRelativeLocation(FVector(-10.f, 0.f, 60.f)); // Position the camera
-	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+	FirstPersonCameraComponent->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
+	FirstPersonCameraComponent->bUsePawnControlRotation = false;
 
 	// Create a mesh component that will be used when being viewed from a '1st person' view (when controlling this pawn)
 	Mesh1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("CharacterMesh1P"));
@@ -37,6 +48,21 @@ AfpstrueCharacter::AfpstrueCharacter()
 	//Tick()
 	PrimaryActorTick.bCanEverTick = true;
 
+	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
+
+}
+
+void AfpstrueCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (HealthComponent != nullptr)
+	{
+		HealthComponent->OnHealthChanged.AddDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
+		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueCharacter::HandleDeath);
+	}
+
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
 //////////////////////////////////////////////////////////////////////////// Input
@@ -69,6 +95,17 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
+
+		// Running
+		if (RunAction)
+		{
+			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartSprint);
+			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopSprint);
+		}
+		else
+		{
+			UE_LOG(LogTemplateCharacter, Error, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
+		}
 
 		// Reloading
 		if (ReloadAction)
@@ -118,6 +155,21 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
 	}
+}
+
+void AfpstrueCharacter::StartSprint()
+{
+	if (CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading)
+	{
+		return;
+	}
+
+	GetCharacterMovement()->MaxWalkSpeed = SprintSpeed;
+}
+
+void AfpstrueCharacter::StopSprint()
+{
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
 
@@ -302,6 +354,35 @@ FString AfpstrueCharacter::GetCharacterStateString() const
 		return TEXT("Dead");
 	default:
 		return TEXT("Unknown");
+	}
+}
+
+void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
+{
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			10,
+			1.5f,
+			FColor::Cyan,
+			FString::Printf(TEXT("Player Health: %.0f"), NewHealth)
+		);
+	}
+}
+
+void AfpstrueCharacter::HandleDeath()
+{
+	CharacterState = EFPCharacterState::Dead;
+	GetCharacterMovement()->DisableMovement();
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			11,
+			3.0f,
+			FColor::Red,
+			TEXT("Player Dead")
+		);
 	}
 }
 

@@ -14,7 +14,12 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #endif
 #define FPSTRUE_fpstrueCharacter_generated_h
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_43_INCLASS_NO_PURE_DECLS \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_RPC_WRAPPERS_NO_PURE_DECLS \
+	DECLARE_FUNCTION(execHandleDeath); \
+	DECLARE_FUNCTION(execHandleHealthChanged);
+
+
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_INCLASS_NO_PURE_DECLS \
 private: \
 	static void StaticRegisterNativesAfpstrueCharacter(); \
 	friend struct Z_Construct_UClass_AfpstrueCharacter_Statics; \
@@ -23,7 +28,7 @@ public: \
 	DECLARE_SERIALIZER(AfpstrueCharacter)
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_43_ENHANCED_CONSTRUCTORS \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_ENHANCED_CONSTRUCTORS \
 private: \
 	/** Private move- and copy-constructors, should never be used */ \
 	AfpstrueCharacter(AfpstrueCharacter&&); \
@@ -35,12 +40,13 @@ public: \
 	NO_API virtual ~AfpstrueCharacter();
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_40_PROLOG
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_43_GENERATED_BODY \
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_42_PROLOG
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_43_INCLASS_NO_PURE_DECLS \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_43_ENHANCED_CONSTRUCTORS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_RPC_WRAPPERS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_INCLASS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_ENHANCED_CONSTRUCTORS \
 private: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 

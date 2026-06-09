@@ -9,6 +9,9 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHealthChanged, float, NewHealth);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
 
+class AController;
+class UDamageType;
+
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueHealthComponent : public UActorComponent
 {
@@ -40,6 +43,9 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+
+	UFUNCTION()
+	void HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser);
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Health")
 	float MaxHealth = 100.0f;

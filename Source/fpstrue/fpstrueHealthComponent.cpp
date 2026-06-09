@@ -12,6 +12,11 @@ void UfpstrueHealthComponent::BeginPlay()
 	Super::BeginPlay();
 
 	ResetHealth();
+
+	if (AActor* Owner = GetOwner())
+	{
+		Owner->OnTakeAnyDamage.AddDynamic(this, &UfpstrueHealthComponent::HandleOwnerTakeAnyDamage);
+	}
 }
 
 void UfpstrueHealthComponent::ApplyDamage(float DamageAmount)
@@ -34,4 +39,9 @@ void UfpstrueHealthComponent::ResetHealth()
 {
 	CurrentHealth = MaxHealth;
 	OnHealthChanged.Broadcast(CurrentHealth);
+}
+
+void UfpstrueHealthComponent::HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser)
+{
+	ApplyDamage(Damage);
 }

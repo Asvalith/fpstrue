@@ -11,8 +11,10 @@
 class UInputComponent;
 class USkeletalMeshComponent;
 class UCameraComponent;
+class USpringArmComponent;
 class UInputAction;
 class UInputMappingContext;
+class UfpstrueHealthComponent;
 struct FInputActionValue;
 
 // 日志分类声明
@@ -46,6 +48,10 @@ class AfpstrueCharacter : public ACharacter // 继承 ACharacter，获得基础移动和碰
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Mesh, meta = (AllowPrivateAccess = "true"))
 	USkeletalMeshComponent* Mesh1P;
 
+	/** Camera boom used for first person camera lag */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Camera, meta = (AllowPrivateAccess = "true"))
+	USpringArmComponent* CameraBoom;
+
 	/** First person camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Camera, meta = (AllowPrivateAccess = "true"))
 	UCameraComponent* FirstPersonCameraComponent;
@@ -69,6 +75,14 @@ class AfpstrueCharacter : public ACharacter // 继承 ACharacter，获得基础移动和碰
 	/** Reload Input Action */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
 	UInputAction* ReloadAction;
+
+	/** Run Input Action */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+	UInputAction* RunAction;
+
+	/** Player health */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Health, meta = (AllowPrivateAccess = "true"))
+	UfpstrueHealthComponent* HealthComponent;
 	
 public:
 
@@ -76,6 +90,7 @@ public:
 	// 构造函数与生命周期
 	// ----------------------
 	AfpstrueCharacter();
+	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 
 protected:
@@ -89,6 +104,9 @@ protected:
 	/** Called for reload input */
 	void StartReload();
 
+	void StartSprint();
+	void StopSprint();
+
 	void FinishReload();
 
 	bool CanReload() const;
@@ -98,6 +116,12 @@ protected:
 	void UpdateCharacterState();
 
 	FString GetCharacterStateString() const;
+
+	UFUNCTION()
+	void HandleHealthChanged(float NewHealth);
+
+	UFUNCTION()
+	void HandleDeath();
 
 protected:
 
@@ -116,6 +140,12 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "State")
 	EFPCharacterState CharacterState = EFPCharacterState::Idle;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	float WalkSpeed = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	float SprintSpeed = 450.0f;
 
 	FTimerHandle ReloadTimerHandle;
 
@@ -149,6 +179,7 @@ public:
 	int32 GetCurrentAmmo() const { return CurrentAmmo; }
 	int32 GetMagazineSize() const { return MagazineSize; }
 	int32 GetReserveAmmo() const { return ReserveAmmo; }
+	UfpstrueHealthComponent* GetHealthComponent() const { return HealthComponent; }
 	
 	
 	// ----------------------

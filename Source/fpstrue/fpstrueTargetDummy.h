@@ -29,6 +29,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Target")
 	float DestroyDelay = 2.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Target")
+	bool bDestroyOnDeath = false;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Target")
 	UStaticMeshComponent* MeshComponent;
 
