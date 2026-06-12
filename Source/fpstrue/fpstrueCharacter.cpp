@@ -32,6 +32,8 @@ AfpstrueCharacter::AfpstrueCharacter()
 	CameraBoom->bUsePawnControlRotation = true;
 	CameraBoom->bEnableCameraLag = true;
 	CameraBoom->CameraLagSpeed = 3.0f;
+	CameraBoom->bEnableCameraRotationLag = true;
+	CameraBoom->CameraRotationLagSpeed = 3.0f;
 
 	// Create a CameraComponent	
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
@@ -100,11 +102,24 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		if (RunAction)
 		{
 			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartSprint);
-			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopSprint);
 		}
 		else
 		{
 			UE_LOG(LogTemplateCharacter, Error, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(15, 5.0f, FColor::Red, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
+			}
+		}
+
+		// Aiming
+		if (AimAction)
+		{
+			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
+		}
+		else
+		{
+			UE_LOG(LogTemplateCharacter, Error, TEXT("AimAction is NULL. Assign IA_Aim in BP_FirstPersonCharacter."));
 		}
 
 		// Reloading
@@ -159,17 +174,71 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 
 void AfpstrueCharacter::StartSprint()
 {
+	if (CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading || bIsAiming)
+	{
+		return;
+	}
+
+	bIsSprinting = !bIsSprinting;
+	GetCharacterMovement()->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			15,
+			0.8f,
+			bIsSprinting ? FColor::Green : FColor::White,
+			FString::Printf(TEXT("%s: %.0f"), bIsSprinting ? TEXT("Sprint") : TEXT("Walk"), GetCharacterMovement()->MaxWalkSpeed)
+		);
+	}
+}
+
+void AfpstrueCharacter::StopSprint()
+{
+	bIsSprinting = false;
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+}
+
+void AfpstrueCharacter::StartAim()
+{
 	if (CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading)
 	{
 		return;
 	}
 
-	GetCharacterMovement()->MaxWalkSpeed = SprintSpeed;
-}
+	bIsAiming = !bIsAiming;
+	OnAimChanged(bIsAiming);
 
-void AfpstrueCharacter::StopSprint()
+	if (bIsAiming)
+	{
+		bIsSprinting = false;
+		GetCharacterMovement()->MaxWalkSpeed = AimWalkSpeed;
+	}
+	else
+	{
+		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	}
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(16, 0.8f, bIsAiming ? FColor::Cyan : FColor::White, bIsAiming ? TEXT("Aim: true") : TEXT("Aim: false"));
+	}
+}
+void AfpstrueCharacter::StopAim()
 {
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	const bool bWasAiming = bIsAiming;
+	bIsAiming = false;
+
+	if (bWasAiming)
+	{
+		OnAimChanged(false);
+		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	}
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(16, 0.8f, FColor::White, TEXT("Aim: false"));
+	}
 }
 
 
@@ -225,6 +294,8 @@ void AfpstrueCharacter::StartReload()
 		return;
 	}
 
+	bIsAiming = false;
+	NotifyFireStopped();
 	CharacterState = EFPCharacterState::Reloading;
 
 	if (GEngine)
@@ -373,6 +444,8 @@ void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 void AfpstrueCharacter::HandleDeath()
 {
 	CharacterState = EFPCharacterState::Dead;
+	bIsSprinting = false;
+	bIsAiming = false;
 	GetCharacterMovement()->DisableMovement();
 
 	if (GEngine)
@@ -394,6 +467,13 @@ bool AfpstrueCharacter::IsReloading() const
 bool AfpstrueCharacter::HasAmmo() const
 {
 	return CurrentAmmo > 0;
+}
+
+bool AfpstrueCharacter::CanFireWeapon() const
+{
+	return CharacterState != EFPCharacterState::Dead
+		&& CharacterState != EFPCharacterState::Reloading
+		&& CurrentAmmo > 0;
 }
 
 bool AfpstrueCharacter::TryConsumeAmmo()
@@ -468,6 +548,27 @@ bool AfpstrueCharacter::TryConsumeAmmo()
 	return true;
 }
 
+void AfpstrueCharacter::NotifyFireStarted()
+{
+	if (bIsFiring || CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading)
+	{
+		return;
+	}
+
+	bIsFiring = true;
+	OnFireStarted();
+}
+
+void AfpstrueCharacter::NotifyFireStopped()
+{
+	if (!bIsFiring)
+	{
+		return;
+	}
+
+	bIsFiring = false;
+	OnFireStopped();
+}
 void AfpstrueCharacter::RequestReload()
 {
 	StartReload();

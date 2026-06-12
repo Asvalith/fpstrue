@@ -15,10 +15,15 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #define FPSTRUE_fpstrueCharacter_generated_h
 
 #define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_RPC_WRAPPERS_NO_PURE_DECLS \
+	DECLARE_FUNCTION(execIsFiring); \
+	DECLARE_FUNCTION(execIsAiming); \
+	DECLARE_FUNCTION(execIsSprinting); \
+	DECLARE_FUNCTION(execCanFireWeapon); \
 	DECLARE_FUNCTION(execHandleDeath); \
 	DECLARE_FUNCTION(execHandleHealthChanged);
 
 
+#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_CALLBACK_WRAPPERS
 #define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_INCLASS_NO_PURE_DECLS \
 private: \
 	static void StaticRegisterNativesAfpstrueCharacter(); \
@@ -45,6 +50,7 @@ public: \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
 	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_RPC_WRAPPERS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_CALLBACK_WRAPPERS \
 	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_INCLASS_NO_PURE_DECLS \
 	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_45_ENHANCED_CONSTRUCTORS \
 private: \

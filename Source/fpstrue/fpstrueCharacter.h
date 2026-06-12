@@ -80,6 +80,10 @@ class AfpstrueCharacter : public ACharacter // 继承 ACharacter，获得基础移动和碰
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
 	UInputAction* RunAction;
 
+	/** Aim Input Action */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+	UInputAction* AimAction;
+
 	/** Player health */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Health, meta = (AllowPrivateAccess = "true"))
 	UfpstrueHealthComponent* HealthComponent;
@@ -106,6 +110,8 @@ protected:
 
 	void StartSprint();
 	void StopSprint();
+	void StartAim();
+	void StopAim();
 
 	void FinishReload();
 
@@ -122,6 +128,15 @@ protected:
 
 	UFUNCTION()
 	void HandleDeath();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
+	void OnAimChanged(bool bNewIsAiming);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
+	void OnFireStarted();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
+	void OnFireStopped();
 
 protected:
 
@@ -142,10 +157,22 @@ protected:
 	EFPCharacterState CharacterState = EFPCharacterState::Idle;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
-	float WalkSpeed = 150.0f;
+	float WalkSpeed = 300.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
-	float SprintSpeed = 450.0f;
+	float SprintSpeed = 600.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	float AimWalkSpeed = 120.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement")
+	bool bIsSprinting = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon")
+	bool bIsAiming = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon")
+	bool bIsFiring = false;
 
 	FTimerHandle ReloadTimerHandle;
 
@@ -169,8 +196,21 @@ public:
 	/** 当前是否还有弹匣内子弹 */
 	bool HasAmmo() const;
 
+	/** 只检查当前是否允许开火，不消耗子弹 */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool CanFireWeapon() const;
+
 	/** 尝试消耗一发子弹。成功返回 true，失败返回 false */
 	bool TryConsumeAmmo();
+
+	/** 左键开始按下，进入射击中状态 */
+	void NotifyFireStarted();
+
+	/** 左键松开或取消，退出射击中状态 */
+	void NotifyFireStopped();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
+	void OnFireAnimationRequested();
 
 	/** 外部请求换弹，比如没子弹时自动换弹 */
 	void RequestReload();
@@ -180,6 +220,12 @@ public:
 	int32 GetMagazineSize() const { return MagazineSize; }
 	int32 GetReserveAmmo() const { return ReserveAmmo; }
 	UfpstrueHealthComponent* GetHealthComponent() const { return HealthComponent; }
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsSprinting() const { return bIsSprinting; }
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsAiming() const { return bIsAiming; }
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsFiring() const { return bIsFiring; }
 	
 	
 	// ----------------------

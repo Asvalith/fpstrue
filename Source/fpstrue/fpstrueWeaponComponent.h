@@ -10,6 +10,8 @@ class AfpstrueCharacter;
 class UCameraComponent;
 class UWorld;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
+
 UCLASS(Blueprintable, BlueprintType, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 {
@@ -65,12 +67,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Weapon")
 	void Fire();
 
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponFireStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponFireStopped;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponFirePerformed;
+
 protected:
 	/** Ends gameplay for this component. */
 	UFUNCTION()
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	void StartFire();
+	void StopFire();
 	bool CanFire() const;
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
 	void FireProjectile(UWorld* World);

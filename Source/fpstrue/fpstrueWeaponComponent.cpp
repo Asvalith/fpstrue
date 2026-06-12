@@ -25,6 +25,23 @@ UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 }
 
 
+void UfpstrueWeaponComponent::StartFire()
+{
+	if (CanFire() && Character->CanFireWeapon())
+	{
+		Character->NotifyFireStarted();
+		OnWeaponFireStarted.Broadcast();
+	}
+}
+
+void UfpstrueWeaponComponent::StopFire()
+{
+	if (Character != nullptr)
+	{
+		Character->NotifyFireStopped();
+	}
+	OnWeaponFireStopped.Broadcast();
+}
 void UfpstrueWeaponComponent::Fire()
 {
 	if (!CanFire())
@@ -44,11 +61,21 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
+	// Check whether the character is allowed to fire before consuming ammo.
+	if (!Character->CanFireWeapon())
+	{
+		return;
+	}
+
 	// Ammo check before firing
 	if (!Character->TryConsumeAmmo())
 	{
 		return;
 	}
+
+	Character->OnFireAnimationRequested();
+	OnWeaponFirePerformed.Broadcast();
+
 
 	if (bUseLineTrace)
 	{
@@ -221,7 +248,10 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerController->InputComponent))
 		{
 			// Fire
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &UfpstrueWeaponComponent::StartFire);
 			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Triggered, this, &UfpstrueWeaponComponent::Fire);
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &UfpstrueWeaponComponent::StopFire);
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Canceled, this, &UfpstrueWeaponComponent::StopFire);
 		}
 	}
 
