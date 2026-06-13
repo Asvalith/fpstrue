@@ -402,35 +402,6 @@ UFunction* Z_Construct_UFunction_AfpstrueCharacter_OnAimChanged()
 }
 // End Class AfpstrueCharacter Function OnAimChanged
 
-// Begin Class AfpstrueCharacter Function OnFireAnimationRequested
-static const FName NAME_AfpstrueCharacter_OnFireAnimationRequested = FName(TEXT("OnFireAnimationRequested"));
-void AfpstrueCharacter::OnFireAnimationRequested()
-{
-	UFunction* Func = FindFunctionChecked(NAME_AfpstrueCharacter_OnFireAnimationRequested);
-	ProcessEvent(Func,NULL);
-}
-struct Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested_Statics
-{
-#if WITH_METADATA
-	static constexpr UECodeGen_Private::FMetaDataPairParam Function_MetaDataParams[] = {
-		{ "Category", "Weapon" },
-		{ "ModuleRelativePath", "fpstrueCharacter.h" },
-	};
-#endif // WITH_METADATA
-	static const UECodeGen_Private::FFunctionParams FuncParams;
-};
-const UECodeGen_Private::FFunctionParams Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested_Statics::FuncParams = { (UObject*(*)())Z_Construct_UClass_AfpstrueCharacter, nullptr, "OnFireAnimationRequested", nullptr, nullptr, nullptr, 0, 0, RF_Public|RF_Transient|RF_MarkAsNative, (EFunctionFlags)0x08020800, 0, 0, METADATA_PARAMS(UE_ARRAY_COUNT(Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested_Statics::Function_MetaDataParams), Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested_Statics::Function_MetaDataParams) };
-UFunction* Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested()
-{
-	static UFunction* ReturnFunction = nullptr;
-	if (!ReturnFunction)
-	{
-		UECodeGen_Private::ConstructUFunction(&ReturnFunction, Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested_Statics::FuncParams);
-	}
-	return ReturnFunction;
-}
-// End Class AfpstrueCharacter Function OnFireAnimationRequested
-
 // Begin Class AfpstrueCharacter Function OnFireStarted
 static const FName NAME_AfpstrueCharacter_OnFireStarted = FName(TEXT("OnFireStarted"));
 void AfpstrueCharacter::OnFireStarted()
@@ -734,7 +705,6 @@ struct Z_Construct_UClass_AfpstrueCharacter_Statics
 		{ &Z_Construct_UFunction_AfpstrueCharacter_IsFiring, "IsFiring" }, // 3426344463
 		{ &Z_Construct_UFunction_AfpstrueCharacter_IsSprinting, "IsSprinting" }, // 4117286174
 		{ &Z_Construct_UFunction_AfpstrueCharacter_OnAimChanged, "OnAimChanged" }, // 3345649525
-		{ &Z_Construct_UFunction_AfpstrueCharacter_OnFireAnimationRequested, "OnFireAnimationRequested" }, // 3450707038
 		{ &Z_Construct_UFunction_AfpstrueCharacter_OnFireStarted, "OnFireStarted" }, // 1907222575
 		{ &Z_Construct_UFunction_AfpstrueCharacter_OnFireStopped, "OnFireStopped" }, // 3266385561
 	};
@@ -848,10 +818,10 @@ struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharact
 		{ EFPCharacterState_StaticEnum, TEXT("EFPCharacterState"), &Z_Registration_Info_UEnum_EFPCharacterState, CONSTRUCT_RELOAD_VERSION_INFO(FEnumReloadVersionInfo, 1862084594U) },
 	};
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
-		{ Z_Construct_UClass_AfpstrueCharacter, AfpstrueCharacter::StaticClass, TEXT("AfpstrueCharacter"), &Z_Registration_Info_UClass_AfpstrueCharacter, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(AfpstrueCharacter), 3052489605U) },
+		{ Z_Construct_UClass_AfpstrueCharacter, AfpstrueCharacter::StaticClass, TEXT("AfpstrueCharacter"), &Z_Registration_Info_UClass_AfpstrueCharacter, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(AfpstrueCharacter), 203336039U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_333833203(TEXT("/Script/fpstrue"),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_1338799619(TEXT("/Script/fpstrue"),
 	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::ClassInfo),
 	nullptr, 0,
 	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::EnumInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueCharacter_h_Statics::EnumInfo));

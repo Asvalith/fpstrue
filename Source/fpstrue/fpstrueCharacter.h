@@ -209,8 +209,6 @@ public:
 	/** 左键松开或取消，退出射击中状态 */
 	void NotifyFireStopped();
 
-	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
-	void OnFireAnimationRequested();
 
 	/** 外部请求换弹，比如没子弹时自动换弹 */
 	void RequestReload();

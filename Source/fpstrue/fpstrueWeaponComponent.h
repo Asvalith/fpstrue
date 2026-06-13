@@ -67,6 +67,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Weapon")
 	void Fire();
 
+	/*Add fire VFX interface*/
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FWeaponFireEvent OnWeaponFireStarted;
 

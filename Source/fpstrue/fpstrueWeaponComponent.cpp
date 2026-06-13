@@ -73,7 +73,6 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	Character->OnFireAnimationRequested();
 	OnWeaponFirePerformed.Broadcast();
 
 
