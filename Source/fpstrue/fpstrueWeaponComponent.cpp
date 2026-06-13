@@ -85,7 +85,6 @@ void UfpstrueWeaponComponent::Fire()
 		FireProjectile(World);
 	}
 
-	PlayFireFeedback();
 }
 
 bool UfpstrueWeaponComponent::CanFire() const
@@ -201,26 +200,6 @@ void UfpstrueWeaponComponent::FireProjectile(UWorld* World)
 	}
 }
 
-void UfpstrueWeaponComponent::PlayFireFeedback() const
-{
-	// Try and play the sound if specified
-	if (FireSound != nullptr)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, FireSound, Character->GetActorLocation());
-	}
-
-	// Try and play a firing animation if specified
-	if (FireAnimation != nullptr)
-	{
-		// Get the animation object for the arms mesh
-		UAnimInstance* AnimInstance = Character->GetMesh1P()->GetAnimInstance();
-		if (AnimInstance != nullptr)
-		{
-			AnimInstance->Montage_Play(FireAnimation, 1.f);
-		}
-	}
-}
-
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 {
 	Character = TargetCharacter;
@@ -248,7 +227,6 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		{
 			// Fire
 			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &UfpstrueWeaponComponent::StartFire);
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Triggered, this, &UfpstrueWeaponComponent::Fire);
 			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &UfpstrueWeaponComponent::StopFire);
 			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Canceled, this, &UfpstrueWeaponComponent::StopFire);
 		}

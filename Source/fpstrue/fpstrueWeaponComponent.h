@@ -88,7 +88,6 @@ private:
 	bool CanFire() const;
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
 	void FireProjectile(UWorld* World);
-	void PlayFireFeedback() const;
 
 	/** The Character holding this weapon*/
 	AfpstrueCharacter* Character;
