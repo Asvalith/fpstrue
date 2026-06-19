@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/HitResult.h"
 #include "fpstrueWeaponComponent.generated.h"
 
 class AfpstrueCharacter;
@@ -11,6 +12,15 @@ class UCameraComponent;
 class UWorld;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponReloadEvent, bool, bWasEmptyReload);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
+	FWeaponTraceEvent,
+	bool, bHit,
+	FVector, TraceStart,
+	FVector, TraceEnd,
+	FVector, TraceTarget,
+	FHitResult, HitResult
+);
 
 UCLASS(Blueprintable, BlueprintType, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
@@ -63,6 +73,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceDamage = 25.0f;
 
+	/** Draw LineTrace debug lines and hit messages. Disabled for normal gameplay. */
+	UPROPERTY(EditAnywhere, Category = "Weapon|Debug")
+	bool bShowDebugTrace = false;
+
 	/** Make the weapon Fire a Projectile */
 	UFUNCTION(BlueprintCallable, Category="Weapon")
 	void Fire();
@@ -76,6 +90,22 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FWeaponFireEvent OnWeaponFirePerformed;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponDryFire;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponReloadEvent OnWeaponReloadStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponReloadFinished;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponTraceEvent OnWeaponTraceFinished;
+
+	void NotifyReloadStarted(bool bWasEmptyReload);
+	void NotifyReloadFinished();
+	void NotifyFireStoppedByCharacter();
 
 protected:
 	/** Ends gameplay for this component. */

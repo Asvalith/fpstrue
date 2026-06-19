@@ -3,6 +3,7 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
 #include "fpstrueProjectile.h"
+#include "fpstrueWeaponComponent.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -294,15 +295,27 @@ void AfpstrueCharacter::StartReload()
 		return;
 	}
 
+	const bool bWasEmptyReload = CurrentAmmo <= 0;
+	const float ActualReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
+
 	bIsAiming = false;
 	NotifyFireStopped();
+	if (EquippedWeaponComponent != nullptr)
+	{
+		EquippedWeaponComponent->NotifyFireStoppedByCharacter();
+	}
 	CharacterState = EFPCharacterState::Reloading;
+
+	if (EquippedWeaponComponent != nullptr)
+	{
+		EquippedWeaponComponent->NotifyReloadStarted(bWasEmptyReload);
+	}
 
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(
 			3,
-			ReloadDuration,
+			ActualReloadDuration,
 			FColor::Orange,
 			TEXT("Start Reload")
 		);
@@ -314,7 +327,7 @@ void AfpstrueCharacter::StartReload()
 		ReloadTimerHandle,
 		this,
 		&AfpstrueCharacter::FinishReload,
-		ReloadDuration,
+		ActualReloadDuration,
 		false
 	);
 }
@@ -330,6 +343,11 @@ void AfpstrueCharacter::FinishReload()
 
 	CharacterState = EFPCharacterState::Idle;
 	UpdateCharacterState();
+
+	if (EquippedWeaponComponent != nullptr)
+	{
+		EquippedWeaponComponent->NotifyReloadFinished();
+	}
 
 	if (GEngine)
 	{
@@ -469,6 +487,11 @@ bool AfpstrueCharacter::HasAmmo() const
 	return CurrentAmmo > 0;
 }
 
+bool AfpstrueCharacter::IsDead() const
+{
+	return CharacterState == EFPCharacterState::Dead;
+}
+
 bool AfpstrueCharacter::CanFireWeapon() const
 {
 	return CharacterState != EFPCharacterState::Dead
@@ -572,4 +595,9 @@ void AfpstrueCharacter::NotifyFireStopped()
 void AfpstrueCharacter::RequestReload()
 {
 	StartReload();
+}
+
+void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
+{
+	EquippedWeaponComponent = WeaponComponent;
 }

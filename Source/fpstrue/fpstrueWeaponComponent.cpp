@@ -27,11 +27,13 @@ UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 
 void UfpstrueWeaponComponent::StartFire()
 {
-	if (CanFire() && Character->CanFireWeapon())
+	if (!CanFire() || Character->IsDead() || Character->IsReloading())
 	{
-		Character->NotifyFireStarted();
-		OnWeaponFireStarted.Broadcast();
+		return;
 	}
+
+	Character->NotifyFireStarted();
+	OnWeaponFireStarted.Broadcast();
 }
 
 void UfpstrueWeaponComponent::StopFire()
@@ -61,15 +63,16 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	// Check whether the character is allowed to fire before consuming ammo.
-	if (!Character->CanFireWeapon())
+	if (Character->IsReloading() || Character->IsDead())
 	{
 		return;
 	}
 
-	// Ammo check before firing
+	// Ammo, reload, and death gates live in the character; this is the single shot attempt.
 	if (!Character->TryConsumeAmmo())
 	{
+		OnWeaponDryFire.Broadcast();
+		StopFire();
 		return;
 	}
 
@@ -92,6 +95,21 @@ bool UfpstrueWeaponComponent::CanFire() const
 	return Character != nullptr && Character->GetController() != nullptr;
 }
 
+void UfpstrueWeaponComponent::NotifyReloadStarted(bool bWasEmptyReload)
+{
+	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
+}
+
+void UfpstrueWeaponComponent::NotifyReloadFinished()
+{
+	OnWeaponReloadFinished.Broadcast();
+}
+
+void UfpstrueWeaponComponent::NotifyFireStoppedByCharacter()
+{
+	OnWeaponFireStopped.Broadcast();
+}
+
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
 {
 	const FVector Start = Camera->GetComponentLocation();
@@ -112,29 +130,37 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 		QueryParams
 	);
 
-	const FVector DebugEnd = bHit ? HitResult.ImpactPoint : End;
-	DrawDebugLine(
-		World,
-		Start,
-		DebugEnd,
-		bHit ? FColor::Green : FColor::Red,
-		false,
-		1.0f,
-		0,
-		0.0f
-	);
+	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
+	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
+
+	if (bShowDebugTrace)
+	{
+		DrawDebugLine(
+			World,
+			Start,
+			TraceTarget,
+			bHit ? FColor::Green : FColor::Red,
+			false,
+			1.0f,
+			0,
+			0.0f
+		);
+	}
 
 	if (bHit)
 	{
-		DrawDebugSphere(
-			World,
-			HitResult.ImpactPoint,
-			8.0f,
-			12,
-			FColor::Yellow,
-			false,
-			1.0f
-		);
+		if (bShowDebugTrace)
+		{
+			DrawDebugSphere(
+				World,
+				HitResult.ImpactPoint,
+				8.0f,
+				12,
+				FColor::Yellow,
+				false,
+				1.0f
+			);
+		}
 
 		if (AActor* HitActor = HitResult.GetActor())
 		{
@@ -157,7 +183,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			}
 		}
 
-		if (GEngine)
+		if (bShowDebugTrace && GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(
 				7,
@@ -167,7 +193,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			);
 		}
 	}
-	else if (GEngine)
+	else if (bShowDebugTrace && GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(
 			7,
@@ -213,6 +239,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	// Attach the weapon to the First Person Character
 	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
 	AttachToComponent(Character->GetMesh1P(), AttachmentRules, FName(TEXT("GripPoint")));
+	Character->SetEquippedWeaponComponent(this);
 
 	// Set up action bindings
 	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))

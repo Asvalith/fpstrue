@@ -15,6 +15,7 @@ class USpringArmComponent;
 class UInputAction;
 class UInputMappingContext;
 class UfpstrueHealthComponent;
+class UfpstrueWeaponComponent;
 struct FInputActionValue;
 
 // 日志分类声明
@@ -153,6 +154,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
 	float ReloadDuration = 0.8f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
+	float EmptyReloadDuration = 1.2f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "State")
 	EFPCharacterState CharacterState = EFPCharacterState::Idle;
 
@@ -176,6 +180,9 @@ protected:
 
 	FTimerHandle ReloadTimerHandle;
 
+	UPROPERTY(Transient)
+	UfpstrueWeaponComponent* EquippedWeaponComponent = nullptr;
+
 protected:
 	// ----------------------
 	// APawn 接口覆盖（UE 自带）
@@ -192,6 +199,8 @@ public:
 	// ----------------------
 	/** 当前是否正在换弹 */
 	bool IsReloading() const;
+
+	bool IsDead() const;
 
 	/** 当前是否还有弹匣内子弹 */
 	bool HasAmmo() const;
@@ -212,6 +221,8 @@ public:
 
 	/** 外部请求换弹，比如没子弹时自动换弹 */
 	void RequestReload();
+
+	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
 
 	/** 调试/UI 用：获取当前弹药信息 */
 	int32 GetCurrentAmmo() const { return CurrentAmmo; }
