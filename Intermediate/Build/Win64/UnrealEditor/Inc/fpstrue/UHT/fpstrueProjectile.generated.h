@@ -17,11 +17,11 @@ struct FHitResult;
 #endif
 #define FPSTRUE_fpstrueProjectile_generated_h
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_RPC_WRAPPERS_NO_PURE_DECLS \
+#define FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_RPC_WRAPPERS_NO_PURE_DECLS \
 	DECLARE_FUNCTION(execOnHit);
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_INCLASS_NO_PURE_DECLS \
+#define FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_INCLASS_NO_PURE_DECLS \
 private: \
 	static void StaticRegisterNativesAfpstrueProjectile(); \
 	friend struct Z_Construct_UClass_AfpstrueProjectile_Statics; \
@@ -32,7 +32,7 @@ public: \
 
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_ENHANCED_CONSTRUCTORS \
+#define FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_ENHANCED_CONSTRUCTORS \
 private: \
 	/** Private move- and copy-constructors, should never be used */ \
 	AfpstrueProjectile(AfpstrueProjectile&&); \
@@ -44,13 +44,13 @@ public: \
 	NO_API virtual ~AfpstrueProjectile();
 
 
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_12_PROLOG
-#define FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_GENERATED_BODY \
+#define FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_12_PROLOG
+#define FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_RPC_WRAPPERS_NO_PURE_DECLS \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_INCLASS_NO_PURE_DECLS \
-	FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h_15_ENHANCED_CONSTRUCTORS \
+	FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_RPC_WRAPPERS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_INCLASS_NO_PURE_DECLS \
+	FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h_15_ENHANCED_CONSTRUCTORS \
 private: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
@@ -58,7 +58,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 template<> FPSTRUE_API UClass* StaticClass<class AfpstrueProjectile>();
 
 #undef CURRENT_FILE_ID
-#define CURRENT_FILE_ID FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueProjectile_h
+#define CURRENT_FILE_ID FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueProjectile_h
 
 
 PRAGMA_ENABLE_DEPRECATION_WARNINGS

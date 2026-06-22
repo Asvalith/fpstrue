@@ -250,14 +250,14 @@ UfpstruePickUpComponent::~UfpstruePickUpComponent() {}
 // End Class UfpstruePickUpComponent
 
 // Begin Registration
-struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstruePickUpComponent_h_Statics
+struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstruePickUpComponent_h_Statics
 {
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
 		{ Z_Construct_UClass_UfpstruePickUpComponent, UfpstruePickUpComponent::StaticClass, TEXT("UfpstruePickUpComponent"), &Z_Registration_Info_UClass_UfpstruePickUpComponent, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UfpstruePickUpComponent), 3198581507U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstruePickUpComponent_h_3395013808(TEXT("/Script/fpstrue"),
-	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstruePickUpComponent_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstruePickUpComponent_h_Statics::ClassInfo),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstruePickUpComponent_h_3395013808(TEXT("/Script/fpstrue"),
+	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstruePickUpComponent_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstruePickUpComponent_h_Statics::ClassInfo),
 	nullptr, 0,
 	nullptr, 0);
 // End Registration

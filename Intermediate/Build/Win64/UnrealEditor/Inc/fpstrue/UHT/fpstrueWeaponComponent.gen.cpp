@@ -6,6 +6,7 @@
 
 #include "UObject/GeneratedCppIncludes.h"
 #include "fpstrue/fpstrueWeaponComponent.h"
+#include "Runtime/Engine/Classes/Engine/HitResult.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void EmptyLinkFunctionForGeneratedCodefpstrueWeaponComponent() {}
 
@@ -16,6 +17,7 @@ ENGINE_API UClass* Z_Construct_UClass_UAnimMontage_NoRegister();
 ENGINE_API UClass* Z_Construct_UClass_USkeletalMeshComponent();
 ENGINE_API UClass* Z_Construct_UClass_USoundBase_NoRegister();
 ENGINE_API UEnum* Z_Construct_UEnum_Engine_EEndPlayReason();
+ENGINE_API UScriptStruct* Z_Construct_UScriptStruct_FHitResult();
 ENHANCEDINPUT_API UClass* Z_Construct_UClass_UInputAction_NoRegister();
 ENHANCEDINPUT_API UClass* Z_Construct_UClass_UInputMappingContext_NoRegister();
 FPSTRUE_API UClass* Z_Construct_UClass_AfpstrueCharacter_NoRegister();
@@ -23,6 +25,8 @@ FPSTRUE_API UClass* Z_Construct_UClass_AfpstrueProjectile_NoRegister();
 FPSTRUE_API UClass* Z_Construct_UClass_UfpstrueWeaponComponent();
 FPSTRUE_API UClass* Z_Construct_UClass_UfpstrueWeaponComponent_NoRegister();
 FPSTRUE_API UFunction* Z_Construct_UDelegateFunction_fpstrue_WeaponFireEvent__DelegateSignature();
+FPSTRUE_API UFunction* Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature();
+FPSTRUE_API UFunction* Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature();
 UPackage* Z_Construct_UPackage__Script_fpstrue();
 // End Cross Module References
 
@@ -51,6 +55,128 @@ void FWeaponFireEvent_DelegateWrapper(const FMulticastScriptDelegate& WeaponFire
 	WeaponFireEvent.ProcessMulticastDelegate<UObject>(NULL);
 }
 // End Delegate FWeaponFireEvent
+
+// Begin Delegate FWeaponReloadEvent
+struct Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics
+{
+	struct _Script_fpstrue_eventWeaponReloadEvent_Parms
+	{
+		bool bWasEmptyReload;
+	};
+#if WITH_METADATA
+	static constexpr UECodeGen_Private::FMetaDataPairParam Function_MetaDataParams[] = {
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+	};
+#endif // WITH_METADATA
+	static void NewProp_bWasEmptyReload_SetBit(void* Obj);
+	static const UECodeGen_Private::FBoolPropertyParams NewProp_bWasEmptyReload;
+	static const UECodeGen_Private::FPropertyParamsBase* const PropPointers[];
+	static const UECodeGen_Private::FFunctionParams FuncParams;
+};
+void Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::NewProp_bWasEmptyReload_SetBit(void* Obj)
+{
+	((_Script_fpstrue_eventWeaponReloadEvent_Parms*)Obj)->bWasEmptyReload = 1;
+}
+const UECodeGen_Private::FBoolPropertyParams Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::NewProp_bWasEmptyReload = { "bWasEmptyReload", nullptr, (EPropertyFlags)0x0010000000000080, UECodeGen_Private::EPropertyGenFlags::Bool | UECodeGen_Private::EPropertyGenFlags::NativeBool, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, sizeof(bool), sizeof(_Script_fpstrue_eventWeaponReloadEvent_Parms), &Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::NewProp_bWasEmptyReload_SetBit, METADATA_PARAMS(0, nullptr) };
+const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::PropPointers[] = {
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::NewProp_bWasEmptyReload,
+};
+static_assert(UE_ARRAY_COUNT(Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::PropPointers) < 2048);
+const UECodeGen_Private::FFunctionParams Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::FuncParams = { (UObject*(*)())Z_Construct_UPackage__Script_fpstrue, nullptr, "WeaponReloadEvent__DelegateSignature", nullptr, nullptr, Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::PropPointers, UE_ARRAY_COUNT(Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::PropPointers), sizeof(Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::_Script_fpstrue_eventWeaponReloadEvent_Parms), RF_Public|RF_Transient|RF_MarkAsNative, (EFunctionFlags)0x00130000, 0, 0, METADATA_PARAMS(UE_ARRAY_COUNT(Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::Function_MetaDataParams), Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::Function_MetaDataParams) };
+static_assert(sizeof(Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::_Script_fpstrue_eventWeaponReloadEvent_Parms) < MAX_uint16);
+UFunction* Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature()
+{
+	static UFunction* ReturnFunction = nullptr;
+	if (!ReturnFunction)
+	{
+		UECodeGen_Private::ConstructUFunction(&ReturnFunction, Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature_Statics::FuncParams);
+	}
+	return ReturnFunction;
+}
+void FWeaponReloadEvent_DelegateWrapper(const FMulticastScriptDelegate& WeaponReloadEvent, bool bWasEmptyReload)
+{
+	struct _Script_fpstrue_eventWeaponReloadEvent_Parms
+	{
+		bool bWasEmptyReload;
+	};
+	_Script_fpstrue_eventWeaponReloadEvent_Parms Parms;
+	Parms.bWasEmptyReload=bWasEmptyReload ? true : false;
+	WeaponReloadEvent.ProcessMulticastDelegate<UObject>(&Parms);
+}
+// End Delegate FWeaponReloadEvent
+
+// Begin Delegate FWeaponTraceEvent
+struct Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics
+{
+	struct _Script_fpstrue_eventWeaponTraceEvent_Parms
+	{
+		bool bHit;
+		FVector TraceStart;
+		FVector TraceEnd;
+		FVector TraceTarget;
+		FHitResult HitResult;
+	};
+#if WITH_METADATA
+	static constexpr UECodeGen_Private::FMetaDataPairParam Function_MetaDataParams[] = {
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+	};
+#endif // WITH_METADATA
+	static void NewProp_bHit_SetBit(void* Obj);
+	static const UECodeGen_Private::FBoolPropertyParams NewProp_bHit;
+	static const UECodeGen_Private::FStructPropertyParams NewProp_TraceStart;
+	static const UECodeGen_Private::FStructPropertyParams NewProp_TraceEnd;
+	static const UECodeGen_Private::FStructPropertyParams NewProp_TraceTarget;
+	static const UECodeGen_Private::FStructPropertyParams NewProp_HitResult;
+	static const UECodeGen_Private::FPropertyParamsBase* const PropPointers[];
+	static const UECodeGen_Private::FFunctionParams FuncParams;
+};
+void Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_bHit_SetBit(void* Obj)
+{
+	((_Script_fpstrue_eventWeaponTraceEvent_Parms*)Obj)->bHit = 1;
+}
+const UECodeGen_Private::FBoolPropertyParams Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_bHit = { "bHit", nullptr, (EPropertyFlags)0x0010000000000080, UECodeGen_Private::EPropertyGenFlags::Bool | UECodeGen_Private::EPropertyGenFlags::NativeBool, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, sizeof(bool), sizeof(_Script_fpstrue_eventWeaponTraceEvent_Parms), &Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_bHit_SetBit, METADATA_PARAMS(0, nullptr) };
+const UECodeGen_Private::FStructPropertyParams Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_TraceStart = { "TraceStart", nullptr, (EPropertyFlags)0x0010000000000080, UECodeGen_Private::EPropertyGenFlags::Struct, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(_Script_fpstrue_eventWeaponTraceEvent_Parms, TraceStart), Z_Construct_UScriptStruct_FVector, METADATA_PARAMS(0, nullptr) };
+const UECodeGen_Private::FStructPropertyParams Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_TraceEnd = { "TraceEnd", nullptr, (EPropertyFlags)0x0010000000000080, UECodeGen_Private::EPropertyGenFlags::Struct, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(_Script_fpstrue_eventWeaponTraceEvent_Parms, TraceEnd), Z_Construct_UScriptStruct_FVector, METADATA_PARAMS(0, nullptr) };
+const UECodeGen_Private::FStructPropertyParams Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_TraceTarget = { "TraceTarget", nullptr, (EPropertyFlags)0x0010000000000080, UECodeGen_Private::EPropertyGenFlags::Struct, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(_Script_fpstrue_eventWeaponTraceEvent_Parms, TraceTarget), Z_Construct_UScriptStruct_FVector, METADATA_PARAMS(0, nullptr) };
+const UECodeGen_Private::FStructPropertyParams Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_HitResult = { "HitResult", nullptr, (EPropertyFlags)0x0010008000000080, UECodeGen_Private::EPropertyGenFlags::Struct, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(_Script_fpstrue_eventWeaponTraceEvent_Parms, HitResult), Z_Construct_UScriptStruct_FHitResult, METADATA_PARAMS(0, nullptr) }; // 4100991306
+const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::PropPointers[] = {
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_bHit,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_TraceStart,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_TraceEnd,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_TraceTarget,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::NewProp_HitResult,
+};
+static_assert(UE_ARRAY_COUNT(Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::PropPointers) < 2048);
+const UECodeGen_Private::FFunctionParams Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::FuncParams = { (UObject*(*)())Z_Construct_UPackage__Script_fpstrue, nullptr, "WeaponTraceEvent__DelegateSignature", nullptr, nullptr, Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::PropPointers, UE_ARRAY_COUNT(Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::PropPointers), sizeof(Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::_Script_fpstrue_eventWeaponTraceEvent_Parms), RF_Public|RF_Transient|RF_MarkAsNative, (EFunctionFlags)0x00130000, 0, 0, METADATA_PARAMS(UE_ARRAY_COUNT(Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::Function_MetaDataParams), Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::Function_MetaDataParams) };
+static_assert(sizeof(Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::_Script_fpstrue_eventWeaponTraceEvent_Parms) < MAX_uint16);
+UFunction* Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature()
+{
+	static UFunction* ReturnFunction = nullptr;
+	if (!ReturnFunction)
+	{
+		UECodeGen_Private::ConstructUFunction(&ReturnFunction, Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature_Statics::FuncParams);
+	}
+	return ReturnFunction;
+}
+void FWeaponTraceEvent_DelegateWrapper(const FMulticastScriptDelegate& WeaponTraceEvent, bool bHit, FVector TraceStart, FVector TraceEnd, FVector TraceTarget, FHitResult HitResult)
+{
+	struct _Script_fpstrue_eventWeaponTraceEvent_Parms
+	{
+		bool bHit;
+		FVector TraceStart;
+		FVector TraceEnd;
+		FVector TraceTarget;
+		FHitResult HitResult;
+	};
+	_Script_fpstrue_eventWeaponTraceEvent_Parms Parms;
+	Parms.bHit=bHit ? true : false;
+	Parms.TraceStart=TraceStart;
+	Parms.TraceEnd=TraceEnd;
+	Parms.TraceTarget=TraceTarget;
+	Parms.HitResult=HitResult;
+	WeaponTraceEvent.ProcessMulticastDelegate<UObject>(&Parms);
+}
+// End Delegate FWeaponTraceEvent
 
 // Begin Class UfpstrueWeaponComponent Function AttachWeapon
 struct Z_Construct_UFunction_UfpstrueWeaponComponent_AttachWeapon_Statics
@@ -320,11 +446,81 @@ struct Z_Construct_UClass_UfpstrueWeaponComponent_Statics
 	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_LineTraceDamage_MetaData[] = {
 		{ "Category", "Weapon" },
 #if !UE_BUILD_SHIPPING
-		{ "Comment", "/** Damage applied to actors with a HealthComponent */" },
+		{ "Comment", "/** Damage applied to enemy body hits. */" },
 #endif
 		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
 #if !UE_BUILD_SHIPPING
-		{ "ToolTip", "Damage applied to actors with a HealthComponent" },
+		{ "ToolTip", "Damage applied to enemy body hits." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_LineTraceHeadDamage_MetaData[] = {
+		{ "Category", "Weapon" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Damage applied when LineTrace hits an enemy head bone. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Damage applied when LineTrace hits an enemy head bone." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_HipFireSpreadAngle_MetaData[] = {
+		{ "Category", "Weapon|Spread" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Random bullet spread when hip firing, in degrees. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Random bullet spread when hip firing, in degrees." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_AimFireSpreadAngle_MetaData[] = {
+		{ "Category", "Weapon|Spread" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Random bullet spread while aiming, in degrees. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Random bullet spread while aiming, in degrees." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_RecoilPitch_MetaData[] = {
+		{ "Category", "Weapon|Recoil" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Upward camera kick applied after each shot. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Upward camera kick applied after each shot." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_RecoilYaw_MetaData[] = {
+		{ "Category", "Weapon|Recoil" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Random left/right camera kick applied after each shot. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Random left/right camera kick applied after each shot." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_AimRecoilMultiplier_MetaData[] = {
+		{ "Category", "Weapon|Recoil" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Multiplier applied to recoil while aiming. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Multiplier applied to recoil while aiming." },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_bShowDebugTrace_MetaData[] = {
+		{ "Category", "Weapon|Debug" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "/** Draw LineTrace debug lines and hit messages. Disabled for normal gameplay. */" },
+#endif
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Draw LineTrace debug lines and hit messages. Disabled for normal gameplay." },
 #endif
 	};
 	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_OnWeaponFireStarted_MetaData[] = {
@@ -345,6 +541,22 @@ struct Z_Construct_UClass_UfpstrueWeaponComponent_Statics
 		{ "Category", "Weapon|Events" },
 		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
 	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_OnWeaponDryFire_MetaData[] = {
+		{ "Category", "Weapon|Events" },
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_OnWeaponReloadStarted_MetaData[] = {
+		{ "Category", "Weapon|Events" },
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_OnWeaponReloadFinished_MetaData[] = {
+		{ "Category", "Weapon|Events" },
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_OnWeaponTraceFinished_MetaData[] = {
+		{ "Category", "Weapon|Events" },
+		{ "ModuleRelativePath", "fpstrueWeaponComponent.h" },
+	};
 #endif // WITH_METADATA
 	static const UECodeGen_Private::FClassPropertyParams NewProp_ProjectileClass;
 	static const UECodeGen_Private::FObjectPropertyParams NewProp_FireSound;
@@ -357,9 +569,21 @@ struct Z_Construct_UClass_UfpstrueWeaponComponent_Statics
 	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceRange;
 	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceImpulse;
 	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceDamage;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_LineTraceHeadDamage;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_HipFireSpreadAngle;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_AimFireSpreadAngle;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_RecoilPitch;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_RecoilYaw;
+	static const UECodeGen_Private::FFloatPropertyParams NewProp_AimRecoilMultiplier;
+	static void NewProp_bShowDebugTrace_SetBit(void* Obj);
+	static const UECodeGen_Private::FBoolPropertyParams NewProp_bShowDebugTrace;
 	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponFireStarted;
 	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponFireStopped;
 	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponFirePerformed;
+	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponDryFire;
+	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponReloadStarted;
+	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponReloadFinished;
+	static const UECodeGen_Private::FMulticastDelegatePropertyParams NewProp_OnWeaponTraceFinished;
 	static const UECodeGen_Private::FPropertyParamsBase* const PropPointers[];
 	static UObject* (*const DependentSingletons[])();
 	static constexpr FClassFunctionLinkInfo FuncInfo[] = {
@@ -387,9 +611,24 @@ const UECodeGen_Private::FBoolPropertyParams Z_Construct_UClass_UfpstrueWeaponCo
 const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceRange = { "LineTraceRange", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceRange), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceRange_MetaData), NewProp_LineTraceRange_MetaData) };
 const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceImpulse = { "LineTraceImpulse", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceImpulse), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceImpulse_MetaData), NewProp_LineTraceImpulse_MetaData) };
 const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceDamage = { "LineTraceDamage", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceDamage), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceDamage_MetaData), NewProp_LineTraceDamage_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceHeadDamage = { "LineTraceHeadDamage", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, LineTraceHeadDamage), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_LineTraceHeadDamage_MetaData), NewProp_LineTraceHeadDamage_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_HipFireSpreadAngle = { "HipFireSpreadAngle", nullptr, (EPropertyFlags)0x0010000000000005, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, HipFireSpreadAngle), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_HipFireSpreadAngle_MetaData), NewProp_HipFireSpreadAngle_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_AimFireSpreadAngle = { "AimFireSpreadAngle", nullptr, (EPropertyFlags)0x0010000000000005, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, AimFireSpreadAngle), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_AimFireSpreadAngle_MetaData), NewProp_AimFireSpreadAngle_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_RecoilPitch = { "RecoilPitch", nullptr, (EPropertyFlags)0x0010000000000005, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, RecoilPitch), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_RecoilPitch_MetaData), NewProp_RecoilPitch_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_RecoilYaw = { "RecoilYaw", nullptr, (EPropertyFlags)0x0010000000000005, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, RecoilYaw), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_RecoilYaw_MetaData), NewProp_RecoilYaw_MetaData) };
+const UECodeGen_Private::FFloatPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_AimRecoilMultiplier = { "AimRecoilMultiplier", nullptr, (EPropertyFlags)0x0010000000000005, UECodeGen_Private::EPropertyGenFlags::Float, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, AimRecoilMultiplier), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_AimRecoilMultiplier_MetaData), NewProp_AimRecoilMultiplier_MetaData) };
+void Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bShowDebugTrace_SetBit(void* Obj)
+{
+	((UfpstrueWeaponComponent*)Obj)->bShowDebugTrace = 1;
+}
+const UECodeGen_Private::FBoolPropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bShowDebugTrace = { "bShowDebugTrace", nullptr, (EPropertyFlags)0x0010000000000001, UECodeGen_Private::EPropertyGenFlags::Bool | UECodeGen_Private::EPropertyGenFlags::NativeBool, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, sizeof(bool), sizeof(UfpstrueWeaponComponent), &Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bShowDebugTrace_SetBit, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_bShowDebugTrace_MetaData), NewProp_bShowDebugTrace_MetaData) };
 const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponFireStarted = { "OnWeaponFireStarted", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponFireStarted), Z_Construct_UDelegateFunction_fpstrue_WeaponFireEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponFireStarted_MetaData), NewProp_OnWeaponFireStarted_MetaData) }; // 3613188963
 const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponFireStopped = { "OnWeaponFireStopped", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponFireStopped), Z_Construct_UDelegateFunction_fpstrue_WeaponFireEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponFireStopped_MetaData), NewProp_OnWeaponFireStopped_MetaData) }; // 3613188963
 const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponFirePerformed = { "OnWeaponFirePerformed", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponFirePerformed), Z_Construct_UDelegateFunction_fpstrue_WeaponFireEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponFirePerformed_MetaData), NewProp_OnWeaponFirePerformed_MetaData) }; // 3613188963
+const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponDryFire = { "OnWeaponDryFire", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponDryFire), Z_Construct_UDelegateFunction_fpstrue_WeaponFireEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponDryFire_MetaData), NewProp_OnWeaponDryFire_MetaData) }; // 3613188963
+const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponReloadStarted = { "OnWeaponReloadStarted", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponReloadStarted), Z_Construct_UDelegateFunction_fpstrue_WeaponReloadEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponReloadStarted_MetaData), NewProp_OnWeaponReloadStarted_MetaData) }; // 3406654283
+const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponReloadFinished = { "OnWeaponReloadFinished", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponReloadFinished), Z_Construct_UDelegateFunction_fpstrue_WeaponFireEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponReloadFinished_MetaData), NewProp_OnWeaponReloadFinished_MetaData) }; // 3613188963
+const UECodeGen_Private::FMulticastDelegatePropertyParams Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponTraceFinished = { "OnWeaponTraceFinished", nullptr, (EPropertyFlags)0x0010000010080000, UECodeGen_Private::EPropertyGenFlags::InlineMulticastDelegate, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(UfpstrueWeaponComponent, OnWeaponTraceFinished), Z_Construct_UDelegateFunction_fpstrue_WeaponTraceEvent__DelegateSignature, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_OnWeaponTraceFinished_MetaData), NewProp_OnWeaponTraceFinished_MetaData) }; // 2597797821
 const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UClass_UfpstrueWeaponComponent_Statics::PropPointers[] = {
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_ProjectileClass,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_FireSound,
@@ -401,9 +640,20 @@ const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UClass_UfpstrueW
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceRange,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceImpulse,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceDamage,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_LineTraceHeadDamage,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_HipFireSpreadAngle,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_AimFireSpreadAngle,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_RecoilPitch,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_RecoilYaw,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_AimRecoilMultiplier,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_bShowDebugTrace,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponFireStarted,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponFireStopped,
 	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponFirePerformed,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponDryFire,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponReloadStarted,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponReloadFinished,
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UClass_UfpstrueWeaponComponent_Statics::NewProp_OnWeaponTraceFinished,
 };
 static_assert(UE_ARRAY_COUNT(Z_Construct_UClass_UfpstrueWeaponComponent_Statics::PropPointers) < 2048);
 UObject* (*const Z_Construct_UClass_UfpstrueWeaponComponent_Statics::DependentSingletons[])() = {
@@ -443,14 +693,14 @@ UfpstrueWeaponComponent::~UfpstrueWeaponComponent() {}
 // End Class UfpstrueWeaponComponent
 
 // Begin Registration
-struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_Statics
+struct Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueWeaponComponent_h_Statics
 {
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
-		{ Z_Construct_UClass_UfpstrueWeaponComponent, UfpstrueWeaponComponent::StaticClass, TEXT("UfpstrueWeaponComponent"), &Z_Registration_Info_UClass_UfpstrueWeaponComponent, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UfpstrueWeaponComponent), 3278897896U) },
+		{ Z_Construct_UClass_UfpstrueWeaponComponent, UfpstrueWeaponComponent::StaticClass, TEXT("UfpstrueWeaponComponent"), &Z_Registration_Info_UClass_UfpstrueWeaponComponent, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UfpstrueWeaponComponent), 1016787729U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_2061021569(TEXT("/Script/fpstrue"),
-	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_Source_fpstrue_fpstrueWeaponComponent_h_Statics::ClassInfo),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueWeaponComponent_h_3732406397(TEXT("/Script/fpstrue"),
+	Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueWeaponComponent_h_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_ueprojrct_fpstrue_safe2_Source_fpstrue_fpstrueWeaponComponent_h_Statics::ClassInfo),
 	nullptr, 0,
 	nullptr, 0);
 // End Registration

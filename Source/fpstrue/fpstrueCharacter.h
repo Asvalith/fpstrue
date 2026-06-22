@@ -138,6 +138,11 @@ protected:
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnFireStopped();
+	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
+	void OnPlayerHealthChanged(float NewHealth);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
+	void OnPlayerDied();
 
 protected:
 
@@ -200,6 +205,7 @@ public:
 	/** 当前是否正在换弹 */
 	bool IsReloading() const;
 
+	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsDead() const;
 
 	/** 当前是否还有弹匣内子弹 */

@@ -69,9 +69,33 @@ public:
 	/** Impulse applied to physics objects hit by LineTrace */
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceImpulse = 10000.0f;
-	/** Damage applied to actors with a HealthComponent */
+	/** Damage applied to enemy body hits. */
 	UPROPERTY(EditAnywhere, Category = "Weapon")
-	float LineTraceDamage = 25.0f;
+	float LineTraceDamage = 40.0f;
+
+	/** Damage applied when LineTrace hits an enemy head bone. */
+	UPROPERTY(EditAnywhere, Category = "Weapon")
+	float LineTraceHeadDamage = 100.0f;
+
+	/** Random bullet spread when hip firing, in degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
+	float HipFireSpreadAngle = 1.5f;
+
+	/** Random bullet spread while aiming, in degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
+	float AimFireSpreadAngle = 0.25f;
+
+	/** Upward camera kick applied after each shot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Recoil")
+	float RecoilPitch = 1.0f;
+
+	/** Random left/right camera kick applied after each shot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Recoil")
+	float RecoilYaw = 0.4f;
+
+	/** Multiplier applied to recoil while aiming. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Recoil")
+	float AimRecoilMultiplier = 0.5f;
 
 	/** Draw LineTrace debug lines and hit messages. Disabled for normal gameplay. */
 	UPROPERTY(EditAnywhere, Category = "Weapon|Debug")

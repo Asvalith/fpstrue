@@ -1,8 +1,8 @@
 {
 	"SourceFiles": [
-		"E:\\ueprojrct\\fpstrue\\Source\\fpstrue\\fpstrue.Build.cs",
-		"E:\\ueprojrct\\fpstrue\\Source\\fpstrue.Target.cs",
-		"E:\\ueprojrct\\fpstrue\\Source\\fpstrueEditor.Target.cs"
+		"E:\\ueprojrct\\fpstrue_safe2\\Source\\fpstrue\\fpstrue.Build.cs",
+		"E:\\ueprojrct\\fpstrue_safe2\\Source\\fpstrue.Target.cs",
+		"E:\\ueprojrct\\fpstrue_safe2\\Source\\fpstrueEditor.Target.cs"
 	],
 	"EngineVersion": "5.5.4"
 }

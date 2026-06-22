@@ -448,6 +448,7 @@ FString AfpstrueCharacter::GetCharacterStateString() const
 
 void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 {
+	OnPlayerHealthChanged(NewHealth);
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(
@@ -461,10 +462,36 @@ void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 
 void AfpstrueCharacter::HandleDeath()
 {
+	if (CharacterState == EFPCharacterState::Dead)
+	{
+		return;
+	}
+
 	CharacterState = EFPCharacterState::Dead;
 	bIsSprinting = false;
+
+	const bool bWasAiming = bIsAiming;
 	bIsAiming = false;
-	GetCharacterMovement()->DisableMovement();
+	if (bWasAiming)
+	{
+		OnAimChanged(false);
+	}
+
+	NotifyFireStopped();
+	if (EquippedWeaponComponent != nullptr)
+	{
+		EquippedWeaponComponent->NotifyFireStoppedByCharacter();
+	}
+
+	GetWorldTimerManager().ClearTimer(ReloadTimerHandle);
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+	}
+
+	OnPlayerDied();
 
 	if (GEngine)
 	{

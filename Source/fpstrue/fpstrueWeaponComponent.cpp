@@ -3,6 +3,7 @@
 
 #include "fpstrueWeaponComponent.h"
 #include "fpstrueCharacter.h"
+#include "fpstrueEnemyCharacter.h"
 #include "fpstrueProjectile.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -88,11 +89,21 @@ void UfpstrueWeaponComponent::Fire()
 		FireProjectile(World);
 	}
 
+	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
+	{
+		const float RecoilMultiplier = Character->IsAiming() ? AimRecoilMultiplier : 1.0f;
+		PlayerController->AddPitchInput(-RecoilPitch * RecoilMultiplier);
+		PlayerController->AddYawInput(FMath::FRandRange(-RecoilYaw, RecoilYaw) * RecoilMultiplier);
+	}
+
 }
 
 bool UfpstrueWeaponComponent::CanFire() const
 {
-	return Character != nullptr && Character->GetController() != nullptr;
+	return Character != nullptr
+		&& Character->GetController() != nullptr
+		&& !Character->IsDead()
+		&& !Character->IsReloading();
 }
 
 void UfpstrueWeaponComponent::NotifyReloadStarted(bool bWasEmptyReload)
@@ -114,7 +125,11 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 {
 	const FVector Start = Camera->GetComponentLocation();
 	const FVector Forward = Camera->GetForwardVector();
-	const FVector End = Start + Forward * LineTraceRange;
+	const float SpreadAngle = Character->IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle;
+	const FVector ShotDirection = SpreadAngle > 0.0f
+		? FMath::VRandCone(Forward, FMath::DegreesToRadians(SpreadAngle))
+		: Forward;
+	const FVector End = Start + ShotDirection * LineTraceRange;
 
 	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
@@ -162,12 +177,16 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			);
 		}
 
-		if (AActor* HitActor = HitResult.GetActor())
+		if (AfpstrueEnemyCharacter* HitEnemy = Cast<AfpstrueEnemyCharacter>(HitResult.GetActor()))
 		{
+			const FString HitBoneName = HitResult.BoneName.ToString().ToLower();
+			const bool bHeadShot = HitBoneName == TEXT("neck_01") || HitBoneName == TEXT("head");
+			const float DamageToApply = bHeadShot ? LineTraceHeadDamage : LineTraceDamage;
+
 			UGameplayStatics::ApplyPointDamage(
-				HitActor,
-				LineTraceDamage,
-				Forward,
+				HitEnemy,
+				DamageToApply,
+				ShotDirection,
 				HitResult,
 				Character->GetController(),
 				GetOwner(),
@@ -179,7 +198,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 		{
 			if (HitComponent->IsSimulatingPhysics())
 			{
-				HitComponent->AddImpulseAtLocation(Forward * LineTraceImpulse, HitResult.ImpactPoint);
+				HitComponent->AddImpulseAtLocation(ShotDirection * LineTraceImpulse, HitResult.ImpactPoint);
 			}
 		}
 
