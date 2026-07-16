@@ -19,11 +19,17 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 
+	UFUNCTION(BlueprintPure, Category = "AI")
+	bool IsDead() const { return bIsDead; }
+
+	UFUNCTION(BlueprintPure, Category = "AI")
+	bool IsAttacking() const { return bIsAttacking; }
+
+	UFUNCTION(BlueprintPure, Category = "AI")
+	bool IsTargetInAttackRange() const;
+
 protected:
 	virtual void BeginPlay() override;
-
-	UFUNCTION()
-	void HandleHealthChanged(float NewHealth);
 
 	UFUNCTION()
 	void HandleDeath();
@@ -47,15 +53,29 @@ protected:
 	float AttackInterval = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	float DestroyDelay = 3.0f;
+	float AttackDamageDelay = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	bool bDestroyOnDeath = false;
+	float AttackAnimationDuration = 1.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
+	float DestroyDelay = 300.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
+	bool bDestroyOnDeath = true;
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
+	void OnAttackStarted();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
+	void OnAttackLanded();
 
 private:
-	void UpdateEnemy(float DeltaTime);
+	void UpdateEnemy();
 	void MoveTowardTarget(const FVector& DirectionToTarget);
 	void TryAttackTarget();
+	void ApplyAttackDamage();
+	void FinishAttack();
 	bool CanAttack() const;
 
 	UPROPERTY()
@@ -63,4 +83,8 @@ private:
 
 	float TimeSinceLastAttack = 0.0f;
 	bool bIsDead = false;
+	bool bIsAttacking = false;
+
+	FTimerHandle AttackDamageTimerHandle;
+	FTimerHandle AttackFinishTimerHandle;
 };

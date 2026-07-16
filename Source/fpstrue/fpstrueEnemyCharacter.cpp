@@ -4,6 +4,7 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -23,7 +24,6 @@ void AfpstrueEnemyCharacter::BeginPlay()
 
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnHealthChanged.AddDynamic(this, &AfpstrueEnemyCharacter::HandleHealthChanged);
 		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
 	}
 
@@ -43,18 +43,18 @@ void AfpstrueEnemyCharacter::Tick(float DeltaTime)
 
 	if (!bIsDead)
 	{
-		UpdateEnemy(DeltaTime);
+		UpdateEnemy();
 	}
 }
 
-void AfpstrueEnemyCharacter::UpdateEnemy(float DeltaTime)
+void AfpstrueEnemyCharacter::UpdateEnemy()
 {
 	if (TargetCharacter == nullptr)
 	{
 		TargetCharacter = Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
 	}
 
-	if (TargetCharacter == nullptr)
+	if (TargetCharacter == nullptr || TargetCharacter->IsDead())
 	{
 		return;
 	}
@@ -63,13 +63,26 @@ void AfpstrueEnemyCharacter::UpdateEnemy(float DeltaTime)
 	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
 	const float DistanceToTarget = HorizontalToTarget.Size();
 
+	if (bIsAttacking)
+	{
+		if (!HorizontalToTarget.IsNearlyZero())
+		{
+			SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
+		}
+		return;
+	}
+
 	if (DistanceToTarget > ChaseRange)
 	{
 		return;
 	}
 
-	if (DistanceToTarget <= AttackRange)
+	if (IsTargetInAttackRange())
 	{
+		if (!HorizontalToTarget.IsNearlyZero())
+		{
+			SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
+		}
 		TryAttackTarget();
 		return;
 	}
@@ -79,7 +92,6 @@ void AfpstrueEnemyCharacter::UpdateEnemy(float DeltaTime)
 		MoveTowardTarget(HorizontalToTarget.GetSafeNormal());
 	}
 }
-
 void AfpstrueEnemyCharacter::MoveTowardTarget(const FVector& DirectionToTarget)
 {
 	AddMovementInput(DirectionToTarget, 1.0f, true);
@@ -94,6 +106,42 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 	}
 
 	TimeSinceLastAttack = 0.0f;
+	bIsAttacking = true;
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+	}
+
+	OnAttackStarted();
+
+	GetWorldTimerManager().SetTimer(
+		AttackDamageTimerHandle,
+		this,
+		&AfpstrueEnemyCharacter::ApplyAttackDamage,
+		AttackDamageDelay,
+		false
+	);
+
+	GetWorldTimerManager().SetTimer(
+		AttackFinishTimerHandle,
+		this,
+		&AfpstrueEnemyCharacter::FinishAttack,
+		AttackAnimationDuration,
+		false
+	);
+}
+
+void AfpstrueEnemyCharacter::ApplyAttackDamage()
+{
+	if (bIsDead || TargetCharacter == nullptr || TargetCharacter->IsDead())
+	{
+		return;
+	}
+if (!IsTargetInAttackRange())
+	{
+		return;
+	}
 
 	UGameplayStatics::ApplyDamage(
 		TargetCharacter,
@@ -103,57 +151,59 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 		nullptr
 	);
 
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			12,
-			0.8f,
-			FColor::Orange,
-			FString::Printf(TEXT("%s Attack Player: %.0f"), *GetName(), AttackDamage)
-		);
-	}
+	OnAttackLanded();
 }
 
+void AfpstrueEnemyCharacter::FinishAttack()
+{
+	bIsAttacking = false;
+}
+
+
+bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
+{
+	if (TargetCharacter == nullptr)
+	{
+		return false;
+	}
+
+	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
+	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
+	return HorizontalToTarget.Size() <= AttackRange;
+}
 bool AfpstrueEnemyCharacter::CanAttack() const
 {
 	return TargetCharacter != nullptr
 		&& TargetCharacter->GetHealthComponent() != nullptr
 		&& !TargetCharacter->GetHealthComponent()->IsDead()
+		&& !bIsDead
+		&& !bIsAttacking
+		&& IsTargetInAttackRange()
 		&& TimeSinceLastAttack >= AttackInterval;
-}
-
-void AfpstrueEnemyCharacter::HandleHealthChanged(float NewHealth)
-{
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			13,
-			1.0f,
-			FColor::Purple,
-			FString::Printf(TEXT("%s Health: %.0f"), *GetName(), NewHealth)
-		);
-	}
 }
 
 void AfpstrueEnemyCharacter::HandleDeath()
 {
+	if (bIsDead)
+	{
+		return;
+	}
+
 	bIsDead = true;
+	bIsAttacking = false;
+	GetWorldTimerManager().ClearTimer(AttackDamageTimerHandle);
+	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
+		Movement->MaxWalkSpeed = 0.0f;
+		Movement->StopMovementImmediately();
 		Movement->DisableMovement();
 	}
 
-	SetActorEnableCollision(false);
-
-	if (GEngine)
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
-		GEngine->AddOnScreenDebugMessage(
-			14,
-			DestroyDelay,
-			FColor::Red,
-			FString::Printf(TEXT("%s Dead"), *GetName())
-		);
+		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
 
 	if (bDestroyOnDeath)
