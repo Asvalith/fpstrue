@@ -821,6 +821,7 @@ Camera Start / Direction
 
 - `PROJECT_PROGRESS.md`：当前功能和蓝图进度。
 - `FPS_BUG_LOG.md`：真实 Bug、环境故障和排查记录。
+- `GAME_DEV_INTERVIEW_FOUNDATIONS_PLAN.md`：C++、STL、工程基础与项目同步学习计划。
 - `RESUME_ENGINE_EARLY_2026-07.md`：简历草稿，内容必须随真实完成度更新。
 - `ENGINE_EARLY_SPRINT_2026-07-17_2026-07-30.md`：阶段冲刺计划，仅作为时间安排参考。
 
