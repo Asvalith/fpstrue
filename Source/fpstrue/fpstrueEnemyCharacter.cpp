@@ -4,8 +4,8 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "Engine/Engine.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 
@@ -107,6 +107,7 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 
 	TimeSinceLastAttack = 0.0f;
 	bIsAttacking = true;
+	bDamageAppliedThisAttack = false;
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
@@ -114,14 +115,6 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 	}
 
 	OnAttackStarted();
-
-	GetWorldTimerManager().SetTimer(
-		AttackDamageTimerHandle,
-		this,
-		&AfpstrueEnemyCharacter::ApplyAttackDamage,
-		AttackDamageDelay,
-		false
-	);
 
 	GetWorldTimerManager().SetTimer(
 		AttackFinishTimerHandle,
@@ -132,26 +125,82 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 	);
 }
 
-void AfpstrueEnemyCharacter::ApplyAttackDamage()
+void AfpstrueEnemyCharacter::HandleAttackHitNotify()
 {
-	if (bIsDead || TargetCharacter == nullptr || TargetCharacter->IsDead())
-	{
-		return;
-	}
-if (!IsTargetInAttackRange())
+	if (bIsDead || !bIsAttacking || bDamageAppliedThisAttack)
 	{
 		return;
 	}
 
-	UGameplayStatics::ApplyDamage(
-		TargetCharacter,
-		AttackDamage,
-		GetController(),
-		this,
-		nullptr
+	// Each attack animation gets exactly one authoritative damage opportunity.
+	bDamageAppliedThisAttack = true;
+	PerformMeleeHit();
+}
+
+bool AfpstrueEnemyCharacter::PerformMeleeHit()
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr || TargetCharacter == nullptr || TargetCharacter->IsDead())
+	{
+		return false;
+	}
+
+	const FVector TraceStart = GetActorLocation() + FVector(0.0f, 0.0f, AttackTraceHeight);
+	const FVector TraceEnd = TraceStart + GetActorForwardVector() * AttackRange;
+
+	FCollisionObjectQueryParams ObjectQueryParams;
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyMeleeTrace), false, this);
+	QueryParams.AddIgnoredActor(this);
+
+	TArray<FHitResult> HitResults;
+	const bool bHitAnyPawn = World->SweepMultiByObjectType(
+		HitResults,
+		TraceStart,
+		TraceEnd,
+		FQuat::Identity,
+		ObjectQueryParams,
+		FCollisionShape::MakeSphere(AttackTraceRadius),
+		QueryParams
 	);
 
-	OnAttackLanded();
+	bool bHitPlayer = false;
+	if (bHitAnyPawn)
+	{
+		for (const FHitResult& HitResult : HitResults)
+		{
+			if (HitResult.GetActor() != TargetCharacter)
+			{
+				continue;
+			}
+
+			const float AppliedDamage = UGameplayStatics::ApplyDamage(
+				TargetCharacter,
+				AttackDamage,
+				GetController(),
+				this,
+				nullptr
+			);
+
+			bHitPlayer = AppliedDamage > 0.0f;
+			if (bHitPlayer)
+			{
+				OnAttackLanded();
+			}
+			break;
+		}
+	}
+
+	if (bDrawAttackTrace)
+	{
+		const FColor DebugColor = bHitPlayer ? FColor::Green : FColor::Red;
+		DrawDebugLine(World, TraceStart, TraceEnd, DebugColor, false, 1.0f, 0, 2.0f);
+		DrawDebugSphere(World, TraceStart, AttackTraceRadius, 16, DebugColor, false, 1.0f);
+		DrawDebugSphere(World, TraceEnd, AttackTraceRadius, 16, DebugColor, false, 1.0f);
+	}
+
+	return bHitPlayer;
 }
 
 void AfpstrueEnemyCharacter::FinishAttack()
@@ -171,6 +220,7 @@ bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
 	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
 	return HorizontalToTarget.Size() <= AttackRange;
 }
+
 bool AfpstrueEnemyCharacter::CanAttack() const
 {
 	return TargetCharacter != nullptr
@@ -191,7 +241,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 
 	bIsDead = true;
 	bIsAttacking = false;
-	GetWorldTimerManager().ClearTimer(AttackDamageTimerHandle);
+	bDamageAppliedThisAttack = true;
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
