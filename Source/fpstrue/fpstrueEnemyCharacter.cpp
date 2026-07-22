@@ -4,8 +4,8 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "Engine/Engine.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 
@@ -24,7 +24,6 @@ void AfpstrueEnemyCharacter::BeginPlay()
 
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnHealthChanged.AddDynamic(this, &AfpstrueEnemyCharacter::HandleHealthChanged);
 		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
 	}
 
@@ -44,23 +43,18 @@ void AfpstrueEnemyCharacter::Tick(float DeltaTime)
 
 	if (!bIsDead)
 	{
-		UpdateEnemy(DeltaTime);
+		UpdateEnemy();
 	}
 }
 
-void AfpstrueEnemyCharacter::UpdateEnemy(float DeltaTime)
+void AfpstrueEnemyCharacter::UpdateEnemy()
 {
 	if (TargetCharacter == nullptr)
 	{
 		TargetCharacter = Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
 	}
 
-	if (TargetCharacter == nullptr)
-	{
-		return;
-	}
-
-	if (TargetCharacter->IsDead())
+	if (TargetCharacter == nullptr || TargetCharacter->IsDead())
 	{
 		return;
 	}
@@ -98,7 +92,6 @@ void AfpstrueEnemyCharacter::UpdateEnemy(float DeltaTime)
 		MoveTowardTarget(HorizontalToTarget.GetSafeNormal());
 	}
 }
-
 void AfpstrueEnemyCharacter::MoveTowardTarget(const FVector& DirectionToTarget)
 {
 	AddMovementInput(DirectionToTarget, 1.0f, true);
@@ -114,6 +107,7 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 
 	TimeSinceLastAttack = 0.0f;
 	bIsAttacking = true;
+	bDamageAppliedThisAttack = false;
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
@@ -121,14 +115,6 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 	}
 
 	OnAttackStarted();
-
-	GetWorldTimerManager().SetTimer(
-		AttackDamageTimerHandle,
-		this,
-		&AfpstrueEnemyCharacter::ApplyAttackDamage,
-		AttackDamageDelay,
-		false
-	);
 
 	GetWorldTimerManager().SetTimer(
 		AttackFinishTimerHandle,
@@ -139,41 +125,82 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 	);
 }
 
-void AfpstrueEnemyCharacter::ApplyAttackDamage()
+void AfpstrueEnemyCharacter::HandleAttackHitNotify()
 {
-	if (bIsDead || TargetCharacter == nullptr || TargetCharacter->IsDead())
+	if (bIsDead || !bIsAttacking || bDamageAppliedThisAttack)
 	{
 		return;
 	}
 
-	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
-	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
-	const float DistanceToTarget = HorizontalToTarget.Size();
+	// Each attack animation gets exactly one authoritative damage opportunity.
+	bDamageAppliedThisAttack = true;
+	PerformMeleeHit();
+}
 
-	if (!IsTargetInAttackRange())
+bool AfpstrueEnemyCharacter::PerformMeleeHit()
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr || TargetCharacter == nullptr || TargetCharacter->IsDead())
 	{
-		return;
+		return false;
 	}
 
-	UGameplayStatics::ApplyDamage(
-		TargetCharacter,
-		AttackDamage,
-		GetController(),
-		this,
-		nullptr
+	const FVector TraceStart = GetActorLocation() + FVector(0.0f, 0.0f, AttackTraceHeight);
+	const FVector TraceEnd = TraceStart + GetActorForwardVector() * AttackRange;
+
+	FCollisionObjectQueryParams ObjectQueryParams;
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyMeleeTrace), false, this);
+	QueryParams.AddIgnoredActor(this);
+
+	TArray<FHitResult> HitResults;
+	const bool bHitAnyPawn = World->SweepMultiByObjectType(
+		HitResults,
+		TraceStart,
+		TraceEnd,
+		FQuat::Identity,
+		ObjectQueryParams,
+		FCollisionShape::MakeSphere(AttackTraceRadius),
+		QueryParams
 	);
 
-	OnAttackLanded();
-
-	if (GEngine)
+	bool bHitPlayer = false;
+	if (bHitAnyPawn)
 	{
-		GEngine->AddOnScreenDebugMessage(
-			12,
-			0.8f,
-			FColor::Orange,
-			FString::Printf(TEXT("%s Attack Player: %.0f"), *GetName(), AttackDamage)
-		);
+		for (const FHitResult& HitResult : HitResults)
+		{
+			if (HitResult.GetActor() != TargetCharacter)
+			{
+				continue;
+			}
+
+			const float AppliedDamage = UGameplayStatics::ApplyDamage(
+				TargetCharacter,
+				AttackDamage,
+				GetController(),
+				this,
+				nullptr
+			);
+
+			bHitPlayer = AppliedDamage > 0.0f;
+			if (bHitPlayer)
+			{
+				OnAttackLanded();
+			}
+			break;
+		}
 	}
+
+	if (bDrawAttackTrace)
+	{
+		const FColor DebugColor = bHitPlayer ? FColor::Green : FColor::Red;
+		DrawDebugLine(World, TraceStart, TraceEnd, DebugColor, false, 1.0f, 0, 2.0f);
+		DrawDebugSphere(World, TraceStart, AttackTraceRadius, 16, DebugColor, false, 1.0f);
+		DrawDebugSphere(World, TraceEnd, AttackTraceRadius, 16, DebugColor, false, 1.0f);
+	}
+
+	return bHitPlayer;
 }
 
 void AfpstrueEnemyCharacter::FinishAttack()
@@ -193,6 +220,7 @@ bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
 	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
 	return HorizontalToTarget.Size() <= AttackRange;
 }
+
 bool AfpstrueEnemyCharacter::CanAttack() const
 {
 	return TargetCharacter != nullptr
@@ -204,19 +232,6 @@ bool AfpstrueEnemyCharacter::CanAttack() const
 		&& TimeSinceLastAttack >= AttackInterval;
 }
 
-void AfpstrueEnemyCharacter::HandleHealthChanged(float NewHealth)
-{
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			13,
-			1.0f,
-			FColor::Purple,
-			FString::Printf(TEXT("%s Health: %.0f"), *GetName(), NewHealth)
-		);
-	}
-}
-
 void AfpstrueEnemyCharacter::HandleDeath()
 {
 	if (bIsDead)
@@ -226,7 +241,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 
 	bIsDead = true;
 	bIsAttacking = false;
-	GetWorldTimerManager().ClearTimer(AttackDamageTimerHandle);
+	bDamageAppliedThisAttack = true;
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -239,16 +254,6 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			14,
-			DestroyDelay,
-			FColor::Red,
-			FString::Printf(TEXT("%s Dead"), *GetName())
-		);
 	}
 
 	if (bDestroyOnDeath)
