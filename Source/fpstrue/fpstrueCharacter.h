@@ -128,6 +128,9 @@ protected:
 	void HandleHealthChanged(float NewHealth);
 
 	UFUNCTION()
+	void HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
+
+	UFUNCTION()
 	void HandleDeath();
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
@@ -138,8 +141,12 @@ protected:
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnFireStopped();
+
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnPlayerHealthChanged(float NewHealth);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
+	void OnPlayerDamaged(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnPlayerDied();
@@ -208,6 +215,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsDead() const;
 
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentHealth() const;
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxHealth() const;
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetHealthNormalized() const;
+
+	UFUNCTION(BlueprintPure, Category = "State")
+	EFPCharacterState GetCharacterState() const { return CharacterState; }
+
 	/** 当前是否还有弹匣内子弹 */
 	bool HasAmmo() const;
 
@@ -234,7 +253,9 @@ public:
 	int32 GetCurrentAmmo() const { return CurrentAmmo; }
 	int32 GetMagazineSize() const { return MagazineSize; }
 	int32 GetReserveAmmo() const { return ReserveAmmo; }
+	UFUNCTION(BlueprintPure, Category = "Health")
 	UfpstrueHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool IsSprinting() const { return bIsSprinting; }
 	UFUNCTION(BlueprintPure, Category = "Weapon")

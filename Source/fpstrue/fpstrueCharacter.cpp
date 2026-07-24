@@ -62,6 +62,7 @@ void AfpstrueCharacter::BeginPlay()
 	if (HealthComponent != nullptr)
 	{
 		HealthComponent->OnHealthChanged.AddDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
+		HealthComponent->OnDamageReceived.AddDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
 		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
 
@@ -460,6 +461,11 @@ void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 	}
 }
 
+void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
+{
+	OnPlayerDamaged(DamageAmount, DamageCauser, InstigatedBy);
+}
+
 void AfpstrueCharacter::HandleDeath()
 {
 	if (CharacterState == EFPCharacterState::Dead)
@@ -517,6 +523,21 @@ bool AfpstrueCharacter::HasAmmo() const
 bool AfpstrueCharacter::IsDead() const
 {
 	return CharacterState == EFPCharacterState::Dead;
+}
+
+float AfpstrueCharacter::GetCurrentHealth() const
+{
+	return HealthComponent != nullptr ? HealthComponent->GetHealth() : 0.0f;
+}
+
+float AfpstrueCharacter::GetMaxHealth() const
+{
+	return HealthComponent != nullptr ? HealthComponent->GetMaxHealth() : 0.0f;
+}
+
+float AfpstrueCharacter::GetHealthNormalized() const
+{
+	return HealthComponent != nullptr ? HealthComponent->GetHealthNormalized() : 0.0f;
 }
 
 bool AfpstrueCharacter::CanFireWeapon() const
