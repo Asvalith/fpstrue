@@ -6,13 +6,11 @@
 #include "fpstrueEnemyCharacter.h"
 #include "fpstrueProjectile.h"
 #include "GameFramework/PlayerController.h"
-#include "Camera/PlayerCameraManager.h"
 #include "Camera/CameraComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
-#include "Animation/AnimInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
@@ -21,14 +19,12 @@
 // Sets default values for this component's properties
 UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 {
-	// Default offset from the character location for projectiles to spawn
-	MuzzleOffset = FVector(100.0f, 0.0f, 10.0f);
 }
 
 
 void UfpstrueWeaponComponent::StartFire()
 {
-	if (!CanFire() || Character->IsDead() || Character->IsReloading())
+	if (!CanFire())
 	{
 		return;
 	}
@@ -64,11 +60,6 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	if (Character->IsReloading() || Character->IsDead())
-	{
-		return;
-	}
-
 	// Ammo, reload, and death gates live in the character; this is the single shot attempt.
 	if (!Character->TryConsumeAmmo())
 	{
@@ -78,16 +69,7 @@ void UfpstrueWeaponComponent::Fire()
 	}
 
 	OnWeaponFirePerformed.Broadcast();
-
-
-	if (bUseLineTrace)
-	{
-		FireLineTrace(World, Camera);
-	}
-	else
-	{
-		FireProjectile(World);
-	}
+	FireLineTrace(World, Camera);
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
 	{
@@ -220,28 +202,6 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			FColor::Red,
 			TEXT("LineTrace missed")
 		);
-	}
-}
-
-void UfpstrueWeaponComponent::FireProjectile(UWorld* World)
-{
-	// Try and fire a projectile. Kept as a fallback for later projectile-style weapons.
-	if (ProjectileClass != nullptr)
-	{
-		APlayerController* PlayerController = Cast<APlayerController>(Character->GetController());
-		if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
-		{
-			const FRotator SpawnRotation = PlayerController->PlayerCameraManager->GetCameraRotation();
-			// MuzzleOffset is in camera space, so transform it to world space before offsetting from the character location to find the final muzzle position
-			const FVector SpawnLocation = GetOwner()->GetActorLocation() + SpawnRotation.RotateVector(MuzzleOffset);
-
-			//Set Spawn Collision Handling Override
-			FActorSpawnParameters ActorSpawnParams;
-			ActorSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
-
-			// Spawn the projectile at the muzzle
-			World->SpawnActor<AfpstrueProjectile>(ProjectileClass, SpawnLocation, SpawnRotation, ActorSpawnParams);
-		}
 	}
 }
 

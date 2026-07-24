@@ -28,20 +28,6 @@ class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 	GENERATED_BODY()
 
 public:
-	/** Projectile class to spawn */
-	UPROPERTY(EditDefaultsOnly, Category=Projectile)
-	TSubclassOf<class AfpstrueProjectile> ProjectileClass;
-	/** Sound to play each time we fire */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Gameplay)
-	USoundBase* FireSound;
-	
-	/** AnimMontage to play each time we fire */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Gameplay)
-	UAnimMontage* FireAnimation;
-
-	/** Gun muzzle's offset from the characters location */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Gameplay)
-	FVector MuzzleOffset;
 
 	/** MappingContext */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Input, meta=(AllowPrivateAccess = "true"))
@@ -57,11 +43,6 @@ public:
 	/** Attaches the actor to a FirstPersonCharacter */
 	UFUNCTION(BlueprintCallable, Category="Weapon")
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
-
-	
-	/** Use LineTrace as the main fire mode. Projectile remains as a fallback. */
-	UPROPERTY(EditAnywhere, Category = "Weapon")
-	bool bUseLineTrace = true;
 	/** Linetrace length*/
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceRange = 10000.0f;
@@ -141,7 +122,6 @@ private:
 	void StopFire();
 	bool CanFire() const;
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
-	void FireProjectile(UWorld* World);
 
 	/** The Character holding this weapon*/
 	AfpstrueCharacter* Character;
