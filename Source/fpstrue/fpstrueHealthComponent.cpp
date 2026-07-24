@@ -21,12 +21,21 @@ void UfpstrueHealthComponent::BeginPlay()
 
 void UfpstrueHealthComponent::ApplyDamage(float DamageAmount)
 {
+	ApplyDamageInternal(DamageAmount, nullptr, nullptr);
+}
+
+void UfpstrueHealthComponent::ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
+{
 	if (DamageAmount <= 0.0f || IsDead())
 	{
 		return;
 	}
 
+	const float PreviousHealth = CurrentHealth;
 	CurrentHealth = FMath::Clamp(CurrentHealth - DamageAmount, 0.0f, MaxHealth);
+	const float AppliedDamage = PreviousHealth - CurrentHealth;
+
+	OnDamageReceived.Broadcast(AppliedDamage, DamageCauser, InstigatedBy);
 	OnHealthChanged.Broadcast(CurrentHealth);
 
 	if (IsDead())
@@ -41,7 +50,12 @@ void UfpstrueHealthComponent::ResetHealth()
 	OnHealthChanged.Broadcast(CurrentHealth);
 }
 
+float UfpstrueHealthComponent::GetHealthNormalized() const
+{
+	return MaxHealth > 0.0f ? CurrentHealth / MaxHealth : 0.0f;
+}
+
 void UfpstrueHealthComponent::HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser)
 {
-	ApplyDamage(Damage);
+	ApplyDamageInternal(Damage, DamageCauser, InstigatedBy);
 }

@@ -4,6 +4,7 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -25,6 +26,7 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	if (HealthComponent != nullptr)
 	{
 		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
+		HealthComponent->OnDamageReceived.AddDynamic(this, &AfpstrueEnemyCharacter::HandleDamageReceived);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -106,8 +108,10 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 	}
 
 	TimeSinceLastAttack = 0.0f;
+	CancelAttackWindow();
 	bIsAttacking = true;
 	bDamageAppliedThisAttack = false;
+	bHitTargetThisAttack = false;
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
@@ -134,7 +138,105 @@ void AfpstrueEnemyCharacter::HandleAttackHitNotify()
 
 	// Each attack animation gets exactly one authoritative damage opportunity.
 	bDamageAppliedThisAttack = true;
-	PerformMeleeHit();
+	bHitTargetThisAttack = PerformMeleeHit();
+	if (!bHitTargetThisAttack && !bAttackWindowActive)
+	{
+		OnAttackMissed();
+	}
+}
+
+void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
+{
+	if (bIsAttacking)
+	{
+		FinishAttack();
+	}
+}
+
+void AfpstrueEnemyCharacter::BeginAttackWindow()
+{
+	if (bIsDead || !bIsAttacking)
+	{
+		return;
+	}
+
+	CancelAttackWindow();
+
+	FVector CurrentWeaponBase;
+	FVector CurrentWeaponTip;
+	if (!GetWeaponBladeSegment(CurrentWeaponBase, CurrentWeaponTip))
+	{
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("%s cannot start attack window: sockets '%s' and '%s' must both exist."),
+			*GetName(),
+			*WeaponTraceStartSocketName.ToString(),
+			*WeaponTraceEndSocketName.ToString()
+		);
+		return;
+	}
+
+	bAttackWindowActive = true;
+	bHasPreviousWeaponSample = true;
+	PreviousWeaponBase = CurrentWeaponBase;
+	PreviousWeaponTip = CurrentWeaponTip;
+	HitActorsThisAttack.Reset();
+}
+
+void AfpstrueEnemyCharacter::UpdateAttackWindow()
+{
+	if (!bAttackWindowActive || bIsDead || !bIsAttacking)
+	{
+		return;
+	}
+
+	FVector CurrentWeaponBase;
+	FVector CurrentWeaponTip;
+	if (!GetWeaponBladeSegment(CurrentWeaponBase, CurrentWeaponTip))
+	{
+		CancelAttackWindow();
+		return;
+	}
+
+	if (!bHasPreviousWeaponSample)
+	{
+		PreviousWeaponBase = CurrentWeaponBase;
+		PreviousWeaponTip = CurrentWeaponTip;
+		bHasPreviousWeaponSample = true;
+		return;
+	}
+
+	const int32 SampleCount = FMath::Clamp(WeaponTraceSampleCount, 2, 8);
+	for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
+	{
+		const float Alpha = static_cast<float>(SampleIndex) / static_cast<float>(SampleCount - 1);
+		const FVector PreviousSample = FMath::Lerp(PreviousWeaponBase, PreviousWeaponTip, Alpha);
+		const FVector CurrentSample = FMath::Lerp(CurrentWeaponBase, CurrentWeaponTip, Alpha);
+		SweepWeaponSegment(PreviousSample, CurrentSample);
+	}
+
+	// Cover the blade segment itself as well as its movement between animation frames.
+	SweepWeaponSegment(CurrentWeaponBase, CurrentWeaponTip);
+
+	PreviousWeaponBase = CurrentWeaponBase;
+	PreviousWeaponTip = CurrentWeaponTip;
+}
+
+void AfpstrueEnemyCharacter::EndAttackWindow()
+{
+	if (!bAttackWindowActive)
+	{
+		return;
+	}
+
+	const bool bMissedTarget = !bHitTargetThisAttack;
+	CancelAttackWindow();
+
+	if (bMissedTarget)
+	{
+		OnAttackMissed();
+	}
 }
 
 bool AfpstrueEnemyCharacter::PerformMeleeHit()
@@ -175,19 +277,7 @@ bool AfpstrueEnemyCharacter::PerformMeleeHit()
 				continue;
 			}
 
-			const float AppliedDamage = UGameplayStatics::ApplyDamage(
-				TargetCharacter,
-				AttackDamage,
-				GetController(),
-				this,
-				nullptr
-			);
-
-			bHitPlayer = AppliedDamage > 0.0f;
-			if (bHitPlayer)
-			{
-				OnAttackLanded();
-			}
+			bHitPlayer = TryApplyAttackDamage(TargetCharacter);
 			break;
 		}
 	}
@@ -203,9 +293,118 @@ bool AfpstrueEnemyCharacter::PerformMeleeHit()
 	return bHitPlayer;
 }
 
+bool AfpstrueEnemyCharacter::GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const
+{
+	const USkeletalMeshComponent* CharacterMesh = GetMesh();
+	if (CharacterMesh == nullptr
+		|| !CharacterMesh->DoesSocketExist(WeaponTraceStartSocketName)
+		|| !CharacterMesh->DoesSocketExist(WeaponTraceEndSocketName))
+	{
+		return false;
+	}
+
+	OutBladeBase = CharacterMesh->GetSocketLocation(WeaponTraceStartSocketName);
+	OutBladeTip = CharacterMesh->GetSocketLocation(WeaponTraceEndSocketName);
+	return true;
+}
+
+void AfpstrueEnemyCharacter::SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd)
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
+
+	FCollisionObjectQueryParams ObjectQueryParams;
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyWeaponTrace), false, this);
+	QueryParams.AddIgnoredActor(this);
+
+	TArray<FHitResult> HitResults;
+	const bool bHitAnyPawn = World->SweepMultiByObjectType(
+		HitResults,
+		TraceStart,
+		TraceEnd,
+		FQuat::Identity,
+		ObjectQueryParams,
+		FCollisionShape::MakeSphere(WeaponTraceRadius),
+		QueryParams
+	);
+
+	if (bDrawAttackTrace)
+	{
+		const FColor DebugColor = bHitAnyPawn ? FColor::Green : FColor::Yellow;
+		DrawDebugLine(World, TraceStart, TraceEnd, DebugColor, false, 0.1f, 0, 1.5f);
+		DrawDebugSphere(World, TraceStart, WeaponTraceRadius, 8, DebugColor, false, 0.1f);
+		DrawDebugSphere(World, TraceEnd, WeaponTraceRadius, 8, DebugColor, false, 0.1f);
+	}
+
+	if (!bHitAnyPawn)
+	{
+		return;
+	}
+
+	for (const FHitResult& HitResult : HitResults)
+	{
+		TryApplyAttackDamage(HitResult.GetActor());
+	}
+}
+
+bool AfpstrueEnemyCharacter::TryApplyAttackDamage(AActor* HitActor)
+{
+	if (HitActor == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead())
+	{
+		return false;
+	}
+
+	const TWeakObjectPtr<AActor> WeakHitActor(HitActor);
+	if (HitActorsThisAttack.Contains(WeakHitActor))
+	{
+		return false;
+	}
+
+	const float AppliedDamage = UGameplayStatics::ApplyDamage(
+		HitActor,
+		AttackDamage,
+		GetController(),
+		this,
+		nullptr
+	);
+
+	if (AppliedDamage <= 0.0f)
+	{
+		return false;
+	}
+
+	HitActorsThisAttack.Add(WeakHitActor);
+	bDamageAppliedThisAttack = true;
+	bHitTargetThisAttack = true;
+	OnAttackLanded();
+	return true;
+}
+
+void AfpstrueEnemyCharacter::CancelAttackWindow()
+{
+	bAttackWindowActive = false;
+	bHasPreviousWeaponSample = false;
+	PreviousWeaponBase = FVector::ZeroVector;
+	PreviousWeaponTip = FVector::ZeroVector;
+	HitActorsThisAttack.Reset();
+}
+
 void AfpstrueEnemyCharacter::FinishAttack()
 {
+	if (!bIsAttacking)
+	{
+		return;
+	}
+
+	EndAttackWindow();
 	bIsAttacking = false;
+	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
+	OnAttackFinished(bHitTargetThisAttack);
 }
 
 
@@ -232,6 +431,11 @@ bool AfpstrueEnemyCharacter::CanAttack() const
 		&& TimeSinceLastAttack >= AttackInterval;
 }
 
+void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
+{
+	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
+}
+
 void AfpstrueEnemyCharacter::HandleDeath()
 {
 	if (bIsDead)
@@ -240,6 +444,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	}
 
 	bIsDead = true;
+	CancelAttackWindow();
 	bIsAttacking = false;
 	bDamageAppliedThisAttack = true;
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
@@ -255,6 +460,8 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	{
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
+
+	OnEnemyDied();
 
 	if (bDestroyOnDeath)
 	{

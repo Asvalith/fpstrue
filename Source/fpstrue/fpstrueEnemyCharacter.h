@@ -22,6 +22,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	void HandleAttackHitNotify();
 
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void HandleAttackFinishedNotify();
+
+	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
+	void BeginAttackWindow();
+
+	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
+	void UpdateAttackWindow();
+
+	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
+	void EndAttackWindow();
+
 	UFUNCTION(BlueprintPure, Category = "AI")
 	bool IsDead() const { return bIsDead; }
 
@@ -36,6 +48,9 @@ protected:
 
 	UFUNCTION()
 	void HandleDeath();
+
+	UFUNCTION()
+	void HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health")
 	UfpstrueHealthComponent* HealthComponent;
@@ -64,6 +79,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Trace")
 	float AttackTraceHeight = 60.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace")
+	FName WeaponTraceStartSocketName = TEXT("weapontop");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace")
+	FName WeaponTraceEndSocketName = TEXT("weaponend");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace", meta = (ClampMin = "1.0"))
+	float WeaponTraceRadius = 8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace", meta = (ClampMin = "2", ClampMax = "8"))
+	int32 WeaponTraceSampleCount = 4;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Debug")
 	bool bDrawAttackTrace = false;
 
@@ -79,11 +106,27 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
 	void OnAttackLanded();
 
+	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
+	void OnAttackMissed();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
+	void OnAttackFinished(bool bHitTarget);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
+	void OnEnemyDamaged(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
+	void OnEnemyDied();
+
 private:
 	void UpdateEnemy();
 	void MoveTowardTarget(const FVector& DirectionToTarget);
 	void TryAttackTarget();
 	bool PerformMeleeHit();
+	bool GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const;
+	void SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd);
+	bool TryApplyAttackDamage(AActor* HitActor);
+	void CancelAttackWindow();
 	void FinishAttack();
 	bool CanAttack() const;
 
@@ -94,6 +137,13 @@ private:
 	bool bIsDead = false;
 	bool bIsAttacking = false;
 	bool bDamageAppliedThisAttack = false;
+	bool bHitTargetThisAttack = false;
+	bool bAttackWindowActive = false;
+	bool bHasPreviousWeaponSample = false;
+
+	FVector PreviousWeaponBase = FVector::ZeroVector;
+	FVector PreviousWeaponTip = FVector::ZeroVector;
+	TSet<TWeakObjectPtr<AActor>> HitActorsThisAttack;
 
 	FTimerHandle AttackFinishTimerHandle;
 };

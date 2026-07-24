@@ -6,11 +6,12 @@
 #include "Components/ActorComponent.h"
 #include "fpstrueHealthComponent.generated.h"
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHealthChanged, float, NewHealth);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
-
 class AController;
 class UDamageType;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDamageReceived, float, DamageAmount, AActor*, DamageCauser, AController*, InstigatedBy);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHealthChanged, float, NewHealth);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueHealthComponent : public UActorComponent
@@ -33,7 +34,13 @@ public:
 	float GetMaxHealth() const { return MaxHealth; }
 
 	UFUNCTION(BlueprintPure, Category="Health")
+	float GetHealthNormalized() const;
+
+	UFUNCTION(BlueprintPure, Category="Health")
 	bool IsDead() const { return CurrentHealth <= 0.0f; }
+
+	UPROPERTY(BlueprintAssignable, Category="Health")
+	FOnDamageReceived OnDamageReceived;
 
 	UPROPERTY(BlueprintAssignable, Category="Health")
 	FOnHealthChanged OnHealthChanged;
@@ -47,6 +54,10 @@ protected:
 	UFUNCTION()
 	void HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser);
 
+private:
+	void ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
+
+protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Health")
 	float MaxHealth = 100.0f;
 
