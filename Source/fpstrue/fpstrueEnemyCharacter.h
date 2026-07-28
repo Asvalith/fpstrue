@@ -7,7 +7,10 @@
 #include "fpstrueEnemyCharacter.generated.h"
 
 class AfpstrueCharacter;
+class AfpstrueEnemyCharacter;
 class UfpstrueHealthComponent;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyDeathReported, AfpstrueEnemyCharacter*, DeadEnemy);
 
 UCLASS(Blueprintable)
 class FPSTRUE_API AfpstrueEnemyCharacter : public ACharacter
@@ -42,6 +45,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "AI")
 	bool IsTargetInAttackRange() const;
+
+	UPROPERTY(BlueprintAssignable, Category = "AI")
+	FOnEnemyDeathReported OnEnemyDeathReported;
 
 protected:
 	virtual void BeginPlay() override;

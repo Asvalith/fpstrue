@@ -461,6 +461,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
 
+	OnEnemyDeathReported.Broadcast(this);
 	OnEnemyDied();
 
 	if (bDestroyOnDeath)
