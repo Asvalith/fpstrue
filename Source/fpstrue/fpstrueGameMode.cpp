@@ -4,21 +4,22 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueEnemyCharacter.h"
 #include "fpstrueHealthComponent.h"
+#include "fpstrueSurroundManager.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
+#include "NavigationSystem.h"
 #include "UObject/ConstructorHelpers.h"
 
 AfpstrueGameMode::AfpstrueGameMode()
 	: Super()
 {
-	// set default pawn class to our Blueprinted character
 	static ConstructorHelpers::FClassFinder<APawn> PlayerPawnClassFinder(TEXT("/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter"));
 	DefaultPawnClass = PlayerPawnClassFinder.Class;
-
+	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
 }
 
-void AfpstrueGameMode::StartGame()
+void AfpstrueGameMode::StartGameMode()
 {
 	if (bGameRunning || bGameEnded)
 	{
@@ -29,14 +30,27 @@ void AfpstrueGameMode::StartGame()
 
 	if (!EnemyClass)
 	{
-		UE_LOG(LogTemp, Error, TEXT("StartGame failed: EnemyClass is not configured."));
+		UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: EnemyClass is not configured."));
 		FinishGame(false);
 		return;
 	}
 
 	if (SpawnPoints.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("StartGame failed: no TargetPoint has the tag '%s'."), *EnemySpawnTag.ToString());
+		UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: no TargetPoint has the tag '%s'."), *EnemySpawnTag.ToString());
+		FinishGame(false);
+		return;
+	}
+
+	if (SpawnPoints.Num() < MinimumSpawnPointCount)
+	{
+		UE_LOG(
+			LogTemp,
+			Error,
+			TEXT("StartGameMode failed: found %d spawn points, but at least %d are required."),
+			SpawnPoints.Num(),
+			MinimumSpawnPointCount
+		);
 		FinishGame(false);
 		return;
 	}
@@ -44,16 +58,22 @@ void AfpstrueGameMode::StartGame()
 	PlayerCharacter = Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
 	if (!PlayerCharacter || !PlayerCharacter->GetHealthComponent())
 	{
-		UE_LOG(LogTemp, Error, TEXT("StartGame failed: player or HealthComponent is invalid."));
+		UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: player or HealthComponent is invalid."));
 		FinishGame(false);
 		return;
 	}
 
 	PlayerCharacter->GetHealthComponent()->OnDeath.AddUniqueDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
 
+	if (!CreateSurroundManager())
+	{
+		UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: SurroundManager could not be created."));
+		FinishGame(false);
+		return;
+	}
+
 	bGameRunning = true;
 	CurrentWave = 0;
-	EnemiesLeftToSpawn = 0;
 	AliveEnemyCount = 0;
 	RemainingTime = GameDuration;
 
@@ -81,6 +101,11 @@ void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		PlayerCharacter->GetHealthComponent()->OnDeath.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
 	}
 
+	if (SurroundManager)
+	{
+		SurroundManager->ResetManager();
+	}
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -103,55 +128,19 @@ void AfpstrueGameMode::StartNextWave()
 	}
 
 	++CurrentWave;
-	EnemiesLeftToSpawn = BaseEnemiesPerWave + (CurrentWave - 1) * EnemiesAddedPerWave;
 	OnWaveChanged.Broadcast(CurrentWave, TotalWaves);
+	UE_LOG(
+		LogTemp,
+		Warning,
+		TEXT("Wave %d/%d started. Enemies to spawn: %d"),
+		CurrentWave,
+		TotalWaves,
+		BaseEnemiesPerWave + (CurrentWave - 1) * EnemiesAddedPerWave
+	);
 
-	SpawnNextEnemy();
-}
+	SpawnCurrentWave();
 
-void AfpstrueGameMode::SpawnNextEnemy()
-{
-	if (!bGameRunning || EnemiesLeftToSpawn <= 0 || SpawnPoints.IsEmpty())
-	{
-		return;
-	}
-
-	const int32 SpawnPointIndex = FMath::RandRange(0, SpawnPoints.Num() - 1);
-	AActor* SpawnPoint = SpawnPoints[SpawnPointIndex];
-
-	if (IsValid(SpawnPoint))
-	{
-		FActorSpawnParameters SpawnParameters;
-		SpawnParameters.SpawnCollisionHandlingOverride =
-			ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-		AfpstrueEnemyCharacter* SpawnedEnemy = GetWorld()->SpawnActor<AfpstrueEnemyCharacter>(
-			EnemyClass,
-			SpawnPoint->GetActorTransform(),
-			SpawnParameters
-		);
-
-		if (SpawnedEnemy)
-		{
-			SpawnedEnemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
-			++AliveEnemyCount;
-			OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
-		}
-	}
-
-	--EnemiesLeftToSpawn;
-
-	if (EnemiesLeftToSpawn > 0)
-	{
-		GetWorldTimerManager().SetTimer(
-			EnemySpawnTimerHandle,
-			this,
-			&AfpstrueGameMode::SpawnNextEnemy,
-			EnemySpawnInterval,
-			false
-		);
-	}
-	else if (CurrentWave < TotalWaves)
+	if (CurrentWave < TotalWaves)
 	{
 		GetWorldTimerManager().SetTimer(
 			WaveTimerHandle,
@@ -160,6 +149,123 @@ void AfpstrueGameMode::SpawnNextEnemy()
 			WaveInterval,
 			false
 		);
+	}
+}
+
+bool AfpstrueGameMode::CreateSurroundManager()
+{
+	if (IsValid(SurroundManager))
+	{
+		SurroundManager->SetTargetCharacter(PlayerCharacter);
+		return true;
+	}
+
+	UWorld* World = GetWorld();
+	if (World == nullptr || !SurroundManagerClass)
+	{
+		return false;
+	}
+
+	SurroundManager = World->SpawnActor<AfpstrueSurroundManager>(
+		SurroundManagerClass,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator
+	);
+
+	if (!IsValid(SurroundManager))
+	{
+		return false;
+	}
+
+	SurroundManager->SetTargetCharacter(PlayerCharacter);
+	return true;
+}
+
+void AfpstrueGameMode::SpawnCurrentWave()
+{
+	if (!bGameRunning || SpawnPoints.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<AActor*> ShuffledSpawnPoints = SpawnPoints;
+	for (int32 Index = ShuffledSpawnPoints.Num() - 1; Index > 0; --Index)
+	{
+		const int32 SwapIndex = FMath::RandRange(0, Index);
+		ShuffledSpawnPoints.Swap(Index, SwapIndex);
+	}
+
+	const int32 EnemiesThisWave = BaseEnemiesPerWave + (CurrentWave - 1) * EnemiesAddedPerWave;
+	for (int32 EnemyIndex = 0; EnemyIndex < EnemiesThisWave; ++EnemyIndex)
+	{
+		const int32 SpawnPointIndex = EnemyIndex % ShuffledSpawnPoints.Num();
+		const bool bUseNearbyLocation = EnemyIndex >= ShuffledSpawnPoints.Num();
+		SpawnEnemyAtPoint(ShuffledSpawnPoints[SpawnPointIndex], bUseNearbyLocation);
+	}
+}
+
+void AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, bool bUseNearbyLocation)
+{
+	if (!IsValid(SpawnPoint))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Enemy spawn point is invalid."));
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
+
+	FVector SpawnLocation = SpawnPoint->GetActorLocation();
+	if (bUseNearbyLocation && ReusedSpawnPointRadius > 0.0f)
+	{
+		if (UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+		{
+			FNavLocation NearbyLocation;
+			if (NavSystem->GetRandomReachablePointInRadius(SpawnLocation, ReusedSpawnPointRadius, NearbyLocation))
+			{
+				SpawnLocation = NearbyLocation.Location;
+			}
+		}
+	}
+
+	FRotator SpawnRotation = SpawnPoint->GetActorRotation();
+	if (PlayerCharacter)
+	{
+		const FVector ToPlayer = PlayerCharacter->GetActorLocation() - SpawnLocation;
+		SpawnRotation = FRotator(0.0f, ToPlayer.Rotation().Yaw, 0.0f);
+	}
+
+	const FTransform SpawnTransform(SpawnRotation, SpawnLocation, FVector::OneVector);
+	FActorSpawnParameters SpawnParameters;
+	SpawnParameters.SpawnCollisionHandlingOverride =
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+	AfpstrueEnemyCharacter* SpawnedEnemy = World->SpawnActor<AfpstrueEnemyCharacter>(
+		EnemyClass,
+		SpawnTransform,
+		SpawnParameters
+	);
+
+	if (SpawnedEnemy)
+	{
+		SpawnedEnemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
+		++AliveEnemyCount;
+		OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("Enemy spawned: %s at %s. Alive enemies: %d"),
+			*GetNameSafe(SpawnedEnemy),
+			*SpawnLocation.ToString(),
+			AliveEnemyCount
+		);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("SpawnActor failed for enemy class %s"), *GetNameSafe(EnemyClass.Get()));
 	}
 }
 
@@ -211,12 +317,15 @@ void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 	bGameEnded = true;
 	bGameRunning = false;
 	ClearGameplayTimers();
+	if (SurroundManager)
+	{
+		SurroundManager->ResetManager();
+	}
 	OnGameResult.Broadcast(bPlayerWon);
 }
 
 void AfpstrueGameMode::ClearGameplayTimers()
 {
 	GetWorldTimerManager().ClearTimer(CountdownTimerHandle);
-	GetWorldTimerManager().ClearTimer(EnemySpawnTimerHandle);
 	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
 }

@@ -8,6 +8,7 @@
 
 class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
+class AfpstrueSurroundManager;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRemainingTimeChanged, int32, RemainingTime);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWaveChanged, int32, CurrentWave, int32, TotalWaves);
@@ -22,8 +23,8 @@ class FPSTRUE_API AfpstrueGameMode : public AGameModeBase
 public:
 	AfpstrueGameMode();
 
-	UFUNCTION(BlueprintCallable, Category = "Game")
-	void StartGame();
+	UFUNCTION(BlueprintCallable, Category = "Game", meta = (DisplayName = "Start GameMode"))
+	void StartGameMode();
 
 	UFUNCTION(BlueprintPure, Category = "Game")
 	int32 GetRemainingTime() const { return RemainingTime; }
@@ -58,6 +59,15 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn")
 	FName EnemySpawnTag = TEXT("EnemySpawn");
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|AI")
+	TSubclassOf<AfpstrueSurroundManager> SurroundManagerClass;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Game|AI")
+	AfpstrueSurroundManager* SurroundManager = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn", meta = (ClampMin = "1"))
+	int32 MinimumSpawnPointCount = 4;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave", meta = (ClampMin = "1"))
 	int32 TotalWaves = 3;
 
@@ -67,19 +77,21 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave", meta = (ClampMin = "0"))
 	int32 EnemiesAddedPerWave = 2;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave", meta = (ClampMin = "0.1"))
-	float EnemySpawnInterval = 0.5f;
-
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave", meta = (ClampMin = "0.0"))
-	float WaveInterval = 10.0f;
+	float WaveInterval = 5.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn", meta = (ClampMin = "0.0"))
+	float ReusedSpawnPointRadius = 300.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Time", meta = (ClampMin = "1"))
-	int32 GameDuration = 180;
+	int32 GameDuration = 90;
 
 private:
 	void CacheSpawnPoints();
+	bool CreateSurroundManager();
 	void StartNextWave();
-	void SpawnNextEnemy();
+	void SpawnCurrentWave();
+	void SpawnEnemyAtPoint(AActor* SpawnPoint, bool bUseNearbyLocation);
 	void UpdateCountdown();
 	void FinishGame(bool bPlayerWon);
 	void ClearGameplayTimers();
@@ -97,14 +109,12 @@ private:
 	AfpstrueCharacter* PlayerCharacter = nullptr;
 
 	int32 CurrentWave = 0;
-	int32 EnemiesLeftToSpawn = 0;
 	int32 AliveEnemyCount = 0;
 	int32 RemainingTime = 0;
 	bool bGameRunning = false;
 	bool bGameEnded = false;
 
 	FTimerHandle CountdownTimerHandle;
-	FTimerHandle EnemySpawnTimerHandle;
 	FTimerHandle WaveTimerHandle;
 };
 

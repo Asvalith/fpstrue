@@ -2,6 +2,7 @@
 
 #include "fpstrueEnemyCharacter.h"
 #include "fpstrueCharacter.h"
+#include "fpstrueEnemyAIController.h"
 #include "fpstrueHealthComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -12,7 +13,9 @@
 
 AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 {
-	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bCanEverTick = false;
+	AIControllerClass = AfpstrueEnemyAIController::StaticClass();
+	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
 
 	GetCapsuleComponent()->InitCapsuleSize(42.0f, 96.0f);
 
@@ -34,80 +37,55 @@ void AfpstrueEnemyCharacter::BeginPlay()
 		Movement->MaxWalkSpeed = MoveSpeed;
 	}
 
-	TargetCharacter = Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
-}
-
-void AfpstrueEnemyCharacter::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	TimeSinceLastAttack += DeltaTime;
-
-	if (!bIsDead)
+	if (UWorld* World = GetWorld())
 	{
-		UpdateEnemy();
+		LastAttackTime = World->GetTimeSeconds();
 	}
 }
 
-void AfpstrueEnemyCharacter::UpdateEnemy()
+float AfpstrueEnemyCharacter::GetDistanceToTarget2D() const
 {
 	if (TargetCharacter == nullptr)
 	{
-		TargetCharacter = Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
+		return MAX_flt;
 	}
 
-	if (TargetCharacter == nullptr || TargetCharacter->IsDead())
+	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
+	return FVector(ToTarget.X, ToTarget.Y, 0.0f).Size();
+}
+
+void AfpstrueEnemyCharacter::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
+{
+	TargetCharacter = NewTargetCharacter;
+}
+
+void AfpstrueEnemyCharacter::FaceTarget()
+{
+	if (TargetCharacter == nullptr)
 	{
 		return;
 	}
 
 	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
 	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
-	const float DistanceToTarget = HorizontalToTarget.Size();
-
-	if (bIsAttacking)
-	{
-		if (!HorizontalToTarget.IsNearlyZero())
-		{
-			SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
-		}
-		return;
-	}
-
-	if (DistanceToTarget > ChaseRange)
-	{
-		return;
-	}
-
-	if (IsTargetInAttackRange())
-	{
-		if (!HorizontalToTarget.IsNearlyZero())
-		{
-			SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
-		}
-		TryAttackTarget();
-		return;
-	}
-
 	if (!HorizontalToTarget.IsNearlyZero())
 	{
-		MoveTowardTarget(HorizontalToTarget.GetSafeNormal());
+		SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
 	}
 }
-void AfpstrueEnemyCharacter::MoveTowardTarget(const FVector& DirectionToTarget)
-{
-	AddMovementInput(DirectionToTarget, 1.0f, true);
-	SetActorRotation(DirectionToTarget.Rotation());
-}
 
-void AfpstrueEnemyCharacter::TryAttackTarget()
+bool AfpstrueEnemyCharacter::TryAttackTarget()
 {
 	if (!CanAttack())
 	{
-		return;
+		return false;
 	}
 
-	TimeSinceLastAttack = 0.0f;
+	if (UWorld* World = GetWorld())
+	{
+		LastAttackTime = World->GetTimeSeconds();
+	}
+
 	CancelAttackWindow();
 	bIsAttacking = true;
 	bDamageAppliedThisAttack = false;
@@ -127,6 +105,8 @@ void AfpstrueEnemyCharacter::TryAttackTarget()
 		AttackAnimationDuration,
 		false
 	);
+
+	return true;
 }
 
 void AfpstrueEnemyCharacter::HandleAttackHitNotify()
@@ -136,7 +116,6 @@ void AfpstrueEnemyCharacter::HandleAttackHitNotify()
 		return;
 	}
 
-	// Each attack animation gets exactly one authoritative damage opportunity.
 	bDamageAppliedThisAttack = true;
 	bHitTargetThisAttack = PerformMeleeHit();
 	if (!bHitTargetThisAttack && !bAttackWindowActive)
@@ -216,7 +195,6 @@ void AfpstrueEnemyCharacter::UpdateAttackWindow()
 		SweepWeaponSegment(PreviousSample, CurrentSample);
 	}
 
-	// Cover the blade segment itself as well as its movement between animation frames.
 	SweepWeaponSegment(CurrentWeaponBase, CurrentWeaponTip);
 
 	PreviousWeaponBase = CurrentWeaponBase;
@@ -422,13 +400,19 @@ bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
 
 bool AfpstrueEnemyCharacter::CanAttack() const
 {
+	const UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return false;
+	}
+
 	return TargetCharacter != nullptr
 		&& TargetCharacter->GetHealthComponent() != nullptr
 		&& !TargetCharacter->GetHealthComponent()->IsDead()
 		&& !bIsDead
 		&& !bIsAttacking
 		&& IsTargetInAttackRange()
-		&& TimeSinceLastAttack >= AttackInterval;
+		&& World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
 }
 
 void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
@@ -448,6 +432,11 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	bIsAttacking = false;
 	bDamageAppliedThisAttack = true;
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
+
+	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
+	{
+		EnemyAIController->StopAI();
+	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{

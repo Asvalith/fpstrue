@@ -20,8 +20,6 @@ class FPSTRUE_API AfpstrueEnemyCharacter : public ACharacter
 public:
 	AfpstrueEnemyCharacter();
 
-	virtual void Tick(float DeltaTime) override;
-
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	void HandleAttackHitNotify();
 
@@ -46,6 +44,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "AI")
 	bool IsTargetInAttackRange() const;
 
+	UFUNCTION(BlueprintPure, Category = "AI")
+	float GetChaseRange() const { return ChaseRange; }
+
+	UFUNCTION(BlueprintPure, Category = "AI")
+	float GetAttackRange() const { return AttackRange; }
+
+	UFUNCTION(BlueprintPure, Category = "AI")
+	float GetDistanceToTarget2D() const;
+
+	UFUNCTION(BlueprintCallable, Category = "AI")
+	void SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter);
+
+	UFUNCTION(BlueprintCallable, Category = "AI")
+	void FaceTarget();
+
+	bool TryAttackTarget();
+
 	UPROPERTY(BlueprintAssignable, Category = "AI")
 	FOnEnemyDeathReported OnEnemyDeathReported;
 
@@ -62,10 +77,10 @@ protected:
 	UfpstrueHealthComponent* HealthComponent;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	float MoveSpeed = 300.0f;
+	float MoveSpeed = 500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	float ChaseRange = 2000.0f;
+	float ChaseRange = 20000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	float AttackRange = 150.0f;
@@ -125,9 +140,6 @@ protected:
 	void OnEnemyDied();
 
 private:
-	void UpdateEnemy();
-	void MoveTowardTarget(const FVector& DirectionToTarget);
-	void TryAttackTarget();
 	bool PerformMeleeHit();
 	bool GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const;
 	void SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd);
@@ -139,7 +151,7 @@ private:
 	UPROPERTY()
 	AfpstrueCharacter* TargetCharacter;
 
-	float TimeSinceLastAttack = 0.0f;
+	float LastAttackTime = 0.0f;
 	bool bIsDead = false;
 	bool bIsAttacking = false;
 	bool bDamageAppliedThisAttack = false;
