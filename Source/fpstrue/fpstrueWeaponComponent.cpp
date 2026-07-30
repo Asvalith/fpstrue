@@ -130,6 +130,8 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
 
+	// 保留射线可视化代码用于排错，正常游戏和性能测试时不绘制。
+	/*
 	if (bShowDebugTrace)
 	{
 		DrawDebugLine(
@@ -143,6 +145,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			0.0f
 		);
 	}
+	*/
 
 	if (bHit)
 	{

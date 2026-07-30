@@ -1,16 +1,20 @@
 # UE5 游戏框架与技术路线复习文档
 
-最后更新：2026-07-21
+最后更新：2026-07-22
+
+> 当前执行基线：`FPS_PORTFOLIO_ACCEPTANCE_PLAN.md`。
+>
+> 2026-07-22 已冻结本轮范围：只完成单机 FPS 闭环、战斗与动画一致性、敌人 AI、内存/生命周期治理、性能分析和图形表现。本文后半部分的多人网络、额外图形项目、行为树、Global Shader / RDG 等内容仅保留为知识索引，不属于当前实现承诺。
 
 ## 1. 文档定位
 
-本文档用于复习 UE5 Gameplay Framework、梳理 `fpstrue` 当前架构，并规划后续多人网络、游戏 AI、渲染和图形学学习路线。
+本文档用于复习 UE5 Gameplay Framework、梳理 `fpstrue` 当前架构，并为当前 FPS 实现提供背景知识。实际范围、顺序和验收要求以 `FPS_PORTFOLIO_ACCEPTANCE_PLAN.md` 为准。
 
 核心原则：
 
 - 只把能够解释、修改和验证的内容写成个人能力。
 - 借鉴代码可以作为学习起点，但必须重新梳理调用链并完成独立修改。
-- 优先完成一个可玩的项目，再增加网络、AI 和渲染深度。
+- 优先完成一个可玩的项目，再增加 AI、生命周期、性能和图形表现深度。
 - 不为了堆技术关键词同时开启过多系统。
 - C++ 负责规则和状态，蓝图负责资源配置与表现。
 
@@ -795,6 +799,186 @@ Camera Start / Direction
 28. Server RPC 和 Multicast 分别解决什么问题？
 29. RepNotify 适合更新什么状态？
 30. 当前 `FireLineTrace` 如果网络化，应如何拆分？
+
+### 大厂关注：架构与工程所有权
+
+> 本节标记为“大厂关注”，不是因为问题一定以原句出现，而是因为大厂面试通常会沿着数据所有权、模块职责、方案取舍和实际验证继续追问。
+
+31. 当前项目中 Character、WeaponComponent、HealthComponent、EnemyCharacter、AIController 和 GameMode 分别拥有什么数据？
+32. 为什么生命值和武器逻辑适合拆成 Component，而不是全部放进 Character？
+33. C++ 与蓝图的职责边界是什么？为什么动画和 UI 表现可以保留在蓝图中？
+34. Delegate、直接函数调用和 Tick 查询各适合什么场景？
+35. UI 为什么应监听状态变化事件，而不是每帧读取 Character？
+36. 当前哪些蓝图节点只是表现层，哪些节点仍然承担了不该承担的规则？
+37. 如果需求改为增加第二种武器，当前架构需要修改哪些类？
+38. 如果重新实现一次，哪些教程或模板逻辑应该保留，哪些应该替换？
+39. 如何证明一个模块已经由自己掌握，而不只是能够运行？
+40. 如何用调用链、独立修改、Bug 复盘和测试结果证明代码所有权？
+
+### 大厂关注：CPU、动画与 AI 性能
+
+41. 为什么必须先建立 Baseline，再声称完成了优化？
+42. `stat unit` 和 Unreal Insights 分别解决什么问题？
+43. 10、25、50、100 个敌人的固定压力测试需要控制哪些变量？
+44. AI 每帧决策、固定时间间隔决策和错峰更新的成本与响应延迟有什么区别？
+45. 为什么不能为了省 CPU 简单关闭所有敌人的 Tick？
+46. 为什么近距离战斗敌人需要更高更新频率，远距离敌人可以降频？
+47. Animation Update Rate Optimization、Visibility Based Anim Tick 和 LOD 分别减少什么成本？
+48. 敌人死亡后应停止哪些移动、动画、碰撞、Timer 和 AI 更新？
+49. 为什么先做距离分级和更新降频，而不是直接把 AI 放到多线程？
+50. 优化方案自身的调度、分支和缓存开销如何测量？
+
+### 大厂关注：内存、资源与生命周期
+
+51. UObject、Actor、Component、强引用、弱引用和 GC 之间是什么关系？
+52. Timer、Delegate、AI 目标、Widget、Niagara、Decal 和尸体分别在哪里创建与清理？
+53. 如何通过 `stat memory`、`memreport`、Actor/Object 数量和连续波次实验判断是否泄漏？
+54. 为什么内存没有立即下降不一定代表泄漏？
+55. Texture Streaming Pool 超预算代表什么？如何使用 `stat streaming` 和 Size Map 定位资源？
+56. Max Texture Size、LOD Bias、Texture Group 和 Never Stream 分别会怎样影响显存与画质？
+57. 什么情况下对象池能减少 Spawn/Destroy 尖峰？什么情况下会增加状态残留风险？
+58. 当前 Hitscan 项目为什么不需要“子弹对象池”？
+59. 为什么对象池必须由性能数据驱动，而不能仅作为简历关键词？
+60. 如何验证关卡重启和多轮战斗后没有残留对象或重复绑定？
+
+### 大厂关注：多人网络
+
+61. NetMode、Role、Authority 和 Ownership 各自描述什么？
+62. 为什么伤害、拾取和胜负判定应该由服务端保持权威？
+63. Server RPC、Client RPC、Multicast RPC 和 RepNotify 的选型依据是什么？
+64. Reliable RPC 为什么不能滥用？高频状态为什么更适合属性同步？
+65. Actor Ownership 如何决定客户端能否调用 Server RPC？
+66. 房间创建、搜索、加入、销毁为什么适合放在 GameInstance 或其子系统中？
+67. 如何在 100ms、200ms 延迟及丢包环境下验证交互没有重复结算或状态分叉？
+68. NetUpdateFrequency、Dormancy 和 Relevancy 分别怎样影响带宽和响应速度？
+69. Listen Server 与 Dedicated Server 的架构和部署成本有什么区别？
+70. 当前 Co-op 为什么先完成服务端权威、RPC 和 Session，再决定是否实现延迟补偿？
+
+#### 多人拾取与第一/第三人称显示追问记录
+
+> 状态：多人设计方案，尚未在 `fpstrue` 中实现，简历中不能写成已完成功能。
+
+单机版本可以直接使用 `OnPickUp` 事件提供的 `PickUpCharacter`。多人版本不能使用 `GetPlayerPawn(0)` 代替它，因为每台机器上的索引 0 通常只代表该机器的本地玩家，不一定是实际拾取者。
+
+推荐的服务端权威链路：
+
+```text
+客户端按下交互键
+→ ServerTryPickup(PickupActor)
+→ 服务器验证 RPC 调用者拥有该 Character
+→ 服务器验证距离、碰撞、武器是否仍可拾取
+→ 服务器检查 Character 当前是否已有武器
+→ 第一个合法请求设置 bPickedUp / EquippedWeapon
+→ 服务器设置武器 Owner 并完成装备
+→ EquippedWeapon 通过 RepNotify 复制
+→ 各客户端在 OnRep_EquippedWeapon 中更新附件和表现
+```
+
+两个玩家同时拾取同一武器时：
+
+```text
+服务器串行处理请求
+→ 第一个合法请求把 bPickedUp 设为 true
+→ 第二个请求再次验证时失败
+→ 避免两个客户端各自认为拾取成功
+```
+
+第一人称与第三人称显示应拆开：
+
+- 本地拥有者：显示 `Mesh1P` 和第一人称武器。
+- 其他客户端：显示第三人称角色 Mesh 和第三人称武器。
+- 第一人称组件使用 `Only Owner See`。
+- 第三人称组件使用 `Owner No See`。
+- `OnRep_EquippedWeapon` 负责持久装备状态；一次性的拾取音效或粒子可以使用本地表现或受控 Multicast。
+- UI 只在拥有该 Character 的客户端监听装备/弹药变化。
+
+多人拾取的关键取舍：
+
+- 持久状态优先使用复制属性和 RepNotify，不依赖一次性 Multicast。
+- 客户端只提交拾取意图，不能直接决定武器归属。
+- 服务器必须验证距离和可用状态，不能信任客户端传入结果。
+- 服务器 Attach 的复制武器 Actor 可以同步附件关系；第一人称专用 Mesh 仍由拥有者本地处理。
+- 玩家死亡、断线、丢弃武器和重生时必须明确清理 Owner、附件和装备引用。
+
+面试口述主线：
+
+> 单机版直接消费重叠事件中的 `PickUpCharacter`。多人化后，我不会用 `GetPlayerPawn(0)`，而是让拥有该 Character 的客户端发送 Server RPC，由服务器验证距离和武器状态并决定归属。装备引用使用 RepNotify 复制，拥有者显示第一人称手臂和武器，其他客户端显示第三人称模型。两个玩家同时拾取时，由服务器上的 `bPickedUp` 状态保证只有第一个合法请求成功。
+
+### 大厂关注：图形学与 GPU
+
+71. 一个模型从局部空间到最终屏幕像素经历哪些坐标变换和管线阶段？
+72. Lambert、Blinn-Phong 和 PBR 分别解决什么问题？
+73. 前向渲染和延迟渲染在光源数量、透明物体、带宽和 MSAA 上有什么取舍？
+74. Shadow Mapping 的基本原理是什么？Shadow Acne 和 Peter Panning 如何产生？
+75. Toon Diffuse、硬边高光、Rim Light 和描边分别应放在什么阶段实现？
+76. 后处理材质为什么不会修改 Gameplay 状态和网络同步结果？
+77. `stat gpu`、ProfileGPU、Shader Complexity、Quad Overdraw 和 Material Stats 各自看什么？
+78. 如何按照 Baseline、单项效果开启、组合效果开启的顺序测量 GPU 成本？
+79. 为什么只调整材质参数不能宣称自己实现了 Shader？
+80. 如何用源码、材质图、自定义 HLSL、截图和 GPU 数据证明图形效果的实现边界？
+
+### 大厂关注：C++、源码与 AI 辅助开发
+
+81. C++ 对象模型、虚函数、内存布局、RAII、移动语义和智能指针如何对应当前项目？
+82. TArray、TSet、TMap 的底层特点分别适合哪些项目数据？
+83. 迭代器失效、容器扩容和缓存局部性可能在哪些项目代码中出现？
+84. Game Thread、Render Thread、RHI Thread 和 GPU 之间如何并行？
+85. 为什么阅读官方文档后还要跟一条 UE 源码调用链？
+86. 阅读源码时如何从公开 API 进入实现，而不是无目标浏览整个引擎？
+87. AI 辅助生成的代码如何通过闭卷重写、独立修改、边界测试和口述追问完成所有权审查？
+88. 为什么不能把 AI 生成量、教程完成量或代码行数直接当成工程能力？
+89. Git 提交如何体现单一意图、真实迭代、Bug 修复和性能实验？
+90. 简历上的每个数字、优化和技术名词需要保存哪些可验证证据？
+
+### 未来几个月完成清单
+
+以下内容按优先级推进，不要求全部阻塞首次投递。
+
+#### P0：首次投递前必须完成
+
+- FPS：完成可玩闭环、AIController/NavMesh/FSM 边界验收、攻击与生命周期回归测试。
+- FPS：完成 10/25/50 敌人的 CPU Baseline，并验证一次 AI 决策降频或错峰更新。
+- FPS：完成 Animation URO、死亡后停止无用更新等至少一项有前后数据的优化。
+- FPS：完成 Texture Streaming Pool 排查，记录纹理显存、画质和参数取舍。
+- FPS：完成连续波次内存实验，检查 Timer、Delegate、Widget、Niagara、Decal 和尸体生命周期。
+- Co-op：完成 Authority、Ownership、Replication、RepNotify、Server/Client/Multicast RPC 的运行验证。
+- Co-op：完成 Create/Find/Join/Destroy Session 和至少双客户端联机测试。
+- 图形：完成一个真正由自己实现的 Shader 或后处理效果，并记录 GPU 增量成本。
+- 基础：能够口述 C++ 对象模型、内存与 STL，操作系统线程/虚拟内存，以及基础渲染管线。
+- 算法：完成 Hot 100 第一轮，并补 A*、堆、图搜索、空间划分等游戏相关算法。
+- 交付：Release 包、演示视频、README、架构图、调用链、性能表和真实 Bug 复盘。
+
+#### P1：首次投递后一个月继续深化
+
+- 对 Co-op 进行 100ms/200ms 延迟、抖动和丢包测试，修复重复结算与表现不同步。
+- 学习并验证 Relevancy、NetUpdateFrequency、Dormancy 和基础带宽分析。
+- 扩充 FPS 固定压力场景到 100 个敌人，完成 CPU、动画和内存的完整曲线。
+- 对比 Tick、Timer、固定更新间隔、错峰更新和距离分级方案。
+- 补全图形学基础：坐标变换、光照模型、Shadow Mapping、前向与延迟渲染。
+- 选择一到两条 UE 源码调用链，形成“公开 API → 引擎实现 → 项目应用”的技术笔记。
+- 继续进行闭卷重写：HealthComponent、Hitscan、换弹状态、RPC/RepNotify 小实验。
+
+#### P2：后续两到三个月按证据选做
+
+- 如果 Spawn/Destroy 数据证明存在明显尖峰，再为敌人或短生命周期特效设计专用对象池。
+- 如果网络射击需要公平性，再实现受控范围的服务端时间戳与延迟补偿实验。
+- 如果技能和状态复杂度确实增长，再单独学习 GAS 的 ASC、Ability、AttributeSet 和 GameplayEffect。
+- 如果现有动画无法满足瞄准表现，再补 BlendSpace、Aim Offset、分层混合和基础 IK。
+- 如果图形方向反馈良好，再深入 Custom HLSL、Shadow Mapping + PCF 或 UE Shader 插件。
+- Dedicated Server、预测回滚、复杂 EQS、多线程 AI 和通用热更新不作为当前默认承诺，只有岗位要求和时间允许时再进入。
+
+每一项技术完成后必须留下：
+
+```text
+问题或需求
+→ Baseline / 原方案
+→ 备选方案与取舍
+→ 实现和关键调用链
+→ 测试环境与数据
+→ Bug 和边界条件
+→ 复测结果
+→ 能够独立修改与口述
+```
 
 ## 15. 当前复习顺序
 
