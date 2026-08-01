@@ -17,15 +17,11 @@
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
-//////////////////////////////////////////////////////////////////////////
-// AfpstrueCharacter
 
 AfpstrueCharacter::AfpstrueCharacter()
 {
-	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 		
-	// Create a camera boom so the first person camera can use camera lag.
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(GetCapsuleComponent());
 	CameraBoom->SetRelativeLocation(FVector(-10.f, 0.f, 60.f));
@@ -36,19 +32,16 @@ AfpstrueCharacter::AfpstrueCharacter()
 	CameraBoom->bEnableCameraRotationLag = true;
 	CameraBoom->CameraRotationLagSpeed = 3.0f;
 
-	// Create a CameraComponent	
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
 	FirstPersonCameraComponent->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FirstPersonCameraComponent->bUsePawnControlRotation = false;
 
-	// Create a mesh component that will be used when being viewed from a '1st person' view (when controlling this pawn)
 	Mesh1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("CharacterMesh1P"));
 	Mesh1P->SetOnlyOwnerSee(true);
 	Mesh1P->SetupAttachment(FirstPersonCameraComponent);
 	Mesh1P->bCastDynamicShadow = false;
 	Mesh1P->CastShadow = false;
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
-	//Tick()
 	PrimaryActorTick.bCanEverTick = true;
 
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
@@ -66,16 +59,18 @@ void AfpstrueCharacter::BeginPlay()
 		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
 
+	CurrentAmmo = MagazineSize;
+	Mesh1P->SetVisibility(EquippedWeaponComponent != nullptr, true);
+	Mesh1P->SetHiddenInGame(EquippedWeaponComponent == nullptr, true);
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	BroadcastAmmoChanged();
 }
 
-//////////////////////////////////////////////////////////////////////////// Input
 
 void AfpstrueCharacter::NotifyControllerChanged()
 {
 	Super::NotifyControllerChanged();
 
-	// Add Input Mapping Context
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
@@ -87,20 +82,15 @@ void AfpstrueCharacter::NotifyControllerChanged()
 
 void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {	
-	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-		// Jumping
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 
-		// Moving
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
 
-		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
 
-		// Running
 		if (RunAction)
 		{
 			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartSprint);
@@ -114,7 +104,6 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			}
 		}
 
-		// Aiming
 		if (AimAction)
 		{
 			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
@@ -124,7 +113,6 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			UE_LOG(LogTemplateCharacter, Error, TEXT("AimAction is NULL. Assign IA_Aim in BP_FirstPersonCharacter."));
 		}
 
-		// Reloading
 		if (ReloadAction)
 		{
 			EnhancedInputComponent->BindAction(
@@ -150,12 +138,10 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 void AfpstrueCharacter::Move(const FInputActionValue& Value)
 {
-	// input is a Vector2D
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
-		// add movement 
 		AddMovementInput(GetActorForwardVector(), MovementVector.Y);
 		AddMovementInput(GetActorRightVector(), MovementVector.X);
 	}
@@ -163,12 +149,10 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 
 void AfpstrueCharacter::Look(const FInputActionValue& Value)
 {
-	// input is a Vector2D
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
-		// add yaw and pitch input to controller
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
 	}
@@ -203,7 +187,9 @@ void AfpstrueCharacter::StopSprint()
 
 void AfpstrueCharacter::StartAim()
 {
-	if (CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading)
+	if (EquippedWeaponComponent == nullptr
+		|| CharacterState == EFPCharacterState::Dead
+		|| CharacterState == EFPCharacterState::Reloading)
 	{
 		return;
 	}
@@ -244,7 +230,6 @@ void AfpstrueCharacter::StopAim()
 }
 
 
-//添加Tick函数
 void AfpstrueCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -267,7 +252,6 @@ void AfpstrueCharacter::Tick(float DeltaTime)
 	}
 }
 
-//换弹药部分
 void AfpstrueCharacter::StartReload()
 {
 	if (GEngine)
@@ -340,6 +324,7 @@ void AfpstrueCharacter::FinishReload()
 
 	CurrentAmmo += AmmoToLoad;
 	ReserveAmmo -= AmmoToLoad;
+	BroadcastAmmoChanged();
 
 
 	CharacterState = EFPCharacterState::Idle;
@@ -365,6 +350,10 @@ void AfpstrueCharacter::FinishReload()
 
 bool AfpstrueCharacter::CanReload() const
 {
+	if (EquippedWeaponComponent == nullptr)
+	{
+		return false;
+	}
 	if (CharacterState == EFPCharacterState::Reloading)
 	{
 		return false;
@@ -386,6 +375,10 @@ bool AfpstrueCharacter::CanReload() const
 
 FString AfpstrueCharacter::GetReloadBlockReason() const
 {
+	if (EquippedWeaponComponent == nullptr)
+	{
+		return TEXT("no weapon equipped");
+	}
 	if (CharacterState == EFPCharacterState::Reloading)
 	{
 		return TEXT("already reloading");
@@ -486,7 +479,7 @@ void AfpstrueCharacter::HandleDeath()
 	NotifyFireStopped();
 	if (EquippedWeaponComponent != nullptr)
 	{
-		EquippedWeaponComponent->NotifyFireStoppedByCharacter();
+		EquippedWeaponComponent->HandleOwnerDeath();
 	}
 
 	GetWorldTimerManager().ClearTimer(ReloadTimerHandle);
@@ -542,14 +535,14 @@ float AfpstrueCharacter::GetHealthNormalized() const
 
 bool AfpstrueCharacter::CanFireWeapon() const
 {
-	return CharacterState != EFPCharacterState::Dead
+	return EquippedWeaponComponent != nullptr
+		&& CharacterState != EFPCharacterState::Dead
 		&& CharacterState != EFPCharacterState::Reloading
 		&& CurrentAmmo > 0;
 }
 
 bool AfpstrueCharacter::TryConsumeAmmo()
 {
-	// 换弹期间不能开火
 	if (IsReloading())
 	{
 		if (GEngine)
@@ -565,7 +558,6 @@ bool AfpstrueCharacter::TryConsumeAmmo()
 		return false;
 	}
 
-	// 死亡状态不能开火，当前只是预留
 	if (CharacterState == EFPCharacterState::Dead)
 	{
 		if (GEngine)
@@ -581,7 +573,6 @@ bool AfpstrueCharacter::TryConsumeAmmo()
 		return false;
 	}
 
-	// 没有子弹时，自动请求换弹
 	if (CurrentAmmo <= 0)
 	{
 		if (GEngine)
@@ -598,8 +589,8 @@ bool AfpstrueCharacter::TryConsumeAmmo()
 		return false;
 	}
 
-	// 成功消耗一发子弹
 	CurrentAmmo--;
+	BroadcastAmmoChanged();
 
 	if (GEngine)
 	{
@@ -647,5 +638,19 @@ void AfpstrueCharacter::RequestReload()
 
 void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
 {
+	if (WeaponComponent == nullptr || EquippedWeaponComponent == WeaponComponent)
+	{
+		return;
+	}
+
 	EquippedWeaponComponent = WeaponComponent;
+	Mesh1P->SetHiddenInGame(false, true);
+	Mesh1P->SetVisibility(true, true);
+	BroadcastAmmoChanged();
+	OnWeaponEquipped(WeaponComponent);
+}
+
+void AfpstrueCharacter::BroadcastAmmoChanged()
+{
+	OnAmmoChanged.Broadcast(CurrentAmmo, MagazineSize, ReserveAmmo);
 }

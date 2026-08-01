@@ -15,8 +15,9 @@
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
 
+#define FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG 0
 
-// Sets default values for this component's properties
+
 UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 {
 }
@@ -60,7 +61,6 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	// Ammo, reload, and death gates live in the character; this is the single shot attempt.
 	if (!Character->TryConsumeAmmo())
 	{
 		OnWeaponDryFire.Broadcast();
@@ -82,7 +82,9 @@ void UfpstrueWeaponComponent::Fire()
 
 bool UfpstrueWeaponComponent::CanFire() const
 {
-	return Character != nullptr
+	return bIsEquipped
+		&& bWeaponGameplayEnabled
+		&& Character != nullptr
 		&& Character->GetController() != nullptr
 		&& !Character->IsDead()
 		&& !Character->IsReloading();
@@ -101,6 +103,12 @@ void UfpstrueWeaponComponent::NotifyReloadFinished()
 void UfpstrueWeaponComponent::NotifyFireStoppedByCharacter()
 {
 	OnWeaponFireStopped.Broadcast();
+}
+
+void UfpstrueWeaponComponent::HandleOwnerDeath()
+{
+	bWeaponGameplayEnabled = false;
+	StopFire();
 }
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
@@ -130,6 +138,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
 
+#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
 	if (bShowDebugTrace)
 	{
 		DrawDebugLine(
@@ -143,9 +152,11 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			0.0f
 		);
 	}
+#endif
 
 	if (bHit)
 	{
+#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
 		if (bShowDebugTrace)
 		{
 			DrawDebugSphere(
@@ -158,6 +169,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 				1.0f
 			);
 		}
+#endif
 
 		if (AfpstrueEnemyCharacter* HitEnemy = Cast<AfpstrueEnemyCharacter>(HitResult.GetActor()))
 		{
@@ -184,6 +196,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			}
 		}
 
+#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
 		if (bShowDebugTrace && GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(
@@ -193,7 +206,9 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 				FString::Printf(TEXT("Hit: %s"), *GetNameSafe(HitResult.GetActor()))
 			);
 		}
+#endif
 	}
+#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
 	else if (bShowDebugTrace && GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(
@@ -203,38 +218,57 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 			TEXT("LineTrace missed")
 		);
 	}
+#endif
 }
 
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 {
-	Character = TargetCharacter;
-
-	// Check that the character is valid, and has no weapon component yet
-	if (Character == nullptr || Character->GetInstanceComponents().FindItemByClass<UfpstrueWeaponComponent>())
+	if (TargetCharacter == nullptr || TargetCharacter->IsDead())
 	{
 		return false;
 	}
 
-	// Attach the weapon to the First Person Character
+	if (bIsEquipped)
+	{
+		return Character == TargetCharacter;
+	}
+
+	if (TargetCharacter->HasEquippedWeapon())
+	{
+		return false;
+	}
+
+	Character = TargetCharacter;
+
 	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
-	AttachToComponent(Character->GetMesh1P(), AttachmentRules, FName(TEXT("GripPoint")));
+	if (!AttachToComponent(Character->GetMesh1P(), AttachmentRules, FName(TEXT("GripPoint"))))
+	{
+		Character = nullptr;
+		return false;
+	}
+
+	bIsEquipped = true;
+	bWeaponGameplayEnabled = true;
 	Character->SetEquippedWeaponComponent(this);
 
-	// Set up action bindings
 	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
 		{
-			// Set the priority of the mapping to 1, so that it overrides the Jump action with the Fire action when using touch input
-			Subsystem->AddMappingContext(FireMappingContext, 1);
+			if (FireMappingContext != nullptr)
+			{
+				Subsystem->AddMappingContext(FireMappingContext, 1);
+			}
 		}
 
-		if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerController->InputComponent))
+		if (FireAction != nullptr)
 		{
-			// Fire
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &UfpstrueWeaponComponent::StartFire);
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &UfpstrueWeaponComponent::StopFire);
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Canceled, this, &UfpstrueWeaponComponent::StopFire);
+			if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerController->InputComponent))
+			{
+				EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &UfpstrueWeaponComponent::StartFire);
+				EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &UfpstrueWeaponComponent::StopFire);
+				EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Canceled, this, &UfpstrueWeaponComponent::StopFire);
+			}
 		}
 	}
 
@@ -243,19 +277,22 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// ensure we have a character owner
 	if (Character != nullptr)
 	{
-		// remove the input mapping context from the Player Controller
 		if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
 		{
 			if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
 			{
-				Subsystem->RemoveMappingContext(FireMappingContext);
+				if (FireMappingContext != nullptr)
+				{
+					Subsystem->RemoveMappingContext(FireMappingContext);
+				}
 			}
 		}
 	}
 
-	// maintain the EndPlay call chain
+	bWeaponGameplayEnabled = false;
+	bIsEquipped = false;
+	Character = nullptr;
 	Super::EndPlay(EndPlayReason);
 }

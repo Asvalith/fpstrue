@@ -59,6 +59,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AI")
 	void FaceTarget();
 
+	void UpdatePerformanceTier(float DistanceToTarget);
+
 	bool TryAttackTarget();
 
 	UPROPERTY(BlueprintAssignable, Category = "AI")
@@ -121,6 +123,21 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	bool bDestroyOnDeath = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance")
+	bool bEnableMovementUpdateTiering = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float FullRateMovementDistance = 2000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float MidRateMovementDistance = 4000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float MidRateMovementTickInterval = 0.033333f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float FarRateMovementTickInterval = 0.066667f;
+
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
 	void OnAttackStarted();
 
@@ -147,6 +164,7 @@ private:
 	void CancelAttackWindow();
 	void FinishAttack();
 	bool CanAttack() const;
+	void SetAttackAnimationPriority(bool bHighPriority);
 
 	UPROPERTY()
 	AfpstrueCharacter* TargetCharacter;

@@ -1,10 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "fpstruePickUpComponent.h"
+#include "fpstrueWeaponComponent.h"
 
 UfpstruePickUpComponent::UfpstruePickUpComponent()
 {
-	// Setup the Sphere Collision
 	SphereRadius = 32.f;
 }
 
@@ -12,20 +12,29 @@ void UfpstruePickUpComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Register our Overlap Event
 	OnComponentBeginOverlap.AddDynamic(this, &UfpstruePickUpComponent::OnSphereBeginOverlap);
 }
 
 void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
-	// Checking if it is a First Person Character overlapping
 	AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(OtherActor);
-	if(Character != nullptr)
+	AActor* OwnerActor = GetOwner();
+	UfpstrueWeaponComponent* WeaponComponent =
+		OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
+
+	if (Character != nullptr
+		&& !Character->IsDead()
+		&& WeaponComponent != nullptr
+		&& WeaponComponent->AttachWeapon(Character))
 	{
-		// Notify that the actor is being picked up
+		SetGenerateOverlapEvents(false);
+		SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		OnComponentBeginOverlap.RemoveAll(this);
 		OnPickUp.Broadcast(Character);
 
-		// Unregister from the Overlap Event so it is no longer triggered
-		OnComponentBeginOverlap.RemoveAll(this);
+		if (IsValid(this))
+		{
+			DestroyComponent();
+		}
 	}
 }

@@ -1,6 +1,6 @@
 # fpstrue FPS Bug 与故障复盘
 
-最后更新：2026-07-21
+最后更新：2026-07-29
 
 ## 1. 文档目的
 
@@ -35,7 +35,7 @@
 | FPS-006 | 死亡后仍可能残留移动、攻击或换弹逻辑 | 生命周期 | 部分修复 |
 | FPS-007 | Reload Montage 无法稳定播放 | 动画/蓝图 | 部分修复 |
 | FPS-008 | 敌人可以被命中但血痕贴花不显示 | 材质/贴花 | 已修复 |
-| FPS-009 | 敌人只能直线追逐，遇到障碍表现异常 | AI | 技术债 |
+| FPS-009 | 敌人只能直线追逐，遇到障碍表现异常 | AI | 部分修复 |
 | FPS-010 | UE 启动时报 DDC 没有可写节点 | 编辑器环境 | 临时绕过 |
 | FPS-011 | 错误打开 `fpstrue_safe1` 并产生重复 UE 进程 | 工程管理 | 已修复 |
 | FPS-012 | 构建产物、生成文件和未跟踪资源混杂 | Git/构建 | 待处理 |
@@ -369,7 +369,7 @@ Game Over UI、输入模式切换和重新开始尚未接入，因此完整死�
 
 ### FPS-009：敌人直线追逐
 
-**状态：技术债**
+**状态：部分修复**
 
 **现象**
 
@@ -387,16 +387,30 @@ Game Over UI、输入模式切换和重新开始尚未接入，因此完整死�
 
 当前 EnemyCharacter 是为了尽快验证玩家受伤和敌人死亡链而实现的原型。
 
-**后续方案**
+**本次处理（2026-07-29）**
 
-- 第一阶段改为显式 FSM。
-- 当前项目允许继续保留直线追逐，避免依赖外部动画和复杂 AI 资产。
-- 只有场景确实需要绕障时，再接入 AIController 与 NavMesh。
+- 新增 `AfpstrueEnemyAIController`。
+- 新增 `Idle / Chase / Attack / Dead` 显式 FSM。
+- AI 决策从敌人 `Tick()` 改为 AIController Timer，默认间隔 `0.2` 秒。
+- Chase 使用 `MoveToActor()`，为 NavMesh 绕障做准备。
+- EnemyCharacter 关闭自身 Tick，移除旧 `UpdateEnemy()`、`MoveTowardTarget()` 和 `AddMovementInput()` 追击职责。
+- 保留攻击窗口、剑刃 Sweep、伤害链和蓝图表现事件。
+- Development Editor 编译通过。
+
+**剩余风险**
+
+- `enemy_BP` 中可能仍残留旧追击 Tick、Timer、AI MoveTo 或手写移动节点。
+- 关卡仍需配置 `NavMeshBoundsVolume`。
+- `EnemySpawn` 点需要确认落在绿色导航区域。
+- 尚未完成 PIE 绕障、玩家死亡停止 AI、敌人死亡停止 AI 的完整回归。
 
 **相关代码**
 
-- `fpstrueEnemyCharacter.cpp::UpdateEnemy`
-- `fpstrueEnemyCharacter.cpp::MoveTowardTarget`
+- `fpstrueEnemyAIController.h`
+- `fpstrueEnemyAIController.cpp`
+- `fpstrueEnemyCharacter.h`
+- `fpstrueEnemyCharacter.cpp`
+- `fpstrue.Build.cs`
 
 ### FPS-010：UE DDC 没有可写节点
 

@@ -1,6 +1,6 @@
 # fpstrue 项目阶段总结
 
-更新时间：2026-06-20
+更新时间：2026-07-29
 
 ## 1. 项目定位
 
@@ -636,9 +636,9 @@ Bullet_BP：视觉子弹
 - 每个事件只做一种事。
 - 不要让表现逻辑反过来控制核心规则。
 
-### 9.2 AI 还不是正式寻路
+### 9.2 AI 寻路仍需编辑器验证
 
-当前敌人 C++ 是原型追逐，不是完整 AI。必须升级，否则遇到障碍物会显得很假。
+敌人 C++ 已从 `Tick + AddMovementInput` 改为 `EnemyAIController + MoveToActor`。目前 C++ 编译通过，但还需要清理 `enemy_BP` 中旧追击节点，并在关卡中配置 `NavMeshBoundsVolume` 后做运行验证。
 
 ### 9.3 UI 还没接入
 
@@ -684,8 +684,8 @@ Bullet_BP：视觉子弹
 
 ### 11.2 已经理解并能够继续练习的内容
 
-- `Tick` 是逐帧更新入口，`DeltaTime` 表示两帧之间的时间；当前敌人每帧累加攻击冷却并执行目标距离与行为判断。
-- 100 个敌人同时 Tick 会放大 Game Thread 开销，后续需要比较 Tick Interval、Timer、错峰和分级更新。
+- 旧版敌人追击依赖 `Tick` 和 `AddMovementInput`，100 个敌人同时 Tick 会放大 Game Thread 开销。
+- 新版 C++ 将敌人决策移到 `AfpstrueEnemyAIController`，使用 Timer 定时更新状态，并通过 `MoveToActor` 交给 NavMesh 处理移动。
 - 自定义 Enemy C++ 类用于补充 `ACharacter` 不具备的敌人规则；蓝图子类用于配置资产和表现，这是 UE 常见的 C++ 与 Blueprint 协作方式。
 - 玩家和敌人不共用同一个 Character 类，但通过组件复用生命系统。
 - 布娃娃是 Skeletal Mesh 基于 Physics Asset 的物理模拟，不是普通 Montage。
@@ -698,7 +698,8 @@ Bullet_BP：视觉子弹
 - 实机验证一次攻击只扣一次血，挥空不扣血，死亡或攻击中断后不再回调伤害。
 - 将蓝图中的立即 `Destroy Actor` 改为合理的延迟回收，否则布娃娃效果和尸体观察时间不足。
 - 验证尸体回收前的移动组件、Actor Tick、阴影和物理开销，而不是凭感觉宣称优化有效。
-- 当前追击仍是 `AddMovementInput` 直线移动，尚未完成 `AIController + NavMesh`。
+- `enemy_BP` 中旧追击 `Tick`、Timer、AI MoveTo 或手写移动节点仍需清理。
+- 关卡还需要放置和调整 `NavMeshBoundsVolume`，确认 `EnemySpawn` 点位于绿色导航区域。
 
 ### 11.4 后续面试官验收方式
 
@@ -720,3 +721,40 @@ Bullet_BP：视觉子弹
 - `L3`：能够设计对比实验，给出性能数据、方案取舍和回归测试。
 
 当前目标是先把敌人攻击链达到 `L2`，完成性能实验后再达到 `L3`。
+
+### 11.5 AIController 改造记录（2026-07-29）
+
+本次目标是把敌人 AI 从角色自身的逐帧追击逻辑中拆出来，减少 `AfpstrueEnemyCharacter` 的职责，并为后续 NavMesh、状态调试和性能测试留出结构。
+
+改造前的问题：
+
+- 敌人每帧在 `Tick()` 中查找目标、计算距离、判断攻击并用 `AddMovementInput` 直线追逐。
+- 遇到墙体或障碍时不会主动绕行。
+- `Idle / Chase / Attack / Dead` 由距离和布尔值隐式表达，不方便观察和扩展。
+- 敌人数量上来后，每个敌人每帧做决策会放大 Game Thread 压力。
+
+本次 C++ 已完成：
+
+- 新增 `AfpstrueEnemyAIController`。
+- 新增 `EFPEnemyAIState`：`Idle / Chase / Attack / Dead`。
+- AIController 关闭 Tick，使用 `DecisionInterval = 0.2f` 的 Timer 做决策。
+- Chase 状态使用 `MoveToActor()`，后续依赖关卡 NavMesh 绕障。
+- Attack 状态停止移动、面向玩家，并调用敌人已有的 `TryAttackTarget()`。
+- `AfpstrueEnemyCharacter` 默认设置 `AIControllerClass = AfpstrueEnemyAIController::StaticClass()`。
+- `AutoPossessAI` 设置为 `PlacedInWorldOrSpawned`，支持场景放置和动态生成敌人。
+- 移除敌人自身的旧 `Tick()`、`UpdateEnemy()`、`MoveTowardTarget()` 和 `AddMovementInput` 追逐职责。
+- 保留原有攻击窗口、剑刃 Sweep、`ApplyDamage -> HealthComponent`、受伤/死亡和攻击蓝图事件。
+
+已验证：
+
+- Development Editor 编译通过。
+- `UnrealEditor-fpstrue.dll` 已重新生成。
+- 源码扫描确认敌人类中不再存在旧追击 `Tick()` 和 `AddMovementInput()`。
+
+还未完成：
+
+- 打开 `enemy_BP`，确认 AI Controller Class 和 Auto Possess AI。
+- 删除敌人蓝图中的旧追击 Tick、Timer、AI MoveTo 或手写移动节点。
+- 在关卡中配置 `NavMeshBoundsVolume`。
+- 确认 `EnemySpawn` TargetPoint 落在绿色 NavMesh 上。
+- PIE 验证 Idle、Chase、Attack、Dead 状态切换，以及玩家死亡、敌人死亡后的 AI 停止行为。

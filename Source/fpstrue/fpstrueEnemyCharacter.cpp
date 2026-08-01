@@ -19,6 +19,13 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 
 	GetCapsuleComponent()->InitCapsuleSize(42.0f, 96.0f);
 
+	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	{
+		CharacterMesh->bEnableUpdateRateOptimizations = true;
+		CharacterMesh->VisibilityBasedAnimTickOption =
+			EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
+	}
+
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
 }
 
@@ -35,7 +42,11 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		Movement->MaxWalkSpeed = MoveSpeed;
+		Movement->bOrientRotationToMovement = false;
+		Movement->bUseControllerDesiredRotation = true;
+		Movement->RotationRate = FRotator(0.0f, 540.0f, 0.0f);
 	}
+	bUseControllerRotationYaw = false;
 
 	if (UWorld* World = GetWorld())
 	{
@@ -74,6 +85,29 @@ void AfpstrueEnemyCharacter::FaceTarget()
 	}
 }
 
+void AfpstrueEnemyCharacter::UpdatePerformanceTier(float DistanceToTarget)
+{
+	if (!bEnableMovementUpdateTiering || bIsDead || bIsAttacking)
+	{
+		return;
+	}
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		float TickInterval = 0.0f;
+		if (DistanceToTarget >= MidRateMovementDistance)
+		{
+			TickInterval = FarRateMovementTickInterval;
+		}
+		else if (DistanceToTarget >= FullRateMovementDistance)
+		{
+			TickInterval = MidRateMovementTickInterval;
+		}
+
+		Movement->SetComponentTickInterval(TickInterval);
+	}
+}
+
 bool AfpstrueEnemyCharacter::TryAttackTarget()
 {
 	if (!CanAttack())
@@ -90,6 +124,7 @@ bool AfpstrueEnemyCharacter::TryAttackTarget()
 	bIsAttacking = true;
 	bDamageAppliedThisAttack = false;
 	bHitTargetThisAttack = false;
+	SetAttackAnimationPriority(true);
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
@@ -381,8 +416,27 @@ void AfpstrueEnemyCharacter::FinishAttack()
 
 	EndAttackWindow();
 	bIsAttacking = false;
+	SetAttackAnimationPriority(false);
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 	OnAttackFinished(bHitTargetThisAttack);
+}
+
+void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
+{
+	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	{
+		CharacterMesh->VisibilityBasedAnimTickOption = bHighPriority
+			? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
+			: EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
+	}
+
+	if (bHighPriority)
+	{
+		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+		{
+			Movement->SetComponentTickInterval(0.0f);
+		}
+	}
 }
 
 
@@ -431,6 +485,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	CancelAttackWindow();
 	bIsAttacking = false;
 	bDamageAppliedThisAttack = true;
+	SetAttackAnimationPriority(false);
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 
 	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
@@ -443,6 +498,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 		Movement->MaxWalkSpeed = 0.0f;
 		Movement->StopMovementImmediately();
 		Movement->DisableMovement();
+		Movement->SetComponentTickEnabled(false);
 	}
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())

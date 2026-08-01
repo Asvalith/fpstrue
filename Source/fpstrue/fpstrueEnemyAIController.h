@@ -37,9 +37,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AI")
 	void StopAI();
 
+	void InitializeCombatContext(
+		AfpstrueCharacter* NewTargetCharacter,
+		AfpstrueSurroundManager* NewSurroundManager
+	);
+
 protected:
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.05"))
-	float DecisionInterval = 0.2f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
+	float AttackDecisionInterval = 0.1f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
+	float ChaseDecisionInterval = 0.25f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
+	float FarDecisionInterval = 0.5f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
+	float IdleDecisionInterval = 1.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.0"))
+	float FarDecisionDistance = 3000.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
 	float MoveAcceptanceRadius = 75.0f;
@@ -55,8 +72,15 @@ protected:
 
 private:
 	void StartDecisionTimer();
+	void ScheduleNextDecision(float Delay);
 	void ClearDecisionTimer();
 	void UpdateAI();
+	float GetNextDecisionInterval() const;
+	bool PrepareDecisionContext();
+	bool HandleActiveAttack();
+	bool HandleAttackToken();
+	bool HandleSurroundMovement();
+	void UpdateFacingTarget();
 	void SetAIState(EFPEnemyAIState NewState);
 	void MoveToGoal(const FVector& GoalLocation);
 	void ReleaseSurroundResources(bool bReleaseSlot);

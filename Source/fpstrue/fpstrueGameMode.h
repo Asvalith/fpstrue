@@ -10,6 +10,18 @@ class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
 class AfpstrueSurroundManager;
 
+USTRUCT(BlueprintType)
+struct FfpstrueWaveConfig
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wave")
+	TSubclassOf<AfpstrueEnemyCharacter> EnemyClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wave", meta = (ClampMin = "1"))
+	int32 EnemyCount = 5;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRemainingTimeChanged, int32, RemainingTime);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWaveChanged, int32, CurrentWave, int32, TotalWaves);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAliveEnemyCountChanged, int32, AliveEnemyCount);
@@ -51,6 +63,7 @@ public:
 	FOnGameResult OnGameResult;
 
 protected:
+	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn")
@@ -77,6 +90,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave", meta = (ClampMin = "0"))
 	int32 EnemiesAddedPerWave = 2;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave")
+	TArray<FfpstrueWaveConfig> WaveConfigs;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Wave", meta = (ClampMin = "0.0"))
 	float WaveInterval = 5.0f;
 
@@ -90,11 +106,18 @@ private:
 	void CacheSpawnPoints();
 	bool CreateSurroundManager();
 	void StartNextWave();
+	int32 GetConfiguredWaveCount() const;
+	int32 GetEnemyCountForWave(int32 WaveNumber) const;
+	TSubclassOf<AfpstrueEnemyCharacter> GetEnemyClassForWave(int32 WaveNumber) const;
 	void SpawnCurrentWave();
-	void SpawnEnemyAtPoint(AActor* SpawnPoint, bool bUseNearbyLocation);
+	void SpawnEnemyAtPoint(AActor* SpawnPoint, bool bUseNearbyLocation, TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass);
 	void UpdateCountdown();
 	void FinishGame(bool bPlayerWon);
 	void ClearGameplayTimers();
+	void BeginAutomatedBenchmark();
+	void StartAutomatedBenchmarkCapture();
+	void StopAutomatedBenchmarkCapture();
+	int32 GetBenchmarkEnemyCount() const;
 
 	UFUNCTION()
 	void HandleEnemyDied(AfpstrueEnemyCharacter* DeadEnemy);
@@ -116,6 +139,9 @@ private:
 
 	FTimerHandle CountdownTimerHandle;
 	FTimerHandle WaveTimerHandle;
+	FTimerHandle BenchmarkStartTimerHandle;
+	FTimerHandle BenchmarkStopTimerHandle;
+	float AutomatedBenchmarkDuration = 30.0f;
 };
 
 
