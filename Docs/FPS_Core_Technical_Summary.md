@@ -1,6 +1,6 @@
 # FPS 项目统一复习主线
 
-> 核对基线：UE 5.5，代码与实验记录截至 2026-07-31。
+> 核对基线：UE 5.5，代码与实验记录截至 2026-08-01。
 >
 > 本文以当前 C++ 为事实来源。蓝图动画、Timer、音效和后处理属于编辑器资产配置，标记为“蓝图约定”或“需回归验证”。
 >
@@ -1185,7 +1185,7 @@ for (int i = n - 1; i > 0; --i)
 
 1. 背熟 16.67 ms、20.76 ms、48.1 FPS、6.919/3.190/0.686 ms。
 2. 解释为什么优化 Movement/Animation，不重写 NavMesh。
-3. 明确哪些 A/B、响应延迟和内存曲线仍未完成。
+3. 明确旧 CPU A/B 的条件限制，以及响应延迟、完整内存回落曲线仍未完成。
 
 ### 第四轮：模拟面试
 
@@ -1203,3 +1203,282 @@ for (int i = n - 1; i > 0; --i)
 - [Portfolio_Technical_Extension_Map.md](Portfolio_Technical_Extension_Map.md)：后续扩展，不作为当前已完成事实。
 
 本文件负责“怎么复习和怎么回答”；其他文件只负责“证据在哪里”。
+
+## 22. 面试项目介绍总纲
+
+这一节把项目背景、实现边界、工程验证和后续方向串成一条完整叙事。面试时先讲事实，再接受追问，不要从功能清单开始背。
+
+### 22.1 项目背景与所有权
+
+项目不是从空目录开始，真实来源是：
+
+```text
+UE 第一人称模板
+-> 蓝图教程建立可运行的玩法原型
+-> 参考 C++ 教程理解 Gameplay Framework 和常用 API
+-> 对照 Epic 官方文档确认生命周期、反射、Navigation 和 Profiling
+-> 将伤害、状态、AI 决策、波次和群体站位等规则迁入 C++
+-> 通过编译、日志、断点、自动压测和数据复测取得代码所有权
+```
+
+推荐直接回答：
+
+> 项目早期使用 UE 第一人称模板和蓝图教程完成原型，我不把模板部分包装成原创。后续我按职责拆解 Character、WeaponComponent、HealthComponent、EnemyAIController、SurroundManager 和 GameMode，把会影响状态一致性和可测试性的规则迁到 C++，蓝图保留动画、音效、UI 和后处理表现。我不仅让功能跑通，还记录了对象类型错误、攻击窗口重复命中、GameMode 配置、群体扎堆和性能瓶颈等问题，并用编译、运行日志和 CSV/Insights 数据验证修改。
+
+“独立完成”在这里表示独立整合、重构、调试和验证，不表示所有基础资产、模板代码和 API 都由自己从零发明。
+
+### 22.2 三种时长的项目介绍
+
+#### 30 秒版本
+
+> 这是一个 UE5 C++ 单机 FPS 压力场景。我基于模板原型，将射击、弹药、共享 HealthComponent、敌人近战攻击窗口、AIController/NavMesh 状态机、双环包围和波次规则整理到 C++，蓝图负责动画与 UI 表现。项目的两个重点是群体近战 AI 的站位与攻击节奏，以及 20 到 160 个敌人的 CPU/动画/纹理资源分析。最终 100 AI 固定场景 Frame Avg 15.41 ms、P95 16.58 ms，并完成了 60 MB 的纹理流送预算治理。
+
+#### 2 分钟版本
+
+按以下顺序讲，不要逐条报功能：
+
+```text
+背景：模板和教程原型，目标是取得核心代码所有权
+架构：C++ 管规则，蓝图管表现
+难点一：NotifyState + 双 Socket 帧间 Sweep + 单次攻击去重
+难点二：NavMesh 双环槽位 + 攻击名额，解决 MoveToActor 扎堆
+难点三：固定敌人数压测，定位 Movement/Animation 而非 Pathfinding
+结果：100 AI 的帧时间数据与纹理预算下降 60 MB
+限制：没有完整内存回落曲线、Toon Shader 和 FPS 多人同步
+下一步：网络项目验证服务端权威、RPC、RepNotify 和 Session
+```
+
+#### 15 分钟版本
+
+依次展开第 13 节架构、第 14 节五条调用链、第 16 节三个 Bug、第 18 节一组数据，再讲本节 22.11 和 22.12。每个模块使用统一句式：
+
+```text
+需求 -> 初始方案 -> 暴露的问题 -> 定位方法
+-> 当前实现 -> 为什么这样取舍 -> 数据/边界 -> 后续方案
+```
+
+### 22.3 技术栈与核心原理
+
+| 技术 | 项目中的用途 | 必须理解的原理 |
+| --- | --- | --- |
+| UE5 / Gameplay Framework | Character、Controller、GameMode、Component 分工 | Pawn 是被控制实体，Controller 负责意图，GameMode 只在当前权威世界管理规则 |
+| C++ / Unreal Reflection | 核心状态、组件、事件和蓝图接口 | UHT 处理 UCLASS/UPROPERTY/UFUNCTION，GC 只认识被反射系统跟踪的 UObject 引用 |
+| Enhanced Input | 移动、瞄准、开火和换弹 | Input Action 与 Mapping Context 解耦，武器附加后再注册武器输入 |
+| LineTrace / Collision Query | Hitscan、命中部位和伤害入口 | QueryParams 过滤自身；FHitResult 提供 Actor、Component、Bone 和法线 |
+| AnimMontage / AnimNotifyState | 近战有效攻击窗口 | 动画只决定判定时机，C++ 决定能否伤害；中断时必须回收窗口状态 |
+| AIController / NavMesh | FSM 决策和路径请求 | Recast 构建可行走网格，Detour 在 Poly 图上寻路；局部避障不等于包围站位分配 |
+| Timer / Delegate | AI 降频决策和事件驱动 UI/表现 | Timer 仍在 Game Thread 调度；Delegate 降低轮询，但必须治理绑定和对象生命周期 |
+| TArray/TSet/TMap/TWeakObjectPtr | 槽位、去重、映射和弱引用 | TSet 适合本次攻击去重；TMap 建敌人到槽位映射；弱引用不延长 UObject 生命周期 |
+| Unreal Insights / CSV / stat | CPU、GPU、对象和流送池证据 | 先固定条件建立 Baseline，再根据调用栈/计数定位，最后同条件复测 |
+
+### 22.4 核心调用链速记
+
+详细版本见第 14 节，面试时至少能脱离文档画出以下链路：
+
+```text
+射击：Input -> WeaponComponent::Fire -> TryConsumeAmmo
+     -> Camera LineTrace -> FHitResult -> ApplyDamage
+     -> HealthComponent -> Delegate -> Blueprint 表现
+
+换弹：Reload Input -> CanReload -> StartReload -> Montage
+     -> AnimNotify/结算点 -> FinishReload -> OnAmmoChanged
+
+敌人近战：FSM Attack -> OnAttackStarted -> Montage
+        -> NotifyState Begin/Tick/End -> 双 Socket 帧间 Sweep
+        -> TSet 去重 -> ApplyDamage -> 玩家 HealthComponent
+
+群体 AI：GameMode Spawn -> AIController FSM -> RequestSurroundSlot
+       -> ProjectPointToNavigation -> MoveToLocation
+       -> RequestAttackToken -> Attack/Hold -> 死亡释放槽位和名额
+
+闭环：Start Game -> GameMode Timer -> Wave Spawn/Countdown
+    -> Delegate 更新 HUD -> Player Dead 或倒计时结束
+    -> OnGameResult -> Result UI / Restart
+```
+
+### 22.5 技术选型与替代方案
+
+| 当前方案 | 没直接采用的方案 | 取舍依据 |
+| --- | --- | --- |
+| Camera Hitscan | 实体 Projectile | 当前武器强调即时反馈且无飞行时间；实体弹会增加生命周期、碰撞和网络预测成本 |
+| HealthComponent | 在玩家和敌人类里各写一套血量 | 共享组件统一 Clamp、死亡只触发一次和事件契约 |
+| 显式 FSM | Behavior Tree / GAS | 当前状态数有限，显式转换更容易闭卷解释和压测；没有为了简历堆框架 |
+| NotifyState 攻击窗口 | 武器碰撞全程开启 / 单个命中帧 | 全程碰撞会在起手收招误伤；单帧容易漏过高速刀刃，窗口内 Sweep 更稳定 |
+| 双环槽位 + Token | 全员 MoveToActor(Player) | 同目标点导致扎堆、推挤和同时攻击；中央分配能保证唯一占位和受控攻击节奏 |
+| Timer 决策 + 距离分级 | 所有 AI 每帧完整决策 | 降低重复判断成本，同时在近战窗口恢复高频保证判定精度 |
+| 数据证明后再池化 | 预先实现通用对象池 | 当前 Hitscan 没有高频 Projectile；没有 Spawn/GC 热点证据时池化只会增加复位复杂度 |
+
+### 22.6 如何发现、定位和修复问题
+
+工程排错不是“节点接到能运行”为止。统一流程是：
+
+```text
+确认运行的是哪个 .uproject / 地图 / GameMode / 蓝图实例
+-> 缩小到输入、对象引用、状态、资源或生命周期层
+-> 用编译错误、Output Log、断点、Print/UE_LOG、stat/CSV 找证据
+-> 沿调用链检查入口、Target 类型、返回值和清理出口
+-> 最小修改
+-> 正常路径 + 中断路径 + 死亡/重启路径回归
+```
+
+代表性工程问题：
+
+| 现象 | 根因 | 定位与修复 |
+| --- | --- | --- |
+| 蓝图接口找不到或 Target 报错 | 手中只有父类引用或 self 不是函数所属类型 | 看节点 Target 类型，从真实实例 Cast 或直接使用事件参数，避免 GetPlayerPawn 硬取玩家 0 |
+| Widget 调用了 Start 但未淡出/未移除 | 调用的变量不是屏幕上那一个实例，或动画未绑定画布 Render Opacity | 保存 CreateWidget 返回值；验证实例；用动画 Finished 后 RemoveFromParent，不把 CollectGarbage 当 UI 销毁 API |
+| 敌人都冲向同一点 | 所有 AI 都 MoveToActor(Player) | Debug NavMesh/目标点并观察路径请求，改为中央槽位分配和 MoveToLocation |
+| 攻击重复扣血 | 攻击窗口每帧 Sweep 未按一次挥砍去重 | Begin 清空 TSet，Tick 只伤害未命中对象，End/中断/死亡统一清理 |
+| 敌人不生成、倒计时不更新 | 关卡没有使用正确 GameMode，StartGame 未真正进入 C++ | 检查 World Settings Override、GetGameMode Cast、生成点 Tag、EnemyClass 和日志入口 |
+| UE 无法启动且 DDC 无可写节点 | Zen/DDC 本地回环通信或缓存目录不可写 | 从日志的 DerivedDataCache 错误入手，检查 ::1 回环、防火墙/代理和缓存目录，而不是误判为普通外网故障 |
+| 160 AI 不能稳定 60 FPS | Game Thread 超 16.67 ms，Movement/Animation 累积高 | CSV/Insights 拆分模块，确认 Pathfinding 不是主瓶颈，再做移动/动画频率分级 |
+| Texture Streaming Pool 告警 | 高分辨率环境纹理占用预算 | stat streaming + Size Map 定位六张纹理，限制到 2048 后同条件复测，流送占用下降 60 MB |
+
+代码检查必须覆盖：空指针/IsValid、数组边界、Timer 清理、Delegate 重复绑定、状态重复进入、死亡幂等、弱引用失效、Montage 中断和关卡重启。编译成功只能证明语法和链接，不等于行为正确。
+
+### 22.7 技术亮点来自哪些自主补充
+
+模板提供的是移动、基础武器和可运行入口；教程提供的是 API 用法。以下内容才是项目主要亮点，面试时必须讲成“问题驱动的改造”，不能只报功能名称。
+
+| 自主补充 | 最初问题 | 自己的优化思路 | 落地与证据 |
+| --- | --- | --- | --- |
+| 共享 HealthComponent | 玩家、敌人分别扣血容易形成两套规则，死亡可能重复触发 | 把数值规则、Clamp、死亡幂等和事件契约收进可复用组件 | 玩家/敌人共用组件；沿 ApplyDamage 调用链验证；死亡事件只广播一次 |
+| AnimNotifyState 近战窗口 | 全程武器碰撞会在起手/收招误伤，单命中帧可能漏过高速刀刃 | 让动画提供有效时间窗，C++ 在窗口内做双 Socket 帧间 Sweep，并按一次挥砍去重 | WeaponTop/WeaponEnd、TSet 去重、中断/死亡清理；攻击窗口文档和回归用例 |
+| 双环包围与攻击名额 | MoveToActor(Player) 让所有敌人扎堆、互推、同时攻击 | 把“路径可达”“局部避障”“战术站位”拆开；中央分配唯一槽位，并限制同时攻击者 | 内圈 8、外圈 12；NavMesh 投影；弱引用占位；Token 释放；25/100 AI 行为验证 |
+| AI 决策与更新分级 | AI 数量增大后每帧决策、Movement 和动画成本线性累积 | 先压测找热点，再按距离、可见性和攻击状态分级；关键攻击窗口恢复高频 | 20/40/80/160 Baseline；100 AI 最终 Frame Avg 15.41 ms、P95 16.58 ms |
+| 波次与 UI 事件闭环 | 关卡蓝图散落生成、倒计时和 UI 查询，换地图后难复用 | GameMode 管规则和 Timer，Delegate 向蓝图/UMG 广播状态，UI 不每帧轮询 | StartGame、波次、剩余时间、存活数和结果事件；重复开始/重复结算保护 |
+| 纹理流送预算治理 | 场景出现 Texture Streaming Pool 告警，直接加 PoolSize 只能掩盖问题 | 先用 stat streaming/Size Map 找真实高占用资源，再限制不必要的 4K 纹理并回归画质 | 六张环境纹理限制到 2048；212.27 MB 降至 152.27 MB，减少 60 MB/28.3% |
+| 可重复性能测试入口 | 只看编辑器 FPS 无法比较改动，且容易把镜头差异当成优化 | 固定地图、分辨率、敌人数、预热与采样时间，记录模块计数和原始 CSV | AutoBenchmark、BenchmarkEnemies、CSV 文件、日志错误扫描和 100 AI 冒烟测试 |
+
+判断“是不是自己的亮点”使用五问：
+
+1. 我观察到了什么具体问题？
+2. 我如何证明根因，而不是凭感觉猜？
+3. 我提出过哪些方案，为什么选当前方案？
+4. 我实际修改了哪个职责、状态或数据结构？
+5. 修改后用什么数据或边界测试验证，仍有什么限制？
+
+五问答不完整的内容只能算“使用过 API”，不能作为简历核心亮点。
+
+### 22.8 优化方向与场景题
+
+回答性能题时先问场景规模、帧率目标、平台和瓶颈线程，再提出方案：
+
+| 场景题 | 回答主线 |
+| --- | --- |
+| 100 个敌人同时寻路怎么优化 | 固定场景 Baseline；决策降频/错峰；避免重复 MoveTo；距离分级；动画 URO；先测 Movement、Animation、Pathfinding 各自成本 |
+| AI 降频会不会变笨 | 会引入响应延迟；近战和可见近距离保持高频，远距离低频；记录平均/最大响应延迟而不是只看 FPS |
+| 死亡对象怎么降成本 | StopMovement、停止 AI/Timer、关闭不必要碰撞和动画更新、延迟销毁；验证对象数和内存是否回落 |
+| 要不要做对象池 | 先看 SpawnActor、Destroy、GC 尖峰和对象复位复杂度；优先池化高频、同构、可完整 Reset 的对象 |
+| 纹理池超预算怎么办 | 先定位实际高占用纹理，再调 MaxTextureSize/LODGroup/NeverStream；不能只增大 PoolSize 掩盖资源问题 |
+| GPU 慢怎么定位 | stat unit 判断 GPU bound，ProfileGPU 找 Pass，Shader Complexity/Quad Overdraw 找材质与透明叠加，再逐项开关复测 |
+| 60 FPS 的标准是什么 | 平均值和 P95/P99 都要接近 16.67 ms；不能只报一次最高 FPS；测试条件和硬件必须写明 |
+
+当前诚实结果见第 18 节。项目已经证明了定位和治理方法，但不能声称完成“零泄漏”、完整 GPU 优化或 160 AI 稳定 60 FPS。
+
+### 22.9 AI 辅助开发如何说明
+
+AI 在项目中承担的是辅助角色：
+
+- 根据错误日志生成排查假设和检查清单。
+- 帮助检索可能相关的 UE API、官方文档关键词和源码入口。
+- 提供候选架构、边界条件、场景题和自动测试脚本草案。
+- 帮助整理实验数据、技术文档和面试追问。
+
+代码所有权通过以下方式取得：
+
+```text
+逐行解释输入、输出、Target、对象生命周期和失败分支
+-> 对照官方文档/头文件确认 API 契约
+-> 本地 C++ 编译和蓝图编译
+-> 真实运行并检查 Output Log
+-> 固定条件采集 CSV/Insights 数据
+-> 关闭文档后重画调用链、写伪代码和回答取舍
+```
+
+不能说“AI 帮我写完了所以就是我的”。推荐回答：
+
+> 我把 AI 当作代码审查和假设生成工具，而不是事实来源。比如对象池、行为树、GAS 和重写 NavMesh 都曾是候选建议，但我根据项目规模和数据没有盲目加入。性能数字来自本机固定场景采集，最终修改必须通过编译、日志和回归验证；无法解释的代码不会放进简历亮点。
+
+### 22.10 项目收获
+
+1. 学会先划分规则所有权和表现边界，避免 C++ 与蓝图维护两套状态。
+2. 理解 UE 的对象引用、反射、GC、Timer、Delegate 和 Actor/Component 生命周期会直接决定稳定性。
+3. 动画不是单纯表现资源，AnimNotifyState 可以成为 Gameplay 时序契约，但权威规则仍应由 C++ 校验。
+4. NavMesh 解决“如何绕路”，局部避障解决“怎么不碰撞”，槽位系统解决“应该去哪里”，三者不能混为一谈。
+5. 性能优化必须从数据出发。160 AI 数据显示先处理 Movement/Animation，比重写 Pathfinding 更合理。
+6. 能运行、能解释、能复测、能诚实说明限制，才算真正掌握一个教程起点的项目。
+
+### 22.11 再给一段时间会怎么优化
+
+按价值排序，不继续无边界加功能：
+
+#### P0：补工程证据
+
+1. 完成连续多轮战斗的对象数、Timer/Delegate 和内存回落曲线。
+2. 用统一镜头和配置重跑 20/40/80/100/160 AI 优化前后 A/B。
+3. 统计 AI 决策降频后的平均和最大响应延迟。
+4. 修复 VSM 非 Nanite 阴影告警并做画质回归。
+
+#### P1：补图形学最小闭环
+
+实现一个可解释的 Toon Diffuse + Rim + Custom Depth Outline，记录材质指令和 GPU Pass 开销。重点是说明发生在渲染管线哪个阶段，不追求堆满 PBR、SSR、GI 和 Ray Tracing。
+
+#### P2：架构演进
+
+将射击方式抽成 Hitscan/Projectile 策略；将波次配置数据化；只有出现真实 Spawn/GC 热点后才为特效或尸体做专用对象池。Behavior Tree、EQS、GAS 均由新需求触发，不作为第一版装饰。
+
+### 22.12 如何切换到多人网络
+
+当前 FPS 是单机，不能把网络设计方案说成已实现。迁移时按权威边界重构：
+
+```text
+客户端输入
+-> Server RPC 请求开火/交互
+-> 服务端校验状态、弹药、射速、距离和命中
+-> 服务端修改 Health/Ammo/GameState
+-> Replicated/RepNotify 同步持久状态
+-> Multicast 或本地预测播放非权威表现
+```
+
+模块变化：
+
+| 单机模块 | 多人迁移 |
+| --- | --- |
+| Character/WeaponComponent | 客户端只提交意图；服务端校验 Fire/Reload/Pickup；防止客户端直接改弹药和伤害 |
+| HealthComponent | 仅服务端扣血；CurrentHealth RepNotify；OnRep 驱动客户端表现 |
+| GameMode | 继续只在服务端；波次、胜负和生成保持权威 |
+| GameState | 新增可复制的剩余时间、波次、存活敌人数和比赛状态 |
+| PlayerState | 保存需要跨 Pawn/重生存在的玩家数据 |
+| EnemyAIController/SurroundManager | 只在服务端决策；选择多个玩家中的仇恨目标；客户端只接收必要移动/动画状态 |
+| UI | 订阅本地 RepNotify/GameState，不直接查询服务器私有 GameMode |
+| Pickup | 服务端验证距离和所有权，成功后复制持有者/可见性，处理两名玩家同时拾取竞争 |
+
+验证顺序：
+
+```text
+双人 PIE / LAN
+-> Role、Authority、Ownership
+-> Variable Replication / RepNotify
+-> Server RPC Validation / Multicast
+-> Session Create/Find/Join/Destroy
+-> 100/200 ms 延迟与丢包模拟
+-> Relevancy、NetUpdateFrequency 和带宽分析
+```
+
+第一版不承诺完整预测回滚、延迟补偿、无缝重连和自建 Dedicated Server。它们应在服务端权威闭环稳定后作为独立专项，不返工当前单机项目。
+
+### 22.13 面试证据清单
+
+面试前逐项确认能现场打开或口述：
+
+- 架构图和第 14 节五条调用链。
+- HealthComponent、WeaponComponent、EnemyAIController、SurroundManager 的关键代码位置。
+- 三个完整 Bug：对象 Target/Widget 实例、攻击窗口重复命中、MoveToActor 扎堆。
+- 20/40/80/160 AI Baseline 与 100 AI 最终验收数据。
+- 纹理流送池前后数据和六张高占用纹理的定位过程。
+- 一次编译日志、一次运行日志和一次 CSV/Insights 原始记录。
+- 已实现、待回归、仅方案三栏边界。
+- 关闭文档后完成 30 秒、2 分钟和 15 分钟项目介绍。
+
+最终判断标准：面试官随机指一个简历关键词时，能够指出代码位置、画出调用链、解释替代方案、讲一个失败路径，并说明用什么证据验证，而不是只复述 API 名称。
