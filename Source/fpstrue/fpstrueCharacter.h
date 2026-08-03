@@ -218,6 +218,13 @@ public:
 
 	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
 
+	void ConfigureAmmoFromWeapon(
+		int32 InMagazineSize,
+		int32 InReserveAmmo,
+		float InReloadDuration,
+		float InEmptyReloadDuration
+	);
+
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool HasEquippedWeapon() const { return EquippedWeaponComponent != nullptr; }
 

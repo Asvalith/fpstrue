@@ -4,6 +4,7 @@
 #include "fpstrueWeaponComponent.h"
 #include "fpstrueCharacter.h"
 #include "fpstrueEnemyCharacter.h"
+#include "fpstrueWeaponDataAsset.h"
 #include "fpstrueProjectile.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/CameraComponent.h"
@@ -73,9 +74,11 @@ void UfpstrueWeaponComponent::Fire()
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
 	{
-		const float RecoilMultiplier = Character->IsAiming() ? AimRecoilMultiplier : 1.0f;
-		PlayerController->AddPitchInput(-RecoilPitch * RecoilMultiplier);
-		PlayerController->AddYawInput(FMath::FRandRange(-RecoilYaw, RecoilYaw) * RecoilMultiplier);
+		const float RecoilMultiplier = Character->IsAiming() ? GetConfiguredAimRecoilMultiplier() : 1.0f;
+		const float Pitch = GetConfiguredRecoilPitch();
+		const float Yaw = GetConfiguredRecoilYaw();
+		PlayerController->AddPitchInput(-Pitch * RecoilMultiplier);
+		PlayerController->AddYawInput(FMath::FRandRange(-Yaw, Yaw) * RecoilMultiplier);
 	}
 
 }
@@ -113,13 +116,22 @@ void UfpstrueWeaponComponent::HandleOwnerDeath()
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
 {
+	const int32 TraceCount = FMath::Max(1, GetTraceCount());
+	for (int32 TraceIndex = 0; TraceIndex < TraceCount; ++TraceIndex)
+	{
+		FireSingleLineTrace(World, Camera);
+	}
+}
+
+void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponent* Camera)
+{
 	const FVector Start = Camera->GetComponentLocation();
 	const FVector Forward = Camera->GetForwardVector();
-	const float SpreadAngle = Character->IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle;
+	const float SpreadAngle = GetConfiguredSpreadAngle(Character->IsAiming());
 	const FVector ShotDirection = SpreadAngle > 0.0f
 		? FMath::VRandCone(Forward, FMath::DegreesToRadians(SpreadAngle))
 		: Forward;
-	const FVector End = Start + ShotDirection * LineTraceRange;
+	const FVector End = Start + ShotDirection * GetConfiguredTraceRange();
 
 	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
@@ -175,7 +187,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 		{
 			const FString HitBoneName = HitResult.BoneName.ToString().ToLower();
 			const bool bHeadShot = HitBoneName == TEXT("neck_01") || HitBoneName == TEXT("head");
-			const float DamageToApply = bHeadShot ? LineTraceHeadDamage : LineTraceDamage;
+			const float DamageToApply = bHeadShot ? GetConfiguredHeadDamage() : GetConfiguredBodyDamage();
 
 			UGameplayStatics::ApplyPointDamage(
 				HitEnemy,
@@ -192,7 +204,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 		{
 			if (HitComponent->IsSimulatingPhysics())
 			{
-				HitComponent->AddImpulseAtLocation(ShotDirection * LineTraceImpulse, HitResult.ImpactPoint);
+				HitComponent->AddImpulseAtLocation(ShotDirection * GetConfiguredTraceImpulse(), HitResult.ImpactPoint);
 			}
 		}
 
@@ -219,6 +231,71 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 		);
 	}
 #endif
+}
+
+int32 UfpstrueWeaponComponent::GetTraceCount() const
+{
+	return 1;
+}
+
+void UfpstrueWeaponComponent::ApplyWeaponConfiguration(AfpstrueCharacter* TargetCharacter) const
+{
+	if (WeaponData == nullptr || TargetCharacter == nullptr)
+	{
+		return;
+	}
+
+	TargetCharacter->ConfigureAmmoFromWeapon(
+		WeaponData->MagazineSize,
+		WeaponData->StartingReserveAmmo,
+		WeaponData->ReloadDuration,
+		WeaponData->EmptyReloadDuration
+	);
+}
+
+float UfpstrueWeaponComponent::GetConfiguredTraceRange() const
+{
+	return WeaponData != nullptr ? WeaponData->TraceRange : LineTraceRange;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredTraceImpulse() const
+{
+	return WeaponData != nullptr ? WeaponData->TraceImpulse : LineTraceImpulse;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredBodyDamage() const
+{
+	return WeaponData != nullptr ? WeaponData->BodyDamage : LineTraceDamage;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredHeadDamage() const
+{
+	return WeaponData != nullptr ? WeaponData->HeadDamage : LineTraceHeadDamage;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredSpreadAngle(bool bAiming) const
+{
+	if (WeaponData != nullptr)
+	{
+		return bAiming ? WeaponData->AimFireSpreadAngle : WeaponData->HipFireSpreadAngle;
+	}
+
+	return bAiming ? AimFireSpreadAngle : HipFireSpreadAngle;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredRecoilPitch() const
+{
+	return WeaponData != nullptr ? WeaponData->RecoilPitch : RecoilPitch;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredRecoilYaw() const
+{
+	return WeaponData != nullptr ? WeaponData->RecoilYaw : RecoilYaw;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredAimRecoilMultiplier() const
+{
+	return WeaponData != nullptr ? WeaponData->AimRecoilMultiplier : AimRecoilMultiplier;
 }
 
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
@@ -249,6 +326,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 
 	bIsEquipped = true;
 	bWeaponGameplayEnabled = true;
+	ApplyWeaponConfiguration(TargetCharacter);
 	Character->SetEquippedWeaponComponent(this);
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))

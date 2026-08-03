@@ -9,6 +9,7 @@
 
 class AfpstrueCharacter;
 class UCameraComponent;
+class UfpstrueWeaponDataAsset;
 class UWorld;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
@@ -36,6 +37,12 @@ public:
 	class UInputAction* FireAction;
 
 	UfpstrueWeaponComponent();
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Config")
+	TObjectPtr<UfpstrueWeaponDataAsset> WeaponData;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Config")
+	UfpstrueWeaponDataAsset* GetWeaponData() const { return WeaponData; }
 
 	UFUNCTION(BlueprintCallable, Category="Weapon")
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
@@ -103,11 +110,24 @@ protected:
 	UFUNCTION()
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
+	virtual int32 GetTraceCount() const;
+
 private:
 	void StartFire();
 	void StopFire();
 	bool CanFire() const;
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
+	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera);
+	void ApplyWeaponConfiguration(AfpstrueCharacter* TargetCharacter) const;
+
+	float GetConfiguredTraceRange() const;
+	float GetConfiguredTraceImpulse() const;
+	float GetConfiguredBodyDamage() const;
+	float GetConfiguredHeadDamage() const;
+	float GetConfiguredSpreadAngle(bool bAiming) const;
+	float GetConfiguredRecoilPitch() const;
+	float GetConfiguredRecoilYaw() const;
+	float GetConfiguredAimRecoilMultiplier() const;
 
 	UPROPERTY(Transient)
 	AfpstrueCharacter* Character = nullptr;

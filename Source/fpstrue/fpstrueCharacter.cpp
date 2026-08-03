@@ -650,6 +650,19 @@ void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* Weap
 	OnWeaponEquipped(WeaponComponent);
 }
 
+void AfpstrueCharacter::ConfigureAmmoFromWeapon(
+	int32 InMagazineSize,
+	int32 InReserveAmmo,
+	float InReloadDuration,
+	float InEmptyReloadDuration)
+{
+	MagazineSize = FMath::Max(1, InMagazineSize);
+	CurrentAmmo = MagazineSize;
+	ReserveAmmo = FMath::Max(0, InReserveAmmo);
+	ReloadDuration = FMath::Max(0.01f, InReloadDuration);
+	EmptyReloadDuration = FMath::Max(ReloadDuration, InEmptyReloadDuration);
+}
+
 void AfpstrueCharacter::BroadcastAmmoChanged()
 {
 	OnAmmoChanged.Broadcast(CurrentAmmo, MagazineSize, ReserveAmmo);
