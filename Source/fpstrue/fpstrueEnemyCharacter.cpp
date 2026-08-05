@@ -449,7 +449,13 @@ bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
 
 	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
 	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
-	return HorizontalToTarget.Size() <= AttackRange;
+
+	const float EnemyRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
+	const float TargetRadius = TargetCharacter->GetCapsuleComponent()->GetScaledCapsuleRadius();
+	const float MinimumReachableDistance = EnemyRadius + TargetRadius + 5.0f;
+	const float EffectiveAttackRange = FMath::Max(AttackRange, MinimumReachableDistance);
+
+	return HorizontalToTarget.Size() <= EffectiveAttackRange;
 }
 
 bool AfpstrueEnemyCharacter::CanAttack() const

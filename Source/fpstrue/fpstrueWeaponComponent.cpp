@@ -41,6 +41,8 @@ void UfpstrueWeaponComponent::StopFire()
 	{
 		Character->NotifyFireStopped();
 	}
+	ConsecutiveShotCount = 0;
+	LastShotTimeSeconds = -1.0;
 	OnWeaponFireStopped.Broadcast();
 }
 void UfpstrueWeaponComponent::Fire()
@@ -105,6 +107,8 @@ void UfpstrueWeaponComponent::NotifyReloadFinished()
 
 void UfpstrueWeaponComponent::NotifyFireStoppedByCharacter()
 {
+	ConsecutiveShotCount = 0;
+	LastShotTimeSeconds = -1.0;
 	OnWeaponFireStopped.Broadcast();
 }
 
@@ -116,21 +120,42 @@ void UfpstrueWeaponComponent::HandleOwnerDeath()
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
 {
+	const double CurrentTimeSeconds = World->GetTimeSeconds();
+	if (LastShotTimeSeconds < 0.0
+		|| CurrentTimeSeconds - LastShotTimeSeconds > GetConfiguredSpreadResetDelay())
+	{
+		ConsecutiveShotCount = 0;
+	}
+
+	const float ContinuousSpreadAngle = FMath::Clamp(
+		ConsecutiveShotCount * GetConfiguredContinuousFireSpreadStep(),
+		0.0f,
+		GetConfiguredMaxContinuousFireSpreadAngle());
+	const float SpreadAngle = GetConfiguredSpreadAngle(Character->IsAiming()) + ContinuousSpreadAngle;
+	LastShotTimeSeconds = CurrentTimeSeconds;
+	++ConsecutiveShotCount;
+
 	const int32 TraceCount = FMath::Max(1, GetTraceCount());
 	for (int32 TraceIndex = 0; TraceIndex < TraceCount; ++TraceIndex)
 	{
-		FireSingleLineTrace(World, Camera);
+		FireSingleLineTrace(World, Camera, SpreadAngle);
 	}
 }
 
-void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponent* Camera)
+void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle)
 {
 	const FVector Start = Camera->GetComponentLocation();
 	const FVector Forward = Camera->GetForwardVector();
-	const float SpreadAngle = GetConfiguredSpreadAngle(Character->IsAiming());
-	const FVector ShotDirection = SpreadAngle > 0.0f
-		? FMath::VRandCone(Forward, FMath::DegreesToRadians(SpreadAngle))
-		: Forward;
+	FVector ShotDirection = Forward;
+	if (SpreadAngle > 0.0f)
+	{
+		const float SpreadRadius = FMath::Tan(FMath::DegreesToRadians(SpreadAngle));
+		const FVector2D SpreadOffset = FMath::RandPointInCircle(SpreadRadius);
+		ShotDirection = (
+			Forward
+			+ Camera->GetRightVector() * SpreadOffset.X
+			+ Camera->GetUpVector() * SpreadOffset.Y).GetSafeNormal();
+	}
 	const FVector End = Start + ShotDirection * GetConfiguredTraceRange();
 
 	FHitResult HitResult;
@@ -281,6 +306,21 @@ float UfpstrueWeaponComponent::GetConfiguredSpreadAngle(bool bAiming) const
 	}
 
 	return bAiming ? AimFireSpreadAngle : HipFireSpreadAngle;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredContinuousFireSpreadStep() const
+{
+	return WeaponData != nullptr ? WeaponData->ContinuousFireSpreadStep : ContinuousFireSpreadStep;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredMaxContinuousFireSpreadAngle() const
+{
+	return WeaponData != nullptr ? WeaponData->MaxContinuousFireSpreadAngle : MaxContinuousFireSpreadAngle;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredSpreadResetDelay() const
+{
+	return WeaponData != nullptr ? WeaponData->SpreadResetDelay : SpreadResetDelay;
 }
 
 float UfpstrueWeaponComponent::GetConfiguredRecoilPitch() const

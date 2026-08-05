@@ -63,6 +63,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
 	float AimFireSpreadAngle = 0.25f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
+	float ContinuousFireSpreadStep = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
+	float MaxContinuousFireSpreadAngle = 3.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread", meta = (ClampMin = "0.0"))
+	float SpreadResetDelay = 0.25f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Recoil")
 	float RecoilPitch = 1.0f;
 
@@ -117,7 +126,7 @@ private:
 	void StopFire();
 	bool CanFire() const;
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
-	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera);
+	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle);
 	void ApplyWeaponConfiguration(AfpstrueCharacter* TargetCharacter) const;
 
 	float GetConfiguredTraceRange() const;
@@ -125,6 +134,9 @@ private:
 	float GetConfiguredBodyDamage() const;
 	float GetConfiguredHeadDamage() const;
 	float GetConfiguredSpreadAngle(bool bAiming) const;
+	float GetConfiguredContinuousFireSpreadStep() const;
+	float GetConfiguredMaxContinuousFireSpreadAngle() const;
+	float GetConfiguredSpreadResetDelay() const;
 	float GetConfiguredRecoilPitch() const;
 	float GetConfiguredRecoilYaw() const;
 	float GetConfiguredAimRecoilMultiplier() const;
@@ -134,4 +146,6 @@ private:
 
 	bool bIsEquipped = false;
 	bool bWeaponGameplayEnabled = false;
+	int32 ConsecutiveShotCount = 0;
+	double LastShotTimeSeconds = -1.0;
 };
