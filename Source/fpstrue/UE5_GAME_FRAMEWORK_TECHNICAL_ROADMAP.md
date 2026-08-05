@@ -1,6 +1,6 @@
 # UE5 游戏框架与技术路线复习文档
 
-最后更新：2026-07-22
+最后更新：2026-08-05
 
 > 当前执行基线：`FPS_PORTFOLIO_ACCEPTANCE_PLAN.md`。
 >
@@ -186,6 +186,8 @@ Constructor
 - 寻找第 0 个玩家角色。
 - Tick 中计算玩家距离。
 - 使用 `AddMovementInput` 直线追逐。
+- 攻击距离使用“蓝图配置值”和“双方胶囊体可接触距离”的较大值，避免出现物理上不可到达的攻击阈值。
+- 进入攻击范围时立即清除追逐阶段的残留速度。
 - 使用 Timer 实现攻击前摇和攻击结束。
 - 玩家进入范围后 `ApplyDamage`。
 - 死亡后清理 Timer、停止移动并关闭碰撞。
@@ -315,7 +317,8 @@ ApplyPointDamage / ApplyDamage
 ```text
 Enemy Tick
 → UpdateEnemy
-→ 距离检查
+→ 计算 Max(AttackRange, EnemyRadius + PlayerRadius + Margin)
+→ 进入攻击范围并 StopMovementImmediately
 → TryAttackTarget
 → OnAttackStarted
 → AttackDamage Timer
@@ -840,6 +843,44 @@ Camera Start / Direction
 58. 当前 Hitscan 项目为什么不需要“子弹对象池”？
 59. 为什么对象池必须由性能数据驱动，而不能仅作为简历关键词？
 60. 如何验证关卡重启和多轮战斗后没有残留对象或重复绑定？
+
+#### 已完成实验：纹理驻留资源治理
+
+问题主线：
+
+```text
+编辑器出现资源警告
+→ 先区分 Texture Streaming 与 VSM 阴影队列
+→ 使用 stat streaming / ListStreamingTextures / MemReport -full 定位
+→ 找到厂区植被高占用纹理
+→ 约束 6 张纹理的最大驻留分辨率
+→ 在相同地图、100 敌人、8 秒预热和 30 秒采样条件下复测
+```
+
+结果：
+
+- Streaming Assets：`212.27 MB → 152.27 MB`，下降 `28.3%`。
+- Texture Memory Used：`288.59 MB → 228.91 MB`，下降 `20.7%`。
+- MemReport 纹理驻留总量减少约 `59.68 MB`。
+- UObject 数量基本不变，不能据此宣称消除了内存泄漏。
+- 两次测试都没有出现真实的 Texture Streaming Pool 超预算，准确名称是“纹理驻留资源治理”。
+- VSM Non-Nanite Marking Job Queue 警告仍存在，属于独立阴影问题。
+- 尚缺同机位画质回归截图，不能宣称画质无损。
+
+完整测试条件、资源清单和原始证据见 `PERFORMANCE_BASELINE.md` 第 9 节。
+
+对应面试追问：
+
+1. 为什么不直接增大 `r.Streaming.PoolSize`？
+   因为扩大预算只能延后问题，不能减少不合理资源的驻留需求；本次目标是先定位资源规格与实际使用距离是否匹配。
+2. 为什么只改 6 张纹理？
+   为保持单变量实验，先处理列表中可解释、可回归且占用较高的场景植被资源。
+3. 为什么不能用进程物理内存证明优化？
+   编辑器、分配器缓存、资源加载顺序和采样时机会影响进程总内存；纹理专项应优先比较对应纹理统计和 MemReport 分类。
+4. 如何判断画质是否可接受？
+   固定机位、分辨率、光照与后处理，对比近景和常用战斗距离；检查树皮、法线高光和 Alpha 图集边缘，再决定是否继续降低规格。
+5. 这次实验和内存泄漏有什么关系？
+   没有直接关系。它降低的是纹理驻留开销；泄漏需要通过多轮生成、销毁、等待 GC 后的对象数与内存回落单独验证。
 
 ### 大厂关注：多人网络
 

@@ -1,8 +1,62 @@
-# fpstrue 项目阶段总结
+# fpstrue 项目阶段总结与历史记录
 
-更新时间：2026-06-20
+更新时间：2026-08-05
+
+> 本节顶部的“当前权威快照”代表 2026-08-05 的真实状态。后续章节保留 2026-06-20 阶段的模块拆解和成长记录；若完成度或范围描述发生冲突，以当前快照、`FPS_BUG_LOG.md`、`PERFORMANCE_BASELINE.md` 和实际代码为准。
+
+## 0. 当前权威快照
+
+### 0.1 项目定位
+
+`fpstrue` 的主价值是可运行、可解释的 UE5 单机 FPS Demo。它用于证明 Gameplay Framework、C++/蓝图分层、动画与命中反馈、AI 原型、生命周期治理和性能排查能力。独立多人玩法位于 `E:\ueprojrct\multiplayer`；图形学是知识与后续加分项，不把迁移来的地图、材质或动画包装成自研图形项目。
+
+### 0.2 已成立的核心链路
+
+```text
+Enhanced Input
+→ 移动 / 跳跃 / 冲刺 / 瞄准 / 射击 / 换弹
+→ WeaponComponent 统一检查开火条件并扣减弹药
+→ 摄像机 LineTrace 决定真实命中
+→ PointDamage / 物理冲量 / HealthComponent
+→ 玩家、敌人或靶子的受伤与死亡生命周期
+→ 蓝图播放枪口、枪声、抛壳、曳光弹、命中粒子、贴花和 Montage
+```
+
+当前代码和蓝图已经覆盖：
+
+- 保留地图拾枪架构，武器附加到第一人称手臂。
+- 单发与长按连发、弹药、普通/空仓换弹、空枪反馈。
+- LineTrace Hitscan、头部/身体伤害、物理冲量、曳光表现分离。
+- 瞄准/腰射差异、连续射击散布增长、二维随机散布和后坐力。
+- 通用 `HealthComponent`，玩家、敌人和 TargetDummy 复用伤害/死亡事件。
+- 敌人直线追逐、攻击前摇、伤害窗口、攻击结束、死亡清理与延迟销毁。
+- 动画蓝图、Montage、枪支与手臂分组件播放，以及命中材质/贴花排障。
+- 一次有固定条件和数据对比的纹理驻留资源治理实验。
+
+### 0.3 最近修复
+
+- 连续射击散布从容易形成直线的单轴表现改为相机右/上平面的圆形随机分布，并随连续射击次数扩张。
+- 敌人攻击范围增加胶囊体接触距离下限，进入攻击范围后清除残留速度，修复贴近玩家时后退且无法攻击的问题。对应提交：`78adeaa`。
+- 纹理实验将 Streaming Assets 从 `212.27 MB` 降到 `152.27 MB`；这是驻留资源治理，不等同于修复内存泄漏，也不等同于自研渲染系统。
+
+### 0.4 封版前缺口
+
+1. 在 PIE 中保存敌人近距离攻击、连续射击、换弹/死亡互斥的回归证据。
+2. 核对 HUD、胜负、重启和输入切换是否形成一局可重复闭环；缺什么只补什么。
+3. 保留直线追逐的边界说明，或在确有演示阻塞时再接 AIController/NavMesh；不为了功能列表继续扩楼。
+4. 整理必要 `Content / Config / Source`，排除生成目录，完成一次干净编译和启动验证。
+5. 录制短演示、整理 README、性能数据、Bug 复盘和面试讲解。
+
+### 0.5 项目边界
+
+- FPS Demo 是游戏客户端求职的主项目之一，目标是稳定、可讲、可修改。
+- Co-op 网络 Demo 是独立项目，不把它继续塞回 `fpstrue`。
+- 当前没有完成两个独立图形学项目；迁移素材只作为场景和表现资产。
+- GAS 计划只属于 Co-op 的进阶分支，不阻塞 FPS 或 Co-op 基础版封版。
 
 ## 1. 项目定位
+
+> 以下开始保留 2026-06-20 的阶段性记录，用于复盘项目是如何从模板逐步形成系统边界的。
 
 `fpstrue` 是一个基于 Unreal Engine 5 的第一人称射击项目。当前目标不是只复刻教程，而是做成一个可以展示工程能力的单机 FPS 原型，并在后期加入 AI、UI、玩法循环和图形渲染亮点。
 
@@ -427,7 +481,7 @@ DeltaLocation = Normalize(TargetLocation - ActorLocation) * Speed * DeltaSeconds
 
 ### 5.6 多人网络
 
-最后做。
+该内容后来已迁移为独立的 `E:\ueprojrct\multiplayer` Co-op 项目，不再作为 `fpstrue` 的封版任务。
 
 原因：
 
@@ -668,55 +722,257 @@ Bullet_BP：视觉子弹
 
 只要敌人 AI 和 UI 跑通，`fpstrue` 就会从“武器测试项目”变成“可玩的 FPS 原型”。
 
-## 11. 学习与面试验收记录（2026-07-23）
+## 11. 2026-06-22 命中贴花踩坑记录
 
-### 11.1 当前已经落地的代码
+### 11.1 问题现象
 
-- `AfpstrueEnemyCharacter` 继承 `ACharacter`，负责敌人的目标、追击、攻击和死亡规则；`enemy_BP` 作为蓝图子类负责模型、动画和表现。
-- 玩家与敌人复用 `UfpstrueHealthComponent`，组件监听 Owner 的 `OnTakeAnyDamage`，统一维护生命值并广播 `OnHealthChanged`、`OnDeath`。
-- 敌人攻击已经具备距离、冷却、存活状态和攻击中状态检查。
-- C++ 通过 `OnAttackStarted` 通知蓝图播放攻击表现。
-- `enemy_BP` 已实现 `OnAttackStarted`，并接入两个 In-Place 攻击 Montage；Root Motion 版本暂不进入当前攻击链。
-- 攻击命中帧由蓝图动画通知调用 `HandleAttackHitNotify()`，C++ 使用 `bDamageAppliedThisAttack` 保证每次攻击最多结算一次。
-- C++ 使用 Sphere Sweep 检测玩家，命中后调用 `ApplyDamage`，最终由玩家的 `HealthComponent` 扣血。
-- 攻击结束使用 `AttackFinishTimerHandle` 恢复攻击状态；敌人死亡时清理该 Timer、停止移动并关闭 Capsule 碰撞。
-- `HealthComponent` 自身不启用 Tick，属于事件驱动组件。
+武器 LineTrace 已经能够命中敌人，`Cast To enemy_BP` 也能成功输出 `Hit Enemy`，墙体周围可以正常生成弹孔贴花，但是敌人身上没有血痕贴花。
 
-### 11.2 已经理解并能够继续练习的内容
+### 11.2 已排除的问题
 
-- `Tick` 是逐帧更新入口，`DeltaTime` 表示两帧之间的时间；当前敌人每帧累加攻击冷却并执行目标距离与行为判断。
-- 100 个敌人同时 Tick 会放大 Game Thread 开销，后续需要比较 Tick Interval、Timer、错峰和分级更新。
-- 自定义 Enemy C++ 类用于补充 `ACharacter` 不具备的敌人规则；蓝图子类用于配置资产和表现，这是 UE 常见的 C++ 与 Blueprint 协作方式。
-- 玩家和敌人不共用同一个 Character 类，但通过组件复用生命系统。
-- 布娃娃是 Skeletal Mesh 基于 Physics Asset 的物理模拟，不是普通 Montage。
-- LOD 降低网格渲染复杂度，Cast Shadow 控制物体是否参与阴影渲染；二者不能替代布娃娃物理优化。
-- 死亡后应停用移动和 Tick，而不是销毁 `CharacterMovement` 默认组件。
+- 不是 `OnWeaponTraceFinished` 没触发：命中音效和粒子能正常播放。
+- 不是 LineTrace 没打到敌人：`Hit Actor` 能 Cast 到 `enemy_BP`。
+- 不是打到胶囊体：打印 `Hit Component` 后确认是 `CharacterMesh0`。
+- 不是贴花材质本身完全失效：墙体弹孔贴花可以显示。
+- 不是 `Receives Decals` 没开：敌人 Mesh 已确认打开接收贴花。
 
-### 11.3 当前仍需接通和验证
+### 11.3 真正原因
 
-- 在攻击 Montage 的实际命中帧添加 Notify，并调用 `HandleAttackHitNotify()`。
-- 实机验证一次攻击只扣一次血，挥空不扣血，死亡或攻击中断后不再回调伤害。
-- 将蓝图中的立即 `Destroy Actor` 改为合理的延迟回收，否则布娃娃效果和尸体观察时间不足。
-- 验证尸体回收前的移动组件、Actor Tick、阴影和物理开销，而不是凭感觉宣称优化有效。
-- 当前追击仍是 `AddMovementInput` 直线移动，尚未完成 `AIController + NavMesh`。
+敌人 Mesh 使用的材质没有响应贴花。
 
-### 11.4 后续面试官验收方式
+组件上的 `Receives Decals` 只表示这个 Mesh 允许接收贴花；真正决定贴花能不能画到表面上的，是材质里的 `Decal Response`。
 
-以后不能以“项目中存在这段代码”作为掌握证明，必须逐级验收：
+如果材质的 `Decal Response` 是 `None`，即使：
 
-1. 不看代码，完整口述 `Tick -> TryAttackTarget -> OnAttackStarted -> AnimNotify -> Sphere Sweep -> ApplyDamage -> HealthComponent`。
-2. 解释 `BlueprintImplementableEvent`、`BlueprintCallable`、Delegate、Timer 和 Tick 各自解决什么问题。
-3. 解释为什么攻击伤害由 C++ 结算、动画由蓝图播放，以及反过来设计会有什么风险。
-4. 解释为什么需要 `bDamageAppliedThisAttack`，并给出重复 Notify、Montage 中断和死亡中断的测试方法。
-5. 对比 Line Trace、Sphere Sweep 和纯距离判断在近战检测中的优缺点。
-6. 闭卷写出精简版 `CanAttack()`、`HandleAttackHitNotify()` 和生命值扣减逻辑。
-7. 面对追问能够指出当前方案缺陷：逐帧 AI、直线追击、Timer 与 Montage 时长耦合、尸体生命周期尚未量化。
+```text
+LineTrace 命中 Mesh
+Cast 成功
+Spawn Decal 节点执行
+Receives Decals 已开启
+```
 
-掌握等级：
+贴花仍然不会显示。
 
-- `L0`：代码存在，但无法解释。
-- `L1`：看着代码能够讲清调用链。
-- `L2`：不看代码能够解释、修改并排查常见错误。
-- `L3`：能够设计对比实验，给出性能数据、方案取舍和回归测试。
+### 11.4 正确检查路径
 
-当前目标是先把敌人攻击链达到 `L2`，完成性能实验后再达到 `L3`。
+```text
+enemy_BP
+↓
+CharacterMesh0
+↓
+Materials / 材质
+↓
+打开材质实例
+↓
+打开 Parent 父材质
+↓
+搜索 Decal Response / 贴花响应
+↓
+不能是 None
+```
+
+推荐设置：
+
+```text
+Decal Response = Color Normal Roughness
+```
+
+至少也要：
+
+```text
+Decal Response = Color
+```
+
+### 11.5 当前命中反馈正确结构
+
+```text
+OnWeaponTraceFinished
+↓
+Break Hit Result
+↓
+Hit Actor
+↓
+Cast To enemy_BP
+```
+
+敌人命中分支：
+
+```text
+Cast Success
+↓
+Spawn Decal Attached
+```
+
+关键参数：
+
+```text
+Decal Material = Blood Decal
+Attach to Component = CharacterMesh0 / enemy_BP Mesh
+Location = Impact Point
+Rotation = Rotation From X Vector(Impact Normal)
+Location Type = Keep World Position
+Attach Point Name = 先空着
+Decal Size = 适当放大测试
+Life Span = 10
+```
+
+非敌人命中分支：
+
+```text
+Cast Failed
+↓
+Spawn Decal Attached
+```
+
+用于墙体、地面、箱子等普通表面的弹孔、命中音效、命中粒子。
+
+### 11.6 这次学到的关键点
+
+- `Hit Actor` 判断命中了谁。
+- `Hit Component` 判断具体打中了哪个组件。
+- `Receives Decals` 是 Mesh 层面的开关。
+- `Decal Response` 是材质层面的开关。
+- 墙体能显示贴花，不代表敌人材质也能显示贴花。
+- 调试命中反馈时，先打印 `Hit Actor`、`Hit Component`、`Cast Success`，再查材质。
+
+## 12. 下一阶段敌人系统任务
+
+### 12.1 敌人被攻击掉血
+
+目标：
+
+```text
+玩家射击敌人
+↓
+LineTrace 命中 enemy_BP
+↓
+ApplyPointDamage
+↓
+HealthComponent 扣血
+↓
+敌人播放受击反馈
+```
+
+需要确认：
+
+- `enemy_BP` 是否挂载 `HealthComponent`。
+- 武器 C++ 的 `ApplyPointDamage` 是否能打到当前敌人 Actor。
+- 敌人蓝图是否监听血量变化或伤害事件。
+- 敌人死亡后是否停止移动、停止攻击、关闭碰撞。
+
+### 12.2 敌人受攻击动画
+
+推荐做法：
+
+```text
+敌人受伤事件
+↓
+根据命中方向或随机选择 HitReact 动画
+↓
+播放受击 Montage
+```
+
+当前先做简化版：
+
+```text
+只要敌人被击中
+↓
+播放一个 HitReact Montage
+```
+
+后续再扩展：
+
+```text
+正面受击
+背后受击
+左侧受击
+右侧受击
+重击硬直
+死亡动画
+```
+
+### 12.3 敌人攻击动画
+
+目标：
+
+```text
+敌人接近玩家
+↓
+进入攻击距离
+↓
+停止移动或降低移动
+↓
+播放攻击动画
+↓
+动画通知帧触发伤害
+```
+
+关键点：
+
+- 不要一进入攻击距离就立刻扣血。
+- 应该由攻击动画中的 `AnimNotify` 决定真正伤害帧。
+- 这样玩家看到刀挥到身上时才掉血，反馈更合理。
+
+### 12.4 敌人伤害检测
+
+简化版：
+
+```text
+AnimNotify_AttackHit
+↓
+判断玩家是否仍在攻击距离内
+↓
+ApplyDamage 给玩家
+```
+
+推荐先不用复杂碰撞盒，先用距离判断：
+
+```text
+Distance(Enemy, Player) <= AttackRange
+```
+
+后续再升级为：
+
+```text
+刀具碰撞盒
+球形检测
+扇形攻击范围
+```
+
+### 12.5 玩家死亡系统
+
+目标：
+
+```text
+玩家 Health <= 0
+↓
+CharacterState = Dead
+↓
+禁用移动、开火、瞄准、换弹
+↓
+停止敌人继续伤害
+↓
+显示 Game Over UI
+↓
+允许重开
+```
+
+需要完成：
+
+- 玩家死亡状态接入 UI。
+- 死亡后禁止输入。
+- 死亡后停止武器 Timer。
+- 敌人攻击逻辑检查玩家是否已死亡。
+- Game Over 界面。
+
+### 12.6 建议执行顺序
+
+```text
+1. 敌人扣血验证
+2. 敌人受击动画
+3. 敌人死亡动画/死亡状态
+4. 敌人攻击动画
+5. 攻击动画 Notify 扣玩家血
+6. 玩家死亡系统
+7. Game Over UI
+```

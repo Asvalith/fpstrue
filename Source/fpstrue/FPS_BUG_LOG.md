@@ -1,6 +1,6 @@
 # fpstrue FPS Bug 与故障复盘
 
-最后更新：2026-07-21
+最后更新：2026-08-05
 
 ## 1. 文档目的
 
@@ -39,6 +39,7 @@
 | FPS-010 | UE 启动时报 DDC 没有可写节点 | 编辑器环境 | 临时绕过 |
 | FPS-011 | 错误打开 `fpstrue_safe1` 并产生重复 UE 进程 | 工程管理 | 已修复 |
 | FPS-012 | 构建产物、生成文件和未跟踪资源混杂 | Git/构建 | 待处理 |
+| FPS-013 | 敌人近距离后退并且始终无法进入攻击状态 | AI/碰撞 | 部分修复 |
 
 ## 4. 详细记录
 
@@ -508,6 +509,54 @@ ZenShared: Disabled because Host is set to 'None'
 **安全要求**
 
 在恢复验证完成前，不删除现有工程、备份副本或缓存目录。清理必须建立在明确路径、可恢复备份和验证结果之上。
+
+### FPS-013：敌人近距离后退并且无法攻击
+
+**状态：部分修复**
+
+**现象**
+
+- 敌人能够持续追向玩家，但靠近后被碰撞推出并向后退。
+- 即使视觉上已经贴近玩家，攻击条件仍可能始终为假。
+- 旧逻辑进入攻击范围时没有清除 `CharacterMovement` 中残留的移动速度。
+
+**根因**
+
+攻击距离使用敌人与玩家 Actor 原点之间的水平距离。若蓝图配置的 `AttackRange` 小于双方胶囊体半径之和，碰撞系统会在两个原点达到攻击阈值之前阻止继续靠近，因此代码永远进不了攻击分支。碰撞去穿透与残留速度叠加后，画面表现为敌人贴近后后退。
+
+**处理**
+
+```text
+MinimumReachableDistance
+= EnemyCapsuleRadius
++ PlayerCapsuleRadius
++ 5 cm 容差
+
+EffectiveAttackRange
+= Max(AttackRange, MinimumReachableDistance)
+```
+
+- `IsTargetInAttackRange()` 使用 `EffectiveAttackRange` 判断，避免配置出物理上不可到达的攻击距离。
+- 进入攻击范围后调用 `StopMovementImmediately()`，立即清除追逐阶段留下的速度。
+- 仍保留蓝图 `AttackRange` 调参能力；只有配置值过小时才使用胶囊接触下限兜底。
+
+**验证方法**
+
+1. UE5.5 Editor Development 构建已通过。
+2. 在 PIE 中分别从正面、侧面和墙边靠近玩家，确认敌人不再被持续推出。
+3. 打印 `IsTargetInAttackRange()`、攻击事件和伤害事件，确认每个攻击周期只产生一次伤害窗口。
+4. 修改双方胶囊半径后复测，确认攻击阈值仍可到达。
+
+**剩余风险**
+
+- 运行时近距离、多人阻挡和不同胶囊尺寸的完整回归尚待保存证据，因此暂记为“部分修复”。
+- 该修复只解决攻击距离与碰撞几何冲突，不解决 `AddMovementInput` 直线追逐的绕障技术债。
+
+**相关文件或提交**
+
+- `fpstrueEnemyCharacter.cpp::UpdateEnemy`
+- `fpstrueEnemyCharacter.cpp::IsTargetInAttackRange`
+- Commit：`78adeaa 修复敌人近距离后退和无法攻击`
 
 ## 5. 当前未闭环事项
 
