@@ -39,6 +39,9 @@ void UfpstrueWeaponComponent::StopFire()
 	{
 		Character->NotifyFireStopped();
 	}
+
+	ConsecutiveShotCount = 0;
+	LastShotTimeSeconds = -1.0;
 	OnWeaponFireStopped.Broadcast();
 }
 void UfpstrueWeaponComponent::Fire()
@@ -100,6 +103,8 @@ void UfpstrueWeaponComponent::NotifyReloadFinished()
 
 void UfpstrueWeaponComponent::NotifyFireStoppedByCharacter()
 {
+	ConsecutiveShotCount = 0;
+	LastShotTimeSeconds = -1.0;
 	OnWeaponFireStopped.Broadcast();
 }
 
@@ -107,10 +112,33 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 {
 	const FVector Start = Camera->GetComponentLocation();
 	const FVector Forward = Camera->GetForwardVector();
-	const float SpreadAngle = Character->IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle;
-	const FVector ShotDirection = SpreadAngle > 0.0f
-		? FMath::VRandCone(Forward, FMath::DegreesToRadians(SpreadAngle))
-		: Forward;
+
+	const double CurrentTimeSeconds = World->GetTimeSeconds();
+	if (LastShotTimeSeconds < 0.0 || CurrentTimeSeconds - LastShotTimeSeconds > SpreadResetDelay)
+	{
+		ConsecutiveShotCount = 0;
+	}
+
+	const float BaseSpreadAngle = Character->IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle;
+	const float ContinuousSpreadAngle = FMath::Clamp(
+		ConsecutiveShotCount * ContinuousFireSpreadStep,
+		0.0f,
+		MaxContinuousFireSpreadAngle);
+	const float TotalSpreadAngle = BaseSpreadAngle + ContinuousSpreadAngle;
+	LastShotTimeSeconds = CurrentTimeSeconds;
+	++ConsecutiveShotCount;
+
+	FVector ShotDirection = Forward;
+	if (TotalSpreadAngle > 0.0f)
+	{
+		const float SpreadRadius = FMath::Tan(FMath::DegreesToRadians(TotalSpreadAngle));
+		const FVector2D SpreadOffset = FMath::RandPointInCircle(SpreadRadius);
+		ShotDirection = (
+			Forward
+			+ Camera->GetRightVector() * SpreadOffset.X
+			+ Camera->GetUpVector() * SpreadOffset.Y).GetSafeNormal();
+	}
+
 	const FVector End = Start + ShotDirection * LineTraceRange;
 
 	FHitResult HitResult;
@@ -130,7 +158,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
 
-	// 保留射线可视化代码用于排错，正常游戏和性能测试时不绘制。
+	// Keep debug trace drawing optional so normal gameplay is not filled with lines.
 	/*
 	if (bShowDebugTrace)
 	{

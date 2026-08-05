@@ -66,6 +66,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
 	float AimFireSpreadAngle = 0.25f;
 
+	/** Extra spread added for each consecutive automatic shot, in degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
+	float ContinuousFireSpreadStep = 0.35f;
+
+	/** Maximum extra spread added by continuous fire, in degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
+	float MaxContinuousFireSpreadAngle = 2.5f;
+
+	/** Time without firing before continuous spread resets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Spread")
+	float SpreadResetDelay = 0.25f;
+
 	/** Upward camera kick applied after each shot. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Recoil")
 	float RecoilPitch = 1.0f;
@@ -125,4 +137,7 @@ private:
 
 	/** The Character holding this weapon*/
 	AfpstrueCharacter* Character;
+
+	int32 ConsecutiveShotCount = 0;
+	double LastShotTimeSeconds = -1.0;
 };
