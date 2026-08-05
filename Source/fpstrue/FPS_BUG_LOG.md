@@ -523,6 +523,40 @@ ZenShared: Disabled because Host is set to 'None'
 
 在恢复验证完成前，不删除现有工程、备份副本或缓存目录。清理必须建立在明确路径、可恢复备份和验证结果之上。
 
+### FPS-013：敌人近距离后退并且无法攻击
+
+**状态：代码已修复，等待 PIE 回归**
+
+**现象**
+
+- 敌人已经贴近玩家，仍可能继续调整路径或向后退。
+- 视觉上进入近战距离后，攻击状态仍不稳定触发。
+
+**根因**
+
+原逻辑只比较敌人和玩家 Actor 原点之间的距离与 `AttackRange`。角色胶囊体在两个原点真正靠到该距离之前已经发生接触，因此 AIController 可能无法继续前进，同时 `IsTargetInAttackRange()` 仍返回 `false`。
+
+**处理**
+
+- 保留 `fps-v1` 已有的 `EnemyAIController / NavMesh / SurroundManager` 架构。
+- 有效攻击距离取配置的 `AttackRange` 与“敌方胶囊半径 + 玩家胶囊半径 + 5 cm 容差”的较大值。
+- 不改变蓝图公开函数签名，也不要求重新连接现有蓝图节点。
+
+**验证方法**
+
+- 在 PIE 中让敌人从不同方向靠近静止和移动中的玩家。
+- 观察敌人接触胶囊边界后是否停止后退，并稳定进入攻击状态。
+- 同时验证多个敌人的环绕槽位和攻击令牌没有被该修复破坏。
+
+**剩余风险**
+
+胶囊尺寸、攻击动画根运动或不同敌人类型变化后，仍需分别调整 `AttackRange` 与动画命中窗口。
+
+**相关文件或提交**
+
+- `fpstrueEnemyCharacter.cpp::IsTargetInAttackRange`
+- `b9ac72f Fix v1 combat range and sustained-fire spread`
+
 ## 5. 当前未闭环事项
 
 以下内容是已确认缺口，不应在简历中写成已经完成：

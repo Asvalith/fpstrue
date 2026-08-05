@@ -1,6 +1,34 @@
 # fpstrue 项目阶段总结
 
-更新时间：2026-07-29
+更新时间：2026-08-05
+
+## 0. `fps-v1` 当前权威快照
+
+`fps-v1` 是当前作品集单机 FPS Demo 的发布分支。核心调用链已经形成：
+
+```text
+Enhanced Input
+-> Character / WeaponComponent
+-> WeaponDataAsset
+-> LineTrace 命中判定
+-> Damage / HealthComponent
+-> Blueprint 动画、音效、粒子和 UI 表现
+```
+
+当前分支在模板基础上已经形成以下工程化模块：
+
+- Data Asset 驱动的武器公共配置，以及 Rifle / Shotgun 组件子类。
+- 摄像机 Hitscan 判定与枪口视觉子弹分离，支持伤害、冲量、命中事件和表现层扩展。
+- `EnemyAIController + NavMesh + SurroundManager` 的敌人寻路、环绕槽位和攻击令牌系统。
+- `GameMode` 驱动的波次生成、敌人计数和胜负流程基础。
+- C++ 负责规则与状态，Blueprint 负责动画、音效、粒子、贴花和 UI 的分层边界。
+
+2026-08-05 完成两项针对 `fps-v1` 架构的修复：
+
+- 连续射击扩散改为相机平面圆盘采样，扩散步长、上限和重置时间由 `WeaponDataAsset` 配置；霰弹枪同一次开火的多颗弹丸共享同一级扩散。
+- 敌人有效攻击距离同时考虑敌我胶囊体半径，避免模型已经接触但 Actor 原点距离仍超过 `AttackRange`，从而反复后退或无法进入攻击状态。
+
+当前仍需完成 PIE 回归、HUD 与胜负/重开闭环、固定压力测试和最终录屏证据。迁移地图与美术素材不计作自研图形学成果；多人合作项目位于独立仓库，图形学内容保持为后续加分项。
 
 ## 1. 项目定位
 
