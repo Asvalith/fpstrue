@@ -18,6 +18,31 @@
 
 #define FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG 0
 
+namespace
+{
+FVector MakeUniformSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
+{
+	const FVector AimDirection = Forward.GetSafeNormal();
+	if (AimDirection.IsNearlyZero() || SpreadAngleDegrees <= KINDA_SMALL_NUMBER)
+	{
+		return AimDirection;
+	}
+
+	FVector Right;
+	FVector Up;
+	AimDirection.FindBestAxisVectors(Right, Up);
+
+	const float DiskRadius = FMath::Tan(FMath::DegreesToRadians(SpreadAngleDegrees));
+	const float Radius = FMath::Sqrt(FMath::FRand()) * DiskRadius;
+	const float Angle = FMath::FRand() * 2.0f * PI;
+	const FVector Offset =
+		Right * (FMath::Cos(Angle) * Radius)
+		+ Up * (FMath::Sin(Angle) * Radius);
+
+	return (AimDirection + Offset).GetSafeNormal();
+}
+}
+
 
 UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 {
@@ -146,16 +171,9 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 {
 	const FVector Start = Camera->GetComponentLocation();
 	const FVector Forward = Camera->GetForwardVector();
-	FVector ShotDirection = Forward;
-	if (SpreadAngle > 0.0f)
-	{
-		const float SpreadRadius = FMath::Tan(FMath::DegreesToRadians(SpreadAngle));
-		const FVector2D SpreadOffset = FMath::RandPointInCircle(SpreadRadius);
-		ShotDirection = (
-			Forward
-			+ Camera->GetRightVector() * SpreadOffset.X
-			+ Camera->GetUpVector() * SpreadOffset.Y).GetSafeNormal();
-	}
+	const FVector ShotDirection = SpreadAngle > 0.0f
+		? MakeUniformSpreadDirection(Forward, SpreadAngle)
+		: Forward;
 	const FVector End = Start + ShotDirection * GetConfiguredTraceRange();
 
 	FHitResult HitResult;

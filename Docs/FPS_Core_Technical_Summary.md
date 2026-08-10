@@ -200,7 +200,7 @@ ReserveAmmo -= AmmoToLoad;
 Start = Camera World Location
 Forward = Camera Forward Vector
 Spread = 瞄准或腰射散布角
-ShotDirection = VRandCone(Forward, Spread)
+ShotDirection = UniformDiskSpread(Forward, Spread)
 End = Start + ShotDirection * LineTraceRange
 ```
 
@@ -209,6 +209,8 @@ End = Start + ShotDirection * LineTraceRange
 - 射程：`10000`。
 - 腰射散布：`1.5` 度。
 - 瞄准散布：`0.25` 度。
+
+散布方向使用圆盘均匀采样：在准星前方单位平面上生成 `sqrt(Random)` 半径和 `0~2π` 角度的随机偏移，再把 `Forward + Offset` 归一化为射线方向。这样散布面积更接近准星圆内均匀分布，避免直接均匀随机半径造成中心过密。
 
 ### 4.2 查询规则
 

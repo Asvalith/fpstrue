@@ -1333,3 +1333,94 @@ Over Budget = 0 MB
 + 优化后资源占用下降且帧时间没有明显退化
 -> FPS 性能与纹理资源实验封版，不再增加新系统。
 ```
+
+## 24. 弹道散布均匀采样优化
+
+### 24.1 问题来源
+
+武器散布的目标不是“随机偏一下枪口”，而是在准星附近形成可控、稳定、符合玩家预期的命中分布。当前项目使用 Camera LineTrace 作为真实命中，散布方向会直接影响命中概率、腰射手感、霰弹类武器的覆盖范围，以及后续准星扩散表现。
+
+如果直接在极坐标中让半径 `r` 在 `[0, R]` 上均匀随机，视觉上会出现中心更密、边缘更稀的问题。原因是圆盘外圈面积更大，但每个半径区间获得的样本数相同，单位面积上的点数就不一致。拒绝采样可以保证均匀，但每次都要先在正方形里采样再丢弃圆外点，命中计算中没有必要引入这种额外循环。
+
+### 24.2 优化思路
+
+采用圆盘均匀采样：
+
+```text
+theta = Random(0, 2π)
+radius = sqrt(Random(0, 1)) * SpreadRadius
+x = cos(theta) * radius
+y = sin(theta) * radius
+```
+
+`sqrt(Random)` 的意义是让半径分布跟圆面积匹配。圆面积随 `r^2` 增长，因此先对面积比例做均匀随机，再开平方得到半径，才能让单位面积内的样本密度更接近一致。
+
+在项目里，`SpreadAngle` 仍然保持原来的角度配置含义。实现时把角度转换为准星前方单位平面上的圆盘半径：
+
+```text
+SpreadRadius = tan(SpreadAngle)
+ShotDirection = Normalize(Forward + Right * x + Up * y)
+```
+
+这样蓝图和 DataAsset 中已有的腰射、瞄准散布角不用重新配置，真实命中仍然走原来的 `LineTraceSingleByChannel`。
+
+### 24.3 修改位置
+
+实现位置：
+
+- `Source/fpstrue/fpstrueWeaponComponent.cpp`
+- `UfpstrueWeaponComponent::FireSingleLineTrace`
+- `MakeUniformSpreadDirection`
+
+本次把原先的方向随机：
+
+```text
+FMath::VRandCone(Forward, SpreadAngle)
+```
+
+替换为：
+
+```text
+MakeUniformSpreadDirection(Forward, SpreadAngle)
+```
+
+保留内容：
+
+- Camera LineTrace 命中链路不变。
+- 头部和身体差异伤害不变。
+- 连续射击散布叠加不变。
+- 瞄准时散布降低不变。
+- 调试射线仍通过测试宏控制，默认不显示。
+
+### 24.4 预期效果
+
+这次优化主要改善“弹道分布质量”，不是 CPU 性能优化。
+
+预期变化：
+
+- 腰射散布在准星圆范围内更均匀。
+- 不会因为半径采样错误导致中心异常密集。
+- 霰弹多射线时，每颗弹丸覆盖圆盘面积更自然。
+- 保持原有角度参数，避免重新调一整套武器数值。
+
+当前还没有保存命中点热力图或固定随机种子 A/B 数据，因此不能写成“命中率提升 X%”。更准确的表述是：弹道散布采样方式已从通用圆锥随机改为面积均匀圆盘采样，分布正确性更容易解释和验证。
+
+### 24.5 验收方法
+
+建议后续用固定场景验证：
+
+```text
+固定相机位置
+固定靶墙距离
+关闭后坐力或固定输入
+连续射击 500~1000 发
+记录 HitResult.ImpactPoint
+对比命中点热力图
+```
+
+判断标准：
+
+- 点云应覆盖准星圆范围。
+- 中心和边缘不应出现明显非预期密度偏差。
+- 瞄准模式点云半径应明显小于腰射。
+- 连续射击叠加散布时，点云半径应随 `ConsecutiveShotCount` 增大并受 `MaxContinuousFireSpreadAngle` 限制；停止射击超过 `SpreadResetDelay` 后应恢复基础散布。
