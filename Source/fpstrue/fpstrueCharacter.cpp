@@ -283,6 +283,7 @@ void AfpstrueCharacter::StartReload()
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
 	const float ActualReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
 
+	// TODO: Route reload through one weapon-action transition so aim, sprint, fire, and animation close together.
 	bIsAiming = false;
 	NotifyFireStopped();
 	if (EquippedWeaponComponent != nullptr)
@@ -308,6 +309,7 @@ void AfpstrueCharacter::StartReload()
 
 	UE_LOG(LogTemplateCharacter, Warning, TEXT("Start Reload"));
 
+	// TODO: Keep this timer as a watchdog; normal ammo commit and unlock should follow the reload montage lifecycle.
 	GetWorldTimerManager().SetTimer(
 		ReloadTimerHandle,
 		this,
@@ -319,6 +321,7 @@ void AfpstrueCharacter::StartReload()
 
 void AfpstrueCharacter::FinishReload()
 {
+	// TODO: Reject stale callbacks with a reload sequence id before committing ammo.
 	const int32 AmmoNeeded = MagazineSize - CurrentAmmo;
 	const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
 

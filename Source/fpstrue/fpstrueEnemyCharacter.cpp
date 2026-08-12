@@ -7,6 +7,7 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/DamageEvents.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -52,6 +53,39 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	{
 		LastAttackTime = World->GetTimeSeconds();
 	}
+}
+
+float AfpstrueEnemyCharacter::TakeDamage(
+	float DamageAmount,
+	FDamageEvent const& DamageEvent,
+	AController* EventInstigator,
+	AActor* DamageCauser)
+{
+	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+	{
+		const FPointDamageEvent* PointDamageEvent = static_cast<const FPointDamageEvent*>(&DamageEvent);
+		LastDamageDirection = PointDamageEvent->ShotDirection.GetSafeNormal();
+		LastDamageLocation = PointDamageEvent->HitInfo.ImpactPoint;
+		LastDamageBoneName = PointDamageEvent->HitInfo.BoneName;
+	}
+	else if (DamageCauser != nullptr)
+	{
+		LastDamageDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
+		LastDamageLocation = GetActorLocation();
+		LastDamageBoneName = NAME_None;
+	}
+
+	if (LastDamageDirection.IsNearlyZero())
+	{
+		LastDamageDirection = GetActorForwardVector() * -1.0f;
+	}
+
+	if (LastDamageLocation.IsNearlyZero())
+	{
+		LastDamageLocation = GetActorLocation();
+	}
+
+	return Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 }
 
 float AfpstrueEnemyCharacter::GetDistanceToTarget2D() const
@@ -514,9 +548,32 @@ void AfpstrueEnemyCharacter::HandleDeath()
 
 	OnEnemyDeathReported.Broadcast(this);
 	OnEnemyDied();
+	GetWorldTimerManager().SetTimerForNextTick(this, &AfpstrueEnemyCharacter::ApplyDeathImpulse);
 
 	if (bDestroyOnDeath)
 	{
 		SetLifeSpan(DestroyDelay);
 	}
+}
+
+void AfpstrueEnemyCharacter::ApplyDeathImpulse()
+{
+	USkeletalMeshComponent* CharacterMesh = GetMesh();
+	if (CharacterMesh == nullptr || !CharacterMesh->IsSimulatingPhysics())
+	{
+		return;
+	}
+
+	const FVector ImpulseDirection =
+		(LastDamageDirection + FVector::UpVector * DeathImpulseUpwardBias).GetSafeNormal();
+	if (ImpulseDirection.IsNearlyZero())
+	{
+		return;
+	}
+
+	CharacterMesh->AddImpulseAtLocation(
+		ImpulseDirection * DeathImpulseStrength,
+		LastDamageLocation,
+		LastDamageBoneName
+	);
 }

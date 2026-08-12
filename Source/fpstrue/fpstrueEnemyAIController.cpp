@@ -247,8 +247,6 @@ bool AfpstrueEnemyAIController::PrepareDecisionContext()
 		TargetCharacter = ResolveTarget();
 	}
 
-	ControlledEnemy->SetTargetCharacter(TargetCharacter);
-
 	if (!IsTargetUsable(TargetCharacter))
 	{
 		ReleaseSurroundResources(true);
@@ -256,6 +254,12 @@ bool AfpstrueEnemyAIController::PrepareDecisionContext()
 		StopMovement();
 		bHasMoveGoal = false;
 		return false;
+	}
+
+	ControlledEnemy->SetTargetCharacter(TargetCharacter);
+	if (SurroundManager != nullptr)
+	{
+		SurroundManager->SetTargetCharacter(TargetCharacter);
 	}
 
 	ControlledEnemy->UpdatePerformanceTier(ControlledEnemy->GetDistanceToTarget2D());

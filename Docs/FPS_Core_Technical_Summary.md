@@ -1,6 +1,6 @@
 # FPS 项目统一复习主线
 
-> 核对基线：UE 5.5，代码与实验记录截至 2026-08-01。
+> 核对基线：UE 5.5，代码与实验记录截至 2026-08-04。
 >
 > 本文以当前 C++ 为事实来源。蓝图动画、Timer、音效和后处理属于编辑器资产配置，标记为“蓝图约定”或“需回归验证”。
 >
@@ -128,6 +128,80 @@ ReserveAmmo = 90
 1. 换弹中或死亡时拒绝开火。
 2. `CurrentAmmo <= 0` 时调用 `RequestReload()`，不产生射击。
 3. 其他情况执行 `CurrentAmmo--` 并返回成功。
+
+### 2.5 武器配置扩展边界
+
+> 状态：**数据接口已接入，但当前正式版仍只有一套主要枪械规则。**
+
+项目曾验证 Rifle/Shotgun 派生组件的可行性。由于两者唯一差异只是每次开火的射线数量，继续保留派生类会增加类型和蓝图迁移成本。现在统一由 `UfpstrueWeaponComponent` 执行开火，通过 `UfpstrueWeaponDataAsset` 的 `WeaponFamily` 与 `PelletsPerShot` 决定单射线或多射线。
+
+当前关系如下：
+
+```text
+UfpstrueWeaponComponent（通用开火和命中规则）
+├── Rifle：单条射线
+└── Shotgun：按 PelletsPerShot 产生多条射线
+
+UfpstrueWeaponDataAsset（静态配置）
+├── 弹匣、备弹和换弹时间
+├── 射程、冲量和身体/头部伤害
+└── 腰射/瞄准散布、后坐力和霰弹数量
+
+AfpstrueCharacter（实例运行状态）
+└── CurrentAmmo、ReserveAmmo、Reloading 等
+```
+
+该方案区分两类数据：
+
+- DataAsset 保存多实例共享、可在编辑器配置的静态参数。
+- Character/WeaponComponent 保存当前弹药、换弹和装备状态，不能写回共享 DataAsset。
+
+拾取配置调用链：
+
+```text
+OnPickUp
+-> WeaponComponent::AttachWeapon(TargetCharacter)
+-> ApplyWeaponConfiguration
+-> Character::ConfigureAmmoFromWeapon
+-> 初始化弹匣、备弹和换弹时长
+-> SetEquippedWeaponComponent
+```
+
+数据驱动的多射线调用链：
+
+```text
+WeaponComponent::Fire
+-> FireLineTrace
+-> GetTraceCount
+   ├── Rifle = 1
+   └── Shotgun = WeaponData.PelletsPerShot（默认 8）
+-> 循环调用 FireSingleLineTrace
+-> 每条射线独立计算散布、命中和伤害
+```
+
+如果未来确实需要步枪、霰弹枪等多种武器，继续扩展该方案的依据是：
+
+1. **配置与规则分离**：增加武器时优先创建配置资产，不必复制伤害、散布和后坐力代码。
+2. **在窄入口隔离差异**：基类保留公共射击链，只在 `GetTraceCount()` 根据数据决定射线数量，避免复制整套射击逻辑。
+3. **渐进迁移**：基类支持可选 DataAsset，并保留原参数回退；确认第二种武器确有需求后，再增加真正不同的行为策略。
+4. **控制范围**：即使启用，也只解决“单射线/多射线 + 数据配置”，不顺带引入武器工厂、背包或 GAS。
+
+当前正式版边界：
+
+- 蓝图统一使用 `UfpstrueWeaponComponent`，不再替换 Rifle/Shotgun 派生组件。
+- 未配置 WeaponData 时继续回退组件默认参数，保持现有蓝图兼容。
+- 当前没有正式配置第二把武器，因此不能把数据接口描述为已经完成的多武器玩法。
+- 只有出现换弹、射击模式或弹药规则明显不同的武器时，才考虑增加新的行为策略，而不是仅因参数不同创建派生类。
+
+未来启用时需要重点验证：
+
+| 现象 | 根因 | 检查与处理 |
+| --- | --- | --- |
+| 修改 DataAsset 后参数没有变化 | 蓝图仍使用基类组件，或 WeaponData 没有赋值 | 检查组件真实 Class 和 WeaponData 引用；空引用会按设计回退旧参数 |
+| Shotgun 仍只产生一条射线 | WeaponData 未赋值、WeaponFamily 不是 Shotgun，或 PelletsPerShot 配置错误 | 检查组件的 WeaponData 引用与数据资产字段 |
+| 拾取后弹药被重置 | `AttachWeapon` 会调用 `ConfigureAmmoFromWeapon` 初始化该武器弹药 | 当前只支持单持有武器；未来多武器切换需把每把武器弹药状态移回武器实例 |
+| 多个武器实例互相修改配置 | 错把运行状态写进共享 DataAsset | DataAsset 只读；CurrentAmmo 等状态只保存在实例对象中 |
+| 旧蓝图突然失效 | 不是 DataAsset 的必然结果，优先检查拾取事件 Target、组件类和 AttachWeapon 返回值 | 按 `OnPickUp -> AttachWeapon -> Branch` 逐段断点，不先重接整张蓝图 |
 
 ## 3. 换弹
 
@@ -820,6 +894,161 @@ UI/关卡确认开始
 | 工业场景材质缺失 | 日志指出 `/Game/FactoryDistrict/Materials/Black` 等引用不完整 | 修复 Redirector/缺失资产或替换材质；这属于资源完整性，不是内存泄漏 | 待资源回归 |
 | 担心 Timer、Delegate、Widget、尸体泄漏 | 仅凭内存峰值不能判断泄漏 | 固定多轮 Spawn/Kill/Wait GC，记录 Actor/UObject 数和内存是否回落；Delegate/Timer 在死亡和 EndPlay 清理 | 生命周期代码已有，完整内存曲线待测 |
 
+### 16.8 历史 Bug 编号与完整复盘
+
+本节合并原 `FPS_BUG_LOG.md` 的历史记录。编号用于追踪开发过程中真实出现的问题；状态表示目前证据边界，不因文档合并而自动视为完成。
+
+| ID | 问题 | 分类 | 当前状态 |
+| --- | --- | --- | --- |
+| FPS-001 | Enhanced Input Action 未赋值导致按键无响应 | 输入/蓝图配置 | 部分修复 |
+| FPS-002 | 射击、换弹、瞄准和死亡状态互相冲突 | Gameplay 状态 | 部分修复 |
+| FPS-003 | 连续射击 Timer 与单发射击职责不清 | 武器架构 | 部分修复 |
+| FPS-004 | 视觉子弹与真实命中职责混淆 | 射击架构 | 已修复 |
+| FPS-005 | 玩家、靶子和敌人血量逻辑重复 | 组件设计 | 已修复 |
+| FPS-006 | 死亡后仍可能残留移动、攻击或换弹逻辑 | 生命周期 | 部分修复 |
+| FPS-007 | Reload Montage 无法稳定播放 | 动画/蓝图 | 部分修复 |
+| FPS-008 | 敌人可以被命中但血痕贴花不显示 | 材质/贴花 | 已修复 |
+| FPS-009 | 敌人只能直线追逐，遇到障碍表现异常 | AI | 部分修复 |
+| FPS-010 | UE 启动时报 DDC 没有可写节点 | 编辑器环境 | 临时绕过 |
+| FPS-011 | 打开错误工程副本并产生重复 UE 进程 | 工程管理 | 已修复 |
+| FPS-012 | 构建产物、生成文件和未跟踪资源混杂 | Git/构建 | 待处理 |
+| FPS-013 | 敌人近距离后退并且无法攻击 | AI/碰撞距离 | 代码已修复，等待 PIE 回归 |
+
+#### FPS-001：Enhanced Input Action 未赋值
+
+**现象**：冲刺、瞄准或换弹没有响应。C++ 已执行输入绑定，但角色蓝图中的 `RunAction`、`AimAction` 或 `ReloadAction` 引用为空。
+
+**根因**：`UInputAction` 属性由蓝图实例配置。C++ 声明和 `BindAction` 存在，并不代表资产引用已经赋值；复制或替换 Pawn 后也可能再次丢失。
+
+**处理与验证**：绑定前输出缺失 Action，在 `BP_FirstPersonCharacter` 默认值中补齐引用。PIE 中分别触发三种输入，确认没有 `Action is NULL`，并检查对应状态变化。封版前还要重新检查关卡实际使用的 Default Pawn。
+
+#### FPS-002：战斗状态互相冲突
+
+**现象**：换弹期间仍可能收到射击输入；空仓自动换弹与手动换弹重复进入；瞄准、冲刺和换弹可能同时激活；死亡后仍残留射击或换弹状态。
+
+**根因**：早期依赖多个独立布尔值和输入事件，没有统一状态入口与互斥规则。
+
+**处理**：增加 `Idle / Moving / Reloading / Dead` 状态，使用 `CanReload()`、`CanFireWeapon()` 和 `TryConsumeAmmo()` 统一校验；换弹开始停止开火，死亡时清理 Reload Timer、移动和武器状态。
+
+**验证边界**：需继续覆盖长按开火时换弹、空仓持续开火、换弹中死亡、瞄准或冲刺中换弹。当前已发现固定时长 Timer 可能早于 Montage 结束解锁射击，因此换弹仍是 P0 技术债。
+
+#### FPS-003：连续射击职责不清
+
+**现象**：`StartFire`、`StopFire` 与 `Fire` 的语义混合，蓝图 Timer 和 C++ 调用可能重复射击，停止射击或换弹后表现 Timer 仍可能运行。
+
+**根因**：输入生命周期、射速调度和单次射击规则没有明确分层。
+
+**处理**：`StartFire()` 只进入开火状态，`Fire()` 只执行一次射击尝试，`StopFire()` 只退出状态。弹药、换弹和死亡限制走统一规则入口。
+
+**验证边界**：单击应只消耗一发，长按按射速消耗，松开应立即停止；换弹、死亡和空仓必须停止调度。当前射速 Timer 仍在 `BP_Weapon`，后续应迁入 C++，避免两套调度源。
+
+#### FPS-004：视觉子弹与真实命中混淆
+
+**现象**：枪口发出的视觉子弹与摄像机准星射线可能不重合，调整视觉子弹速度还可能改变命中表现。
+
+**根因**：Gameplay 命中判定与曳光表现没有分开。
+
+**处理**：摄像机 Hitscan LineTrace 决定命中、伤害和冲量；`FHitResult` 或射线终点作为 `TraceTarget`；视觉子弹只从枪口飞向该目标，不决定伤害结果。
+
+**验证**：关闭视觉子弹后伤害仍正常；开启后轨迹朝向 TraceTarget；修改视觉速度不改变伤害发生时间。由此确认“规则产生结果，表现消费结果”的边界。
+
+#### FPS-005：血量逻辑重复
+
+**现象**：Player、TargetDummy 和 Enemy 分别维护生命值、受伤和死亡，规则逐渐不一致。
+
+**根因**：早期为快速验证射击，在各 Actor 内重复实现生命值逻辑。
+
+**处理**：抽取 `UfpstrueHealthComponent`，监听 Owner 的 `OnTakeAnyDamage`，统一 Clamp、死亡判断以及 `OnHealthChanged / OnDamageReceived / OnDeath` 广播。
+
+**验证**：使用同一伤害入口攻击不同 Actor，确认生命值统一扣除且死亡只广播一次。当前枪械仍对具体 Enemy 类型有依赖，后续应改为通用可伤害契约，才能让 TargetDummy 完整复用链路。
+
+#### FPS-006：死亡后残留逻辑
+
+**现象**：玩家死亡后仍瞄准、射击或换弹；敌人死亡后攻击 Timer 回调；死亡 Actor 继续移动或参与碰撞。
+
+**根因**：死亡最初只被当作生命值结果，没有作为终止其他系统的生命周期边界。
+
+**处理**：Player 进入 `Dead` 并停止移动、瞄准、开火和 Reload Timer；Enemy 清理攻击窗口和 Timer，停止 AI 与移动，关闭 Capsule 碰撞，使用 `SetLifeSpan` 延后销毁。
+
+**验证边界**：应在敌人攻击前摇期间击杀、玩家换弹期间死亡、波次结束时残留 Actor 三种情况下回归。Game Over UI、输入模式和重新开始仍需做完整闭环验收。
+
+#### FPS-007：Reload Montage 无法稳定播放
+
+**现象**：C++ 已进入换弹状态，但第一人称手臂没有稳定播放 Montage；普通换弹和空仓换弹表现不一致，或 Montage 被开火动画打断后仍能继续射击。
+
+**可能根因**：Montage 播放在错误 Mesh/AnimInstance、AnimGraph 缺少对应 Slot、蓝图监听错误 Weapon 实例，以及 C++ 固定 Timer 与 Montage 生命周期不同步。
+
+**处理方向**：C++ 管规则，蓝图只播放表现；普通与空仓换弹选择明确事件；正常弹药提交和状态解锁应由 Montage/Notify 完成，Timer 只作超时兜底，并用换弹序列号拒绝旧回调。
+
+**验证边界**：分别测试普通换弹、空仓换弹、开火中断、切换状态和换弹中死亡。该问题目前仍为 P0，不能标记为已修复。
+
+#### FPS-008：敌人血痕贴花不显示
+
+**现象**：LineTrace、Cast、声音和粒子都成功，墙面弹孔正常，但敌人 `CharacterMesh0` 没有血痕。
+
+**定位过程**：打印 Hit Actor 和 Hit Component，确认命中 SkeletalMesh 而不是 Capsule；确认 Mesh 开启 `Receives Decals`；使用墙面弹孔排除 Spawn 节点和 Decal Material 本身。
+
+**根因与修复**：敌人父材质 `Decal Response` 为 `None`。改为 `Color` 或 `Color Normal Roughness`，使用 `Spawn Decal Attached` 附着到 Hit Component，并设置有限 Life Span。
+
+**验证**：静止敌人可见血痕；移动和旋转后贴花随 Mesh；墙面仍走弹孔分支；Life Span 到期后自动清理。
+
+#### FPS-009：敌人直线追逐
+
+**现象**：旧 EnemyCharacter 使用 `AddMovementInput` 朝玩家移动，遇到障碍不会绕行，Idle/Chase/Attack/Dead 由距离和布尔值隐式表达。
+
+**根因**：原型阶段把目标选择、状态判断和移动实现都放进敌人自身 Tick。
+
+**处理**：新增 `AfpstrueEnemyAIController` 显式 FSM，关闭 EnemyCharacter 与 Controller Tick，用 Timer 驱动决策，Chase 使用 NavMesh MoveTo；保留攻击窗口、Sweep、伤害和蓝图表现。随后增加 SurroundManager 的双环槽位和攻击名额。
+
+**验证边界**：需要继续确认 `enemy_BP` 不再执行旧 Tick/Timer/AI MoveTo 节点，出生点位于绿色导航区域，并回归绕障、不可达目标以及玩家或敌人死亡后的停止行为。
+
+#### FPS-010：DDC 没有可写节点
+
+**错误**：`InstalledDerivedDataBackendGraph` 报告没有可写节点，编辑器在未打开项目时也可能 Fatal。
+
+**定位**：缓存目录可写、Zen 进程存在，但本机 `::1:8558` loopback 访问异常，默认 Installed DDC Graph 在 Zen 失效后没有其他可写节点。
+
+**临时处理**：通过 `-ddc=InstalledNoZenLocalFallback` 使用文件缓存回退，并从日志确认本地路径 Writable、ZenShared Disabled。
+
+**剩余风险**：这不是永久修复。普通快捷方式仍可能回到默认 Zen Graph，首次切换缓存还会触发 Shader 重建。正式处理应检查代理规则、IPv6 loopback 和本机防火墙。
+
+#### FPS-011：打开错误工程副本
+
+**现象**：编辑器打开名称相近的 safe1/safe2 副本，同时出现两组 UnrealEditor 和 ShaderCompileWorker，源码、DLL 与蓝图状态不一致。
+
+**根因**：Recent Projects 保留备份副本，启动时没有核对 `.uproject` 绝对路径。
+
+**处理与验证**：检查进程 CommandLine、窗口标题、项目根目录和当前 Map，只保留正确工程进程。备份应改为日期化压缩包或只读归档，避免多个可直接运行的活动副本。
+
+#### FPS-012：构建产物与项目资源混杂
+
+**现象**：`Binaries`、`Intermediate`、UHT 文件和缓存进入工作区，同时蓝图、Content 或文档存在未跟踪项，提交范围难以判断。
+
+**风险**：只提交 Source 可能遗漏真实依赖的资产；提交全部改动又会带入可再生成文件和本机缓存；旧 DLL 还可能掩盖源码是否真正编译。
+
+**治理方案**：版本控制聚焦 `.uproject / Source / Config / Content / Plugins / Docs`，通过 `.gitignore` 排除 `Binaries / Intermediate / Saved`；提交前逐项检查未跟踪资源，大型资产继续使用 Git LFS，并最终做一次干净目录恢复和 Development Editor 编译。
+
+**安全边界**：恢复验证完成前不直接删除现有工程或备份。当前工作区仍存在生成文件和来源不同的资产改动，因此每次提交必须明确筛选。
+
+#### FPS-013：敌人近距离后退并且无法攻击
+
+**现象**：敌人视觉上已经贴近玩家，却继续调整路径或后退，攻击状态不能稳定触发。
+
+**根因**：旧逻辑只比较两个 Actor 原点之间的距离与 `AttackRange`。敌我胶囊体可能先发生接触，导航无法继续缩短中心距离，但范围判断仍返回 false。
+
+**处理**：保留 `EnemyAIController / NavMesh / SurroundManager` 架构，有效攻击距离取配置 `AttackRange` 与“敌方胶囊半径 + 玩家胶囊半径 + 5 cm 容差”的较大值，不修改已有蓝图公开接口。
+
+**验证边界**：PIE 中从不同方向接近静止和移动玩家，确认胶囊接触后能稳定进入 Attack，同时检查双环槽位和攻击令牌没有被绕过。不同胶囊尺寸、根运动和攻击动画仍需分别校准。
+
+#### 当前未闭环事项
+
+1. 将换弹改为 Montage/Notify 驱动的事务，并覆盖中断矩阵。
+2. 把持续射击 Timer 从蓝图迁入 C++，建立单一射速调度源。
+3. 清理 `enemy_BP` 中旧 Tick、Timer 和移动节点并完成 NavMesh 回归。
+4. 完成 Game Over、重新开始、血量、弹药、波次和倒计时 UI 验收。
+5. 验证代理/loopback 修复后的 Zen DDC 正常启动路径。
+6. 整理 `.gitignore`、Git LFS 和资产清单，完成干净恢复测试。
+
 ## 17. 统一定位方法
 
 ### 17.1 “接口无反应”五步法
@@ -1209,6 +1438,167 @@ for (int i = n - 1; i > 0; --i)
 ## 22. 面试项目介绍总纲
 
 这一节把项目背景、实现边界、工程验证和后续方向串成一条完整叙事。面试时先讲事实，再接受追问，不要从功能清单开始背。
+
+### 22.0 完整项目介绍与框架结构
+
+#### 项目定位
+
+这是一个使用 UE5、C++ 和 Blueprint 实现的单机第一人称射击 Demo。玩家进入关卡后拾取武器，在限定时间内应对分波生成的近战敌人；系统包含射击与换弹、共享生命组件、敌人近战攻击、AI 导航与显式状态机、群体包围、HUD、胜负结算和重新开始。
+
+项目重点不是继续增加武器和玩法数量，而是围绕两个实际问题深化：
+
+1. 多个近战敌人同时追逐玩家时，怎样避免所有 AI 以玩家中心为同一目标而扎堆，并限制同时攻击人数。
+2. 高密度敌人场景中，怎样区分移动、动画、寻路和纹理资源成本，用固定场景和数据验证优化结果。
+
+#### 总体分层
+
+```text
+关卡与配置层
+TargetPoint / NavMeshBoundsVolume / 敌人蓝图 / 动画与材质资产
+                    |
+                    v
+规则协调层
+AfpstrueGameMode ---------------- AfpstrueSurroundManager
+波次、倒计时、生成、胜负          包围槽位、攻击令牌、补位与释放
+                    |
+                    v
+AI 与实体执行层
+AfpstrueEnemyAIController -------- AfpstrueEnemyCharacter
+FSM 决策、MoveTo、转向             近战执行、攻击窗口、受击和死亡
+                    |
+                    v
+战斗组件层
+AfpstrueCharacter
+  |- UfpstrueWeaponComponent      拾取、射击、弹药、换弹和后坐力
+  `- UfpstrueHealthComponent      受伤、血量、死亡和事件广播
+
+敌人和测试靶同样复用 UfpstrueHealthComponent
+                    |
+                    v
+表现层
+AnimBlueprint / Montage / AnimNotifyState / UMG / 音效 / 特效 / 后处理
+```
+
+这不是严格的传统 MVC，而是借鉴了“规则、数据状态和表现分离”的思路：C++ 对结果负责，蓝图对资产编排和视觉表现负责。`GameMode` 与 `SurroundManager` 是协调者，不直接播放动画；`AIController` 决定去哪里，`EnemyCharacter` 负责怎样执行；组件封装可复用的战斗能力。
+
+#### 核心类与职责
+
+| 类或模块 | 当前职责 | 不负责什么 |
+|---|---|---|
+| `AfpstrueGameMode` | 游戏开始防重、90 秒倒计时、波次生成、存活数量、胜负判定、Timer 清理，并向蓝图广播状态 | 不执行单个敌人的移动和攻击，不处理 HUD 样式 |
+| `AfpstrueCharacter` | 玩家输入入口、移动和战斗状态、当前武器与生命组件的持有者 | 不实现敌人 AI，不负责关卡波次 |
+| `UfpstrueWeaponComponent` | 武器拾取与挂接、开火输入、Hitscan、随机散布、弹药、普通/空仓换弹、后坐力和伤害分发 | 不直接管理敌人死亡或 UI 布局 |
+| `UfpstrueHealthComponent` | 监听伤害、Clamp 血量、保证死亡只结算一次，并用 Delegate 广播血量和死亡 | 不播放受击动画，不判断攻击是否命中 |
+| `AfpstrueEnemyAIController` | Timer 驱动的 `Idle / Chase / Attack / Dead` 决策、导航请求、停止移动和朝向更新 | 不计算最终伤害，不保存玩家 HUD |
+| `AfpstrueEnemyCharacter` | 接收 AI 决策、播放攻击接口、管理攻击窗口、双 Socket Sweep、单次攻击去重、受击与死亡清理 | 不集中分配其他敌人的站位 |
+| `AfpstrueSurroundManager` | 双环槽位、最近空槽分配、NavMesh 投影、攻击令牌、外圈补位和弱引用清理 | 不代替 Recast/Detour 寻路，不直接移动角色 |
+| `UfpstruePickUpComponent` | 处理进入拾取范围和拾取事件，把实际角色对象传给武器逻辑 | 不使用固定的 Player 0 代替事件中的拾取者 |
+| Blueprint / UMG | 动画资产选择、Montage、Notify 时间、音效、特效、镜头和界面表现 | 不作为血量、弹药、AI 和胜负规则的权威来源 |
+
+#### 一局游戏的完整运行链路
+
+```text
+1. 关卡加载
+   -> World Settings 选择 AfpstrueGameMode 的蓝图子类
+   -> 关卡提供 EnemySpawn 标签的 TargetPoint 和 NavMesh 数据
+
+2. 开始游戏
+   -> 开始界面完成输入/镜头切换
+   -> 蓝图调用 GameMode 的 StartGameMode
+   -> GameMode 防止重复开始，初始化 90 秒倒计时和第一波生成
+
+3. 生成敌人
+   -> GameMode 收集多个出生点并轮换/随机选择
+   -> SpawnActor 生成 EnemyCharacter
+   -> AIController Possess 敌人
+   -> 注入玩家目标与 SurroundManager 上下文
+
+4. AI 追逐与包围
+   -> EnemyAIController 的低频决策 Timer 更新 FSM
+   -> 敌人向 SurroundManager 请求空闲槽位
+   -> 理论环形位置投影到 NavMesh
+   -> AIController 对独立槽位执行 MoveToLocation
+   -> 到达攻击区域后申请攻击令牌；未拿到令牌则等待或补位
+
+5. 玩家射击
+   -> Enhanced Input
+   -> Character / WeaponComponent
+   -> 相机方向 LineTraceSingleByChannel
+   -> FHitResult 提供命中 Actor、位置、法线和骨骼名称
+   -> 根据普通部位或头部计算伤害
+   -> ApplyDamage
+   -> 目标 HealthComponent 更新血量并广播事件
+   -> 蓝图播放命中特效、受击动画和 HUD 表现
+
+6. 敌人近战
+   -> FSM 进入 Attack
+   -> C++ 调用 OnAttackStarted，蓝图播放 Montage
+   -> AnimNotifyState Begin 开启攻击窗口
+   -> 每帧读取 WeaponTop / WeaponEnd Socket 做连续 Sweep
+   -> TSet 记录本轮已命中 Actor，防止同一次挥砍重复扣血
+   -> ApplyDamage 到玩家 HealthComponent
+   -> Notify End、Montage 中断、敌人死亡或目标死亡均关闭窗口
+
+7. 死亡与结算
+   -> HealthComponent 只广播一次死亡
+   -> EnemyCharacter 停止移动、攻击窗口和相关 Timer
+   -> SurroundManager 释放槽位和攻击令牌
+   -> GameMode 更新存活数量
+   -> 倒计时结束时玩家存活则成功，玩家死亡则失败
+   -> 广播 OnGameResult，蓝图显示结算和重新开始界面
+```
+
+#### 数据流、控制流与表现流
+
+项目中三条流分开处理：
+
+```text
+控制流：Input / Timer / FSM / GameMode 调用函数，决定“现在做什么”
+数据流：FHitResult、血量、弹药、槽位、攻击令牌和倒计时，决定“当前状态是什么”
+表现流：Delegate / Blueprint Event / AnimNotify 驱动动画、UI、音效和特效
+```
+
+例如玩家血量不是由 UMG 每帧查询：`HealthComponent` 修改权威数据后广播 `OnHealthChanged`，Character 转发玩家语义事件，UMG 只更新显示。这样减少 Tick 轮询，也避免 UI 反过来修改 Gameplay 规则。
+
+#### 使用的数据结构与设计模式
+
+| 设计 | 项目中的落点 | 解决的问题 |
+|---|---|---|
+| 组件模式 | `WeaponComponent`、`HealthComponent`、`PickUpComponent` | 将武器、生命和交互能力从 Character 拆开并复用 |
+| 状态模式 | Character 战斗状态、敌人 FSM | 避免多个布尔变量组合产生换弹、攻击、受击和死亡冲突 |
+| 观察者模式 | Dynamic Multicast Delegate / Blueprint Event | 规则层不依赖具体 HUD、动画和音效资产 |
+| 中央协调者 | `GameMode`、`SurroundManager` | 避免每个敌人独立争抢同一位置和攻击时机 |
+| `TSet` | 单次攻击已命中对象集合、活动攻击者 | 平均常数时间查重，避免攻击窗口内重复伤害 |
+| `TArray` | 出生点、包围槽位和候选位置 | 数据连续、遍历频繁，规模小且稳定 |
+| `TMap` | 敌人与槽位的映射 | 快速查询某个敌人当前占用的槽位 |
+| `TWeakObjectPtr` | 槽位占用者和攻击者引用 | 对象销毁后可检测失效，不让管理器错误持有生命周期 |
+| Timer + 错峰 | AI 决策、波次和倒计时 | 不让所有规则都在每帧 Tick 中执行，降低同帧峰值 |
+
+#### 当前工程证据与边界
+
+已完成的工程验证包括：
+
+- 固定关卡、固定敌人数和固定采样时长下测试 20 / 40 / 80 / 100 / 160 AI。
+- 100 AI 场景 Frame Avg 为 `15.41 ms`，P95 为 `16.58 ms`；主要成本来自 CharacterMovement 和 Animation，而不是 Pathfinding。
+- 通过 `stat streaming`、CSV、`ListStreamingTextures`、`MemReport -full`、Size Map 和 Reference Viewer 定位高占用纹理。
+- 将 6 张环境/植被纹理的最大尺寸限制为 2048 后，Streaming 占用由 `212.27 MB` 降至 `152.27 MB`，下降 `60 MB`（约 `28.3%`），P95 帧时间没有明显回归。
+
+必须诚实说明的边界：
+
+- 这是单机 FPS，FPS 项目本身没有完成多人同步；RPC、属性复制和 Session 放在独立 Co-op 项目验证。
+- VSM Non-Nanite 队列警告与 Texture Streaming Pool 是不同问题，当前只完成归因，没有把 VSM 警告包装成已修复。
+- 还没有形成完整的多轮战斗内存回落曲线，因此只描述 Timer、弱引用、死亡清理和对象统计，不宣称解决了内存泄漏。
+- 武器 DataAsset 和步枪/霰弹枪派生体系属于放弃的 v2 实验，只作为可扩展方向，不写成当前正式架构。
+
+#### 面试中的完整介绍示例
+
+> 这是一个 UE5 C++ 单机 FPS 项目。早期我先完成可运行的射击原型，之后把重点从增加功能转到代码所有权和工程验证。当前结构里，GameMode 管波次、倒计时和胜负；Character 持有 WeaponComponent 与 HealthComponent；AIController 用 Timer 驱动显式 FSM 并发起 NavMesh 移动；EnemyCharacter 执行攻击和死亡；SurroundManager 集中管理站位与攻击并发；蓝图只保留动画、音效、UI 和后处理表现。
+>
+> 战斗方面，玩家使用相机射线完成 Hitscan，FHitResult 负责传递命中对象、骨骼和表面信息，统一通过 ApplyDamage 进入共享 HealthComponent。敌人近战没有使用全程碰撞，而是在 Montage 的 AnimNotifyState 窗口内，用 WeaponTop 和 WeaponEnd 两个 Socket 连续 Sweep，并使用 TSet 保证同一次挥砍只命中一次；动画中断、敌人死亡和目标死亡都会关闭攻击窗口。
+>
+> 群体 AI 是项目里最主要的补充。最初所有敌人 MoveToActor 玩家中心，出现扎堆和同时攻击。我增加了双环槽位，按当前位置分配最近空槽，将位置投影到 NavMesh，再由 AIController MoveToLocation；同时用攻击令牌限制并发攻击，敌人死亡时通过弱引用和显式释放归还槽位。这个管理器只分配目标，真正路径仍由 UE 的 Recast/Detour 导航完成。
+>
+> 最后我建立了固定敌人数的性能基线。100 AI 场景的平均帧时间是 15.41 毫秒，P95 是 16.58 毫秒，数据表明主要成本是 CharacterMovement 和 Animation，而不是寻路。我还用 Streaming 统计、内存报告、Size Map 和 Reference Viewer 定位 6 张环境纹理，在不扩大纹理池的前提下把 Streaming 占用降低了 60 MB。这个过程让我能从“功能能跑”继续讲到职责划分、问题复现、工具定位、方案取舍和量化验证。
 
 ### 22.1 项目背景与所有权
 

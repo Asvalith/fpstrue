@@ -411,6 +411,7 @@ void AfpstrueGameMode::ClearGameplayTimers()
 	GetWorldTimerManager().ClearTimer(BenchmarkStopTimerHandle);
 }
 
+// TODO: Move benchmark orchestration to a development-only runner.
 void AfpstrueGameMode::BeginAutomatedBenchmark()
 {
 	StartGameMode();

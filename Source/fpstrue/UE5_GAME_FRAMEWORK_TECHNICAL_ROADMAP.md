@@ -820,7 +820,7 @@ Camera Start / Direction
 ## 16. 相关文档
 
 - `PROJECT_PROGRESS.md`：当前功能和蓝图进度。
-- `FPS_BUG_LOG.md`：真实 Bug、环境故障和排查记录。
+- `Docs/FPS_Core_Technical_Summary.md` 第 16 章：真实 Bug、环境故障和排查记录。
 - `AI_OPTIMIZATION_DECISION_RECORD.md`：AI 架构、性能取舍和决策记录。
 - `PERFORMANCE_BASELINE.md`：固定场景、指标与回归测试基线。
 - `FPS_PORTFOLIO_ACCEPTANCE_PLAN.md`：作品集封版范围和验收标准。

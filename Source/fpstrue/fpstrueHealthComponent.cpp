@@ -11,6 +11,7 @@ void UfpstrueHealthComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// TODO: Replay the initial snapshot after owner listeners bind; this broadcast currently happens too early.
 	ResetHealth();
 
 	if (AActor* Owner = GetOwner())

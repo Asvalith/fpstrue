@@ -68,6 +68,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual float TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
 	UFUNCTION()
 	void HandleDeath();
@@ -123,6 +124,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	bool bDestroyOnDeath = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Death|Physics", meta = (ClampMin = "0.0"))
+	float DeathImpulseStrength = 70000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Death|Physics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DeathImpulseUpwardBias = 0.15f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance")
 	bool bEnableMovementUpdateTiering = true;
 
@@ -165,6 +172,7 @@ private:
 	void FinishAttack();
 	bool CanAttack() const;
 	void SetAttackAnimationPriority(bool bHighPriority);
+	void ApplyDeathImpulse();
 
 	UPROPERTY()
 	AfpstrueCharacter* TargetCharacter;
@@ -179,6 +187,9 @@ private:
 
 	FVector PreviousWeaponBase = FVector::ZeroVector;
 	FVector PreviousWeaponTip = FVector::ZeroVector;
+	FVector LastDamageDirection = FVector::ForwardVector;
+	FVector LastDamageLocation = FVector::ZeroVector;
+	FName LastDamageBoneName = NAME_None;
 	TSet<TWeakObjectPtr<AActor>> HitActorsThisAttack;
 
 	FTimerHandle AttackFinishTimerHandle;

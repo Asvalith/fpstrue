@@ -119,7 +119,7 @@ protected:
 	UFUNCTION()
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	virtual int32 GetTraceCount() const;
+	int32 GetTraceCount() const;
 
 private:
 	void StartFire();

@@ -56,6 +56,7 @@ void UfpstrueWeaponComponent::StartFire()
 		return;
 	}
 
+	// TODO: Own automatic-fire cadence here; Blueprint should only react to single-shot presentation events.
 	Character->NotifyFireStarted();
 	OnWeaponFireStarted.Broadcast();
 }
@@ -226,6 +227,7 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 		}
 #endif
 
+		// TODO: Use a generic damageable contract; hit-zone rules should not require the enemy character class.
 		if (AfpstrueEnemyCharacter* HitEnemy = Cast<AfpstrueEnemyCharacter>(HitResult.GetActor()))
 		{
 			const FString HitBoneName = HitResult.BoneName.ToString().ToLower();
@@ -278,6 +280,11 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 
 int32 UfpstrueWeaponComponent::GetTraceCount() const
 {
+	if (WeaponData != nullptr && WeaponData->WeaponFamily == EFPWeaponFamily::Shotgun)
+	{
+		return FMath::Max(1, WeaponData->PelletsPerShot);
+	}
+
 	return 1;
 }
 
