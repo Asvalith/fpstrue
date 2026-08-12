@@ -3560,3 +3560,2409 @@ Substepping 的重点是“用更多小步换稳定性”，不是性能优化�
 ```
 
 如果题目没有给规模、帧率和玩法要求，应主动问或声明假设。没有数据时说“我会先采集这些指标”，不要直接给出虚构的性能结论。
+
+## 25. 腾讯 FPS 教程对照：当前深度、完成度与升级条件
+
+### 25.1 对照方法：目录覆盖不等于技术深度
+
+这份教程覆盖武器、3C、网络、反外挂、性能和开发流程，适合作为 FPS 客户端知识地图。但评估当前项目时必须拆成三个维度：
+
+1. **功能覆盖**：教程提到的功能是否存在。
+2. **实现深度**：功能是否有明确所有权、状态机、生命周期、中断和异常路径。
+3. **工程证据**：是否有源码、蓝图回归、日志、性能数据或固定测试矩阵。
+
+本文采用以下分级：
+
+| 级别 | 含义 | 判断标准 |
+| --- | --- | --- |
+| L0 | 概念了解 | 能解释名词，但项目没有运行链 |
+| L1 | 原型可用 | 正常路径可运行，边界和失败路径较少 |
+| L2 | 系统闭环 | 有职责边界、状态门禁、中断清理、幂等和事件链 |
+| L3 | 工程化 | 有规模化策略、定量数据、固定回归和明确替换条件 |
+| L4 | 生产级 | 还包含网络权威、安全、平台适配、工具链和长期维护约束 |
+
+当前项目整体位于 **L2**。其中群体 AI、近战命中治理和性能归因接近 L3；3C 手感、UI/蓝图验收仍处于 L1 到 L2；网络和反外挂在本项目中是 L0，因为 Co-op 已暂停，不能把设计知识写成已实现。
+
+如果把教程中的多人网络、反外挂、移动端、匹配和多玩法模式全部算入，当前运行功能覆盖约为 **45%**。如果只看本项目承诺的单机 PvE FPS 核心，代码完成度约为 **70%**，但带编辑器回归和性能证据的封闭完成度低于代码完成度。百分比用于定位差距，不作为质量指标。
+
+### 25.2 分章节结论
+
+| 教程主题 | 当前状态 | 深度判断 | 主要证据或缺口 |
+| --- | --- | --- | --- |
+| FPS 基础闭环 | 已实现 | L2 | 第一人称移动、跳跃、冲刺、瞄准、射击、敌人、波次和胜负链已存在 |
+| 武器架构 | 部分实现 | L2 | Character 只转发意图，WeaponComponent 拥有弹药、射速、换弹和命中；尚无正式 WeaponData 资产与多武器切换验收 |
+| Hitscan | 已实现 | L2 | 相机射线、过滤、散布、点伤害、物理冲量和表现事件已接通 |
+| Projectile/混合弹道 | 未实现 | L0 | 当前设计不需要飞行时间和下坠，旧 Projectile 路径不作为成果 |
+| 散布 | 核心已实现 | L2 | 瞄准与持续射击影响散布，使用圆盘面积均匀采样；尚缺移动、空中和姿态因子 |
+| 后坐力 | 部分实现 | L1-L2 | 有机械 Pitch/Yaw 后坐力；尚缺恢复曲线、固定模式和独立 ViewModel 后坐表现 |
+| 弹药与换弹 | C++ 已实现，蓝图未闭环 | L2 | 有动作状态、序列号、Commit 幂等和超时恢复；Notify 与 Montage 中断仍需接线验收 |
+| 伤害 | 核心已实现 | L2 | PointDamage、头/身体差异、HealthComponent 和死亡幂等已完成；通用 Damageable、距离衰减、护甲和穿透未完成 |
+| Character | 核心已实现 | L2 | Enhanced Input、移动、冲刺、瞄准、死亡协调；输入语义和移动参数调优证据不足 |
+| Camera | 部分实现 | L1 | 第一人称相机和 OnAimChanged 接口存在；ADS FOV、ViewModel FOV、靠墙收枪与屏幕反馈缺少完整证据 |
+| Control | 基础实现 | L1 | 键鼠和 Enhanced Input 可用；没有用户灵敏度、ADS 倍率、手柄曲线和辅助瞄准系统 |
+| AI 与对局 | 已实现 | L2-L3 | Timer FSM、NavMesh、包围槽位、攻击名额、三波与 90 秒结算已存在 |
+| 网络同步 | 未实现 | L0 | 当前 FPS 是单机项目，没有 RPC、Replication、预测或服务器回溯 |
+| 反外挂 | 未实现 | L0 | 只有设计知识，没有服务器校验或行为检测代码 |
+| 性能优化 | 已有实证 | L2-L3 | 有 10/20/40/80/160 压测、100 AI 验收、CPU 归因和纹理驻留前后数据；完整 A/B、GPU 与生命周期证据仍缺 |
+
+结论不是“教程做了一半所以项目只有一半水平”。教程强调横向广度，当前项目的优势是把少数核心链路做到了状态、生命周期和性能证据层；短板是 3C 手感、武器扩展验证、表现闭环和多人生产边界。
+
+### 25.3 教程内容需要按 UE5.5 重新解释
+
+教程包含跨引擎伪代码和概念化结论，不能直接当作本项目的 UE API 说明：
+
+- UE5.5 默认物理系统是 **Chaos**，不是教程表格中的 PhysX。当前项目的 CharacterMovement、Scene Query 和 Ragdoll 都应按 Chaos/UE5.5 的线程与生命周期理解。
+- Hitscan、Projectile 和混合式不是技术等级高低关系。选择由飞行时间、下坠、可拦截性、联网公平性和成本决定。
+- “开火组件、弹药组件、后坐力组件、动画组件”是一种示意架构，不代表每个名词都要拆成 Component。当前一把武器只有一套紧密事务，把弹药、射速和换弹放在同一个 WeaponComponent 更容易保持原子性。
+- “第一人称武器独立深度渲染”只是解决穿模和 FOV 的一种方案。UE 项目还可使用独立 ViewModel FOV、材质 WPO、靠墙收枪、Owner Only Mesh 或自定义渲染路径，必须按画面和平台成本选择。
+- “像素级头部判定”不是准确术语。Gameplay 命中精度来自 Physics Asset、碰撞体、骨骼、Physical Material、Hit Zone 规则和网络回溯精度，不是屏幕像素。
+- “自定义物理更易网络同步”不能泛化。生产项目通常复用引擎查询、碰撞和移动框架，只为明确的玩法或确定性需求自定义有限层，而不是重写完整物理系统。
+
+因此，教程应作为“要能解释的问题列表”，当前源码和测试才是“已经完成的项目事实”。
+
+### 25.4 武器架构：当前聚合合理，扩展时再拆
+
+当前调用链是：
+
+```text
+Enhanced Input
+-> Character 表达 Start/Stop/Reload 意图
+-> EquippedWeaponComponent
+-> 动作状态门禁
+-> 弹药和射速提交
+-> Trace/Damage
+-> Delegate 通知蓝图表现和 HUD
+```
+
+这条链比把弹药留在 Character 更合理，因为弹匣容量、备弹、射速、散布、后坐力和换弹都随武器变化。Character 只需要知道“当前装备对象”和“角色是否死亡/移动/瞄准”。
+
+当前不继续拆成四个 Component 的原因：
+
+- 弹药消耗、射速门禁和真实射击必须在同一事务内决定，拆散后会增加状态同步点。
+- 项目目前只有一条主要射击链，没有多种可复用的独立行为。
+- Component 本身也有初始化、引用、事件和生命周期成本，类越多不等于边界越清楚。
+
+出现以下条件时再升级：
+
+| 新条件 | 推荐升级 |
+| --- | --- |
+| 只有数值不同的 Rifle/Shotgun | 保持 WeaponComponent，使用 WeaponDataAsset |
+| 霰弹只比步枪多条射线 | 使用数据中的 PelletsPerShot，不建 Shotgun 子类 |
+| 出现 Projectile、蓄力、持续光束等不同发射语义 | 抽取 FireMode Strategy 或武器行为子类 |
+| 出现逐发装填、弹鼓、过热等独立装填规则 | 抽取 Reload/Ammo Policy |
+| 出现主副武器切换、背包和多弹药类型 | 增加 Equipment/InventoryComponent |
+| 多个角色都需要独立武器动画协调 | 增加表现层 WeaponPresentation/Anim 协调对象 |
+
+当前最重要的架构验证不是继续拆类，而是创建正式 Rifle 和 Shotgun DataAsset，在不改 Character 的情况下验证参数切换、弹药初始化、射线数量和 HUD 快照。
+
+### 25.5 Hitscan、Projectile 与相机/枪口视差
+
+当前 Hitscan 从相机位置沿准星方向发射，优点是“准星所指即命中”。它适合当前近中距离自动武器，也便于做头部命中和即时反馈。
+
+它仍有一个必须能解释的边界：相机可能看过掩体，但枪口还在墙后。如果仅从相机 Trace，可能出现枪身被挡却能射中的情况。需要严格处理时使用两阶段查询：
+
+```text
+Camera Trace -> 得到玩家瞄准目标点
+Muzzle Trace -> 从真实枪口检查到目标点之间是否被近处障碍阻挡
+```
+
+两阶段查询提高正确性，但每发增加查询成本，也要处理相机与枪口射线不完全平行的近距离视差。当前项目尚未实现该方案，应先用靠墙和掩体测试证明问题存在。
+
+当设计要求以下任一条件时，Hitscan 应替换或补充为 Projectile：
+
+- 玩家能看见并躲避弹丸。
+- 需要飞行时间、重力、阻力、反弹或拦截。
+- 弹丸是场景中的持续对象，例如火箭、榴弹、箭。
+- 命中由弹丸沿途碰撞决定，而不是开火瞬间决定。
+
+混合式不是简单地“近处射线、远处生成子弹”。切换点会影响命中时序、网络验证和玩家预期。只有在弹道表现和高频子弹成本同时要求时才值得引入，并需要保证切换距离两侧的伤害与命中语义连续。
+
+### 25.6 散布：当前数学、效果与进一步条件
+
+当前代码在相机前方切平面上做面积均匀圆盘采样：
+
+```text
+R = tan(MaxSpreadAngle)
+r = sqrt(u) * R
+phi = 2 * PI * v
+Direction = normalize(Forward + Right * r*cos(phi) + Up * r*sin(phi))
+```
+
+其中 `u,v` 是 `[0,1]` 均匀随机数。半径使用 `sqrt(u)` 的原因是圆面积与 `r^2` 成正比。若直接令 `r = uR`，每个半径区间获得相同样本数，中心较小面积会被塞入过多点，形成中心过密。
+
+当前效果：
+
+- 相比直接均匀半径，准星圆盘内的样本面积分布更均匀。
+- 腰射和瞄准有不同基础散布。
+- 连射按发数增加散布，并有上限和停止后的重置时间。
+- Shotgun 数据可让一次开火执行多条独立射线。
+
+严格来说，它是“切平面圆盘面积均匀后再归一化”，不是对球面立体角完全均匀。小散布角下差异很小，适合当前枪械。若题目要求在圆锥立体角内严格均匀，可使用：
+
+```text
+cos(alpha) = 1 - u * (1 - cos(MaxAngle))
+phi = 2 * PI * v
+```
+
+然后在 Forward/Right/Up 基底中构造方向。
+
+教程提到的移动、站姿、瞄准和连射因子可整理为：
+
+```text
+FinalSpread =
+    BaseSpread(Weapon, Aim)
+    * MovementMultiplier
+    * AirMultiplier
+    * StanceMultiplier
+    + ContinuousFireSpread
+```
+
+当前只实现了 Aim 和 ContinuousFire。下一步应从 CharacterMovement 读取地面速度、是否 Falling，并将最终散布和归一化准星扩散通过事件交给 HUD。不要为了覆盖教程而盲目增加随机项，先定义站立、移动、冲刺、空中和 ADS 五个固定靶场用例。
+
+均匀随机也不一定产生最佳手感：
+
+- 竞技步枪可能需要固定后坐模式或可学习序列。
+- 首发可能要求零散布或更高中心权重。
+- 霰弹可能需要分层采样或固定图案，减少极端随机空洞。
+- 联网、回放或反作弊验证可能需要服务器种子或可重现随机流。
+
+### 25.7 后坐力、开火与换弹事务
+
+教程正确地区分了机械后坐力和视觉后坐力。项目当前通过 `AddPitchInput/AddYawInput` 改变控制旋转，属于机械后坐力；蓝图可从真实射击事件播放 Camera Shake、枪模动画和音效，属于表现层。
+
+后续应把三条链分开调节：
+
+| 通道 | 作用 | 是否影响后续弹道 |
+| --- | --- | --- |
+| Aim Recoil | 修改控制旋转或瞄准方向 | 是 |
+| Camera Feedback | 短时 Camera Shake、冲击感 | 通常否 |
+| ViewModel Recoil | 枪模后退、旋转、弹簧恢复 | 否 |
+
+三条链若重复修改同一个相机角度，会出现“双倍后坐力”。当前还缺停止射击后的恢复曲线和固定模式验证，因此只能说“机械随机后坐力已实现”，不能说完整后坐力系统已经封版。
+
+当前真实开火顺序是：
+
+```text
+CanFire
+-> 射速时间门禁
+-> TryConsumeAmmo
+-> OnWeaponFirePerformed
+-> 生成散布方向
+-> LineTrace
+-> ApplyPointDamage / Impulse
+-> 机械后坐力
+```
+
+弹药在射速门禁通过后、查询前提交，保证一次被接受的射击只扣一发；表现监听 `OnWeaponFirePerformed`，避免输入事件、Timer 和蓝图各播放一次效果。
+
+换弹部分的 C++ 深度已经高于教程概述：
+
+- `Reloading` 阻止开火。
+- `ActiveReloadSequence` 拒绝旧 Timer。
+- `bReloadAmmoCommitted` 保证一次换弹只提交一次弹药。
+- 死亡和取消会清 Timer、推进序列并关闭武器。
+- Timer 是超时恢复，不应成为动画正常完成的唯一依据。
+
+剩余闭环必须在蓝图完成：
+
+```text
+Reload Started -> 播放 Montage
+Ammo Insert Notify -> CommitReload
+Montage Completed -> FinishReload
+Montage Interrupted/BlendOut -> CancelReload
+```
+
+若改为霰弹逐发装填，事务边界也要替换：每个 Insert Notify 提交一发，允许开火在合法窗口中中断，End/Interrupted 统一退出 Reloading。不能直接复用“结束时整匣提交”的规则。
+
+### 25.8 伤害：查询、规则、生命值和表现必须分层
+
+当前伤害链：
+
+```text
+LineTrace
+-> FHitResult/BoneName
+-> 选择 BodyDamage 或 HeadDamage
+-> ApplyPointDamage
+-> Actor OnTakeAnyDamage
+-> HealthComponent Clamp/事件/死亡幂等
+-> Character/Enemy/GameMode/蓝图表现
+```
+
+这条链的优点是查询和生命值已经分离；问题是 WeaponComponent 仍直接依赖 `AfpstrueEnemyCharacter`，头部规则硬编码为 `head/neck_01`。
+
+更完整的伤害模型可以写成：
+
+```text
+RawDamage =
+    BaseDamage
+    * HitZoneMultiplier
+    * DistanceMultiplier
+    * PenetrationMultiplier
+    * GameplayModifier
+
+FinalDamage = Mitigation(RawDamage, Armor, Resistance)
+```
+
+这里的乘法顺序和护甲公式必须由玩法定义。工程边界应保持：
+
+- Trace/Sweep 负责找到命中上下文。
+- Hit Zone/Physical Material/Damageable 接口负责把上下文转换为规则参数。
+- Weapon 或 Damage Calculator 负责得到最终输入伤害。
+- HealthComponent 只负责合法化数值、扣血、事件和一次死亡。
+- 蓝图只负责受击、血迹、声音、布娃娃等表现。
+
+当前封版优先级是通用 Damageable 合同、专用 Weapon/Melee Channel 和隔墙测试。距离衰减、护甲、穿透只有在玩法需要时再加，否则会增加配置和测试维度，却不能证明基础伤害链更正确。
+
+### 25.9 3C：当前最需要补深度的单机模块
+
+#### Character
+
+当前 Character 已负责输入意图、移动、视角、装备引用和死亡协调，武器状态已经移出 Character。这是正确边界。
+
+角色状态不应枚举所有组合。若把 `Moving + Aiming + Reloading + Injured` 全部做成一个枚举，状态数会组合爆炸。当前把移动状态与 WeaponActionState 正交拆开是合理方向。以后再按需求增加：
+
+```text
+LifeState: Alive / Dead
+LocomotionState: Grounded / Falling / SpecialMove
+WeaponActionState: Ready / Firing / Reloading / Disabled
+Posture: Standing / Crouching
+```
+
+当前 `StartSprint` 和 `StartAim` 绑定 Started 后在函数内部采用 Toggle 语义。需要明确产品规则是“按一下切换”还是“按住生效”。若按住生效，应使用 Started 设置 true、Completed/Canceled 设置 false；若切换生效，应重命名为 Toggle 并验证死亡、换弹、失焦和重新 Possess 后不会残留。
+
+移动手感的技术深度不取决于是否堆 Slide/Mantle，而取决于能否解释和验证：
+
+- `MaxWalkSpeed` 决定速度上限。
+- `MaxAcceleration` 决定达到目标速度的响应。
+- `BrakingDecelerationWalking` 与 `GroundFriction` 决定松键后的减速和转向黏性。
+- `AirControl` 决定空中可改变水平速度的程度。
+- 跳跃、落地、冲刺和 ADS 切换是否有一致的输入优先级。
+
+下一步应做一张固定参数表和 0 到最高速、松键停止、180 度转向、空中转向四个用例，而不是先增加高级移动功能。
+
+#### Camera
+
+当前代码有第一人称相机和 `OnAimChanged` 表现接口，但没有证据证明以下内容已闭环：
+
+- ADS FOV 插值及中断恢复。
+- World FOV 与 ViewModel FOV 是否分离。
+- 枪口靠墙时的穿模、收枪或射击阻挡。
+- Damage Direction、Hit Marker、受击后处理和低血量反馈。
+
+ADS 插值应由一个权威状态驱动。输入只改变 `bIsAiming`，相机或表现对象读取该状态插值，换弹、死亡和取消瞄准统一回到默认值。不要让多个 Timeline 各自记住 FOV。
+
+#### Control
+
+项目目前依赖 Enhanced Input 和 `DefaultInput.ini` 中的基础轴配置，但没有运行时用户灵敏度和 ADS 倍率。更完整的输入链应是：
+
+```text
+Raw Device Delta
+-> Dead Zone / Response Curve
+-> User Sensitivity
+-> ADS Multiplier
+-> Frame/Input Sampling
+-> Controller Rotation
+```
+
+手柄 Aim Assist 只在目标平台或玩法需要时实现。它不是“自动瞄准”一个开关，而是候选目标、视野/遮挡、减速区、旋转辅助、目标切换迟滞和强度曲线的组合。PC 键鼠单机封版不需要为了教程覆盖而加入它。
+
+### 25.10 网络与反外挂：当前是迁移设计，不是完成项
+
+教程的网络章节是当前最大空白。单机项目里 `GameMode`、WeaponComponent 和 HealthComponent 都在一个进程运行，不存在客户端预测与服务器纠正。
+
+若恢复 Co-op，最小迁移顺序应是：
+
+1. 服务端 GameMode 负责生成、波次和胜负。
+2. 可复制的倒计时、波次和结果移入 GameState；玩家长期数据移入 PlayerState。
+3. 客户端发送“开火请求”，服务端验证武器状态、射速、弹药和位置。
+4. 客户端立即播放预测枪口表现，服务端权威执行或验证命中与伤害。
+5. 使用 RepNotify/Multicast 传播必要结果，避免复制每个纯表现细节。
+6. 基础同步稳定后，再评估带时间戳的历史位置缓存和服务器回溯。
+
+最小射击请求可包含：
+
+```text
+WeaponId
+ShotSequence
+ClientFireTime
+ViewOrigin
+ViewDirection
+RandomSeed 或 SpreadIndex
+```
+
+服务端不能直接相信这些字段，应检查：
+
+- 当前是否装备该武器。
+- 射击序号是否重复或回退。
+- 射速和弹药是否允许。
+- ViewOrigin 与服务端角色位置差距是否合理。
+- 方向变化是否超过合理阈值。
+- 回溯目标是否在允许历史窗口内。
+- 命中路径是否被世界几何阻挡。
+
+反外挂首先是服务器权威和最小信任，不是客户端加密。行为检测、客户端保护和第三方反作弊属于更高层。当前项目可以讲设计，但简历中必须写“迁移方案”或“知识储备”，不能写成已实现。
+
+### 25.11 性能：当前项目比教程更有说服力的部分
+
+教程列举 LOD、休眠、简化碰撞、动画降频、裁剪、合批和纹理压缩，属于方案目录。当前项目已经多做了一步：先测量实际瓶颈，再决定优化顺序。
+
+已确认的证据包括：
+
+- 固定 10/20/40/80/160 敌人压力测试。
+- 160 敌人时平均帧时间 20.741 ms，Game Thread 20.733 ms。
+- CharacterMovement 6.920 ms、Animation 3.190 ms、Pathfinding 0.071 ms，说明主要成本不是 A*。
+- 基于距离的 AI 决策/移动更新分级、Animation URO 和不可见动画降级代码。
+- 100 AI 最终验收数据。
+- 6 张植被纹理限制驻留分辨率后，Streaming Assets 从 212.27 MB 降至 152.27 MB。
+
+这说明“先 Profile，再按贡献排序”已经达到 L2-L3。仍缺：
+
+- 优化前后同地图、同机位、同画质、每档至少三次的中位数 A/B。
+- Game/Render/GPU 和 P95 同时记录。
+- 连续波次结束后的 UObject、Timer、Delegate、Niagara、Decal 和内存回落。
+- 10/25/50 活动 Ragdoll 的 Physics 成本。
+- VSM Non-Nanite Job Queue Overflow 的独立定位与治理。
+
+教程中的“并行计算/GPU 加速物理”不能直接作为优化答案。应先用 Insights 确认任务并行度和同步等待；UObject Gameplay 修改仍受 Game Thread 边界约束；Chaos 异步也会引入一帧结果时序和同步复杂度。
+
+### 25.12 方案替换表：面试官改变条件时怎么推导
+
+| 原条件 | 新条件 | 当前方案为何不够 | 替换或补充方案 |
+| --- | --- | --- | --- |
+| 单把自动步枪 | 多武器和共享弹药 | 单引用无法表达槽位与库存 | Equipment/Inventory + WeaponData |
+| 武器仅数值不同 | 蓄力、光束、Projectile | DataAsset 不能替代行为多态 | FireMode Strategy/子类 |
+| 瞬时子弹 | 可见飞行、下坠、拦截 | LineTrace 没有持续实体 | ProjectileMovement + Sweep/CCD |
+| 小角度随机散布 | 竞技固定压枪 | 随机分布不可学习 | 可配置 Recoil Pattern + 可重现索引 |
+| 单机 | 2 到 4 人 Co-op | 本地状态没有网络权威 | RPC、Replication、GameState、服务器验证 |
+| 单玩家目标 | 多玩家、诱饵、仇恨 | 生成时注入一个目标不够 | Candidate Registry + Team/Threat Score + Hysteresis |
+| 简单厂区 | 多层掩体和复杂战术位 | 固定双环槽位不够 | EQS/可达性与视线评分 |
+| 20 到 100 AI | 500 到 1000 AI | CharacterMovement/SkeletalMesh 线性成本过高 | 更激进 Significance、Animation Sharing、Mass/简化 Agent |
+| 整匣换弹 | 逐发装填且可中断 | 单次 Commit 无法表达每发提交 | 每个 Notify 提交一发的 Reload Policy |
+| 无护甲敌人 | 部位、护甲、材质和穿透 | BoneName 二分规则不可扩展 | HitZone/PhysicalMaterial + Damage Calculator |
+| PC 键鼠 | 手柄/移动端 | 线性鼠标轴配置不够 | Dead Zone、Curve、Sensitivity、Aim Assist |
+| 少量尸体 | 大量长期尸体 | 全量 Ragdoll 持续模拟过贵 | Full/Sleep/Frozen/Destroyed 预算 |
+
+回答场景题时先说明新条件破坏了哪个原假设，再升级最小的一层。不要先报框架名称。
+
+### 25.13 接下来该完成什么
+
+#### P0：把当前单机主线变成可验收闭环
+
+1. 完成 Reload Notify、Completed、Interrupted 接线，验证换弹中不能开枪且中断不提交弹药。
+2. 建立专用 Weapon/Melee Channel，完成隔墙、玻璃、敌人、TargetDummy 和物理物体矩阵。
+3. 用通用 Damageable/HitZone 规则移除 WeaponComponent 对具体 Enemy 类和骨骼字符串的依赖。
+4. 完成 HUD 初始快照、事件更新、胜负、暂停与重新开始，不使用 Widget Tick。
+5. 回归玩家死亡立即失败、倒计时归零且存活才胜利，以及同帧死亡/归零。
+6. 完成 Development Editor 编译、PIE 固定用例和 Release 打包冒烟测试。
+
+#### P1：用最小功能证明武器和 3C 架构可扩展
+
+1. 创建正式 Rifle/Shotgun WeaponData，验证同一 WeaponComponent 在不修改 Character 时切换配置。
+2. 记录 1000 次以上散布样本，检查左右/上下均值、半径平方分布和最大角度。
+3. 增加移动、空中、ADS 和持续射击散布因子，并把准星扩散改成事件驱动。
+4. 分离 Aim Recoil、Camera Feedback 和 ViewModel Recoil，增加停止射击恢复曲线。
+5. 固化 CharacterMovement 参数与移动测试用例，明确 Sprint/Aim 是 Toggle 还是 Hold。
+6. 验证 ADS FOV、ViewModel FOV 和靠墙射击/穿模策略。
+
+#### P2：补齐工程证据
+
+1. 对 10/20/40/80/160 AI 做同条件优化前后各三次采样，记录 Avg、P95 和线程成本。
+2. 记录攻击响应延迟、Scene Query 数、活动攻击窗口和 Token 占用。
+3. 做 Ragdoll、对象生命周期、内存回落和 VSM 独立实验。
+4. 对画质改动保存同机位截图和 GPU Pass 数据。
+
+#### 条件任务：不阻塞当前封版
+
+- 只有恢复 Co-op 时才做 RPC、Replication、GameState 和服务器权威射击。
+- 只有基础网络稳定后才做服务器回溯和反外挂校验。
+- 只有目标平台需要手柄/触屏时才做 Aim Assist 和移动端适配。
+- 只有 Profile 证明 Spawn/Destroy/GC 是瓶颈时才做对象池。
+- 只有玩法要求可见弹道时才恢复 Projectile。
+
+### 25.14 每项知识点的验收方式
+
+| 知识点 | 不能只说 | 最小验收 |
+| --- | --- | --- |
+| 散布均匀 | 使用了 `sqrt` | 固定种子/样本量，检查象限、均值、半径平方分布和边界 |
+| 射速 | 使用 Timer | 连续射击实际间隔、低帧率、重复输入和空仓回归 |
+| 换弹事务 | 有 Reloading bool | Notify 重复、中断、死亡、旧 Timer 和一次提交 |
+| 伤害 | 能扣血 | 通道、部位、不可伤害物、死亡幂等和 DamageCauser |
+| 3C 手感 | 有移动和 FOV | 加速、制动、转向、空中控制、ADS 中断和输入语义 |
+| AI 优化 | 降低 Tick | 决策频率、响应 P95、移动/动画成本和错误攻击率 |
+| 纹理优化 | 降低分辨率 | 同条件驻留内存、同机位画质和对象数 |
+| 网络射击 | 调用了 RPC | 服务端权威、预测反馈、重复请求、延迟和作弊输入 |
+
+### 25.15 最终水平判断
+
+当前项目已经超过“照教程拼 API 的 FPS 原型”，因为核心系统有所有权、状态机、幂等、中断清理、场景查询分层和真实性能数据。它最适合表述为：
+
+```text
+一个达到中级客户端项目深度的单机 PvE FPS。
+武器事务、近战命中、群体 AI 和性能分析是主要技术亮点；
+3C 手感、通用伤害、蓝图闭环和工程验收仍需封口；
+网络、反外挂和多平台是明确的迁移方向，不是当前成果。
+```
+
+若完成 P0 和 P1，单机主线可稳定达到 L2，并在 AI/性能方向形成 L3 证据。若再完成一个服务端权威的 Co-op 射击最小闭环，项目对游戏客户端岗位的覆盖面才会明显跨到网络生产边界。
+
+## 26. 知识扩展：多平台优化与高级渲染
+
+### 26.1 本节边界
+
+本节只作为游戏客户端进阶知识，不进入当前 FPS 的实现清单，也不能写成项目已完成：
+
+- 不实现移动端、主机或多平台发行。
+- 不修改 Renderer。
+- 不实现自定义软光栅器。
+- 不实现自定义 GPU Driven Rendering 管线。
+- 不把 Nanite、GPU Scene 或 Instance Culling 的引擎能力写成个人实现。
+
+学习目标是能在面试场景题中说明：平台瓶颈为什么不同，应该在哪一层配置，何时需要软光栅遮挡或 GPU Driven，以及如何验证收益。
+
+### 26.2 多平台优化的第一原则
+
+多平台优化不是为每个平台复制一套代码，而是保持 Gameplay 语义一致，让渲染质量、资源规格、输入方式和帧预算按平台变化。
+
+```text
+同一 Gameplay 规则
+-> Platform Capability
+-> Device Profile
+-> Scalability Group
+-> Asset/Shader Cook
+-> Runtime Budget
+-> 真实设备验证
+```
+
+需要先固定目标：
+
+| 目标 | 示例 |
+| --- | --- |
+| 分辨率 | 1080p、1440p、动态分辨率范围 |
+| 帧率 | 30、60、120 FPS |
+| CPU 帧预算 | 33.3、16.67、8.33 ms 中可分给 Game/Render 的部分 |
+| GPU 帧预算 | 同目标帧率下的渲染预算 |
+| 内存 | 系统内存、显存、纹理池和瞬时峰值 |
+| 功耗 | 移动设备温度、降频和电量 |
+| 输入延迟 | 采样、Game Thread、Render Queue、显示链路 |
+| 包体和 IO | Cook 后体积、加载峰值、流送带宽 |
+
+没有预算时，“降低画质”不是完整方案。先找超过预算的线程、Pass、内存类别或 IO 阶段，再选择可缩放项。
+
+### 26.3 PC、主机和移动端的典型差异
+
+| 平台 | 主要特点 | 常见瓶颈 | 典型策略 |
+| --- | --- | --- | --- |
+| PC | 硬件组合分散，驱动与分辨率差异大 | Shader/PSO 首次卡顿、CPU 单线程、显存差异 | Graphics Settings、Scalability、PSO 缓存、硬件档位测试 |
+| 主机 | 硬件固定，性能和内存预算明确 | 固定帧预算、内存峰值、认证要求 | 固定质量档、动态分辨率、严格内存与 Frame P95 |
+| 移动端 | GPU 架构和设备碎片化，功耗受限 | 带宽、Overdraw、热降频、内存、Shader 复杂度 | Device Profile、分辨率缩放、简化光照/阴影/材质、真实设备长测 |
+
+移动 GPU 常采用 Tile-Based Rendering。屏幕空间中间结果尽量留在片上存储可以节省外部内存带宽，但高 Overdraw、频繁 Render Target 切换、透明叠层和不合适的 Pass 会放大带宽成本。因此移动端不能只看多边形数量，还要看：
+
+- 屏幕覆盖面积和 Overdraw。
+- Material 指令、纹理采样和精度。
+- Render Target 数量、格式和切换。
+- 阴影分辨率、灯光数量和后处理链。
+- UI、粒子、植被 Masked Material 的像素成本。
+- 持续运行后的温度、频率和帧时间变化。
+
+PC 上“GPU 还有余量”的配置不代表移动端可用；主机上一次稳定的 60 FPS 也不能代替 PC 多档硬件覆盖。
+
+### 26.4 UE 的配置分层
+
+#### Device Profile
+
+`UDeviceProfile` 表达设备或设备族配置，可以继承父 Profile，并覆盖 CVar、Texture LOD 和内存档位。Android 通常还会按 GPU 家族匹配 Profile。
+
+适合放入 Device Profile 的内容：
+
+- 分辨率比例与动态分辨率边界。
+- Texture LOD、纹理池和各类资源上限。
+- 阴影、后处理、植被和特效预算。
+- 特定 GPU/驱动的兼容性开关。
+- 平台默认帧率与质量档。
+
+#### Scalability
+
+Scalability 解决“同一平台内部的质量分级”，例如：
+
+```text
+ViewDistance
+AntiAliasing
+Shadow
+GlobalIllumination
+Reflection
+PostProcess
+Texture
+Effects
+Foliage
+Shading
+```
+
+Device Profile 负责选择设备默认值，Scalability 负责 Low/Medium/High/Epic 等用户档位。二者不能混为“几个随意的 CVar”。
+
+#### Cook 与 Shader Platform
+
+多平台构建还会改变：
+
+- 目标 RHI 和 Shader Model。
+- 纹理压缩格式。
+- 可编译 Shader Permutation。
+- 资产 Cook 和 Strip 规则。
+- 平台插件、输入和在线能力。
+- PSO 的收集、预编译与驱动缓存行为。
+
+只在编辑器中切换 Preview Rendering Level 不能替代目标平台 Cook、部署和真实设备 Profile。
+
+### 26.5 多平台性能治理顺序
+
+推荐顺序：
+
+1. 为每个平台定义帧率、分辨率、内存和温度目标。
+2. 建立代表性场景，不只测试空地图和最轻战斗。
+3. 使用 Unreal Insights、CSV、ProfileGPU、RenderDoc/平台工具定位瓶颈。
+4. 先调整现有 Scalability 和内容预算。
+5. 再做平台特定资源与 Shader 变体。
+6. 最后才考虑 Renderer 级高级方案。
+
+跨平台测试至少记录：
+
+| 类别 | 指标 |
+| --- | --- |
+| CPU | Game、Render、RHI、Task、P95/P99 |
+| GPU | BasePass、Shadow、Lighting、Post、Translucency、Compute |
+| 内存 | Working Set、GPU Memory、Texture Pool、Transient Resource Peak |
+| IO | 启动、关卡加载、流送带宽和卡顿 |
+| 稳定性 | 15 到 30 分钟温度、降频、帧时间漂移 |
+| 体验 | 输入延迟、分辨率变化、LOD Pop、画面稳定性 |
+
+平均 FPS 会掩盖首次 Shader 卡顿、流送峰值和热降频，因此必须结合 Frame Time 分布。
+
+### 26.6 Shader、PSO 与平台卡顿
+
+现代图形 API 会把 Shader、Blend、Depth/Stencil、Raster State、Render Target 格式等组合成 Pipeline State。首次创建或编译未准备好的 PSO 可能造成明显卡顿。
+
+UE 的 PSO Precaching/Cache 思路：
+
+```text
+收集可能使用的 PSO
+-> 加载阶段异步预编译
+-> 运行时命中缓存
+-> 统计 Missed / Too Late / Hit
+```
+
+多平台注意：
+
+- 不同 RHI、驱动和 Shader Platform 的 PSO 不能假设完全复用。
+- Material Static Switch 和无界 Permutation 会增加 Cook、包体、内存和预编译压力。
+- 异步预编译消耗 CPU 与内存，可能与 Gameplay 任务竞争。
+- 测首次启动时需要控制驱动缓存，否则第二次运行会掩盖卡顿。
+
+优化方向不是单纯“把所有 PSO 都编译”，而是减少无用排列、覆盖真实使用路径，并在加载界面和运行时内存之间取舍。
+
+### 26.7 软光栅遮挡剔除
+
+#### 问题来源
+
+视锥剔除只能排除相机外物体，无法排除被建筑或地形完全挡住的物体。硬件 Occlusion Query 需要 GPU 查询并把结果反馈给 CPU，可能存在一到多帧延迟和 CPU/GPU 同步问题。
+
+软光栅遮挡的核心思路是在 CPU 上用简化遮挡体生成低分辨率深度表示，再测试候选物体包围盒：
+
+```text
+选择大而稳定的 Occluder
+-> 使用简化 LOD/代理网格
+-> 变换到裁剪空间
+-> CPU 低分辨率保守光栅化
+-> 生成 Depth Buffer 或层次深度
+-> 投影 Occludee Bounds
+-> 判断是否完全位于遮挡深度之后
+-> 输出 Visible Set
+```
+
+#### 为什么使用“保守”判定
+
+错误剔除会让可见物体突然消失，属于严重正确性问题。因此算法宁愿产生 False Visible，也尽量不产生 False Occluded：
+
+- 物体只要有不确定区域就保留。
+- 包围盒投影会适当放大。
+- 近裁剪面穿越、相机快速移动和深度精度不足时回退为可见。
+- 对结果加入一到数帧可见性迟滞，减少闪烁。
+
+#### 合适场景
+
+- 移动端或 CPU Draw Submission 压力较高。
+- 场景有大型墙体、建筑和稳定遮挡物。
+- Occluder 数量少且简化后成本低。
+- GPU Query 延迟或平台支持不理想。
+
+#### 不合适场景
+
+- 开阔地形几乎没有遮挡。
+- 遮挡体碎、小、动态且频繁变化。
+- CPU 已是主要瓶颈。
+- 候选对象很少，剔除成本高于节省的提交成本。
+- 已有成熟 HZB/GPU Instance Culling，CPU 结果不会减少关键工作。
+
+#### 成本模型
+
+```text
+收益 =
+    被剔除对象减少的 CPU 提交
+    + 被剔除 Draw 的 GPU 顶点/像素成本
+
+代价 =
+    Occluder 变换与光栅
+    + Occludee 包围盒测试
+    + 可见集合维护
+    + 多线程调度与缓存访问
+```
+
+需要记录 Occluder 数、Occludee 数、Culled 数、Cull Time、节省 Draw Calls、CPU Render 时间和 GPU Pass 变化。只记录“剔除了多少物体”不足以证明总帧时间收益。
+
+UE 官方提供过面向移动端的 Software Occlusion Queries，使用指定 Static Mesh LOD 在 CPU 上光栅化并做保守剔除。它证明了方案方向，但是否适用于当前 UE 版本和目标平台必须按对应版本文档、Device Profile 和真机验证。
+
+### 26.8 GPU Driven Rendering
+
+#### 传统 CPU Driven
+
+```text
+CPU 遍历场景
+-> 可见性与 LOD
+-> 构建/排序 Draw Command
+-> 提交到 RHI/Driver
+-> GPU 执行
+```
+
+当实例和 Draw 数量很大时，CPU 场景遍历、状态组织和提交可能成为瓶颈。
+
+#### GPU Driven
+
+```text
+CPU 上传场景与实例数据
+-> Compute Shader 做 Frustum/HZB/Occlusion/LOD Culling
+-> GPU 压缩 Visible Instance List
+-> 生成 Indirect Draw Arguments
+-> ExecuteIndirect / MultiDrawIndirect
+-> GPU 执行可见对象
+```
+
+关键组成：
+
+- **GPU Scene**：场景级 Primitive/Instance 数据缓冲。
+- **GPU Culling**：在 GPU 上进行实例级视锥、距离、HZB 遮挡和 LOD 选择。
+- **Compaction**：把可见实例压缩成连续列表。
+- **Indirect Draw**：GPU 生成 Draw 参数，减少 CPU 逐对象提交。
+- **Material/Geometry Batching**：相同管线状态和资源布局尽量共享命令。
+- **Previous Frame HZB**：复用上一帧层次深度做遮挡，需要处理一帧滞后。
+
+UE 的 Mesh Drawing Pipeline、GPU Scene 和 Instance Culling 已包含这类思想。Nanite 进一步把几何切分、可见性、LOD 与流送做成高度 GPU 驱动的管线。学习这些架构时，应区分“使用引擎能力”和“自己实现 Renderer”。
+
+#### 它解决什么
+
+- 大量实例导致的 CPU Draw Submission 压力。
+- CPU 逐实例可见性和 LOD 开销。
+- 需要对可见实例做紧凑批处理的场景。
+- 静态网格、植被、道具等高实例数内容。
+
+#### 它不自动解决什么
+
+- 复杂材质导致的像素成本。
+- 大面积 Overdraw。
+- 阴影和透明 Pass 的高填充成本。
+- Skeletal Animation、CharacterMovement 和 Gameplay Tick。
+- 大量唯一材质破坏批处理。
+- GPU 已满载时继续转移 CPU 工作到 GPU。
+
+当前项目在高敌人数下主要 CPU 成本是 CharacterMovement 和 Animation。即使使用 GPU Driven，敌人 Gameplay、骨骼动画和移动更新也不会自动消失。GPU Driven 更可能帮助厂区静态实例、植被和非 Nanite Draw Submission，而不是直接解决 160 AI 的 Game Thread 瓶颈。
+
+#### 主要风险
+
+- GPU 缓冲容量、扩容和瞬时显存。
+- CPU/GPU 场景数据同步和更新带宽。
+- Previous HZB 带来的遮挡滞后。
+- GPU 原子操作、Prefix Sum、Compaction 和 Indirect Args 的成本。
+- Material 多样性导致可见实例仍无法合批。
+- GPU 调试和跨 API 兼容性更复杂。
+- 低端平台可能缺少合适特性或收益。
+
+#### 何时值得考虑
+
+必须同时满足：
+
+1. Profile 证明 CPU Render/RHI 或 Draw Submission 是主要瓶颈。
+2. 场景有足够高的实例数和可合批性。
+3. GPU 仍有接受额外 Culling/Compaction 的预算。
+4. 目标 RHI 和最低硬件支持所需能力。
+5. 已先完成距离、视锥、LOD、实例化、材质合并等低风险优化。
+
+### 26.9 软光栅与 GPU Driven 的关系
+
+二者不是同一层的替代品：
+
+| 方案 | 主要执行位置 | 主要输出 | 主要收益 |
+| --- | --- | --- | --- |
+| CPU 软件遮挡 | CPU | CPU 可见对象集合 | 提前减少 CPU 提交和后续 GPU 工作 |
+| Hardware Occlusion Query | GPU 查询，CPU 使用结果 | 延迟返回的可见性 | 使用 GPU 深度判断遮挡 |
+| HZB Occlusion | GPU | GPU/渲染管线可见性 | 批量层次深度测试 |
+| GPU Instance Culling | GPU Compute | Visible Instance + Indirect Args | 减少 CPU 逐实例剔除与提交 |
+
+场景题中应先问：
+
+- 谁是瓶颈，Game、Render、RHI 还是 GPU？
+- 需要在 CPU 端得到可见集合吗？
+- Draw 是否能合批？
+- GPU 是否有余量？
+- 可接受几帧可见性延迟？
+- 场景是大遮挡城市、开放地形还是室内走廊？
+
+答案决定使用距离剔除、预计算可见性、软件遮挡、HZB、实例剔除或 Nanite，而不是默认选择“最高级”的技术。
+
+### 26.10 可继续学习的高级方向
+
+这些同样只作为知识储备：
+
+- Render Dependency Graph：Pass 依赖、Transient Resource 和 Barrier。
+- Mesh Draw Command：缓存、排序、Dynamic Instancing 与状态切换。
+- HZB：层次深度构建、Mip 选择、保守遮挡与上一帧数据。
+- Clustered/Forward+ Lighting：按 Tile/Cluster 建立灯光列表。
+- Async Compute：与 Graphics Queue 重叠的前提、依赖和资源竞争。
+- Dynamic Resolution/Upscaling：以画质稳定性换 GPU 时间。
+- PSO Precache：首用卡顿、异步编译、Miss/Too Late 统计。
+- Shader Permutation：Static Switch、Cook 时间、包体和运行时内存。
+- Nanite：Cluster Culling、虚拟化几何和材质/实例限制。
+- Virtual Shadow Maps：页面分配、缓存失效和 Non-Nanite 标记成本。
+
+学习优先级建议：
+
+```text
+Mesh Drawing Pipeline
+-> GPU Scene
+-> Instance Culling + HZB
+-> Indirect Draw
+-> Nanite 架构
+-> RDG 与 Renderer 源码
+```
+
+### 26.11 面试回答模板
+
+```text
+我会先确定目标平台、帧预算和瓶颈线程。
+多平台首先通过 Device Profile、Scalability、Cook 和资源预算治理，
+不是直接维护多套 Gameplay 代码。
+
+如果 CPU Render/RHI 被大量对象提交拖慢，我会先检查距离剔除、
+LOD、实例化和材质合批。场景有大型稳定遮挡物且移动端 GPU Query
+反馈不理想，可以评估 CPU 低分辨率保守软光栅遮挡。
+
+如果实例数继续扩大、Draw Submission 成为主要瓶颈且 GPU 有余量，
+再考虑 GPU Scene、HZB Instance Culling、Visible List Compaction
+和 Indirect Draw。最终用 Cull Time、Draw Calls、Render/RHI 时间、
+GPU Pass、显存与 P95 证明收益。
+
+当前 FPS 没有实现这些 Renderer 级技术。项目中的直接经验是
+先通过 Profile 发现 160 AI 主要受 CharacterMovement 和 Animation
+影响，因此 GPU Driven 不能替代 Gameplay 和动画侧优化。
+```
+
+### 26.12 官方学习入口
+
+- [Unreal Engine Scalability](https://dev.epicgames.com/documentation/unreal-engine/scalability-in-unreal-engine)
+- [Setting Up Device Profiles](https://dev.epicgames.com/documentation/unreal-engine/setting-up-device-profiles-in-unreal-engine)
+- [Software Occlusion Queries for Mobile](https://dev.epicgames.com/documentation/unreal-engine/software-occlusion-queries-for-mobile)
+- [Visibility and Occlusion Culling](https://dev.epicgames.com/documentation/en-us/unreal-engine/visibility-and-occlusion-culling-in-unreal-engine)
+- [Mesh Drawing Pipeline](https://dev.epicgames.com/documentation/unreal-engine/mesh-drawing-pipeline-in-unreal-engine)
+- [UE5.5 Instance Culling API](https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/Renderer/InstanceCulling?application_version=5.5)
+- [PSO Precaching](https://dev.epicgames.com/documentation/en-us/unreal-engine/pso-precaching-for-unreal-engine)
+- [Dynamic Resolution](https://dev.epicgames.com/documentation/en-us/unreal-engine/dynamic-resolution-in-unreal-engine)
+
+## 27. 知识扩展：FPS 网络同步、延迟补偿与网络性能
+
+### 27.1 本节定位
+
+本节整理 FPS 网络进阶知识，不表示当前单机项目已经实现网络：
+
+- 当前源码没有 Replicated Property、RPC、网络移动扩展或服务器回溯。
+- 当前 GameMode、WeaponComponent、HealthComponent 和 AI 都运行在同一进程。
+- Co-op 项目已经暂停，本节只用于理解架构迁移和面试场景题。
+- 未经双客户端、Dedicated Server 和网络模拟验证的内容不能写成项目成果。
+
+FPS 网络的核心不是“把所有变量同步”，而是回答五个问题：
+
+```text
+谁拥有权威结果
+客户端如何立即响应
+服务器如何验证请求
+其他客户端如何平滑观察
+有限带宽下哪些状态值得发送
+```
+
+### 27.2 对原教程的技术修正
+
+#### “爆头精确到像素级”不准确
+
+命中精度来自：
+
+- 服务端保存的 Capsule/Hitbox/Physics Asset。
+- 命中部位和 Physical Material。
+- 客户端与服务器的时间映射。
+- 回溯记录频率和记录间插值。
+- Trace 浮点精度、网络量化和姿态状态。
+
+屏幕像素只影响玩家看见和瞄准的画面，不直接定义服务器命中体。
+
+#### “低于 100 ms 理想”不是系统设计阈值
+
+网络体验由完整延迟链决定：
+
+```text
+输入采样
++ Client Frame
++ Client -> Server One-Way Delay
++ Server Queue/Tick
++ Replication Scheduling
++ Server -> Client One-Way Delay
++ Interpolation Buffer
++ Render/Display
+```
+
+相同 Ping 下，Jitter、Packet Loss、Server Tick、客户端帧率和插值缓冲不同，体验也会明显不同。
+
+#### “服务器回溯时间 = 当前时间 - RTT/2”过于简化
+
+客户端看到的远端角色通常还经过插值缓冲，所以视觉状态可能比服务器当前状态更早。正确做法是建立客户端时钟到服务器时钟的映射，让射击请求携带可验证的 Shot Time，再限制在服务器历史窗口内。RTT/2 只能作为估计的一部分，不能直接信任客户端时间戳。
+
+#### Server-Side Hit Detection 不一定总要回溯
+
+- PvE、低竞争或慢速 Projectile 可以直接按服务器当前状态判定。
+- 高速竞技 Hitscan 为了补偿观察延迟，通常才需要历史命中体回溯。
+- 回溯提高射手体验，但会让目标在当前画面已经躲入掩体后仍被命中。
+
+### 27.3 UE 网络对象与权威边界
+
+#### 网络角色
+
+| 角色 | 所在位置 | 职责 |
+| --- | --- | --- |
+| Authority | 服务器 | 保存并提交权威 Gameplay 状态 |
+| Autonomous Proxy | 拥有该 Pawn 的客户端 | 本地输入、预测和服务器校正 |
+| Simulated Proxy | 观察其他 Pawn 的客户端 | 接收快照并平滑显示 |
+
+不要把 Authority 理解为“这个 Actor 最初由谁 Spawn”。判断重点是当前实例在哪台机器对状态拥有最终决定权。
+
+#### Framework 类
+
+| 类 | 网络边界 |
+| --- | --- |
+| GameMode | 仅服务器存在，负责规则、生成、胜负 |
+| GameState | 服务器权威并复制给客户端，保存对局公共状态 |
+| PlayerController | 服务器和拥有者客户端存在，是客户端请求进入服务器的主要入口 |
+| PlayerState | 服务器权威并复制，保存玩家身份、分数等公共长期状态 |
+| Pawn/Character | 服务器权威，拥有者客户端预测移动，其他客户端观察 |
+| AIController | 通常只在服务器运行，客户端不需要复制 AI 决策过程 |
+
+映射到当前项目：
+
+```text
+GameMode:
+    保留生成、波次推进、玩家死亡判负和服务器最终结算
+
+GameState:
+    承担 RemainingTime、CurrentWave、AliveEnemyCount、GameResult
+
+Character/Weapon:
+    客户端表达输入，服务器提交弹药、伤害和死亡
+
+EnemyAIController/SurroundManager:
+    服务器运行，不向客户端复制每次 FSM 决策和槽位评分
+
+EnemyCharacter:
+    复制位置、生命结果和表现所需的紧凑状态
+```
+
+### 27.4 Replicated Property 与 RPC
+
+#### Replicated Property
+
+用于“当前状态是什么”：
+
+- 当前生命值。
+- 当前弹药。
+- 当前波次和剩余时间。
+- 武器动作状态。
+- 是否死亡。
+
+客户端晚加入时仍需要知道这些状态，因此不应只依赖一次 RPC。
+
+`ReplicatedUsing/OnRep` 适合在状态到达客户端后更新表现，但必须注意：
+
+- OnRep 表示本地观察到属性变化，不是权威 Gameplay 提交点。
+- 服务端通常不会因为本机修改而自动执行同样的 OnRep 表现路径，需要显式统一。
+- 多个属性的到达和回调顺序不能随意假设。
+- 属性复制表达最终状态，不保证每个中间值都被客户端观察到。
+
+#### RPC
+
+用于“发生了一次动作或请求”：
+
+- Client -> Server：请求开火、换弹、交互。
+- Server -> Owning Client：拒绝原因、私有确认。
+- Server -> Relevant Clients：短时表现事件。
+
+```text
+Reliable:
+    需要确认并保持顺序
+    丢包时重发
+    会阻塞同一可靠序列之后的数据
+
+Unreliable:
+    允许丢失
+    适合高频、短时、下一次更新可替代的事件
+```
+
+“重要”不等于全部 Reliable。高频开火、每帧瞄准方向或移动若全部 Reliable，丢包时可能形成队头阻塞和积压。权威状态应通过属性或后续确认恢复，而不是把所有瞬时事件变成可靠 RPC。
+
+### 27.5 本地预测、服务器校正与重放
+
+若玩家每次移动都等待服务器返回，输入延迟至少包含一次往返。客户端预测的基本链路是：
+
+```text
+Client:
+    读取 Input N
+    -> 本地立即模拟
+    -> 保存 Move N
+    -> 发送 Input/Move N
+
+Server:
+    接收 Move N
+    -> 按权威规则模拟
+    -> 返回 State + Ack N
+
+Client:
+    收到 Ack N
+    -> 删除已确认 Move
+    -> 比较权威状态与预测状态
+    -> 超阈值则校正
+    -> 从 Ack N 之后重放未确认输入
+```
+
+为什么要重放，而不是直接设置服务器位置：
+
+- 客户端等待服务器期间已经执行了 N+1、N+2 等输入。
+- 直接设置到旧服务器位置会丢掉这些合法输入。
+- 先回到服务器确认点，再重放未确认输入，才能得到当前预测位置。
+
+需要处理：
+
+- 输入序号和 Ack。
+- 固定或一致的模拟参数。
+- 浮点和碰撞差异。
+- Move 合并规则。
+- 校正阈值和视觉平滑。
+- Teleport、Root Motion 和自定义移动模式。
+
+UE 的 `UCharacterMovementComponent` 已经为 Walking/Falling 等模式提供网络预测、ServerMove、Ack、SavedMove 和校正框架。基础 Character 移动不应自行每帧 Replicate Transform。
+
+若把当前 Sprint 扩展到网络：
+
+- 服务器必须验证是否允许冲刺。
+- 冲刺状态要进入可预测 Move 数据。
+- 客户端使用同一速度规则预测。
+- 服务端拒绝时触发校正。
+- 只在 Character 上复制一个 `bIsSprinting`，但不进入移动预测，可能造成速度反复纠正。
+
+### 27.6 远端角色的插值与外推
+
+Simulated Proxy 不拥有远端玩家的输入，只能接收离散快照：
+
+```text
+Snapshot A: Time 10.00, Position PA
+Snapshot B: Time 10.05, Position PB
+```
+
+#### 插值
+
+客户端故意在服务器时间之后保留一个缓冲：
+
+```text
+RenderTime = EstimatedServerTime - InterpolationDelay
+Alpha = (RenderTime - TimeA) / (TimeB - TimeA)
+RenderPosition = Lerp(PA, PB, Alpha)
+```
+
+优点：
+
+- A、B 都已经收到，结果稳定。
+- 可以吸收一定 Jitter。
+- 位置和旋转更平滑。
+
+代价：
+
+- 远端对象永远显示在过去。
+- 插值延迟会参与 Peeker's Advantage 和服务器回溯时间。
+
+#### 外推
+
+缺少新快照时，根据旧速度预测未来：
+
+```text
+PredictedPosition = LastPosition + LastVelocity * DeltaTime
+```
+
+优点是延迟较低；缺点是在突然停止、转向和碰撞时预测错误。应限制最大外推时间，超时后冻结或采用更保守策略，并在新快照到达后平滑回归。
+
+#### 选择原则
+
+| 网络条件 | 策略 |
+| --- | --- |
+| 快照稳定 | 插值 |
+| 轻微 Jitter | 扩大少量缓冲 |
+| 短时丢包 | 有上限的外推 |
+| 长时无数据 | 停止外推，标记连接异常 |
+| Teleport/重生 | 跳过普通插值，直接重置历史 |
+
+### 27.7 FPS Hitscan 射击同步
+
+推荐把“即时手感”和“权威伤害”分开：
+
+```text
+Owning Client:
+    输入开火
+    -> 本地门禁预测
+    -> 立即播放枪口/声音/后坐力
+    -> 发送 Shot Request
+
+Server:
+    验证请求
+    -> 提交权威弹药与射速
+    -> 当前或历史命中查询
+    -> 应用权威伤害
+    -> 复制弹药/生命/死亡与命中确认
+
+Other Clients:
+    接收必要的开火表现和结果
+```
+
+请求数据可以包含：
+
+```text
+WeaponId
+ShotSequence
+ClientShotTime
+ViewOrigin
+ViewDirection
+SpreadSeed 或 SpreadIndex
+```
+
+这些只是声明，不是事实。服务器至少验证：
+
+- 调用者是否拥有该 Pawn/Weapon。
+- WeaponId 是否为当前装备武器。
+- ShotSequence 是否重复、回退或跳跃异常。
+- 当前状态是否允许射击。
+- 服务器弹药是否大于 0。
+- 与上次权威射击的间隔是否满足 RPM。
+- ViewOrigin 与服务端角色/相机代理是否在容差内。
+- ViewDirection 与服务端可接受朝向是否一致。
+- ClientShotTime 是否位于允许回溯窗口。
+- 命中射线是否被世界几何阻挡。
+
+客户端命中结果只能用于即时准星反馈的预测。最终伤害必须由服务器决定。
+
+### 27.8 服务器回溯的完整链路
+
+#### 历史记录
+
+服务器不需要保存“最近 N 帧的整个世界”。通常只保存命中判定所需数据：
+
+- ServerTime。
+- Character Capsule。
+- 关键 Hitbox Transform 和 Extent。
+- 姿态、蹲伏和死亡状态。
+- Teleport/重生等历史断点。
+
+使用按时间排序的环形缓冲区：
+
+```text
+Oldest <- [Frame0][Frame1][Frame2]...[FrameN] <- Newest
+```
+
+容量近似：
+
+```text
+HistoryFrameCount = HistorySeconds * RecordRate
+Memory = Players * HistoryFrameCount * BytesPerRecord
+```
+
+记录频率越高，时间精度越高，但 CPU 和内存成本也越高。查询时可在相邻记录之间插值 Hitbox，减少必须逐 Tick 保存的压力。
+
+#### 时间映射
+
+服务器收到 Shot Request 后：
+
+1. 把客户端 Shot Time 映射到服务器时间域。
+2. 检查时间是否未来、过旧或异常跳跃。
+3. Clamp 到最大回溯窗口。
+4. 找到历史记录 A/B 并按时间插值。
+5. 在历史 Hitbox 上执行射线/形状查询。
+6. 使用当前权威武器状态提交伤害。
+
+不能只相信客户端提供的 “我在 300 ms 前开枪”。否则作弊客户端可以选择最有利历史时刻。
+
+#### 回溯查询的实现边界
+
+较安全的思路是对历史 Hitbox 数据做独立查询，或者在严格作用域内暂时应用历史碰撞体并立即恢复。不要随意移动真实 Gameplay Actor：
+
+- 并发射击可能互相干扰。
+- Overlap/Hit 回调可能产生副作用。
+- 动画、AI 和移动系统可能读取临时 Transform。
+- 恢复遗漏会破坏当前世界。
+
+世界静态墙体通常可使用当前几何；移动门、升降台和可破坏掩体是否也回溯，需要单独定义。只回溯玩家却不回溯动态掩体，可能产生“历史上墙没关但当前墙已关”的争议。
+
+#### 霰弹与穿透
+
+霰弹的一次 ShotSequence 是一个权威事务：
+
+- 只检查一次射速和弹药。
+- 根据可验证 Seed 生成多条方向。
+- 对每条射线回溯。
+- 按目标/部位聚合伤害。
+- 限制命中表现和 RPC 数量。
+
+穿透则需要记录每段世界几何和能量衰减。不能让客户端直接上报“穿过了哪几面墙”。
+
+### 27.9 Peeker's Advantage
+
+主动探头者在本机立即看到守点者；守点者要等探头者的移动经过网络、服务器处理、复制和插值后才看到对方：
+
+```text
+Holder 看到 Peeker 的延迟近似 =
+    Peeker -> Server Delay
+    + Server Queue/Replication Delay
+    + Server -> Holder Delay
+    + Holder Interpolation/Render Delay
+```
+
+它不是固定等于双方 RTT，也不意味着探头者总能获胜。还受：
+
+- 双方 Ping/Jitter。
+- Server Tick 和 Replication Rate。
+- 客户端帧率、显示延迟和输入延迟。
+- 移动速度与加速度。
+- 角色碰撞体、相机位置和动画姿态。
+- 地图拐角几何。
+- 回溯窗口与命中规则。
+
+缓解措施：
+
+1. 降低服务器排队和复制延迟。
+2. 为高重要玩家保持合理更新频率和优先级。
+3. 插值缓冲按 Jitter 调整，不无界增大。
+4. 限制最大服务器回溯时间。
+5. 优化客户端输入、渲染队列和帧率。
+6. 校准移动速度、相机偏移、角色轮廓与地图拐角。
+7. 用服务器区域部署和匹配降低基础网络距离。
+
+把 64 Tick 提升到 128 Tick 只能减少 Tick 量化和排队的一部分时间，会提高服务器 CPU、带宽和数据处理压力，不能消除传播延迟。
+
+### 27.10 网络带宽与服务器 CPU 优化
+
+网络优化的第一顺序：
+
+```text
+少复制对象
+-> 少复制字段
+-> 少复制频率
+-> 更小的数据
+-> 最后再换复制框架
+```
+
+#### Relevancy
+
+每条连接只接收对它可能产生影响的 Actor。距离、Owner、队伍、视野和 Gameplay 重要性都可参与。不能为了省带宽隐藏会立即伤害玩家的敌人或关键投射物。
+
+#### Priority
+
+带宽饱和时，重要 Actor 先获得发送机会。提高所有 Actor 的 `NetPriority` 没有意义，因为优先级看相对比例。
+
+#### Dormancy
+
+长期不变化的复制 Actor 可进入休眠，减少服务器每次网络更新时的扫描和属性比较。状态变化前必须正确 Wake/Flush；频繁睡眠和唤醒可能比保持活跃更贵。
+
+#### Frequency
+
+- 玩家和高速投射物需要较高更新频率。
+- 远处 AI、静态机关和低重要表现可以低频。
+- 关键事件可立即 Force Update，而不是长期维持最高频率。
+- 频率降低后，客户端必须有插值或事件补偿。
+
+#### Quantization 与 Delta
+
+- 位置、旋转、速度根据玩法精度量化。
+- 只发送变化字段。
+- 数组使用增量语义，避免每次发送完整容器。
+- 相同信息不同时通过属性、Reliable RPC 和 Multicast 重复发送。
+
+#### 服务器 AI
+
+当前 AI 若迁移网络：
+
+- EnemyAIController 和 SurroundManager 保持服务器独占。
+- 客户端不需要每个 Decision Tick、MoveTo 请求或 Token 变化。
+- 客户端接收 Enemy Character 的移动结果和少量动画/攻击状态。
+- 近战伤害窗口由服务器执行，客户端播放对应 Montage。
+
+这会让现有“Timer 降频、中央槽位、攻击名额”同时减少服务器 Gameplay 成本，但网络带宽仍需另行测量。
+
+### 27.11 Generic Replication、Replication Graph 与 Iris
+
+UE5.5 学习顺序应是：
+
+1. Generic Replication 的 Actor、Property、RPC、Ownership、Relevancy。
+2. CharacterMovement 的预测和校正。
+3. Networking Insights 与网络模拟。
+4. Actor 数量和连接数确实扩大后，再研究 Replication Graph 或 Iris。
+
+| 系统 | 适用问题 |
+| --- | --- |
+| Generic Replication | 常规规模、基础 Actor/Property/RPC |
+| Replication Graph | 大量 Actor 和连接下，自定义空间/持久列表裁剪 |
+| Iris | 量化状态副本、过滤、优先级、并行与共享每连接工作 |
+
+在 UE5.5 中不要为了“技术更高级”直接迁移 Iris。框架选择必须由 Actor 数、连接数、服务器 CPU、带宽和维护风险决定；先掌握通用网络语义。
+
+### 27.12 网络安全边界
+
+服务器权威不是“客户端什么都不能算”，而是客户端可以预测，不能提交最终结果。
+
+服务端应独立拥有：
+
+- 生命值和死亡。
+- 弹药、射速和换弹提交。
+- 武器装备合法性。
+- 伤害与胜负。
+- AI 和生成。
+- 可接受移动规则。
+
+典型攻击与校验：
+
+| 攻击 | 服务端校验 |
+| --- | --- |
+| 无限弹药 | 服务器维护弹药 |
+| 超射速 | 服务器时间门禁 |
+| 重放射击 RPC | ShotSequence 去重 |
+| 伪造枪口位置 | 与权威位置做容差检查 |
+| 伪造历史时间 | 时钟映射和最大回溯窗口 |
+| 穿墙命中 | 服务器世界几何查询 |
+| 加速移动 | CharacterMovement 权威模拟与校正 |
+| 非法武器 | 服务器装备状态 |
+
+Aimbot 和 Wallhack 不能只靠一个 RPC 校验解决：
+
+- Aimbot 输入可能仍符合物理规则，需要行为统计、命中分布和人工/模型审查。
+- Wallhack 的根本缓解之一是减少向客户端发送完全无关的信息，但声音、队友、预测和即将相关对象会让裁剪复杂。
+- 客户端保护只能提高作弊成本，最终 Gameplay 结果仍由服务器验证。
+
+### 27.13 测试矩阵与指标
+
+#### 拓扑
+
+- Listen Server + 2 Clients。
+- Dedicated Server + 2 Clients。
+- 迟加入、断线、重连、服务器退出。
+
+#### 网络条件
+
+| 条件 | 延迟 | 丢包 | Jitter | 用途 |
+| --- | ---: | ---: | ---: | --- |
+| Local | 0 | 0% | 0 | 基础正确性 |
+| Good | 20 到 40 ms | 0 到 1% | 低 | 常规体验 |
+| Average | 80 到 120 ms | 1 到 3% | 中 | 预测与插值 |
+| Bad | 180 到 250 ms | 5 到 10% | 高 | 失败和恢复 |
+
+测试时要明确工具中的延迟是单向还是分别配置 Incoming/Outgoing，不能把配置值直接当 RTT。
+
+#### Gameplay 用例
+
+- 开火、长按自动射击、空仓、换弹和换弹中开火。
+- 死亡与射击同帧。
+- 高 Ping 射击移动目标。
+- 目标进入掩体前后。
+- 霰弹多射线和重复请求。
+- 重生后旧 ShotSequence/Timer 到达。
+- 移动、跳跃、冲刺和自定义状态校正。
+- 远处敌人进入/离开 Relevancy。
+
+#### 指标
+
+- Input -> Local Muzzle Flash。
+- Shot Request -> Server Accept。
+- Shot -> Hit Confirm。
+- Hit Reject Rate 与原因。
+- Rewind Age 平均/P95/最大值。
+- Rewind Clamp 次数。
+- Movement Correction 次数、距离和最大值。
+- Interpolation Buffer、外推次数与持续时间。
+- 每连接带宽、Actor/Property/RPC 字节。
+- Reliable RPC 数和积压。
+- Server Game/Net Tick、序列化和复制 Gather 时间。
+
+工具：
+
+- PIE Multiplayer Options。
+- Network Emulation：Lag、Loss、Jitter、Order、Duplicate。
+- Networking Insights。
+- Unreal Insights。
+- Network Profiler。
+- 服务端与客户端分类日志。
+
+### 27.14 高频场景题
+
+#### 场景 1：客户端播放了命中，但服务端没有扣血
+
+先检查是否只是预测表现；再检查 Server RPC Ownership、射速/弹药门禁、时间窗口、服务器 Trace、Collision Channel 和目标 Relevancy。客户端不能自行补一次伤害。
+
+#### 场景 2：玩家躲到墙后仍然死亡
+
+可能是合法服务器回溯，也可能是时间映射错误、回溯上限过大或动态掩体未参与历史查询。记录 Shot Time、Rewind Age、历史 Hitbox 和墙体状态后再判断。
+
+#### 场景 3：高丢包时 Reliable 开火越来越延迟
+
+可靠序列发生重传和队头阻塞。高频射击请求需要序号、幂等和后续权威状态恢复，不能无脑把每个表现事件都设为 Reliable。
+
+#### 场景 4：冲刺时客户端不断被拉回
+
+客户端和服务器的移动参数或 Sprint 状态不一致。把冲刺状态纳入 CharacterMovement SavedMove/压缩标记，并由服务器验证，而不是只复制 MaxWalkSpeed。
+
+#### 场景 5：200 个敌人导致服务器带宽暴涨
+
+AIController 和内部 FSM 不应复制；检查 Enemy Pawn 的 Relevancy、NetUpdateFrequency、移动复制、动画状态和死亡 Dormancy。先按每 Actor/Property/RPC 字节归因。
+
+#### 场景 6：霰弹一次发送 20 个命中 RPC
+
+错误边界。客户端发送一个 Shot Request 和 Seed/Index，服务器生成 20 条方向并聚合结果；一次弹药、一次射速提交、一个 ShotSequence。
+
+#### 场景 7：提高 Tick Rate 后 Peeker's Advantage 仍明显
+
+Tick 只占总延迟一部分。继续检查网络距离、复制调度、插值缓冲、客户端帧率、Render Queue、移动速度和回溯规则。
+
+### 27.15 面试回答模板
+
+```text
+我会先区分三类对象：
+拥有者客户端做输入预测，服务器做权威提交，
+其他客户端作为 Simulated Proxy 对快照插值。
+
+移动优先复用 CharacterMovement 的 SavedMove、ServerMove、
+Ack、Correction 和 Replay；不会自己每帧复制 Transform。
+
+Hitscan 开火在客户端立即播放预测表现，同时发送带序号和时间的请求。
+服务器验证装备、状态、弹药、射速、位置、方向和回溯窗口，
+再对历史命中体执行查询并提交伤害。
+
+网络性能先从 Relevancy、Frequency、Dormancy、Quantization
+和 RPC/Property 语义入手，再根据 Actor 与连接规模选择 Replication Graph
+或 Iris。验证时使用 Dedicated Server、网络模拟和 Networking Insights，
+记录校正、回溯、拒绝率、带宽以及 Server P95。
+
+当前 FPS 是单机项目，这些是迁移设计和知识储备，
+不是已经完成的网络功能。
+```
+
+### 27.16 官方学习入口
+
+- [Networking Overview](https://dev.epicgames.com/documentation/unreal-engine/networking-overview-for-unreal-engine)
+- [Networked Character Movement](https://dev.epicgames.com/documentation/unreal-engine/understanding-networked-movement-in-the-character-movement-component-for-unreal-engine)
+- [Remote Procedure Calls](https://dev.epicgames.com/documentation/unreal-engine/remote-procedure-calls-in-unreal-engine)
+- [Actor Relevancy](https://dev.epicgames.com/documentation/unreal-engine/actor-relevancy-in-unreal-engine)
+- [Actor Priority](https://dev.epicgames.com/documentation/unreal-engine/actor-priority-in-unreal-engine)
+- [Actor Network Dormancy](https://dev.epicgames.com/documentation/unreal-engine/actor-network-dormancy-in-unreal-engine)
+- [Network Emulation](https://dev.epicgames.com/documentation/en-us/unreal-engine/using-network-emulation-in-unreal-engine)
+- [Testing and Debugging Networked Games](https://dev.epicgames.com/documentation/en-us/unreal-engine/testing-and-debugging-networked-games-in-unreal-engine)
+- [Iris Replication System](https://dev.epicgames.com/documentation/unreal-engine/iris-replication-system-in-unreal-engine)
+
+## 28. 教程性能章节：概念修订、备选方案与场景题
+
+### 28.1 封板范围不变
+
+本节不增加封板功能，只整理教程中的性能知识：
+
+- 当前项目继续按单机 PvE FPS 封板，不实现网络。
+- 当前性能标准仍以 CPU、GPU、内存、场景查询、动画、Ragdoll 和生命周期证据为准。
+- 软光栅遮挡、GPU Driven、Animation Budget Allocator、对象池和异步物理均是条件方案。
+- 只有 Profile 证明瓶颈且质量回归通过，备选方案才会进入实现。
+- 当前事实数据继续以 `PERFORMANCE_BASELINE.md` 为唯一性能结果来源。
+
+网络性能只作为第 27 章的知识储备，不进入本项目验收。
+
+### 28.2 先把性能问题分层
+
+教程把很多方案放在同一张检查表中，实际定位时应先判断成本属于哪一层：
+
+```text
+Gameplay CPU:
+    AI、CharacterMovement、Timer、Tick、Scene Query、Spawn/Destroy
+
+Animation CPU:
+    Anim Graph Update、Pose Evaluation、IK、Notify、Physics Blend
+
+Physics:
+    Broadphase、Narrowphase、Contact、Constraint、Ragdoll、同步等待
+
+Render CPU:
+    Scene Traversal、Mesh Draw Command、State Sort、RHI Submission
+
+GPU:
+    Vertex/Skinning、Raster、Pixel、Shadow、Lighting、Post Process
+
+Memory/IO:
+    UObject、Texture、Mesh、Animation、Render Target、Streaming、Allocation
+```
+
+同一个现象可能跨层。例如“敌人多时掉帧”既可能来自 CharacterMovement，也可能来自动画求值、Skeletal Mesh Draw、阴影或像素 Overdraw。必须通过线程和 Pass 数据拆分。
+
+### 28.3 对教程表述的 UE5.5 修正
+
+#### 角色移动碰撞与射击 Hitbox 不能混用
+
+角色移动通常使用 Capsule，部位命中使用 Physics Asset/Hitbox。远距离敌人改成球体不是通用优化：
+
+- 改移动碰撞会改变寻路可达性、拥挤和近战距离。
+- 改射击 Hitbox 会改变命中公平性。
+- 只能在明确的距离、可见性和武器有效范围外降级。
+- 降级前后要验证误命中率、漏命中率和碰撞成本。
+
+#### “固定物理 30 到 60 Hz”不是默认答案
+
+UE 使用可变帧时间，Substepping 可把较大的帧时间拆成多个物理子步，提高 Ragdoll 和复杂约束稳定性，但增加 CPU、内存记账和回调复杂度。
+
+只有出现低帧率穿透、Ragdoll 抖动或约束不稳时才做：
+
+```text
+Max Physics Delta
+Max Substep Delta
+Max Substeps
+30/60/120 FPS
+```
+
+固定矩阵 A/B。Substep 可能让同一帧排队多个碰撞回调，因此 Gameplay 伤害仍需要幂等。
+
+#### 空间结构通常由引擎 Broadphase 管理
+
+对一次 Line Trace，不应先在 Gameplay 层维护一棵重复八叉树。Chaos Scene Query 已依赖底层空间加速结构。Gameplay 优化优先级是：
+
+```text
+减少查询次数
+-> 缩小范围
+-> 精确 Collision Channel
+-> Single 替代不必要的 Multi
+-> Simple 替代不必要的 Complex
+-> 最后评估异步/批处理
+```
+
+只有候选目标选择、战术搜索或非物理数据查询才可能需要独立 Grid/BVH。
+
+#### “批量射线”不是自动合并成一次检测
+
+多条射线仍需要各自的几何结果。批处理的收益可能来自：
+
+- 共享查询参数和候选集合。
+- 降低调度与接口开销。
+- 异步提交后统一收集。
+- 对结果做 Actor/部位聚合。
+
+不能为了减少查询，把霰弹 20 条独立弹丸错误合成一条射线。
+
+#### 异步查询只适合非立即依赖结果的逻辑
+
+当前玩家开火需要当帧决定伤害和反馈，默认同步 Trace 更简单。AI 预判、远处环境探测或可延后一帧的批量检测才适合评估异步；异步会增加结果时序、对象失效和取消处理。
+
+#### GPU 蒙皮不等于动画全部在 GPU
+
+需要分开：
+
+```text
+Anim Graph Update/Evaluation:
+    状态机、Blend、IK、曲线、Notify，主要是 CPU/Worker Task
+
+Bone Transform Upload:
+    把最终骨骼数据提供给渲染
+
+Skinning:
+    顶点根据骨骼矩阵变换，可由 Vertex/Compute GPU 路径完成
+```
+
+启用 GPU Skinning 后，复杂 Anim Blueprint、IK、Notify 和 Physics Blend 仍可能消耗 Game/Worker Thread。Skin Cache 还会使用额外 GPU 内存和 Compute 时间。
+
+#### UE 不采用“动态批处理小于 300 顶点”这一固定规则
+
+这是跨引擎或旧版本经验。UE 中更应讨论：
+
+- ISM/HISM。
+- Merge Actors。
+- HLOD。
+- Mesh Draw Command 缓存与 Dynamic Instancing。
+- GPU Scene/Instance Culling。
+- Nanite。
+
+批处理能否发生取决于 Mesh、Material、Vertex Factory、Pass、实例数据和平台，不由一个固定顶点数决定。
+
+#### 软件遮挡不是无延迟、必然高性能
+
+CPU 软光栅需要变换 Occluder、写低分辨率深度并测试 Bounds。UE 的移动端 Software Occlusion 资料描述的是保守 CPU 光栅方案，并存在结果时序。场景缺少大型遮挡物或 CPU 已满时可能负收益。
+
+#### 对象池与多线程都是条件方案
+
+- 对象池只在 Spawn/Destroy/GC 被证明是瓶颈时引入。
+- 池化对象必须重置 Timer、Delegate、碰撞、物理速度、材质和 Gameplay 状态。
+- 多线程不能在任意 Worker Thread 修改 UObject、World 或碰撞场景。
+- 异步任务还要计算调度、同步、数据复制和一帧延迟成本。
+
+### 28.4 物理与 Scene Query 备选方案
+
+| 问题 | 首选方案 | 升级条件 | 验证指标 |
+| --- | --- | --- | --- |
+| 移动碰撞过重 | Capsule/Simple Collision、碰撞矩阵 | Narrowphase/Pair 成本高 | Physics、Pairs、误阻挡 |
+| 射击 Trace 过多 | 专用 Channel、Single、降频非关键查询 | Query 本身进入主要成本 | Query 数、时间、命中正确率 |
+| 高速近战漏判 | 帧间 Sweep、自适应采样 | 固定采样仍漏判 | 漏判率、Sweep 数、P95 |
+| Ragdoll 抖动 | Physics Asset/Constraint 校准 | 低帧率仍不稳定 | Active Bodies、Constraint、Physics |
+| 大量静止刚体 | Sleep、Freeze、生命周期预算 | Awake Body 持续过多 | Awake 数、唤醒次数 |
+| 高速 Projectile 穿透 | Swept Movement、CCD | 普通 Sweep 仍漏判 | 穿透率、Physics/Query 成本 |
+| 非关键批量探测 | 错帧或异步查询 | 允许一帧以上延迟 | 延迟、取消率、Task/同步时间 |
+| 复杂物理低帧率失稳 | Substepping | 可复现稳定性问题 | 质量指标、CPU 增量、重复回调 |
+
+当前项目已经使用：
+
+- Character Capsule + CharacterMovement。
+- Hitscan Line Trace。
+- 近战窗口内帧间 Sphere Sweep。
+- 死亡后 Ragdoll 和下一帧物理冲量。
+- 距离分级的 AI/Movement 更新。
+
+仍需验证：
+
+- 专用 Weapon/Melee Channel。
+- 隔墙近战。
+- Simple/Complex A/B。
+- 10/25/50 Ragdoll。
+- 活动物理 Body 和约束成本。
+
+### 28.5 动画优化备选方案
+
+动画成本应拆成 Update、Evaluate、Completion、Notify、Physics 和 Render Skinning。
+
+| 方案 | 解决的问题 | 代价与边界 |
+| --- | --- | --- |
+| Visibility Based Tick | 不可见角色仍完整更新 | 可能影响离屏 Gameplay Socket/Notify |
+| URO | 按帧间隔降低 Update/Evaluate | 降低动作平滑度，插值也有成本 |
+| Animation Budget Allocator | 按固定毫秒预算和 Significance 动态分配 | 需要 Budgeted SkeletalMesh 和质量规则 |
+| LOD Bone Reduction | 远距离减少骨骼与顶点工作 | Socket、Hitbox、IK 依赖需审计 |
+| Parallel Animation Update | 把可并行求值放 Worker Thread | Root Motion、线程不安全节点会限制并行 |
+| Animation Sharing | 大量角色共享状态和 Pose 计算 | 个体差异和过渡自由度降低 |
+| Leader Pose | 多个 Mesh 共享骨骼 Pose | 从属 Mesh 不能独立动画 |
+| Anim Compression | 降低动画资产内存/IO | 可能增加解压或产生姿态误差 |
+| Fixed Skel Bounds | 跳过每帧 Physics Asset Bounds 更新 | 动画超出固定 Bounds 会被错误裁剪 |
+
+当前项目已实现 URO、不可见动画降级和距离更新率分级。进一步升级到 Animation Budget Allocator 的触发条件应是：
+
+- 敌人数量或硬件波动让固定距离阈值无法稳定控制动画毫秒预算。
+- Profile 证明 Animation Update/Evaluate 是主要瓶颈。
+- 已定义近战、受击、死亡等必须高质量更新的 Significance 规则。
+
+不能只看动画“是否播放流畅”，还要验证攻击 Notify、Socket Sweep、Root Motion、受击和死亡是否在降频后保持正确。
+
+### 28.6 渲染优化备选方案
+
+#### 可见性顺序
+
+```text
+Distance Culling
+-> Frustum Culling
+-> Precomputed Visibility/HLOD
+-> Dynamic Occlusion
+-> Instance/Cluster Culling
+```
+
+便宜且稳定的方案应先执行。遮挡剔除本身也有成本，不是越多越好。
+
+#### LOD 以屏幕占比和误差为核心
+
+教程中的 10m、30m、50m 只能作为示意。真实 LOD 应考虑：
+
+- 物体屏幕尺寸。
+- 模型几何误差。
+- FOV 和目标分辨率。
+- 阴影 LOD。
+- 材质和透明成本。
+- 切换 Hysteresis/Dither。
+
+相同距离下，大型建筑与弹壳的 LOD 决策不应相同。
+
+#### Instancing 与合并
+
+| 方案 | 适用内容 | 代价 |
+| --- | --- | --- |
+| ISM | 大量同 Mesh/Material 实例 | 实例管理、每实例数据和剔除成本 |
+| HISM | 数千个主要静态实例 | 层次维护，动态修改不友好 |
+| Merge Actors | 稳定静态组合 | 粗粒度剔除、内存与工作流 |
+| HLOD | 远距离场景簇 | 构建时间、代理质量和切换 |
+| Nanite | 高几何静态内容和虚拟化几何 | 材质、平台和非 Nanite Pass 仍有限制 |
+| GPU Driven | 高实例与 CPU Submission 瓶颈 | GPU Culling/内存/跨平台复杂度 |
+
+减少 Draw Calls 不一定降低 GPU Frame：
+
+- 合并过大会让不可见部分一起绘制。
+- 材质仍不兼容时无法真正合批。
+- 像素、阴影或透明是瓶颈时，Draw Call 下降可能没有帧率收益。
+
+#### 当前项目映射
+
+- 厂区重复树木和道具适合检查 ISM/HISM、Cull Distance 和 HLOD。
+- 当前 VSM Non-Nanite Job Queue Overflow 要先检查非 Nanite 阴影投射者、实例数和阴影预算。
+- 高敌人数的 Skeletal Mesh、动画和阴影需要分开测量。
+- GPU Driven 不能解决当前已测出的 CharacterMovement 6.920 ms。
+
+### 28.7 内存与资源优化备选方案
+
+内存问题至少分为：
+
+```text
+Resident Asset Memory
+Transient Render Memory
+Runtime Object Memory
+Allocation/Fragmentation
+Streaming/IO Peak
+Leak or Lifetime Retention
+```
+
+| 方案 | 目标 | 风险 |
+| --- | --- | --- |
+| Texture LOD/Max Size | 降低驻留和流送 | 画质、Mip Pop |
+| Texture Compression | 降低包体/显存/带宽 | 平台格式和伪影 |
+| Mesh LOD/Nanite | 几何内存与渲染 | 平台、构建和回退资产 |
+| Anim Compression | 动画资产 | 解压成本和误差 |
+| Streaming | 控制 Resident Set | IO 峰值、晚加载 |
+| Object Pool | 减少分配和 GC | Reset 漏项和常驻内存 |
+| Lifetime Cleanup | 清 Timer/Delegate/引用 | 过早释放或丢表现 |
+
+当前纹理实验已经证明 6 张植被纹理降低约 60 MB 驻留，但进程 Working Set 没有同步下降。这正说明优化必须观察对应内存类别，不能用一个指标代替全部内存。
+
+Memory Insights 可用时间点查询和 Callstack 区分短期分配、长期存活和疑似泄漏。连续波次测试应设置：
+
+```text
+Start
+-> Wave Peak
+-> All Enemies Dead
+-> Effects Expired
+-> GC
+-> Cooldown
+```
+
+比较每轮 Peak 与 Cooldown Baseline，而不是只看某一帧对象数。
+
+### 28.8 当前性能深度
+
+| 方向 | 当前状态 | 深度 |
+| --- | --- | --- |
+| CPU 规模测试 | 10/20/40/80/160 已采样 | L2-L3 |
+| AI 归因 | Movement/Animation/Pathfinding 已拆分 | L2-L3 |
+| AI/动画降级 | Timer、距离分级、URO、不可见降级 | L2 |
+| Scene Query | 枪械与近战方案清楚，查询统计未闭环 | L2 |
+| Physics/Ragdoll | 生命周期设计存在，规模 A/B 未完成 | L1-L2 |
+| GPU | 有线程/GPU数据，Pass 级治理不足 | L1-L2 |
+| 纹理内存 | 有固定条件前后对照 | L2-L3 |
+| 生命周期内存 | 缺多轮回落与 Callstack 证据 | L1 |
+| 高级 Renderer | 知识储备，没有实现 | L0 实现 |
+
+因此，性能章节的正确表述是：
+
+```text
+项目已经完成 CPU/AI 和纹理驻留的定量分析，
+并实现部分距离/可见性降级；
+GPU Pass、Ragdoll、Scene Query 计数和生命周期内存仍需闭环；
+软光栅与 GPU Driven 是备选知识，不是项目成果。
+```
+
+### 28.9 高频场景题
+
+#### 场景 1：160 个敌人时帧率下降，是否先优化寻路
+
+不能。先比较 Game、Render、GPU，并拆 CharacterMovement、Animation、Pathfinding。当前实测 Pathfinding 仅 0.071 ms，而 CharacterMovement 6.920 ms，优先优化移动和动画。
+
+#### 场景 2：50 个敌人同时死亡时出现尖峰
+
+拆 Spawn/Destroy、Ragdoll Active Bodies、Constraint、Niagara、Decal、音效、对象销毁和 GC。限制同时活动 Ragdoll，分级 Sleep/Freeze/Destroy，并记录 Physics P95 和对象回落。
+
+#### 场景 3：所有射线改异步是否更快
+
+不一定。即时射击需要当帧结果；异步会增加调度、结果延迟和对象失效处理。先减少查询数量、范围和复杂度，再把允许延迟的 AI 查询作为异步候选。
+
+#### 场景 4：开启 GPU Skinning 后 Game Thread 动画仍然很高
+
+GPU Skinning只处理顶点蒙皮；Anim Graph、Blend、IK、Notify、Physics Blend 和 Completion 仍可能在 CPU。用 Animation Insights 拆 Update/Evaluate/Completion。
+
+#### 场景 5：Draw Calls 降低 40%，GPU Frame 没变化
+
+GPU 可能受像素、阴影、透明、带宽或 Compute 限制；也可能 CPU Render 原本不是瓶颈。检查 ProfileGPU Pass 和 Render/RHI 时间，不能只看 Draw Calls。
+
+#### 场景 6：遮挡剔除后反而更慢
+
+场景可能缺少大型 Occluder，CPU 光栅与 Bounds 测试成本高于节省的 Draw；或被剔除对象本身很便宜。记录 Cull Time、Culled 数和实际节省 Pass。
+
+#### 场景 7：合并大量建筑后远处更快，近处反而更慢
+
+合并粒度过大导致粗粒度剔除，任何一部分可见都会提交整个组合。按空间 Cell/HLOD 层次重新划分，而不是无限合并。
+
+#### 场景 8：对象池加入后内存变高
+
+对象池以常驻内存换 Spawn/Destroy/GC。若生成频率低或池容量按峰值永久保留，内存会上升且帧时间未改善。应由分配与 GC 数据决定容量。
+
+#### 场景 9：Substepping 后一次碰撞触发多次伤害
+
+多个子步回调在帧末排队。Gameplay 使用攻击序列、命中集合或接触生命周期去重，不能假设一帧只有一次碰撞回调。
+
+#### 场景 10：动画降到 15 Hz 后敌人攻击漏判
+
+命中窗口依赖 NotifyTick/Socket Transform。近距离攻击者和当前攻击窗口必须提升 Significance 或保持高频；远处非战斗敌人才允许低频。
+
+#### 场景 11：纹理驻留下降 60 MB，但进程内存上升
+
+Working Set 受分配器、编辑器、对象、Render Target 和采集时机影响。使用相同条件和 Memory Insights/LLM 比较对应类别，不宣称总内存下降。
+
+#### 场景 12：VSM Non-Nanite Queue Overflow 是否扩大队列
+
+扩大队列只能缓解症状。先找大量非 Nanite 阴影投射者、植被/小物件、远距离阴影和频繁无效化，再按重要性关闭或降级阴影并做 ProfileGPU 对照。
+
+### 28.10 性能场景题回答模板
+
+```text
+1. 先确定目标平台、帧率和质量预算
+2. 判断是 CPU、GPU、Physics、Animation、Memory 还是 IO
+3. 用 Insights/ProfileGPU/Memory Insights 找主要贡献项
+4. 提出最低风险方案，并说明触发条件
+5. 说明质量、延迟、内存和维护代价
+6. 固定地图、机位、规模和画质做多轮 A/B
+7. 同时记录 Avg、P95/P99 和正确性指标
+8. 无收益就回退，不因为方案“高级”而保留
+```
+
+### 28.11 官方学习入口
+
+- [Introduction to Performance Profiling](https://dev.epicgames.com/documentation/en-us/unreal-engine/introduction-to-performance-profiling-and-configuration-in-unreal-engine)
+- [Unreal Insights](https://dev.epicgames.com/documentation/unreal-engine/unreal-insights-in-unreal-engine)
+- [Physics Sub-Stepping](https://dev.epicgames.com/documentation/en-us/unreal-engine/physics-sub-stepping-in-unreal-engine)
+- [Animation Optimization](https://dev.epicgames.com/documentation/unreal-engine/animation-optimization-in-unreal-engine)
+- [Animation Budget Allocator](https://dev.epicgames.com/documentation/en-us/unreal-engine/animation-budget-allocator-in-unreal-engine)
+- [Instanced Static Mesh](https://dev.epicgames.com/documentation/en-us/unreal-engine/instanced-static-mesh-component-in-unreal-engine)
+- [Memory Insights](https://dev.epicgames.com/documentation/en-us/unreal-engine/memory-insights-in-unreal-engine)
+- [Visibility and Occlusion Culling](https://dev.epicgames.com/documentation/en-us/unreal-engine/visibility-and-occlusion-culling-in-unreal-engine)
+
+## 29. 游戏客户端面经驱动的考察地图与扩展场景题
+
+### 29.1 样本用途和限制
+
+本节参考公开游戏客户端面经，用于判断问题频率、追问方式和岗位关注点。面经不是官方题库，也可能受到候选人简历、项目组方向和回忆偏差影响，因此：
+
+- 不根据单篇面经推导“必考题”。
+- 只把多个样本重复出现的主题提高优先级。
+- 面经里的技术答案不直接采用，仍由 UE 官方资料、源码和项目数据校正。
+- Unity 特定规则不会直接套到 UE5.5。
+- 网络仍是知识题，不进入当前单机封板实现。
+
+参考样本覆盖腾讯光子、腾讯 IEG、字节、完美世界、网易及综合客户端经历。重复出现的主题包括：
+
+- C++ 对象模型、内存、容器、线程和生命周期。
+- 渲染管线、Draw Call、合批、深度/模板、透明、阴影、MipMap、PSO 和 Shader 变体。
+- 骨骼动画、蒙皮、动画优化和引擎生命周期。
+- 碰撞检测、空间划分、高速穿透和物理。
+- 项目中真实做过什么、如何定位、用了什么工具、数据是否可信。
+- 网络状态同步/帧同步、服务器和客户端帧率、预测与校正。
+- A*、NavMesh、行为树、状态机和大量对象查询。
+- 内存定位、资源加载、GC、对象池与泄漏。
+
+### 29.2 高频考察优先级
+
+| 优先级 | 考察方向 | 面试官真正要确认 | 当前项目对应 |
+| --- | --- | --- | --- |
+| S | 项目深挖与性能定位 | 是否亲手做过，能否从现象到证据 | 10 到 160 AI、纹理驻留、Bug 记录 |
+| S | C++、内存与生命周期 | 所有权、析构、容器、缓存、线程安全 | UObject、TObjectPtr/TWeakObjectPtr、Timer/Delegate 清理 |
+| S | 渲染管线与 Draw Call | CPU/GPU 分工、Pass、状态与瓶颈归因 | Draw Call、VSM、ProfileGPU 待深化 |
+| A | 场景查询与碰撞 | 宽相/窄相、过滤、连续检测、正确性 | Hitscan、Sphere Sweep、隔墙风险 |
+| A | 动画与蒙皮 | Update/Evaluate/Skinning 边界和降频代价 | URO、不可见降级、攻击 Notify |
+| A | 资源与内存 | 如何找到占用、加载/卸载和泄漏 | Texture/MemReport，生命周期回落待补 |
+| A | AI、寻路与数据结构 | 搜索、可达、状态机、更新频率 | Timer FSM、NavMesh、SurroundManager |
+| A | 网络同步 | 权威、预测、校正、插值与带宽 | 第 27 章知识储备，无实现 |
+| B | UI 与业务框架 | 事件驱动、批次、资源和生命周期 | HUD 初始快照与事件更新待验收 |
+| B | 多平台与高级 Renderer | 平台预算和方案边界 | 第 26 章知识储备 |
+
+这里的 S/A/B 表示复习优先级，不代表技术等级。对 FPS 客户端岗位，网络可能从 A 上升为 S；对引擎/渲染岗位，Renderer、GPU 架构和 Shader 会取代 Gameplay 成为 S。
+
+### 29.3 面试官常用的递进结构
+
+公开面经中常见的追问不是孤立八股，而是以下递进：
+
+```text
+概念是什么
+-> 你的项目在哪里使用
+-> 为什么选择它
+-> 改一个条件后是否仍成立
+-> 性能瓶颈在哪里
+-> 如何用工具证明
+-> 方案有什么副作用
+```
+
+例如“Draw Call 是什么”之后，常继续问：
+
+- 为什么要降低 Draw Call。
+- 瓶颈在 CPU 还是 GPU。
+- 哪些对象能合批。
+- 合批后为什么可能更慢。
+- 项目里实际测过什么。
+
+这里需要区分两种题型：
+
+- **项目拷打**：基于简历和现有项目，追问“你到底怎么实现、为什么这么写、调用链是什么、数据从哪里来”。答案必须能落到当前类、函数、状态和实测证据。
+- **扩展场景题**：修改项目之外的条件，例如敌人从 160 增加到 1000、目标平台改成移动端、内存限制减半、加入联机或要求首帧无卡顿，考察知识迁移和系统取舍。
+
+因此扩展场景题不能只有“打开某个开关”的答案，必须包含新增条件、瓶颈假设、定位方法、候选方案、代价和验证。第 30 章单独整理当前项目拷打题，避免再混用术语。
+
+### 29.4 当前项目最应准备的八条证据链
+
+| 证据链 | 已有证据 | 当前缺口 |
+| --- | --- | --- |
+| 武器职责 | Character 转发，Weapon 拥有事务 | 正式 DataAsset 与蓝图回归 |
+| 换弹生命周期 | State、Sequence、Commit 幂等 | Montage Notify/Interrupted |
+| 近战碰撞 | 双 Socket、帧间 Sweep、命中集合 | 隔墙和查询量实测 |
+| 伤害与死亡 | HealthComponent、死亡幂等、GameMode 结算 | 通用 Damageable/HitZone |
+| 群体 AI | Timer FSM、NavMesh、槽位和 Token | 响应延迟和 Token 统计 |
+| CPU 优化 | 10 到 160 AI 分项数据 | 同条件三轮 A/B |
+| GPU/渲染 | Draw Call/GPU/VSM 基础信息 | Pass 级定位和同机位对照 |
+| 内存 | 纹理驻留下降约 60 MB | 多轮生命周期和 Callstack |
+
+面试回答应优先使用这些项目证据。没有实测的软光栅、GPU Driven、网络和对象池应明确称为候选方案。
+
+### 29.5 扩展场景题一：160 个敌人只有 48 FPS，怎么定位
+
+**考察点**：性能方法论、线程边界、数据诚实性。
+
+**回答主线**：
+
+1. 固定地图、机位、画质、敌人数和预热时间。
+2. 比较 Game、Render、GPU，确定主瓶颈。
+3. 用 Insights/CSV 拆 Tick、CharacterMovement、Animation、Pathfinding。
+4. 当前实测 160 敌人时 Game 20.733 ms，Movement 6.920 ms，Animation 3.190 ms，Pathfinding 0.071 ms。
+5. 优先处理 Movement、Animation 和 Tick，不先重写 A*。
+6. 多轮采样 Avg/P95，并验证 AI 响应和动画质量。
+
+**继续追问**：
+
+- 为什么 80 和 160 敌人的瓶颈线程会变化。
+- 降低更新率后敌人变笨怎么办。
+- 为什么平均 FPS 不能替代 P95。
+
+### 29.6 扩展场景题二：Draw Call 从 2099 增加到 3537，如何优化
+
+**考察点**：渲染管线、CPU Submission、实例化和错误归因。
+
+**回答主线**：
+
+- 先确认 Render/RHI 是否真是瓶颈，Draw Call 只是指标。
+- 按 Pass、Mesh、Material、Shadow 和实例类型归因。
+- 厂区重复静态 Mesh 检查 ISM/HISM、HLOD、Cull Distance。
+- 敌人 Skeletal Mesh 检查材质槽、阴影、LOD 和可见性，不随意合并角色。
+- 合并后验证粗粒度剔除、内存和 GPU Frame。
+
+**继续追问**：
+
+- Draw Call 降了为什么 GPU 没变。
+- 相同 Mesh 为什么仍不能合批。
+- ISM 和 HISM 怎么选。
+- Nanite 是否自动解决 Draw Call。
+
+### 29.7 扩展场景题三：纹理池告警和 VSM Queue Overflow 同时出现
+
+**考察点**：日志分类、GPU/内存边界、避免误修。
+
+**回答主线**：
+
+- Texture Streaming 管理 Mip 驻留和纹理池。
+- VSM Non-Nanite Queue 关联非 Nanite 阴影页面标记。
+- 分别用 `stat streaming/ListStreamingTextures/MemReport` 和 `ProfileGPU/VSM` 定位。
+- 当前纹理实验只证明 Streaming Assets 下降约 60 MB，没有修复 VSM。
+
+**继续追问**：
+
+- 为什么不直接扩大纹理池。
+- 为什么纹理下降后 Working Set 可能上升。
+- VSM 队列是否可以直接扩容。
+
+### 29.8 扩展场景题四：连续三轮后内存只涨不降
+
+**考察点**：泄漏、生命周期、分配器和采样方法。
+
+**回答主线**：
+
+1. 设置 Start、Wave Peak、Enemies Dead、Effects Expired、GC、Cooldown 时间点。
+2. 比较每轮 Peak 和 Cooldown Baseline。
+3. 检查 UObject、Timer、Delegate、Widget、Niagara、Decal、Ragdoll。
+4. 使用 Memory Insights/LLM 查长期存活分配和 Callstack。
+5. 区分对象仍被引用、内存池保留和真实泄漏。
+
+**继续追问**：
+
+- UObject 数量不增长能否证明无泄漏。
+- TWeakObjectPtr 是否自动解绑 Delegate。
+- 为什么 GC 后 Working Set 不一定立即下降。
+
+### 29.9 扩展场景题五：敌人低帧率时剑穿过玩家
+
+**考察点**：离散碰撞、连续检测、时间步与 Gameplay 幂等。
+
+**回答主线**：
+
+- 单帧只检测当前刀刃位置会漏过中间轨迹。
+- 使用上一帧到当前帧的 Socket Sweep，并按刀刃位移自适应采样。
+- 每轮攻击用命中集合去重。
+- 近距离攻击者不能被动画降频到破坏 Socket/Notify 精度。
+- 固定 30/60/120 FPS 比较漏判率和查询量。
+
+**继续追问**：
+
+- Sweep 和 CCD 有什么区别。
+- Substepping 能否自动修复 AnimNotify Sweep。
+- 为什么 Multi Sweep 可能隔墙命中。
+
+### 29.10 扩展场景题六：1000 个敌人寻找最近目标
+
+**考察点**：数据结构、空间索引、缓存和 Gameplay 条件。
+
+**回答主线**：
+
+- 先问目标数量、查询频率、移动速度和是否需要视线。
+- 单玩家目标直接注入，不需要搜索。
+- 多目标低规模用 Registry + 线性评分可能最简单。
+- 规模扩大后使用 Uniform Grid/Spatial Hash/BVH 缩小候选。
+- 距离比较使用平方，加入 Team、LOS、Threat 和切换迟滞。
+- 导航可达性不要对所有候选立即做昂贵 Path Query。
+
+**继续追问**：
+
+- Grid Cell 多大。
+- 目标跨 Cell 如何更新。
+- 为什么不用每帧 GetAllActorsOfClass。
+- 最近目标是否一定是最佳目标。
+
+### 29.11 扩展场景题七：开启 GPU Skinning，Animation 仍占 4 ms
+
+**考察点**：骨骼动画与蒙皮边界。
+
+**回答主线**：
+
+- GPU Skinning 主要处理顶点蒙皮。
+- Anim Graph、Blend、IK、曲线、Notify 和 Physics Blend 仍需 CPU/Worker Task。
+- 使用 Animation Insights 拆 Update/Evaluate/Completion。
+- 检查 URO、Visibility Tick、骨骼 LOD、Fixed Bounds 和 Budget Allocator。
+- 验证攻击窗口、Socket 和死亡表现没有被降级破坏。
+
+**继续追问**：
+
+- 骨骼矩阵如何作用于顶点。
+- Skin Cache 用什么换什么。
+- Root Motion 为什么会限制某些并行路径。
+
+### 29.12 扩展场景题八：对象池加入后帧率没变，内存更高
+
+**考察点**：对象池适用条件、生命周期复位和内存取舍。
+
+**回答主线**：
+
+- 先确认原始瓶颈是否为 Spawn/Destroy、Allocation 或 GC。
+- 池会让峰值对象长期驻留，以内存换分配稳定性。
+- Acquire/Release 必须复位 Transform、Timer、Delegate、碰撞、物理速度和 Gameplay 标记。
+- 若生成频率低或池容量按峰值永久保留，删除对象池可能更合理。
+
+**继续追问**：
+
+- 如何决定池容量。
+- UObject 是否适合完全通用的对象池。
+- 复用 Ragdoll 为什么可能自己飞走。
+
+### 29.13 扩展场景题九：第一次开火卡顿，之后正常
+
+**考察点**：Shader/PSO、同步加载、对象创建与工具。
+
+**回答主线**：
+
+- 分别检查首次 Shader/PSO 创建、Niagara/音频资产加载、Decal/组件创建和日志。
+- 使用 Insights、PSO Validation 和加载日志定位。
+- 资产可在关卡/加载阶段预热；PSO 使用 Precache/Cache；效果组件是否池化由数据决定。
+- 测试时控制驱动缓存，否则第二次运行会掩盖首次卡顿。
+
+**继续追问**：
+
+- PSO 包含哪些状态。
+- 为什么不能预编译所有排列。
+- 异步加载完成前怎么处理玩家第一次射击。
+
+### 29.14 扩展场景题十：软光栅遮挡开启后更慢
+
+**考察点**：遮挡剔除成本模型和方案触发条件。
+
+**回答主线**：
+
+- 检查场景是否有大型稳定 Occluder。
+- 记录 Occluder/Occludee 数、Cull Time、Culled 数和节省 Draw。
+- CPU 已满或被剔除对象很便宜时可能负收益。
+- 先使用距离、视锥、HLOD 和引擎现有遮挡。
+- 错误剔除比保守多画更严重，因此结果必须保守。
+
+**继续追问**：
+
+- False Visible 与 False Occluded 哪个更危险。
+- 为什么使用低分辨率深度。
+- HZB 与软件遮挡有什么区别。
+
+### 29.15 扩展场景题十一：把单机 FPS 改成联机，要先改哪里
+
+**考察点**：网络知识，不要求当前项目实现。
+
+**回答主线**：
+
+- GameMode 留在服务器，公共对局状态进入 GameState。
+- CharacterMovement 使用预测/校正框架。
+- Weapon/Health 由服务器权威提交。
+- 客户端预测枪口、声音和后坐力。
+- AIController/SurroundManager 只在服务器。
+- 基础 RPC/属性复制稳定后再讨论回溯、Relevancy 和 Iris。
+
+**继续追问**：
+
+- RPC 和 Replicated Property 如何选择。
+- 为什么不能相信客户端 Hit Result。
+- 服务器和客户端帧率不同怎么办。
+
+这道题只按第 27 章回答，不能说项目已经完成。
+
+### 29.16 扩展场景题十二：把 Profile 工作放到多线程就会更快吗
+
+**考察点**：线程、数据所有权、同步和错误优化。
+
+**回答主线**：
+
+- 先确认任务是否可并行、粒度是否足够、是否依赖 UObject/World。
+- Worker Thread 计算纯数据，Gameplay 提交回安全线程。
+- 计算调度、复制、锁竞争、Cache Miss 和同步等待。
+- Physics/Animation/Renderer 已有自己的任务系统，不重复建立线程池。
+- 用 Insights 检查并行区间和关键路径，不看总 CPU 利用率判断。
+
+**继续追问**：
+
+- mutex 与 atomic 怎么选。
+- False Sharing 是什么。
+- 多线程后总 CPU 更高但帧时间更低是否合理。
+
+### 29.17 扩展场景题十三：UI 血条和弹药显示导致 Game Thread 升高
+
+**考察点**：事件驱动、布局、Widget 生命周期。
+
+**回答主线**：
+
+- 移除 Widget Tick 和高频 Text Binding。
+- 创建时主动读取一次快照，之后 Delegate 更新。
+- 大量世界血条按距离/可见性降频或池化。
+- 区分 Gameplay 查询、Slate Prepass/Layout、Paint 和材质成本。
+- 检查 Widget 创建销毁、Delegate 解绑和失效面板。
+
+**继续追问**：
+
+- 属性绑定为什么可能每帧执行。
+- 隐藏 Widget 是否完全没有成本。
+- UI 对象池如何避免旧数据残留。
+
+### 29.18 扩展场景题十四：面试官要求“再优化 30%”
+
+**考察点**：需求澄清、指标定义和工程判断。
+
+**回答主线**：
+
+- 先问优化的是平均 FPS、P95、Game Thread、GPU、内存、包体还是加载。
+- 明确目标平台、场景、画质和正确性约束。
+- 选 Top Contributor 做单变量实验。
+- 没有 Baseline 时不承诺百分比。
+- 如果目标超出内容和硬件边界，应给出质量降级或范围调整方案。
+
+**继续追问**：
+
+- 优化 30% 是从 20 ms 到多少。
+- CPU 和 GPU 同时 20 ms，只优化 CPU 是否提高 FPS。
+- 画质降低是否算性能优化。
+
+### 29.19 扩展场景题评分标准
+
+面试官通常不只看是否说中某个 API，而会观察：
+
+| 维度 | 好答案 |
+| --- | --- |
+| 澄清条件 | 主动确认规模、平台、帧率和正确性要求 |
+| 问题分类 | 能区分 CPU/GPU/Memory/Physics/Network |
+| 原理 | 能解释方案为什么可能有效 |
+| 项目连接 | 能指出当前类、调用链和已有数据 |
+| 取舍 | 能说出质量、延迟、内存和复杂度代价 |
+| 验证 | 有工具、固定场景、Avg/P95 和回归指标 |
+| 诚实边界 | 区分已实现、计划和知识储备 |
+
+统一回答骨架：
+
+```text
+先澄清条件
+-> 给出瓶颈假设
+-> 说明如何采集证据
+-> 提出最低风险方案
+-> 说明副作用和替代方案
+-> 定义 A/B 与回归指标
+-> 映射到当前项目事实
+```
+
+### 29.20 面经样本入口
+
+- [腾讯光子游戏客户端面经：渲染、动画、内存、AI、网络](https://www.nowcoder.com/discuss/664200375213338624)
+- [游戏客户端面经总结：高频 C++、图形、碰撞与项目题](https://www.nowcoder.com/discuss/860341579272212480)
+- [字节游戏客户端面经：同步、剔除、渲染与场景题](https://www.nowcoder.com/feed/main/detail/a6a0a96a48d540b29ce76c44c5fac211)
+- [腾讯 IEG 游戏客户端面经：图形、Draw Call、内存与同步](https://www.nowcoder.com/discuss/293989)
+- [完美世界游戏客户端面经：性能、动画、对象池和内存](https://www.nowcoder.com/discuss/549002893068603392)
+- [腾讯渲染/客户端面经总结：项目细节与优化追问](https://www.nowcoder.com/discuss/353157894017327104)
+
+## 30. 本项目 FPS 专项拷打题库
+
+本节不属于扩展场景题，而是沿当前项目真实调用链进行项目拷打。回答时应先复原实现，再解释选型、边界和验证方法，避免把尚未实现的方案说成项目成果。
+
+### 30.1 项目调用链总图
+
+```text
+Enhanced Input
+-> AfpstrueCharacter：接收输入、检查玩家生死、转发武器请求
+-> UfpstrueWeaponComponent：开火/换弹状态、弹药、射线、散布、伤害请求
+-> UGameplayStatics::ApplyPointDamage / ApplyDamage
+-> UfpstrueHealthComponent：统一扣血、Clamp、伤害事件、一次性死亡事件
+-> Character / EnemyCharacter：停止玩法并通知表现层
+-> AfpstrueGameMode：监听玩家死亡和敌人死亡、维护倒计时与唯一结算
+
+AfpstrueEnemyAIController
+-> Timer 驱动 Idle/Chase/Attack/Dead 决策
+-> AfpstrueSurroundManager：环绕槽位和攻击令牌
+-> AfpstrueEnemyCharacter：播放攻击、打开攻击窗口、连续 Sweep、申请伤害
+```
+
+面试官会先沿其中一个节点拷打现有实现，确认候选人能讲清真实调用链；确认项目事实后，再修改帧率、敌人数、动画时长、平台或资源预算，把问题转成扩展场景题，检查方案能否迁移。
+
+### 30.2 武器与角色状态
+
+#### 项目拷打一：换弹 Montage 被打断后，玩家为什么不能立刻开枪
+
+**考察点**：逻辑状态与动画表现的主从关系、互斥状态、异步回调失效。
+
+**回答主线**：
+
+- `Character` 只把 Reload 和 Fire 输入转发给 `WeaponComponent`。
+- `WeaponComponent::RequestReload()` 先停止自动开火，再把 `ActionState` 设为 `Reloading`。
+- `CanFire()` 在 `Reloading` 状态返回 false。因此 Montage 被其他动画打断，也不能改变武器逻辑状态。
+- `CommitReload()` 由 `bReloadAmmoCommitted` 保证一次换弹只提交一次。
+- `ActiveReloadSequence` 使取消前创建的旧 Timer 回调失效，避免旧回调给新状态加弹。
+- Montage Notify 适合决定弹匣插入的表现时刻，Timer 适合作为异常情况下的兜底，但二者最终都必须调用同一个幂等提交接口。
+
+**继续追问**：玩家死亡、切枪、进入暂停或关卡结束时如何处理。答案是统一取消换弹、清理 Timer、递增序列号并禁用武器玩法，而不是只停止 Montage。
+
+#### 项目拷打二：玩家按住鼠标，最后一发打完后发生什么
+
+**考察点**：自动武器 Timer、弹药原子性、状态重入。
+
+**回答主线**：每次 `Fire()` 都重新执行 `CanFire()` 和射速间隔检查，再通过 `TryConsumeAmmo()` 消耗一发。无弹时广播 DryFire、停止自动开火 Timer，再申请换弹。不能只在按键按下时检查一次弹药，否则持续 Timer 会越过状态边界。
+
+**变体**：一帧内收到两次 Fire 请求。当前实现还用 `LastAcceptedShotTimeSeconds` 限制最小射击间隔，避免重复输入造成超射速。
+
+#### 项目拷打三：换弹完成、玩家死亡和旧 Timer 回调落在同一帧
+
+**考察点**：幂等、终止状态优先级、悬空异步任务。
+
+**回答主线**：死亡调用 `HandleOwnerDeath()`，清理开火和换弹 Timer、递增 `ActiveReloadSequence`、把状态设为 `Disabled`。旧回调同时到达时，序列号和 `Reloading` 状态双重检查会拒绝提交。终止状态必须高于 Reloading 和 Firing。
+
+#### 项目拷打四：为什么开火判定不应该重新写回 Character
+
+**考察点**：职责边界、组件化、单一事实来源。
+
+**回答主线**：Character 拥有输入与角色生死语义，WeaponComponent 拥有弹药、射速、散布、换弹和武器状态。若两边都判断弹药和换弹，就会出现 UI、动画和真实射击结果不一致。Character 只调用 `StartFire()`、`StopFire()`、`RequestReload()`，结果通过委托通知 HUD 和动画。
+
+#### 项目拷打五：准星指向敌人，但枪管贴墙时还能命中吗
+
+**考察点**：相机射线与枪口射线、第一人称视差、公平性和手感取舍。
+
+**当前实现**：射线从第一人称相机出发，能保证准星与命中点一致，但没有第二段枪口遮挡校验。
+
+**回答主线**：若要防止隔墙开火，应先用相机射线获得期望目标，再从枪口向该目标做第二次射线。第二段若先碰到墙，应以墙为命中点。代价是近距离可能出现准星命中而枪口受阻，需要用枪口抬起、准星反馈或武器碰撞姿态改善体验。
+
+### 30.3 弹道、命中与伤害
+
+#### 项目拷打六：为什么散布半径要使用 `sqrt(random)`
+
+**考察点**：圆盘均匀采样、概率密度、可视化验证。
+
+**回答主线**：角度在 `[0, 2PI)` 均匀，若半径也线性均匀，样本会偏向圆心。圆面积与半径平方成正比，因此使用 `r = R * sqrt(U)` 才能让单位面积的概率一致。项目的 `MakeUniformSpreadDirection()` 已采用这一方法，并叠加腰射/瞄准基础散布与连续射击扩散。
+
+**继续追问**：是否应该让游戏枪械完全均匀。答案取决于设计，可用曲线改变中心权重，但必须明确这是有意的分布，而不是采样错误。
+
+#### 项目拷打七：敌人头部骨骼改名后，爆头全部失效
+
+**考察点**：数据驱动、资产契约、脆弱字符串规则。
+
+**当前实现**：武器根据 `HitResult.BoneName` 是否为 `head` 或 `neck_01` 选择头部伤害。
+
+**回答主线**：短期应在导入和验收时检查骨骼命名；进一步可把命中区域配置为 DataAsset、GameplayTag 或 Physical Material，使不同敌人骨架不用修改武器代码。更完整的边界是定义通用可受伤接口，让武器不必 `Cast` 到具体敌人类。
+
+#### 项目拷打八：霰弹枪多条射线命中同一个敌人，伤害怎么算
+
+**考察点**：多射线聚合、伤害次数、表现与逻辑一致性。
+
+**回答主线**：当前 `TraceCount` 会逐条射线独立处理，因此同一敌人可承受多颗弹丸伤害，这符合霰弹枪常见设计。若需求改成“单次开火对同一目标只结算一次”，应先收集命中结果，再按 Actor 聚合，而不是在射线函数里立即 ApplyDamage。还要明确每颗弹丸是否分别触发受击 Montage，避免表现事件风暴。
+
+#### 项目拷打九：射击木箱有物理冲量，射击敌人有伤害，如何避免耦合
+
+**考察点**：场景查询结果分派、物理交互、伤害接口。
+
+**回答主线**：一次 LineTrace 只负责得到 `FHitResult`；之后分别处理可受伤对象、物理模拟组件和命中特效。当前代码对敌人使用 PointDamage，对模拟物理的组件使用 `AddImpulseAtLocation`。进一步应以接口或 DamageType/PhysicalMaterial 驱动，而不是继续增加具体类 Cast。
+
+### 30.4 生命、死亡与结算
+
+#### 项目拷打十：同一帧中敌人被多颗子弹击中，死亡会触发几次
+
+**考察点**：一次性事件、Clamp、重复伤害。
+
+**回答主线**：`HealthComponent` 先拒绝已死亡对象，再把生命 Clamp 到 `[0, MaxHealth]`，`bDeathBroadcast` 保证 `OnDeath` 只广播一次。敌人自身的死亡处理还要清理攻击窗口、攻击 Timer 和 AI，再触发一次蓝图死亡表现。
+
+**继续追问**：`OnEnemyDamaged` 是否负责判断死亡。不是。它是受击表现通知，死亡判定由 HealthComponent 完成，死亡表现走独立的 `OnEnemyDied`。
+
+#### 项目拷打十一：倒计时归零和玩家死亡发生在同一帧，胜负是什么
+
+**考察点**：事件顺序、确定性规则、终局优先级。
+
+**当前实现**：`FinishGame()` 通过 `bGameEnded` 保证只结算一次；但倒计时与死亡若在同一帧竞争，先执行的回调会决定胜负。
+
+**回答主线**：需要先确定产品规则。若“死亡优先”，倒计时到零时不能立即宣布胜利，可在当帧末统一结算，或由单一 `EvaluateGameResult()` 按 `PlayerDead > TimeExpired` 的固定优先级判断。若“到点即胜”，则保留相反优先级。关键不是多加一个 bool，而是让结果只由一个确定性入口计算。
+
+#### 项目拷打十二：游戏结束后敌人为什么还可能砍玩家
+
+**考察点**：生命周期治理、全局结束与局部异步状态。
+
+**回答主线**：GameMode 结束时要清倒计时和波次 Timer、停止所有已注册敌人的 AI、重置 SurroundManager；EnemyCharacter 自身还要在死亡或 EndPlay 时取消攻击窗口和攻击完成 Timer。只把 UI 切到结算页并不能停止正在运行的玩法逻辑。
+
+#### 项目拷打十三：HUD 开始时血量或倒计时显示为 0，之后才正常
+
+**考察点**：订阅时序、初始快照、事件驱动 UI。
+
+**回答主线**：事件只通知“变化”，晚于首次广播绑定的 Widget 会错过初始化。正确做法是创建 Widget 后先读取 `GetCurrentHealth()`、`GetRemainingTime()` 和弹药快照，再订阅变化事件；或提供明确的 Snapshot/Initialize 接口。不要改成 Tick 轮询掩盖时序问题。
+
+### 30.5 敌人生成、AI 与近战
+
+#### 项目拷打十四：倒计时已经开始，但没有生成敌人
+
+**考察点**：GameMode 配置、关卡 Actor 查询、生成失败定位。
+
+**回答顺序**：
+
+1. 确认当前关卡实际使用的是 `AfpstrueGameMode` 或其蓝图子类，且 `StartGameMode()` 执行成功。
+2. 检查 `EnemyClass` 是否配置。
+3. 检查至少四个 `TargetPoint` 是否带有精确的 `EnemySpawn` Actor Tag，而不是对象名称或组件 Tag。
+4. 检查日志中 `StartGameMode failed` 和 `SpawnActor failed`。
+5. 检查出生点碰撞与 `SpawnCollisionHandlingOverride`。
+6. 检查生成出的敌人是否配置 `AIControllerClass` 和 `PlacedInWorldOrSpawned` 自动 Possess。
+7. 检查 NavMesh 是否覆盖出生点；这通常影响移动，不应被误判为 SpawnActor 根本没有执行。
+
+这类题的重点是按调用链逐层排除，不能一看到敌人不动就直接改寻路代码。
+
+#### 项目拷打十五：敌人已经生成，但原地不动
+
+**考察点**：Possess、NavMesh、目标有效性、MoveTo 结果。
+
+**回答主线**：先在运行时确认 Pawn 的 Controller 类型和 AI FSM 状态，再用 `P` 查看 NavMesh，确认出生点和玩家附近可导航；随后检查 `MoveToActor` 返回值与路径跟随状态。若目标不可达，应区分临时阻塞、目标不在 NavMesh、路径构建失败，并设计重试、重新投影或 Idle 回退，不能恢复 `AddMovementInput` 绕过导航系统。
+
+#### 项目拷打十六：大量敌人同时冲到玩家身边并重叠攻击
+
+**考察点**：群体位置分配、并发攻击节流、可读性。
+
+**回答主线**：项目用 `SurroundManager` 管理内外环槽位，以 `MaxConcurrentAttackers` 限制攻击令牌数量；只有获得内环槽位和令牌的敌人进入攻击流程，其余敌人移动到分配位置。它解决的不是路径搜索本身，而是目标附近的占位和攻击并发策略。
+
+**继续追问**：某个敌人拿到令牌却到不了攻击点。当前 AI 有令牌超时和释放路径；还应监控路径失败、死亡、失去目标和游戏结束，确保所有出口都释放令牌，避免其他敌人永久饥饿。
+
+#### 项目拷打十七：低帧率时剑刃穿过玩家却没有伤害
+
+**考察点**：连续碰撞检测、离散采样、攻击去重。
+
+**回答主线**：单帧在剑尖位置做一次 Overlap 容易漏检。项目在 AnimNotifyState 攻击窗口中保存上一帧 `weapontop/weaponend`，对上一帧和当前帧的剑刃段做连续 Sphere Sweep，并补充当前剑刃段采样。`HitActorsThisAttack` 与命中标记保证一次攻击不会因多帧 Sweep 重复扣血。
+
+**继续追问**：极低帧率仍漏检怎么办。可以按位移或旋转幅度增加子步采样，但要设置上限并 Profile；也可扩大半径或用简化攻击体，代价是命中判定更宽松。
+
+#### 项目拷打十八：攻击 Montage 没有正确发出 NotifyEnd，敌人永久卡在攻击状态
+
+**考察点**：动画事件不可靠时的恢复机制。
+
+**回答主线**：动画 Notify 决定精确攻击窗口，`AttackFinishTimerHandle` 提供最长时限兜底；`FinishAttack()` 本身先检查 `bIsAttacking`，再关闭窗口、恢复动画优先级、清 Timer 并广播结果。死亡和 EndPlay 也必须走取消路径。因此表现事件可以提前完成逻辑，但不能成为唯一恢复入口。
+
+#### 项目拷打十九：160 个敌人时 AI 该先优化寻路还是动画
+
+**考察点**：以数据决定优先级。
+
+**项目证据**：现有基线中 CharacterMovement 约 `6.920 ms`，Animation 约 `3.190 ms`，Pathfinding 约 `0.071 ms`。因此不能因为“AI 多”就先重写 A*；当前更应先看移动组件更新、骨骼动画和可见性分层。
+
+**回答主线**：保留 Timer 驱动的分频 FSM，并对远距离敌人降低决策、移动和动画更新频率。每次只改一个变量，用 Insights、`stat game`、`stat anim` 和项目自定义统计验证 Avg/P95，再决定是否需要更激进的 MassEntity、动画预算或代理表现。
+
+### 30.6 波次、对象注册与交互
+
+#### 项目拷打二十：敌人死亡后存活数偶尔多减一次
+
+**考察点**：事件重复、注册表幂等、弱引用。
+
+**回答主线**：GameMode 同时监听敌人死亡和 Actor Destroyed 是为了覆盖不同销毁路径，但二者可能先后到达。`RegisteredEnemies.Remove()` 的返回值保证只有第一次注销成功时才更新数量；使用 `TWeakObjectPtr` 避免注册表延长敌人生命周期。回答时要区分“事件可能重复”和“状态变化必须幂等”。
+
+#### 项目拷打二十一：出生点少于敌人数，如何避免全部叠在同一点
+
+**考察点**：随机分配、导航可达采样、生成碰撞。
+
+**回答主线**：项目先打乱出生点，超过点位数量后循环复用，并用 `GetRandomReachablePointInRadius` 在附近采样导航可达位置。这里的随机目标是分散出生，不是数学上无限精确的均匀圆盘；还需通过最小间距、占用检测和最大尝试次数避免重叠。敌人数继续扩大时应分帧生成，避免单帧 Spawn 峰值。
+
+#### 项目拷打二十二：武器 Overlap 一次却触发两次拾取
+
+**考察点**：Overlap 重入和一次性交互。
+
+**回答主线**：`PickUpComponent` 使用 `bConsumed` 在进入处理时先占位；Attach 失败才恢复。成功后立即关闭 Overlap 和 Collision、移除绑定并广播拾取事件。仅在最后 DestroyComponent 不足以防止同帧多个重叠回调。
+
+### 30.7 蓝图表现与调试
+
+#### 项目拷打二十三：`OnEnemyDamaged` 和 `OnEnemyDied` 为什么要分开
+
+**考察点**：领域事件语义、表现层解耦。
+
+**回答主线**：Damaged 携带伤害量、来源和 Instigator，用于受击 Montage、材质闪烁和方向反馈；Died 是一次性终止事件，用于布娃娃、碰撞关闭和死亡特效。Damaged 不负责再次判断死亡，否则 C++ HealthComponent 与蓝图会形成两个死亡事实来源。
+
+#### 项目拷打二十四：枪上出现红线，是弹道错误还是测试代码
+
+**考察点**：调试可视化与 Shipping 隔离。
+
+**回答主线**：当前 LineTrace 的红/绿线由编译宏和 `bShowDebugTrace` 双重控制，属于测试可视化。定位时先检查 DebugDraw 生命周期和开关，再检查真实 TraceStart/TraceTarget。发布版应关闭宏或确保 Shipping 不编译该路径，不能通过删除命中逻辑来消除红线。
+
+#### 项目拷打二十五：Widget 使用文本绑定后每帧读取 GameMode，是否合理
+
+**考察点**：UMG 属性绑定成本、事件驱动架构。
+
+**回答主线**：简单原型可以工作，但属性绑定会高频调用。当前 GameMode 已提供 `OnRemainingTimeChanged`、`OnWaveChanged`、`OnAliveEnemyCountChanged` 和 `OnGameResult`，HUD 应在初始化时读取一次快照，然后通过事件更新 Text。性能验收时检查 Widget Tick、Blueprint Time 和绑定函数调用数。
+
+### 30.8 本项目拷打的标准答法
+
+```text
+1. 先复述触发条件，确认是逻辑错误、表现错误还是性能问题。
+2. 沿真实调用链定位唯一事实来源。
+3. 指出状态入口、成功出口、取消出口和生命周期出口。
+4. 说明当前项目已经有哪些保护。
+5. 明确仍存在的风险或没有实现的候选方案。
+6. 给出日志、断点、DebugDraw、Unreal Insights 或 stat 命令的验证方法。
+7. 说明修改条件后方案如何变化，以及 CPU、GPU、内存、手感的代价。
+```
+
+最值得优先背熟的项目拷打是：换弹互斥、死亡幂等、同帧胜负、无敌人生成、AI 原地不动、近战漏检、攻击令牌释放、160 敌人性能判断和 UI 初始快照。这些问题都能直接指向当前源码，而不是停留在概念层。
