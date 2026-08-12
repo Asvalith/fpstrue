@@ -12,8 +12,24 @@ class UCameraComponent;
 class UfpstrueWeaponDataAsset;
 class UWorld;
 
+UENUM(BlueprintType)
+enum class EFPWeaponActionState : uint8
+{
+	Ready      UMETA(DisplayName = "Ready"),
+	Firing     UMETA(DisplayName = "Firing"),
+	Reloading  UMETA(DisplayName = "Reloading"),
+	Disabled   UMETA(DisplayName = "Disabled")
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponReloadEvent, bool, bWasEmptyReload);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponActionStateChanged, EFPWeaponActionState, NewState);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+	FFPAmmoChanged,
+	int32, CurrentAmmo,
+	int32, MagazineSize,
+	int32, ReserveAmmo
+);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
 	FWeaponTraceEvent,
 	bool, bHit,
@@ -23,19 +39,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
 	FHitResult, HitResult
 );
 
-UCLASS(Blueprintable, BlueprintType, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
+UCLASS(Blueprintable, BlueprintType, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 {
 	GENERATED_BODY()
 
 public:
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Input, meta=(AllowPrivateAccess = "true"))
-	class UInputMappingContext* FireMappingContext;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Input, meta=(AllowPrivateAccess = "true"))
-	class UInputAction* FireAction;
-
 	UfpstrueWeaponComponent();
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Config")
@@ -44,13 +53,96 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Config")
 	UfpstrueWeaponDataAsset* GetWeaponData() const { return WeaponData; }
 
-	UFUNCTION(BlueprintCallable, Category="Weapon")
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
+
+	void StartFire();
+	void StopFire();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	bool RequestReload();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	bool CommitReload();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void FinishReload();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void CancelReload();
+
+	// Compatibility entry for existing Blueprints. Input cadence is now owned by this component.
+	UFUNCTION(BlueprintCallable, Category = "Weapon", meta = (DeprecatedFunction, DeprecationMessage = "Remove Blueprint fire timers and let WeaponComponent own fire cadence."))
+	void Fire();
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsEquipped() const { return bIsEquipped; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsReloading() const { return ActionState == EFPWeaponActionState::Reloading; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsFiring() const { return ActionState == EFPWeaponActionState::Firing; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool HasAmmo() const { return CurrentAmmo > 0; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool CanFire() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
+	bool CanReload() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	EFPWeaponActionState GetActionState() const { return ActionState; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetCurrentAmmo() const { return CurrentAmmo; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetMagazineSize() const { return MagazineSize; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
+	int32 GetReserveAmmo() const { return ReserveAmmo; }
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FFPAmmoChanged OnAmmoChanged;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponActionStateChanged OnWeaponActionStateChanged;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponFireStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponFireStopped;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponFirePerformed;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponDryFire;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponReloadEvent OnWeaponReloadStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponReloadFinished;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponFireEvent OnWeaponReloadCanceled;
+
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FWeaponTraceEvent OnWeaponTraceFinished;
+
+	void HandleOwnerDeath();
+
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceRange = 10000.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceImpulse = 10000.0f;
+
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float LineTraceDamage = 40.0f;
 
@@ -84,50 +176,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Weapon|Debug")
 	bool bShowDebugTrace = false;
 
-	UFUNCTION(BlueprintCallable, Category="Weapon")
-	void Fire();
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponFireStarted;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponFireStopped;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponFirePerformed;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponDryFire;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponReloadEvent OnWeaponReloadStarted;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponReloadFinished;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponTraceEvent OnWeaponTraceFinished;
-
-	void NotifyReloadStarted(bool bWasEmptyReload);
-	void NotifyReloadFinished();
-	void NotifyFireStoppedByCharacter();
-	void HandleOwnerDeath();
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool IsEquipped() const { return bIsEquipped; }
-
 protected:
-	UFUNCTION()
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	int32 GetTraceCount() const;
-
 private:
-	void StartFire();
-	void StopFire();
-	bool CanFire() const;
+	bool TryConsumeAmmo();
+	void InitializeRuntimeState();
+	void SetActionState(EFPWeaponActionState NewState);
+	void HandleReloadTimeout(int32 ReloadSequence);
+	void BroadcastAmmoChanged();
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
 	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle);
-	void ApplyWeaponConfiguration(AfpstrueCharacter* TargetCharacter) const;
+	int32 GetTraceCount() const;
 
 	float GetConfiguredTraceRange() const;
 	float GetConfiguredTraceImpulse() const;
@@ -140,12 +200,33 @@ private:
 	float GetConfiguredRecoilPitch() const;
 	float GetConfiguredRecoilYaw() const;
 	float GetConfiguredAimRecoilMultiplier() const;
+	float GetConfiguredReloadDuration(bool bEmptyReload) const;
+	float GetConfiguredFireInterval() const;
+	bool IsAutomatic() const;
 
 	UPROPERTY(Transient)
-	AfpstrueCharacter* Character = nullptr;
+	TObjectPtr<AfpstrueCharacter> Character;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon|State", meta = (AllowPrivateAccess = "true"))
+	EFPWeaponActionState ActionState = EFPWeaponActionState::Disabled;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (AllowPrivateAccess = "true"))
+	int32 MagazineSize = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (AllowPrivateAccess = "true"))
+	int32 CurrentAmmo = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (AllowPrivateAccess = "true"))
+	int32 ReserveAmmo = 0;
 
 	bool bIsEquipped = false;
 	bool bWeaponGameplayEnabled = false;
+	bool bRuntimeStateInitialized = false;
+	bool bReloadAmmoCommitted = false;
+	int32 ActiveReloadSequence = 0;
 	int32 ConsecutiveShotCount = 0;
 	double LastShotTimeSeconds = -1.0;
+	double LastAcceptedShotTimeSeconds = -1.0;
+	FTimerHandle AutomaticFireTimerHandle;
+	FTimerHandle ReloadTimerHandle;
 };

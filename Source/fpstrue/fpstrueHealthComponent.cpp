@@ -16,8 +16,18 @@ void UfpstrueHealthComponent::BeginPlay()
 
 	if (AActor* Owner = GetOwner())
 	{
-		Owner->OnTakeAnyDamage.AddDynamic(this, &UfpstrueHealthComponent::HandleOwnerTakeAnyDamage);
+		Owner->OnTakeAnyDamage.AddUniqueDynamic(this, &UfpstrueHealthComponent::HandleOwnerTakeAnyDamage);
 	}
+}
+
+void UfpstrueHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (AActor* Owner = GetOwner())
+	{
+		Owner->OnTakeAnyDamage.RemoveDynamic(this, &UfpstrueHealthComponent::HandleOwnerTakeAnyDamage);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void UfpstrueHealthComponent::ApplyDamage(float DamageAmount)
@@ -39,15 +49,18 @@ void UfpstrueHealthComponent::ApplyDamageInternal(float DamageAmount, AActor* Da
 	OnDamageReceived.Broadcast(AppliedDamage, DamageCauser, InstigatedBy);
 	OnHealthChanged.Broadcast(CurrentHealth);
 
-	if (IsDead())
+	if (IsDead() && !bDeathBroadcast)
 	{
+		bDeathBroadcast = true;
 		OnDeath.Broadcast();
 	}
 }
 
 void UfpstrueHealthComponent::ResetHealth()
 {
+	MaxHealth = FMath::Max(1.0f, MaxHealth);
 	CurrentHealth = MaxHealth;
+	bDeathBroadcast = false;
 	OnHealthChanged.Broadcast(CurrentHealth);
 }
 

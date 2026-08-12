@@ -111,6 +111,13 @@ private:
 	TSubclassOf<AfpstrueEnemyCharacter> GetEnemyClassForWave(int32 WaveNumber) const;
 	void SpawnCurrentWave();
 	void SpawnEnemyAtPoint(AActor* SpawnPoint, bool bUseNearbyLocation, TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass);
+	bool RegisterEnemy(AfpstrueEnemyCharacter* Enemy);
+	bool UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount);
+	void StopActiveEnemies();
+	void ClearEnemyRegistrations();
+	bool IsPlayerAlive() const;
+	void BindPlayerDeathEvent();
+	void UnbindPlayerDeathEvent();
 	void UpdateCountdown();
 	void FinishGame(bool bPlayerWon);
 	void ClearGameplayTimers();
@@ -123,13 +130,18 @@ private:
 	void HandleEnemyDied(AfpstrueEnemyCharacter* DeadEnemy);
 
 	UFUNCTION()
-	void HandlePlayerDied();
+	void HandleEnemyDestroyed(AActor* DestroyedActor);
+
+	UFUNCTION()
+	void HandlePlayerDied(AfpstrueCharacter* DeadPlayer);
 
 	UPROPERTY()
 	TArray<AActor*> SpawnPoints;
 
 	UPROPERTY()
 	AfpstrueCharacter* PlayerCharacter = nullptr;
+
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
 	int32 CurrentWave = 0;
 	int32 AliveEnemyCount = 0;

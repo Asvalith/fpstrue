@@ -37,6 +37,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ammo", meta = (ClampMin = "0.01"))
 	float EmptyReloadDuration = 1.2f;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Fire")
+	bool bAutomatic = true;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Fire", meta = (ClampMin = "1.0"))
+	float RoundsPerMinute = 600.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Trace", meta = (ClampMin = "1.0"))
 	float TraceRange = 10000.0f;
 

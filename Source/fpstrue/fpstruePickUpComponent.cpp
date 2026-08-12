@@ -12,29 +12,40 @@ void UfpstruePickUpComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	OnComponentBeginOverlap.AddDynamic(this, &UfpstruePickUpComponent::OnSphereBeginOverlap);
+	OnComponentBeginOverlap.AddUniqueDynamic(this, &UfpstruePickUpComponent::OnSphereBeginOverlap);
 }
 
 void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
+	if (bConsumed)
+	{
+		return;
+	}
+
 	AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(OtherActor);
 	AActor* OwnerActor = GetOwner();
 	UfpstrueWeaponComponent* WeaponComponent =
 		OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 
-	if (Character != nullptr
-		&& !Character->IsDead()
-		&& WeaponComponent != nullptr
-		&& WeaponComponent->AttachWeapon(Character))
+	if (Character == nullptr || Character->IsDead() || WeaponComponent == nullptr)
 	{
-		SetGenerateOverlapEvents(false);
-		SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		OnComponentBeginOverlap.RemoveAll(this);
-		OnPickUp.Broadcast(Character);
+		return;
+	}
 
-		if (IsValid(this))
-		{
-			DestroyComponent();
-		}
+	bConsumed = true;
+	if (!WeaponComponent->AttachWeapon(Character))
+	{
+		bConsumed = false;
+		return;
+	}
+
+	SetGenerateOverlapEvents(false);
+	SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	OnComponentBeginOverlap.RemoveAll(this);
+	OnPickUp.Broadcast(Character);
+
+	if (IsValid(this))
+	{
+		DestroyComponent();
 	}
 }

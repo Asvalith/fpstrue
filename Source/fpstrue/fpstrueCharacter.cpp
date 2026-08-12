@@ -2,7 +2,6 @@
 
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
-#include "fpstrueProjectile.h"
 #include "fpstrueWeaponComponent.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
@@ -42,7 +41,7 @@ AfpstrueCharacter::AfpstrueCharacter()
 	Mesh1P->bCastDynamicShadow = false;
 	Mesh1P->CastShadow = false;
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
-	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bCanEverTick = false;
 
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
 
@@ -54,28 +53,42 @@ void AfpstrueCharacter::BeginPlay()
 
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnHealthChanged.AddDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
-		HealthComponent->OnDamageReceived.AddDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
-		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueCharacter::HandleDeath);
+		HealthComponent->OnHealthChanged.AddUniqueDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
+		HealthComponent->OnDamageReceived.AddUniqueDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
+		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
 
-	CurrentAmmo = MagazineSize;
 	Mesh1P->SetVisibility(EquippedWeaponComponent != nullptr, true);
 	Mesh1P->SetHiddenInGame(EquippedWeaponComponent == nullptr, true);
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
-	BroadcastAmmoChanged();
+}
+
+void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopWeaponFire();
+	RemoveInputMappingContexts();
+	if (HealthComponent != nullptr)
+	{
+		HealthComponent->OnHealthChanged.RemoveDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
+		HealthComponent->OnDamageReceived.RemoveDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
+		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueCharacter::HandleDeath);
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 
 void AfpstrueCharacter::NotifyControllerChanged()
 {
+	StopWeaponFire();
+	RemoveInputMappingContexts();
 	Super::NotifyControllerChanged();
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
 		{
-			Subsystem->AddMappingContext(DefaultMappingContext, 0);
+			BoundInputSubsystem = Subsystem;
+			ApplyInputMappingContexts();
 		}
 	}
 }
@@ -90,6 +103,17 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
 
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
+
+		if (FireAction)
+		{
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartWeaponFire);
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopWeaponFire);
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Canceled, this, &AfpstrueCharacter::StopWeaponFire);
+		}
+		else
+		{
+			UE_LOG(LogTemplateCharacter, Error, TEXT("FireAction is NULL. Assign IA_Shoot in BP_FirstPersonCharacter."));
+		}
 
 		if (RunAction)
 		{
@@ -160,7 +184,7 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 
 void AfpstrueCharacter::StartSprint()
 {
-	if (CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading || bIsAiming)
+	if (IsDead() || IsReloading() || bIsAiming)
 	{
 		return;
 	}
@@ -188,8 +212,8 @@ void AfpstrueCharacter::StopSprint()
 void AfpstrueCharacter::StartAim()
 {
 	if (EquippedWeaponComponent == nullptr
-		|| CharacterState == EFPCharacterState::Dead
-		|| CharacterState == EFPCharacterState::Reloading)
+		|| IsDead()
+		|| IsReloading())
 	{
 		return;
 	}
@@ -230,216 +254,24 @@ void AfpstrueCharacter::StopAim()
 }
 
 
-void AfpstrueCharacter::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	UpdateCharacterState();
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			1,
-			0.0f,
-			FColor::Green,
-			FString::Printf(
-				TEXT("State: %s | Ammo: %d / %d"),
-				*GetCharacterStateString(),
-				CurrentAmmo,
-				ReserveAmmo
-			)
-		);
-	}
-}
-
 void AfpstrueCharacter::StartReload()
 {
-	if (GEngine)
+	RequestReload();
+}
+
+void AfpstrueCharacter::StartWeaponFire()
+{
+	if (EquippedWeaponComponent != nullptr && !IsDead())
 	{
-		GEngine->AddOnScreenDebugMessage(
-			2,
-			2.0f,
-			FColor::Yellow,
-			TEXT("Reload key pressed")
-		);
+		EquippedWeaponComponent->StartFire();
 	}
-	if (!CanReload())
-	{
-		const FString Reason = GetReloadBlockReason();
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(
-				3,
-				2.0f,
-				FColor::Red,
-				FString::Printf(TEXT("Cannot reload: %s"), *Reason)
-			);
-		}
+}
 
-		UE_LOG(LogTemplateCharacter, Warning, TEXT("Cannot reload: %s"), *Reason);
-		return;
-	}
-
-	const bool bWasEmptyReload = CurrentAmmo <= 0;
-	const float ActualReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
-
-	// TODO: Route reload through one weapon-action transition so aim, sprint, fire, and animation close together.
-	bIsAiming = false;
-	NotifyFireStopped();
+void AfpstrueCharacter::StopWeaponFire()
+{
 	if (EquippedWeaponComponent != nullptr)
 	{
-		EquippedWeaponComponent->NotifyFireStoppedByCharacter();
-	}
-	CharacterState = EFPCharacterState::Reloading;
-
-	if (EquippedWeaponComponent != nullptr)
-	{
-		EquippedWeaponComponent->NotifyReloadStarted(bWasEmptyReload);
-	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			3,
-			ActualReloadDuration,
-			FColor::Orange,
-			TEXT("Start Reload")
-		);
-	}
-
-	UE_LOG(LogTemplateCharacter, Warning, TEXT("Start Reload"));
-
-	// TODO: Keep this timer as a watchdog; normal ammo commit and unlock should follow the reload montage lifecycle.
-	GetWorldTimerManager().SetTimer(
-		ReloadTimerHandle,
-		this,
-		&AfpstrueCharacter::FinishReload,
-		ActualReloadDuration,
-		false
-	);
-}
-
-void AfpstrueCharacter::FinishReload()
-{
-	// TODO: Reject stale callbacks with a reload sequence id before committing ammo.
-	const int32 AmmoNeeded = MagazineSize - CurrentAmmo;
-	const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
-
-	CurrentAmmo += AmmoToLoad;
-	ReserveAmmo -= AmmoToLoad;
-	BroadcastAmmoChanged();
-
-
-	CharacterState = EFPCharacterState::Idle;
-	UpdateCharacterState();
-
-	if (EquippedWeaponComponent != nullptr)
-	{
-		EquippedWeaponComponent->NotifyReloadFinished();
-	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			3,
-			2.0f,
-			FColor::Green,
-			FString::Printf(TEXT("Finish Reload: Ammo %d / %d"), CurrentAmmo, ReserveAmmo)
-		);
-	}
-
-	UE_LOG(LogTemplateCharacter, Warning, TEXT("Finish Reload: CurrentAmmo=%d, ReserveAmmo=%d"), CurrentAmmo, ReserveAmmo);
-}
-
-bool AfpstrueCharacter::CanReload() const
-{
-	if (EquippedWeaponComponent == nullptr)
-	{
-		return false;
-	}
-	if (CharacterState == EFPCharacterState::Reloading)
-	{
-		return false;
-	}
-	if (CharacterState == EFPCharacterState::Dead)
-	{
-		return false;
-	}
-	if (CurrentAmmo >= MagazineSize)
-	{
-		return false;
-	}
-	if (ReserveAmmo <= 0)
-	{
-		return false;
-	}
-	return true;
-}
-
-FString AfpstrueCharacter::GetReloadBlockReason() const
-{
-	if (EquippedWeaponComponent == nullptr)
-	{
-		return TEXT("no weapon equipped");
-	}
-	if (CharacterState == EFPCharacterState::Reloading)
-	{
-		return TEXT("already reloading");
-	}
-	if (CharacterState == EFPCharacterState::Dead)
-	{
-		return TEXT("character is dead");
-	}
-	if (CurrentAmmo >= MagazineSize)
-	{
-		return TEXT("magazine is full");
-	}
-	if (ReserveAmmo <= 0)
-	{
-		return TEXT("no reserve ammo");
-	}
-	return TEXT("unknown");
-}
-
-void AfpstrueCharacter::UpdateCharacterState()
-{
-	if (CharacterState == EFPCharacterState::Dead)
-	{
-		return;
-	}
-
-	if (CharacterState == EFPCharacterState::Reloading)
-	{
-		return;
-	}
-
-	const FVector Velocity = GetVelocity();
-	const FVector HorizontalVelocity(Velocity.X, Velocity.Y, 0.0f);
-
-	if (HorizontalVelocity.SizeSquared() > 1.0f)
-	{
-		CharacterState = EFPCharacterState::Moving;
-	}
-	else
-	{
-		CharacterState = EFPCharacterState::Idle;
-	}
-}
-
-FString AfpstrueCharacter::GetCharacterStateString() const
-{
-	switch (CharacterState)
-	{
-	case EFPCharacterState::Idle:
-		return TEXT("Idle");
-	case EFPCharacterState::Moving:
-		return TEXT("Moving");
-	case EFPCharacterState::Reloading:
-		return TEXT("Reloading");
-	case EFPCharacterState::Dead:
-		return TEXT("Dead");
-	default:
-		return TEXT("Unknown");
+		EquippedWeaponComponent->StopFire();
 	}
 }
 
@@ -459,17 +291,22 @@ void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 
 void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
+	if (HealthComponent != nullptr && HealthComponent->IsDead())
+	{
+		return;
+	}
+
 	OnPlayerDamaged(DamageAmount, DamageCauser, InstigatedBy);
 }
 
 void AfpstrueCharacter::HandleDeath()
 {
-	if (CharacterState == EFPCharacterState::Dead)
+	if (bDeathHandled)
 	{
 		return;
 	}
 
-	CharacterState = EFPCharacterState::Dead;
+	bDeathHandled = true;
 	bIsSprinting = false;
 
 	const bool bWasAiming = bIsAiming;
@@ -479,13 +316,10 @@ void AfpstrueCharacter::HandleDeath()
 		OnAimChanged(false);
 	}
 
-	NotifyFireStopped();
 	if (EquippedWeaponComponent != nullptr)
 	{
 		EquippedWeaponComponent->HandleOwnerDeath();
 	}
-
-	GetWorldTimerManager().ClearTimer(ReloadTimerHandle);
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
@@ -493,6 +327,7 @@ void AfpstrueCharacter::HandleDeath()
 		Movement->DisableMovement();
 	}
 
+	OnPlayerDeathReported.Broadcast(this);
 	OnPlayerDied();
 
 	if (GEngine)
@@ -508,17 +343,17 @@ void AfpstrueCharacter::HandleDeath()
 
 bool AfpstrueCharacter::IsReloading() const
 {
-	return CharacterState == EFPCharacterState::Reloading;
+	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
 }
 
 bool AfpstrueCharacter::HasAmmo() const
 {
-	return CurrentAmmo > 0;
+	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->HasAmmo();
 }
 
 bool AfpstrueCharacter::IsDead() const
 {
-	return CharacterState == EFPCharacterState::Dead;
+	return bDeathHandled || (HealthComponent != nullptr && HealthComponent->IsDead());
 }
 
 float AfpstrueCharacter::GetCurrentHealth() const
@@ -538,105 +373,19 @@ float AfpstrueCharacter::GetHealthNormalized() const
 
 bool AfpstrueCharacter::CanFireWeapon() const
 {
-	return EquippedWeaponComponent != nullptr
-		&& CharacterState != EFPCharacterState::Dead
-		&& CharacterState != EFPCharacterState::Reloading
-		&& CurrentAmmo > 0;
+	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->CanFire();
 }
 
-bool AfpstrueCharacter::TryConsumeAmmo()
-{
-	if (IsReloading())
-	{
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(
-				6,
-				1.0f,
-				FColor::Red,
-				TEXT("Cannot fire: reloading")
-			);
-		}
-
-		return false;
-	}
-
-	if (CharacterState == EFPCharacterState::Dead)
-	{
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(
-				6,
-				1.0f,
-				FColor::Red,
-				TEXT("Cannot fire: dead")
-			);
-		}
-
-		return false;
-	}
-
-	if (CurrentAmmo <= 0)
-	{
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(
-				6,
-				1.0f,
-				FColor::Red,
-				TEXT("No ammo: auto reload")
-			);
-		}
-
-		RequestReload();
-		return false;
-	}
-
-	CurrentAmmo--;
-	BroadcastAmmoChanged();
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			6,
-			0.5f,
-			FColor::White,
-			FString::Printf(
-				TEXT("Fire: Ammo %d / %d | Reserve %d"),
-				CurrentAmmo,
-				MagazineSize,
-				ReserveAmmo
-			)
-		);
-	}
-
-	return true;
-}
-
-void AfpstrueCharacter::NotifyFireStarted()
-{
-	if (bIsFiring || CharacterState == EFPCharacterState::Dead || CharacterState == EFPCharacterState::Reloading)
-	{
-		return;
-	}
-
-	bIsFiring = true;
-	OnFireStarted();
-}
-
-void AfpstrueCharacter::NotifyFireStopped()
-{
-	if (!bIsFiring)
-	{
-		return;
-	}
-
-	bIsFiring = false;
-	OnFireStopped();
-}
 void AfpstrueCharacter::RequestReload()
 {
-	StartReload();
+	if (EquippedWeaponComponent == nullptr || !EquippedWeaponComponent->CanReload())
+	{
+		return;
+	}
+
+	StopAim();
+	StopSprint();
+	EquippedWeaponComponent->RequestReload();
 }
 
 void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
@@ -649,24 +398,77 @@ void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* Weap
 	EquippedWeaponComponent = WeaponComponent;
 	Mesh1P->SetHiddenInGame(false, true);
 	Mesh1P->SetVisibility(true, true);
-	BroadcastAmmoChanged();
 	OnWeaponEquipped(WeaponComponent);
 }
 
-void AfpstrueCharacter::ConfigureAmmoFromWeapon(
-	int32 InMagazineSize,
-	int32 InReserveAmmo,
-	float InReloadDuration,
-	float InEmptyReloadDuration)
+void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent)
 {
-	MagazineSize = FMath::Max(1, InMagazineSize);
-	CurrentAmmo = MagazineSize;
-	ReserveAmmo = FMath::Max(0, InReserveAmmo);
-	ReloadDuration = FMath::Max(0.01f, InReloadDuration);
-	EmptyReloadDuration = FMath::Max(ReloadDuration, InEmptyReloadDuration);
+	if (EquippedWeaponComponent == nullptr || EquippedWeaponComponent != WeaponComponent)
+	{
+		return;
+	}
+
+	StopWeaponFire();
+	EquippedWeaponComponent = nullptr;
+	Mesh1P->SetVisibility(false, true);
+	Mesh1P->SetHiddenInGame(true, true);
 }
 
-void AfpstrueCharacter::BroadcastAmmoChanged()
+void AfpstrueCharacter::ApplyInputMappingContexts()
 {
-	OnAmmoChanged.Broadcast(CurrentAmmo, MagazineSize, ReserveAmmo);
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get();
+	if (Subsystem == nullptr)
+	{
+		return;
+	}
+
+	if (DefaultMappingContext != nullptr)
+	{
+		Subsystem->AddMappingContext(DefaultMappingContext, 0);
+	}
+}
+
+void AfpstrueCharacter::RemoveInputMappingContexts()
+{
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get())
+	{
+		if (DefaultMappingContext != nullptr)
+		{
+			Subsystem->RemoveMappingContext(DefaultMappingContext);
+		}
+	}
+
+	BoundInputSubsystem.Reset();
+}
+
+int32 AfpstrueCharacter::GetCurrentAmmo() const
+{
+	return EquippedWeaponComponent != nullptr ? EquippedWeaponComponent->GetCurrentAmmo() : 0;
+}
+
+int32 AfpstrueCharacter::GetMagazineSize() const
+{
+	return EquippedWeaponComponent != nullptr ? EquippedWeaponComponent->GetMagazineSize() : 0;
+}
+
+int32 AfpstrueCharacter::GetReserveAmmo() const
+{
+	return EquippedWeaponComponent != nullptr ? EquippedWeaponComponent->GetReserveAmmo() : 0;
+}
+
+bool AfpstrueCharacter::IsFiring() const
+{
+	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsFiring();
+}
+
+EFPCharacterState AfpstrueCharacter::GetCharacterState() const
+{
+	if (IsDead())
+	{
+		return EFPCharacterState::Dead;
+	}
+
+	return GetVelocity().SizeSquared2D() > 1.0f
+		? EFPCharacterState::Moving
+		: EFPCharacterState::Idle;
 }

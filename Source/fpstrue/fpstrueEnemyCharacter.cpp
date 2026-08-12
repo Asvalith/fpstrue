@@ -36,8 +36,8 @@ void AfpstrueEnemyCharacter::BeginPlay()
 
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
-		HealthComponent->OnDamageReceived.AddDynamic(this, &AfpstrueEnemyCharacter::HandleDamageReceived);
+		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
+		HealthComponent->OnDamageReceived.AddUniqueDynamic(this, &AfpstrueEnemyCharacter::HandleDamageReceived);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -53,6 +53,19 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	{
 		LastAttackTime = World->GetTimeSeconds();
 	}
+}
+
+void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	CancelAttackWindow();
+	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
+	if (HealthComponent != nullptr)
+	{
+		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
+		HealthComponent->OnDamageReceived.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDamageReceived);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 float AfpstrueEnemyCharacter::TakeDamage(
@@ -155,6 +168,7 @@ bool AfpstrueEnemyCharacter::TryAttackTarget()
 	}
 
 	CancelAttackWindow();
+	HitActorsThisAttack.Reset();
 	bIsAttacking = true;
 	bDamageAppliedThisAttack = false;
 	bHitTargetThisAttack = false;
@@ -187,10 +201,6 @@ void AfpstrueEnemyCharacter::HandleAttackHitNotify()
 
 	bDamageAppliedThisAttack = true;
 	bHitTargetThisAttack = PerformMeleeHit();
-	if (!bHitTargetThisAttack && !bAttackWindowActive)
-	{
-		OnAttackMissed();
-	}
 }
 
 void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
@@ -229,7 +239,6 @@ void AfpstrueEnemyCharacter::BeginAttackWindow()
 	bHasPreviousWeaponSample = true;
 	PreviousWeaponBase = CurrentWeaponBase;
 	PreviousWeaponTip = CurrentWeaponTip;
-	HitActorsThisAttack.Reset();
 }
 
 void AfpstrueEnemyCharacter::UpdateAttackWindow()
@@ -277,13 +286,7 @@ void AfpstrueEnemyCharacter::EndAttackWindow()
 		return;
 	}
 
-	const bool bMissedTarget = !bHitTargetThisAttack;
 	CancelAttackWindow();
-
-	if (bMissedTarget)
-	{
-		OnAttackMissed();
-	}
 }
 
 bool AfpstrueEnemyCharacter::PerformMeleeHit()
@@ -401,7 +404,10 @@ void AfpstrueEnemyCharacter::SweepWeaponSegment(const FVector& TraceStart, const
 
 bool AfpstrueEnemyCharacter::TryApplyAttackDamage(AActor* HitActor)
 {
-	if (HitActor == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead())
+	if (HitActor == nullptr
+		|| HitActor != TargetCharacter
+		|| TargetCharacter->IsDead()
+		|| bHitTargetThisAttack)
 	{
 		return false;
 	}
@@ -438,7 +444,6 @@ void AfpstrueEnemyCharacter::CancelAttackWindow()
 	bHasPreviousWeaponSample = false;
 	PreviousWeaponBase = FVector::ZeroVector;
 	PreviousWeaponTip = FVector::ZeroVector;
-	HitActorsThisAttack.Reset();
 }
 
 void AfpstrueEnemyCharacter::FinishAttack()
@@ -449,10 +454,17 @@ void AfpstrueEnemyCharacter::FinishAttack()
 	}
 
 	EndAttackWindow();
+	const bool bHitTarget = bHitTargetThisAttack;
 	bIsAttacking = false;
 	SetAttackAnimationPriority(false);
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
-	OnAttackFinished(bHitTargetThisAttack);
+
+	if (!bHitTarget)
+	{
+		OnAttackMissed();
+	}
+	OnAttackFinished(bHitTarget);
+	HitActorsThisAttack.Reset();
 }
 
 void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
@@ -511,6 +523,11 @@ bool AfpstrueEnemyCharacter::CanAttack() const
 
 void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
+	if (HealthComponent != nullptr && HealthComponent->IsDead())
+	{
+		return;
+	}
+
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
 }
 
@@ -525,6 +542,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	CancelAttackWindow();
 	bIsAttacking = false;
 	bDamageAppliedThisAttack = true;
+	HitActorsThisAttack.Reset();
 	SetAttackAnimationPriority(false);
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 

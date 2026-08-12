@@ -1,6 +1,17 @@
 # fpstrue 项目阶段总结
 
-更新时间：2026-08-05
+更新时间：2026-08-12
+
+## 2026-08-12 生命周期边界审计
+
+- HealthComponent 增加每次生命只广播一次死亡的显式标记，并在 Reset 时开启新生命周期。
+- 致死伤害不再进入普通 Damaged 蓝图事件，避免受击 Montage 抢占死亡表现。
+- GameMode 使用弱引用敌人注册表统一接收 Death/Destroy；只有首次注销会更新存活数，游戏结束同时停止场上 AI。
+- 敌人一轮攻击的所有窗口共享命中去重状态，Landed/Missed/Finished 不再因多窗口重复触发。
+- Pickup 增加消费门禁；Character、Enemy、TargetDummy 和 HealthComponent 补齐唯一绑定与 EndPlay 解绑。
+- `TryAttackTarget()` 收为 AIController 专用入口，防止其他 C++ 调用绕开 SurroundManager Attack Token。
+- Development Editor 编译通过；重复 Notify、外部 Destroy、Montage 中断和关卡退出仍需 PIE 行为回归。
+- GameMode 分离结算触发器：Character 在处理 `HealthComponent::OnDeath` 后通过 `OnPlayerDeathReported` 向 GameMode 报告，游戏中立即失败；倒计时只在归零时检查玩家仍有生命且未死亡并触发胜利，结算时解绑死亡报告。
 
 ## 0. `fps-v1` 当前权威快照
 
@@ -17,7 +28,7 @@ Enhanced Input
 
 当前分支在模板基础上已经形成以下工程化模块：
 
-- Data Asset 驱动的武器公共配置，以及 Rifle / Shotgun 组件子类。
+- 通用 WeaponComponent 已支持可选 WeaponDataAsset 配置；Rifle / Shotgun 派生组件已移除。当前未发现已赋值的数据资产，正式武器仍使用组件默认值回退。
 - 摄像机 Hitscan 判定与枪口视觉子弹分离，支持伤害、冲量、命中事件和表现层扩展。
 - `EnemyAIController + NavMesh + SurroundManager` 的敌人寻路、环绕槽位和攻击令牌系统。
 - `GameMode` 驱动的波次生成、敌人计数和胜负流程基础。
@@ -25,7 +36,7 @@ Enhanced Input
 
 2026-08-05 完成两项针对 `fps-v1` 架构的修复：
 
-- 连续射击扩散改为相机平面圆盘采样，扩散步长、上限和重置时间由 `WeaponDataAsset` 配置；霰弹枪同一次开火的多颗弹丸共享同一级扩散。
+- 连续射击扩散改为相机平面圆盘采样；扩散步长、上限和重置时间可由 `WeaponDataAsset` 配置，空引用时使用组件默认值。霰弹枪同一次开火的多颗弹丸共享同一级扩散。
 - 敌人有效攻击距离同时考虑敌我胶囊体半径，避免模型已经接触但 Actor 原点距离仍超过 `AttackRange`，从而反复后退或无法进入攻击状态。
 
 当前仍需完成 PIE 回归、HUD 与胜负/重开闭环、固定压力测试和最终录屏证据。迁移地图与美术素材不计作自研图形学成果；多人合作项目位于独立仓库，图形学内容保持为后续加分项。
@@ -58,30 +69,17 @@ Enhanced Input
 主要职责：
 
 - 创建第一人称角色胶囊体、摄像机、第一人称手臂 `Mesh1P`。
-- 处理移动、视角、跳跃、冲刺、瞄准、换弹输入。
-- 维护角色状态：
-  - `Idle`
-  - `Moving`
-  - `Reloading`
-  - `Dead`
-- 管理弹药：
-  - `CurrentAmmo`
-  - `ReserveAmmo`
-  - `MagazineSize`
-- 提供武器需要查询的接口：
-  - `CanFireWeapon()`
-  - `TryConsumeAmmo()`
-  - `CanReload()`
-  - `IsReloading()`
-  - `IsDead()`
-  - `IsAiming()`
-  - `IsFiring()`
-- 接收伤害并进入死亡状态。
+- 统一处理移动、视角、跳跃、冲刺、瞄准、开火和换弹输入。
+- 计算 `Idle / Moving / Dead` 移动与生命状态。
+- 保存当前装备引用，并把开火/换弹意图转发给 WeaponComponent。
+- Character 管理包含 `IA_Shoot` 的 `IMC_Default`，在 Controller 变化和 EndPlay 时清理映射。
+- 协调换弹时停止瞄准和冲刺，死亡时通知武器停用。
+- 保留弹药 Getter 作为旧 HUD 的只读兼容转发，不保存弹药副本。
 
 当前状态：
 
 - 基础角色逻辑已成立。
-- 瞄准、冲刺、换弹、死亡都已经进入 C++ 状态系统。
+- 瞄准、冲刺和死亡协调位于 Character；换弹和开火动作状态位于 WeaponComponent。
 - 角色表现部分主要由蓝图继续完善，例如 FOV 放大、手臂动画、UI。
 
 ### 2.2 武器模块：`UfpstrueWeaponComponent`
@@ -95,8 +93,12 @@ Enhanced Input
 
 - 作为枪支核心组件挂在 `BP_Weapon` 上。
 - 被拾取后附加到角色 `Mesh1P` 的 `GripPoint`。
-- 添加武器输入映射。
-- 处理开火输入：
+- 接收 Character 转发的 `StartFire / StopFire / RequestReload` 命令，不直接依赖 Enhanced Input。
+- 独占每把武器实例的 `CurrentAmmo / ReserveAmmo / MagazineSize`。
+- 维护 `Ready / Firing / Reloading / Disabled` 动作状态。
+- 按 `RoundsPerMinute` 调度自动射击并执行射速门禁。
+- 管理 `RequestReload / CommitReload / FinishReload / CancelReload` 换弹事务。
+- 处理开火命令：
   - `StartFire()`
   - `StopFire()`
   - `Fire()`
@@ -121,11 +123,11 @@ Enhanced Input
 ↓
 WeaponComponent::StartFire()
 ↓
-蓝图开始 Timer
+C++ 立即执行首发，并按配置启动 Timer
 ↓
-蓝图循环调用 WeaponComponent::Fire()
+WeaponComponent::Fire()
 ↓
-TryConsumeAmmo()
+WeaponComponent::TryConsumeAmmo()
 ↓
 LineTrace
 ↓
@@ -436,7 +438,7 @@ DeltaLocation = Normalize(TargetLocation - ActorLocation) * Speed * DeltaSeconds
 - Enemy Spawner。
 - Wave Manager。
 - 每波敌人数。
-- 全部死亡后下一波。
+- 原计划为全部死亡后下一波；当前实现改为按 `WaveInterval` 推进波次，敌人死亡只更新注册表存活数。
 - 胜利/失败条件。
 
 ### 5.5 图形学/渲染亮点

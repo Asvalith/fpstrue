@@ -84,7 +84,14 @@ void AfpstrueGameMode::StartGameMode()
 		return;
 	}
 
-	PlayerCharacter->GetHealthComponent()->OnDeath.AddUniqueDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
+	if (!IsPlayerAlive())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("StartGameMode failed: player is already dead."));
+		FinishGame(false);
+		return;
+	}
+
+	BindPlayerDeathEvent();
 
 	if (!CreateSurroundManager())
 	{
@@ -93,6 +100,7 @@ void AfpstrueGameMode::StartGameMode()
 		return;
 	}
 
+	ClearEnemyRegistrations();
 	bGameRunning = true;
 	CurrentWave = 0;
 	AliveEnemyCount = 0;
@@ -116,11 +124,10 @@ void AfpstrueGameMode::StartGameMode()
 void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ClearGameplayTimers();
+	StopActiveEnemies();
+	ClearEnemyRegistrations();
 
-	if (PlayerCharacter && PlayerCharacter->GetHealthComponent())
-	{
-		PlayerCharacter->GetHealthComponent()->OnDeath.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
-	}
+	UnbindPlayerDeathEvent();
 
 	if (SurroundManager)
 	{
@@ -330,9 +337,7 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 			);
 		}
 
-		SpawnedEnemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
-		++AliveEnemyCount;
-		OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+		RegisterEnemy(SpawnedEnemy);
 		UE_LOG(
 			LogTemp,
 			Warning,
@@ -348,6 +353,121 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 	}
 }
 
+bool AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
+{
+	if (!IsValid(Enemy))
+	{
+		return false;
+	}
+
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
+	if (RegisteredEnemies.Contains(EnemyKey))
+	{
+		return false;
+	}
+
+	RegisteredEnemies.Add(EnemyKey);
+	Enemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
+	Enemy->OnDestroyed.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
+	AliveEnemyCount = RegisteredEnemies.Num();
+
+	if (bGameRunning)
+	{
+		OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+	}
+	return true;
+}
+
+bool AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount)
+{
+	if (Enemy == nullptr)
+	{
+		return false;
+	}
+
+	Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
+	Enemy->OnDestroyed.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
+
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
+	if (RegisteredEnemies.Remove(EnemyKey) == 0)
+	{
+		return false;
+	}
+
+	AliveEnemyCount = RegisteredEnemies.Num();
+	if (bBroadcastCount && bGameRunning)
+	{
+		OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+	}
+	return true;
+}
+
+void AfpstrueGameMode::StopActiveEnemies()
+{
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
+	{
+		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
+		{
+			if (AfpstrueEnemyAIController* EnemyController =
+				Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+			{
+				EnemyController->StopAI();
+			}
+		}
+	}
+}
+
+void AfpstrueGameMode::ClearEnemyRegistrations()
+{
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
+	{
+		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
+		{
+			Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
+			Enemy->OnDestroyed.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
+		}
+	}
+
+	RegisteredEnemies.Reset();
+	AliveEnemyCount = 0;
+}
+
+bool AfpstrueGameMode::IsPlayerAlive() const
+{
+	if (!IsValid(PlayerCharacter))
+	{
+		return false;
+	}
+
+	const UfpstrueHealthComponent* HealthComponent = PlayerCharacter->GetHealthComponent();
+	return IsValid(HealthComponent)
+		&& HealthComponent->GetHealth() > 0.0f
+		&& !HealthComponent->IsDead()
+		&& !PlayerCharacter->IsDead();
+}
+
+void AfpstrueGameMode::BindPlayerDeathEvent()
+{
+	if (IsValid(PlayerCharacter))
+	{
+		PlayerCharacter->OnPlayerDeathReported.AddUniqueDynamic(
+			this,
+			&AfpstrueGameMode::HandlePlayerDied
+		);
+	}
+}
+
+void AfpstrueGameMode::UnbindPlayerDeathEvent()
+{
+	if (IsValid(PlayerCharacter))
+	{
+		PlayerCharacter->OnPlayerDeathReported.RemoveDynamic(
+			this,
+			&AfpstrueGameMode::HandlePlayerDied
+		);
+	}
+}
+
 void AfpstrueGameMode::UpdateCountdown()
 {
 	if (!bGameRunning)
@@ -358,32 +478,28 @@ void AfpstrueGameMode::UpdateCountdown()
 	RemainingTime = FMath::Max(RemainingTime - 1, 0);
 	OnRemainingTimeChanged.Broadcast(RemainingTime);
 
-	if (RemainingTime <= 0)
+	if (RemainingTime <= 0 && IsPlayerAlive())
 	{
-		const bool bPlayerIsAlive = PlayerCharacter && !PlayerCharacter->IsDead();
-		FinishGame(bPlayerIsAlive);
+		FinishGame(true);
 	}
 }
 
 void AfpstrueGameMode::HandleEnemyDied(AfpstrueEnemyCharacter* DeadEnemy)
 {
-	if (DeadEnemy)
-	{
-		DeadEnemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
-	}
-
-	if (!bGameRunning)
-	{
-		return;
-	}
-
-	AliveEnemyCount = FMath::Max(AliveEnemyCount - 1, 0);
-	OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+	UnregisterEnemy(DeadEnemy, true);
 }
 
-void AfpstrueGameMode::HandlePlayerDied()
+void AfpstrueGameMode::HandleEnemyDestroyed(AActor* DestroyedActor)
 {
-	FinishGame(false);
+	UnregisterEnemy(Cast<AfpstrueEnemyCharacter>(DestroyedActor), true);
+}
+
+void AfpstrueGameMode::HandlePlayerDied(AfpstrueCharacter* DeadPlayer)
+{
+	if (bGameRunning && DeadPlayer == PlayerCharacter)
+	{
+		FinishGame(false);
+	}
 }
 
 void AfpstrueGameMode::FinishGame(bool bPlayerWon)
@@ -396,10 +512,20 @@ void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 	bGameEnded = true;
 	bGameRunning = false;
 	ClearGameplayTimers();
+	UnbindPlayerDeathEvent();
+	StopActiveEnemies();
 	if (SurroundManager)
 	{
 		SurroundManager->ResetManager();
 	}
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("Game finished: %s. Remaining time: %d. Player health: %.1f"),
+		bPlayerWon ? TEXT("Victory") : TEXT("Defeat"),
+		RemainingTime,
+		IsValid(PlayerCharacter) ? PlayerCharacter->GetCurrentHealth() : 0.0f
+	);
 	OnGameResult.Broadcast(bPlayerWon);
 }
 

@@ -50,6 +50,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UFUNCTION()
 	void HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser);
@@ -58,9 +59,11 @@ private:
 	void ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 
 protected:
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Health")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Health", meta=(ClampMin="1.0"))
 	float MaxHealth = 100.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Health")
 	float CurrentHealth = 100.0f;
+
+	bool bDeathBroadcast = false;
 };

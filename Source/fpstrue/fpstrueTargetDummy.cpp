@@ -23,9 +23,20 @@ void AfpstrueTargetDummy::BeginPlay()
 
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnHealthChanged.AddDynamic(this, &AfpstrueTargetDummy::HandleHealthChanged);
-		HealthComponent->OnDeath.AddDynamic(this, &AfpstrueTargetDummy::HandleDeath);
+		HealthComponent->OnHealthChanged.AddUniqueDynamic(this, &AfpstrueTargetDummy::HandleHealthChanged);
+		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueTargetDummy::HandleDeath);
 	}
+}
+
+void AfpstrueTargetDummy::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (HealthComponent != nullptr)
+	{
+		HealthComponent->OnHealthChanged.RemoveDynamic(this, &AfpstrueTargetDummy::HandleHealthChanged);
+		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueTargetDummy::HandleDeath);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void AfpstrueTargetDummy::HandleHealthChanged(float NewHealth)

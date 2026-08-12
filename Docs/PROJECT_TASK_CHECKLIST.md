@@ -4,24 +4,42 @@
 
 ## P0：玩法正确性
 
+### 一次性提交边界
+
+- [x] HealthComponent 使用死亡广播标记，保证每次 Reset 之间最多广播一次 `OnDeath`。
+- [x] 致死伤害跳过普通 Damaged 表现，只进入 Death 表现，避免两个 Montage 争抢同一 Slot。
+- [x] GameMode 使用敌人注册表统一处理 Death/Destroy，同一敌人只允许注销和减少存活数一次。
+- [x] `bGameEnded` 保证一局只广播一次胜负结果；结算同时停止场上敌人 AI。
+- [x] Character 接收 HealthComponent 的 `OnDeath`，完成自身死亡状态后通过 `OnPlayerDeathReported(this)` 向 GameMode 报告；游戏进行中立即失败，不等待倒计时。
+- [x] 倒计时归零只负责检查胜利；生命值大于 0 且未进入死亡状态时 `FinishGame(true)`，不在倒计时中轮询或触发失败。
+- [ ] PIE 验证剩余时间内死亡、时间归零时存活、时间归零前致死和死亡/倒计时同帧四种结算路径。
+- [x] WeaponComponent 用动作状态、换弹序列号和提交标记保证每轮换弹最多提交一次。
+- [x] 射速门禁通过后才扣除一发弹药，并只广播一次真实射击事件。
+- [x] PickupComponent 使用消费标记，防止同帧重入导致重复装备或重复广播。
+- [x] EnemyCharacter 在整轮攻击开始时清空命中集合；多个攻击窗口共享去重状态，Landed/Missed/Finished 每轮最多各一次。
+- [x] SurroundManager 的 Attack Token 使用 `TSet`，重复申请和重复释放保持幂等。
+- [ ] PIE 覆盖重复伤害、敌人外部 Destroy、攻击多窗口、Montage 中断、死亡中断和关卡退出。
+
+完成标准：重复输入、Notify、Timer、Death/Destroy 或 EndPlay 的先后顺序不能造成重复扣血、重复加弹、重复计数或重复结算。
+
 ### 换弹事务
 
-- [ ] 新增 `EFPWeaponActionState::Ready / Firing / Reloading / Disabled`。
-- [ ] 把弹药、换弹状态和换弹 Timer 从 Character 移入 WeaponComponent。
-- [ ] 增加 `ReloadSequenceId` 和 `bReloadAmmoCommitted`，拒绝旧 Timer 和旧 Notify。
+- [x] 新增 `EFPWeaponActionState::Ready / Firing / Reloading / Disabled`。
+- [x] 把弹药、换弹状态和换弹 Timer 从 Character 移入 WeaponComponent。
+- [x] 增加换弹序列号和 `bReloadAmmoCommitted`，拒绝旧 Timer，并由状态门禁拒绝已结束换弹的 Notify。
 - [ ] 使用 AnimNotify 提交弹药，保证一轮换弹只提交一次。
 - [ ] 使用 Montage Completed/Interrupted 收口状态；Timer 仅作超时恢复。
-- [ ] 换弹开始时统一停止瞄准、冲刺和射击，并广播对应状态变化。
-- [ ] 明确规则：当前版本换弹期间不可开火，Montage 正常结束后恢复 Ready。
+- [x] 换弹开始时统一停止瞄准、冲刺和射击，并广播对应状态变化。
+- [x] 明确规则：当前版本换弹期间不可开火，Montage 正常结束后恢复 Ready。
 - [ ] 验证普通换弹、空仓换弹、死亡中断、重复按键、长按开火和 Montage 被替换。
 
 完成标准：动画未结束前无法造成射击伤害；动画中断不会加弹；同一轮换弹不会重复结算。
 
 ### 群体攻击名额
 
-- [ ] 删除或限制无 Token 的直接攻击入口。
-- [ ] 只有持有 SurroundManager Attack Token 的敌人可以进入 Attack。
-- [ ] 攻击结束、超时、死亡、失去目标和 UnPossess 时释放 Token。
+- [x] 把 `TryAttackTarget()` 收为仅 EnemyAIController 可调用的私有入口，避免其他类绕开 Token。
+- [x] 当前运行链只有持有 SurroundManager Attack Token 的敌人可以进入 Attack。
+- [x] 攻击结束、超时、死亡、失去目标、GameMode 结算和 UnPossess 时释放 Token。
 - [ ] 记录当前攻击者数量，验证不超过 `MaxConcurrentAttackers`。
 - [ ] 统一 AttackRange 的含义，明确它是中心距离还是胶囊表面外的武器距离。
 
@@ -41,26 +59,26 @@
 
 ### Character
 
-- [ ] Character 只保留移动、视角、输入意图、当前装备引用和角色死亡协调。
-- [ ] 拆分 LocomotionState 与 WeaponActionState，避免移动状态和武器状态混用。
-- [ ] 移除每帧测试文字；状态变化改为事件驱动。
-- [ ] 在 EndPlay/Controller 变化时清理默认 Input Mapping Context。
+- [x] Character 只保留移动、视角、输入意图、当前装备引用和角色死亡协调；弹药 Getter 仅作兼容转发。
+- [x] 拆分 LocomotionState 与 WeaponActionState，避免移动状态和武器状态混用。
+- [x] 关闭 Character Tick；状态变化改为事件驱动。
+- [x] 在 EndPlay/Controller 变化时停止开火并清理默认 Input Mapping Context。
 - [ ] 检查重新 Possess、重新开始和窗口失焦后的输入状态。
 
 ### WeaponComponent
 
-- [ ] 由 WeaponComponent 统一拥有弹药、射速、连续射击、换弹和开火冷却。
-- [ ] 把蓝图自动开火 Timer 移到 C++，蓝图只响应单发、空仓、换弹和命中事件。
-- [ ] 保存并移除 Enhanced Input Binding Handle，避免输入组件长期积累绑定。
-- [ ] 统一 WeaponData 与组件默认参数，避免同一参数存在两套权威值。
-- [ ] 在“子类多态”和“WeaponFamily + DataAsset”中选择一种主要武器策略。
-- [ ] 当前 Rifle/Shotgun 只有射线数量差异时优先数据驱动；行为真正分化后再保留子类。
+- [x] 由 WeaponComponent 统一拥有弹药、射速、连续射击、换弹和开火冷却。
+- [x] 把自动开火 Timer 移到 C++，蓝图只响应单发、空仓、换弹和命中事件。
+- [x] 移除 WeaponComponent 的 Enhanced Input 依赖，由 Character 统一绑定并转发开火命令。
+- [ ] 创建并赋值正式 WeaponData 资产，再移除组件默认参数回退，避免同一参数存在两套权威值。
+- [x] 代码层选择 `WeaponFamily + DataAsset` 作为武器配置策略；资产创建与赋值尚未完成。
+- [x] 当前 Rifle/Shotgun 只有射线数量差异时使用数据驱动；行为真正分化后再增加策略或子类。
 
 ### HealthComponent
 
-- [ ] 保持为独立 Component。
+- [x] 保持为独立 Component。
 - [ ] 补充可靠的初始 Health 快照，确保 UI 在绑定后立即获得当前值。
-- [ ] 为 MaxHealth 增加合法范围限制。
+- [x] 为 MaxHealth 增加编辑器 Clamp 和运行时最小值限制。
 - [ ] 评估事件是否需要 PreviousHealth、MaxHealth、DamageType 和击杀上下文。
 - [ ] 验证 Reset 后再次死亡仍只广播一次当前生命周期的死亡事件。
 
@@ -94,14 +112,55 @@
 
 ### 生命周期与开发工具
 
+- [x] 停止跟踪 `Binaries / Intermediate / Saved / .sln` 生成文件，并完成一次重新生成 BuildRules 的全量 Development Editor 编译。
 - [ ] 把 AutoBenchmark、CSV、纹理和内存命令移出正式 GameMode。
-- [ ] 检查 Character、Weapon、Enemy、GameMode 的 Timer 与 Delegate 清理路径。
+- [x] 检查 Character、Weapon、Enemy、Health、TargetDummy、GameMode 的 C++ Timer 与 Delegate 清理路径。
 - [ ] 清理 enemy_BP 中残留的旧 Tick、Timer、AI MoveTo 和手写追击节点。
 - [ ] 确认所有攻击 Montage 只使用一种命中入口；旧单点 Notify 与 AttackWindow 不在同一攻击中重复结算。
 - [ ] 确认 Projectile 路径无资产引用后，清理旧 Projectile 类、include 和重定向。
 - [ ] 缓存 Surround 槽位的导航投影，只在玩家移动超过阈值或 NavMesh 变化时刷新。
 
-## P2：基础图形学与材质
+### 目标搜索与感知治理
+
+- [x] GameMode 在敌人生成时注入 Player 和 SurroundManager，AI 决策不使用每帧 `GetAllActorsOfClass` 或全 Pawn 扫描。
+- [x] 区分目标获取、战术槽位、NavMesh 路径和攻击命中查询，不把四类问题集中到 EnemyCharacter Tick。
+- [ ] PIE 验证玩家死亡、重新 Possess、重新开始和目标引用失效后的 AI Idle/Stop/重新注入路径。
+- [ ] 只有玩法需要视野、听觉、最后已知位置和丢失目标时，才接入 `UAIPerceptionComponent` 和目标记忆。
+- [ ] 只有出现多玩家、诱饵或召唤物时，才增加 Candidate Registry、Team Filter、Threat Score 和切换迟滞。
+- [ ] 只有规则槽位无法处理复杂掩体/多层地形时，才引入 EQS 对候选位置做可达性、视线和距离评分。
+- [ ] 记录 AI Decision、Target Resolve、Move Request、Nav Query 和候选数量，避免用框架名称代替性能证据。
+
+完成标准：能区分“目标是谁、站在哪里、怎么到达、是否命中”四条链；新条件出现时按需求升级，不用高频全图搜索掩盖上下文装配错误。
+
+### 物理与碰撞治理
+
+- [x] 区分场景查询、物理模拟和 Gameplay 伤害：Trace/Sweep 决定命中，HealthComponent 决定扣血，Impulse 只作用于模拟刚体。
+- [x] 玩家和敌人使用 Capsule + CharacterMovement；枪械使用 Line Trace；近战使用攻击窗口内的帧间 Sphere Sweep。
+- [x] 敌人死亡先关闭移动和 Capsule，再由蓝图开启 Ragdoll，C++ 下一帧检查物理状态并施加命中冲量。
+- [ ] 在敌人蓝图回归 `OnEnemyDied -> Ragdoll Profile -> Set Simulate Physics(true)`，验证没有 Physics Asset 时的失败表现。
+- [ ] 建立项目专用 Weapon/Melee Trace Channel 和碰撞响应矩阵；通用伤害入口中的 Weapon Trace 任务完成后在此做固定用例验收。
+- [ ] 用可配置骨骼集合、Physical Material 或 Hit Zone 替换头部骨骼名硬编码。
+- [ ] 记录 10/25/50 个活动 Ragdoll 的 CPU Physics、Frame P95、对象数和内存回落，确定尸体数量预算。
+- [ ] 对 `bTraceComplex`、Sphere 半径和帧间采样数做固定靶场 A/B，同时记录准确率和 Scene Query 成本。
+- [ ] 为射击、近战、Overlap、死亡切换和物理冲量建立碰撞测试矩阵，覆盖 Ignore/Overlap/Block 和 NoCollision/QueryOnly/QueryAndPhysics。
+- [ ] 增加 WeaponLineTrace、MeleeSweep、ReturnedHit、ActiveAttackWindow 和 RagdollActive 计数器，并为 Weapon Trace 添加 Scene Query 统计标签。
+- [ ] 记录默认攻击窗口实际 NotifyTick 数，计算并实测 `SampleCount + 1` 次 Sweep 的每轮查询量。
+- [ ] 评估单目标近战改为专用 Melee Channel + SphereSweepSingle，同时让 WorldStatic 成为阻挡对象。
+- [ ] 用剑刃端点位移和 TraceRadius 推导自适应采样数，与固定 4 采样做漏判率/查询量 A/B。
+- [ ] 在 Debug Draw、屏幕消息和高频日志关闭条件下采集 Scene Query 数据。
+- [ ] 建立 Ragdoll `Full -> Sleeping -> Frozen -> Destroyed` 分级策略，按距离、可见性、Awake 状态和全局预算转换。
+- [ ] 验证 `PutAllRigidBodiesToSleep / IsAnyRigidBodyAwake / WakeAllRigidBodies`，区分休眠与关闭物理模拟。
+- [ ] 审计敌人 Physics Asset 的 Body、Constraint、相邻骨骼自碰撞和事件生成，保留质量 A/B 截图。
+- [ ] 验证冻结 Ragdoll 前后的 Pose 保留，避免 `SetSimulatePhysics(false)` 后尸体回弹到动画姿势。
+- [ ] 记录 Active/Awake Rigid Body、Contact/Constraint、Physics 时间和 Game/Physics 同步等待。
+- [ ] 只有 Profile 证明 Physics/Sync 是瓶颈后，才评估 Chaos Threading Model 或 Async Physics；不把 GPU 当通用开关。
+- [ ] 只有 Ragdoll 抖动、约束不稳或低帧率穿透可复现后，才对 MaxPhysicsDelta/Substep 做 30/60/120 FPS A/B。
+- [ ] 按主文档 24.23 的统一场景题完成口述复盘：先分类问题，再给最小方案、代价和验证指标。
+- [ ] PIE 实测隔墙近战、高速挥砍、50 敌人同时死亡、重复子步回调和 Character 击退五个代表场景。
+
+完成标准：能用数据证明碰撞查询和 Ragdoll 成本；Profile 或通道调整不会导致漏命中、误命中、重复伤害或尸体继续阻挡活角色。
+
+## P3：基础图形学与材质
 
 ### PBR 材质基础
 
@@ -148,6 +207,8 @@
 ## 验收与记录
 
 - [ ] 每项修改记录问题、原因、方案、取舍、验证方法和结果。
+- [ ] 对主文档 16.0 的六个核心难点逐项保留源码、蓝图、日志或性能证据，不把风险分析写成真实事故。
+- [ ] 至少选择换弹、近战和群体 AI 三个问题完成闭卷复盘：现象、假设、根因、方案取舍、结果和遗留边界。
 - [ ] Gameplay 修改至少覆盖正常、重复输入、中断、死亡和重新开始。
 - [ ] 图形修改使用相同关卡、机位、分辨率和质量设置做 A/B 对比。
 - [ ] 记录 CPU Frame、GPU Frame、主要 Pass、Texture Pool 和对象数量。

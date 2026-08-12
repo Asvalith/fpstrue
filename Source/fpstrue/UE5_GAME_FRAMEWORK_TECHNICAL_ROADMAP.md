@@ -6,6 +6,8 @@
 
 本文档用于复习 UE5 Gameplay Framework、梳理 `fpstrue` 当前架构，并规划后续多人网络、游戏 AI、渲染和图形学学习路线。
 
+本文现在只承担学习路线职责；当前项目架构、调用链和完成状态统一见 `Docs/FPS_Core_Technical_Summary.md`，活动任务见 `Docs/PROJECT_TASK_CHECKLIST.md`。
+
 核心原则：
 
 - 只把能够解释、修改和验证的内容写成个人能力。
@@ -241,8 +243,9 @@ Mapping Context 是否添加
 ```text
 Fire Input
 → WeaponComponent::StartFire
-→ 单次 WeaponComponent::Fire
-→ Character::TryConsumeAmmo
+→ WeaponActionState = Firing
+→ 首发 Fire + C++ 自动射击 Timer
+→ WeaponComponent::TryConsumeAmmo
 → WeaponComponent::FireLineTrace
 → FHitResult
 → ApplyPointDamage
@@ -264,12 +267,14 @@ Fire / Trace 结果
 ```text
 Reload Input
 → Character::StartReload
-→ CanReload
-→ 退出瞄准并停止开火
-→ CharacterState = Reloading
+→ Character::RequestReload
+→ WeaponComponent::CanReload
+→ 退出瞄准、冲刺并停止开火
+→ WeaponActionState = Reloading
 → OnWeaponReloadStarted
-→ Reload Timer
-→ FinishReload
+→ AnimNotify: CommitReload
+→ Montage Completed/Interrupted: FinishReload/CancelReload
+→ 带序列号的 Reload Timer 仅作兜底
 → 更新 CurrentAmmo / ReserveAmmo
 → OnWeaponReloadFinished
 ```
@@ -329,7 +334,8 @@ Sphere Overlap
 → OnPickUp.Broadcast
 → 武器蓝图处理装备表现
 → Character 保存 WeaponComponent
-→ Fire Mapping Context 生效
+→ Character 的 Default Mapping Context 已包含 Fire Action
+→ Fire Input 由 Character 转发给 WeaponComponent
 ```
 
 ## 7. C++ 与蓝图接口设计
@@ -399,10 +405,10 @@ C++ 计算结果
 
 ### 7.4 接口技术债
 
-- Character 与 WeaponComponent 都存在 Fire Started/Stopped，可能产生重复事件源。
+- Fire Started/Stopped 与弹药事件只由 WeaponComponent 广播；Character 不再保存重复武器状态。
 - `OnWeaponTraceFinished` 参数较多，继续扩展时应考虑 `FWeaponHitData`。
 - 必须确认每个预留事件是否存在实际蓝图消费者。
-- HUD 阶段应新增 `OnAmmoChanged`。
+- `OnAmmoChanged` 已由 WeaponComponent 提供；HUD 应先读一次快照，再监听事件。
 - Match 闭环阶段应新增 `OnMatchStateChanged`。
 
 ## 8. 单机 FPS 第一阶段
@@ -414,10 +420,12 @@ C++ 计算结果
 → 玩家和敌人受伤、死亡
 → 3～5 个敌人
 → HUD
-→ 全部敌人死亡则胜利
+→ 当前版本坚持到倒计时结束且玩家存活则胜利
 → 玩家死亡则失败
 → 重新开始
 ```
+
+说明：这是当前代码的限时生存规则。敌人死亡会更新存活数，但不会立即结束比赛；波次按配置间隔生成。若改成“清完一波再开下一波/全部清除即胜利”，需要新增明确的波次完成状态，不能只在 UI 中判断存活数。
 
 HUD 只使用 UMG 基础控件：
 
@@ -469,9 +477,9 @@ HUD 只使用 UMG 基础控件：
 
 ```text
 CurrentAmmo / ReserveAmmo
-→ 需要决定复制方式
+→ 位于 WeaponComponent，需要决定复制方式
 
-CharacterState / Health / Death
+WeaponActionState / Health / Death
 → 需要服务端权威并复制结果
 
 WeaponComponent::FireLineTrace
@@ -480,8 +488,8 @@ WeaponComponent::FireLineTrace
 Enemy GetPlayerCharacter(0)
 → 不能作为多人目标选择方案
 
-蓝图连续开火 Timer
-→ 需要明确客户端输入与服务端射速验证
+C++ 自动开火 Timer
+→ 客户端只提交输入意图，服务端仍需独立校验射速
 ```
 
 ### 9.3 最小网络验收
@@ -669,10 +677,9 @@ UE Plugin
 
 独立实现：
 
-- `CanReload()`。
-- `TryConsumeAmmo()`。
-- `StartReload()`。
-- `FinishReload()`。
+- `WeaponComponent::CanReload()`。
+- `WeaponComponent::TryConsumeAmmo()`。
+- `RequestReload / CommitReload / FinishReload / CancelReload`。
 
 验收：能够覆盖死亡、换弹中、满弹匣和无备用弹药。
 

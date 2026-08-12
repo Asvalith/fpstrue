@@ -4,7 +4,7 @@
 
 ## 1. 文档地位
 
-本文档是 `fpstrue` 当前唯一有效的项目执行与验收基线。
+本文档保留 2026-07-22 制定的四周验收基线，属于历史计划。当前活动任务以 `Docs/PROJECT_TASK_CHECKLIST.md` 为准，当前架构与完成状态以 `Docs/FPS_Core_Technical_Summary.md` 为准。
 
 跨项目、八股和算法的完整日程见 `EIGHT_WEEK_EXECUTION_PLAN_2026-07-22_2026-09-15.md`。本文只定义 FPS 本身的验收要求；若两份文档冲突，以本文的 FPS 范围和验收门槛为准。
 

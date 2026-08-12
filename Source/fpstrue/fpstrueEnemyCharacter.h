@@ -7,6 +7,7 @@
 #include "fpstrueEnemyCharacter.generated.h"
 
 class AfpstrueCharacter;
+class AfpstrueEnemyAIController;
 class AfpstrueEnemyCharacter;
 class UfpstrueHealthComponent;
 
@@ -61,13 +62,12 @@ public:
 
 	void UpdatePerformanceTier(float DistanceToTarget);
 
-	bool TryAttackTarget();
-
 	UPROPERTY(BlueprintAssignable, Category = "AI")
 	FOnEnemyDeathReported OnEnemyDeathReported;
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual float TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
 	UFUNCTION()
@@ -164,6 +164,9 @@ protected:
 	void OnEnemyDied();
 
 private:
+	friend class AfpstrueEnemyAIController;
+
+	bool TryAttackTarget();
 	bool PerformMeleeHit();
 	bool GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const;
 	void SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd);

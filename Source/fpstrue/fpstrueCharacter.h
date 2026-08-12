@@ -7,104 +7,118 @@
 #include "Logging/LogMacros.h"
 #include "fpstrueCharacter.generated.h"
 
-class UInputComponent;
-class USkeletalMeshComponent;
 class UCameraComponent;
-class USpringArmComponent;
+class UEnhancedInputLocalPlayerSubsystem;
 class UInputAction;
+class UInputComponent;
 class UInputMappingContext;
+class USkeletalMeshComponent;
+class USpringArmComponent;
 class UfpstrueHealthComponent;
 class UfpstrueWeaponComponent;
+class AfpstrueCharacter;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
-	FFPAmmoChanged,
-	int32, CurrentAmmo,
-	int32, MagazineSize,
-	int32, ReserveAmmo
-);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerDeathReported, AfpstrueCharacter*, DeadPlayer);
 
 UENUM(BlueprintType)
 enum class EFPCharacterState : uint8
 {
-	Idle        UMETA(DisplayName = "Idle"),
-	Moving      UMETA(DisplayName = "Moving"),
-	Reloading   UMETA(DisplayName = "Reloading"),
-	Dead        UMETA(DisplayName = "Dead")
+	Idle       UMETA(DisplayName = "Idle"),
+	Moving     UMETA(DisplayName = "Moving"),
+	// Kept hidden so existing Blueprint enum pins can load; weapon state now owns reloading.
+	Reloading  UMETA(Hidden),
+	Dead       UMETA(DisplayName = "Dead")
 };
 
 UCLASS(config=Game)
-class AfpstrueCharacter : public ACharacter
+class FPSTRUE_API AfpstrueCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=Mesh, meta = (AllowPrivateAccess = "true"))
-	USkeletalMeshComponent* Mesh1P;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Camera, meta = (AllowPrivateAccess = "true"))
-	USpringArmComponent* CameraBoom;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Camera, meta = (AllowPrivateAccess = "true"))
-	UCameraComponent* FirstPersonCameraComponent;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
-	UInputMappingContext* DefaultMappingContext;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Input, meta=(AllowPrivateAccess = "true"))
-	UInputAction* JumpAction;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Input, meta=(AllowPrivateAccess = "true"))
-	UInputAction* MoveAction;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
-	class UInputAction* LookAction;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
-	UInputAction* ReloadAction;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
-	UInputAction* RunAction;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
-	UInputAction* AimAction;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Health, meta = (AllowPrivateAccess = "true"))
-	UfpstrueHealthComponent* HealthComponent;
-	
 public:
-
 	AfpstrueCharacter();
 	virtual void BeginPlay() override;
-	virtual void Tick(float DeltaTime) override;
 
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FFPAmmoChanged OnAmmoChanged;
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void RequestReload();
+
+	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
+	void ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent);
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool HasEquippedWeapon() const { return EquippedWeaponComponent != nullptr; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	UfpstrueWeaponComponent* GetEquippedWeaponComponent() const { return EquippedWeaponComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsReloading() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool HasAmmo() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool CanFireWeapon() const;
+
+	// Compatibility getters forward to the equipped weapon; Character stores no ammo state.
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	int32 GetCurrentAmmo() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	int32 GetMagazineSize() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	int32 GetReserveAmmo() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsFiring() const;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsAiming() const { return bIsAiming; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	bool IsDead() const;
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentHealth() const;
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxHealth() const;
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetHealthNormalized() const;
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	UfpstrueHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
+	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
+	FOnPlayerDeathReported OnPlayerDeathReported;
+
+	UFUNCTION(BlueprintPure, Category = "State")
+	EFPCharacterState GetCharacterState() const;
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsSprinting() const { return bIsSprinting; }
+
+	USkeletalMeshComponent* GetMesh1P() const { return Mesh1P; }
+	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 
 protected:
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void NotifyControllerChanged() override;
+	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
+
 	void Move(const FInputActionValue& Value);
-
 	void Look(const FInputActionValue& Value);
-
+	void StartWeaponFire();
+	void StopWeaponFire();
 	void StartReload();
-
 	void StartSprint();
 	void StopSprint();
 	void StartAim();
 	void StopAim();
-
-	void FinishReload();
-
-	bool CanReload() const;
-
-	FString GetReloadBlockReason() const;
-
-	void UpdateCharacterState();
-
-	FString GetCharacterStateString() const;
-
-	void BroadcastAmmoChanged();
 
 	UFUNCTION()
 	void HandleHealthChanged(float NewHealth);
@@ -119,12 +133,6 @@ protected:
 	void OnAimChanged(bool bNewIsAiming);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
-	void OnFireStarted();
-
-	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
-	void OnFireStopped();
-
-	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnWeaponEquipped(UfpstrueWeaponComponent* WeaponComponent);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
@@ -136,119 +144,65 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnPlayerDied();
 
-protected:
+private:
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Mesh", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USkeletalMeshComponent> Mesh1P;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	int32 MagazineSize = 30;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USpringArmComponent> CameraBoom;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon")
-	int32 CurrentAmmo = 30;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UCameraComponent> FirstPersonCameraComponent;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	int32 ReserveAmmo = 90;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputMappingContext> DefaultMappingContext;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	float ReloadDuration = 0.8f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> JumpAction;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	float EmptyReloadDuration = 1.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> MoveAction;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "State")
-	EFPCharacterState CharacterState = EFPCharacterState::Idle;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> LookAction;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> FireAction;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> ReloadAction;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> RunAction;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> AimAction;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UfpstrueHealthComponent> HealthComponent;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	float WalkSpeed = 300.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	float SprintSpeed = 600.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	float AimWalkSpeed = 120.0f;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	bool bIsSprinting = false;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (AllowPrivateAccess = "true"))
 	bool bIsAiming = false;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon")
-	bool bIsFiring = false;
-
-	FTimerHandle ReloadTimerHandle;
-
 	UPROPERTY(Transient)
-	UfpstrueWeaponComponent* EquippedWeaponComponent = nullptr;
+	TObjectPtr<UfpstrueWeaponComponent> EquippedWeaponComponent;
 
-protected:
-	virtual void NotifyControllerChanged() override;
-	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
+	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> BoundInputSubsystem;
 
-public:
+	void ApplyInputMappingContexts();
+	void RemoveInputMappingContexts();
 
-	bool IsReloading() const;
-
-	UFUNCTION(BlueprintPure, Category = "Health")
-	bool IsDead() const;
-
-	UFUNCTION(BlueprintPure, Category = "Health")
-	float GetCurrentHealth() const;
-
-	UFUNCTION(BlueprintPure, Category = "Health")
-	float GetMaxHealth() const;
-
-	UFUNCTION(BlueprintPure, Category = "Health")
-	float GetHealthNormalized() const;
-
-	UFUNCTION(BlueprintPure, Category = "State")
-	EFPCharacterState GetCharacterState() const { return CharacterState; }
-
-	bool HasAmmo() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool CanFireWeapon() const;
-
-	bool TryConsumeAmmo();
-
-	void NotifyFireStarted();
-
-	void NotifyFireStopped();
-
-
-	void RequestReload();
-
-	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
-
-	void ConfigureAmmoFromWeapon(
-		int32 InMagazineSize,
-		int32 InReserveAmmo,
-		float InReloadDuration,
-		float InEmptyReloadDuration
-	);
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool HasEquippedWeapon() const { return EquippedWeaponComponent != nullptr; }
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	int32 GetCurrentAmmo() const { return CurrentAmmo; }
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	int32 GetMagazineSize() const { return MagazineSize; }
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	int32 GetReserveAmmo() const { return ReserveAmmo; }
-	UFUNCTION(BlueprintPure, Category = "Health")
-	UfpstrueHealthComponent* GetHealthComponent() const { return HealthComponent; }
-
-	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool IsSprinting() const { return bIsSprinting; }
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool IsAiming() const { return bIsAiming; }
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool IsFiring() const { return bIsFiring; }
-	
-	
-	USkeletalMeshComponent* GetMesh1P() const { return Mesh1P; }
-	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
-
+	bool bDeathHandled = false;
 };
-

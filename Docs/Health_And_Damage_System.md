@@ -252,16 +252,17 @@ weaponend
 TSet<TWeakObjectPtr<AActor>> HitActorsThisAttack
 ```
 
-同一 Actor 在本次窗口首次命中后会加入集合，后续动画更新再次扫到它时不再扣血。
+同一 Actor 在本轮攻击首次命中后会加入集合，后续动画更新或同一 Montage 的其他攻击窗口再次扫到它时不再扣血。
 
 必须满足：
 
-- 每次攻击开始时重置集合。
-- 每次攻击只设置一个有效攻击窗口。
+- 只在 `TryAttackTarget()` 开始一轮新攻击时重置集合。
+- `BeginAttackWindow()` 只初始化 Socket 采样，不重置整轮攻击的去重集合。
+- 同一轮攻击可以有多个采样窗口，但默认仍只允许同一目标结算一次。
 - 不要在同一 Montage 中同时保留旧的单点 `Enemy Attack Hit` 和新的 `Enemy Attack Window`。
 - 如果一个攻击被设计为多段伤害，应显式设计“伤害段”，不能依靠重复创建窗口偶然实现。
 
-当前代码中 `BeginAttackWindow()` 会重置命中集合，因此同一轮攻击误放多个窗口时仍可能重复结算。这是资产配置约束，也是后续可以增加断言或攻击序号保护的地方。
+当前代码把 `HitActorsThisAttack` 的生命周期绑定到整轮攻击：`TryAttackTarget()` 重置，`FinishAttack()` 或死亡清理。这样即使同一 Montage 存在多个 NotifyState 窗口，也不会重新开放对同一目标的伤害。未来只有在 Combo 分段、网络预测或异步攻击需要区分多次合法提交时，才引入显式 `AttackSequenceId` 或 Damage Segment。
 
 ### 3.3.7 攻击窗口关闭条件
 

@@ -3,6 +3,8 @@
 > 用途：面试中讨论开发过程、Bug、方案比较和后续优化。
 >
 > 规则：只把代码已经实现并验证过的内容说成“做过”；没有性能数据的内容只能说成“发现的风险、准备验证的方案”。
+>
+> 当前架构、设计模式和模拟面试的唯一正文见 [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md)。本文只保留经历与证据，避免重复维护。
 
 ## 1. 如何讲一个开发经历
 
@@ -115,9 +117,9 @@ weaponend
 
    当前攻击只允许对玩家结算一次伤害。首次命中后，后续 Notify Tick 仍可能继续 Sweep，只是被命中集合拦住。可以在单段攻击命中后提前结束窗口，减少无意义查询。
 
-2. **攻击序号代替窗口重置**
+2. **整轮攻击共享去重状态（已完成）**
 
-   当前 `BeginAttackWindow()` 会清空命中集合。如果同一个 Montage 误放多个窗口，同一轮攻击可能再次命中。可以由 `AttackSequenceId` 管理整轮攻击，并只在 `TryAttackTarget()` 时重置集合。
+   命中集合现在只在 `TryAttackTarget()` 开始一轮攻击时重置，`BeginAttackWindow()` 不再清空。同一个 Montage 即使存在多个攻击窗口，也不能再次伤害当前目标。若未来支持网络预测、Combo 分段或异步命中，再考虑显式 `AttackSequenceId`，避免把当前简单事务过度设计。
 
 3. **采样数量分级**
 
@@ -220,7 +222,7 @@ OnDamageReceived
 -> OnDeath
 ```
 
-所以最后一击可能先触发普通受击表现，再触发死亡表现。解决方式不是调整伤害数值，而是让蓝图先检查 `IsDead()`，并规定：
+所以最后一击可能先触发普通受击表现，再触发死亡表现。当前由 Character 和 EnemyCharacter 的 C++ Damage 回调读取已经更新的 Health；如果该次伤害已经致死，就不再调用普通 Damaged 蓝图事件，只让 Death 表现继续。表现优先级是：
 
 ```text
 Dead > Attack Montage > Hit Reaction > Movement
@@ -232,49 +234,47 @@ Dead > Attack Montage > Hit Reaction > Movement
 
 当前结构：
 
-- `StartFire()`：响应按下，进入输入生命周期。
-- 蓝图 Timer：决定射速。
-- `Fire()`：完成一次弹药消耗、Line Trace 和后坐力。
-- `StopFire()`：响应松开、取消、换弹、空仓和死亡。
+- `StartFire()`：响应按下，进入 `Firing`，立即首发，并按 `RoundsPerMinute` 启动 C++ Timer。
+- `Fire()`：完成一次受射速门禁保护的弹药消耗、Line Trace 和后坐力。
+- `StopFire()`：响应松开、取消、换弹、空仓和死亡，并清理 C++ Timer。
+- 蓝图只消费 `OnWeaponFirePerformed`，播放单发动画、声音和特效。
 
 这样单次射击规则不会和“按住多久”混在一起。
 
-### 5.2 目前的取舍
+### 5.2 为什么把射速调度移入 WeaponComponent
 
-蓝图 Timer 的优点：
+旧蓝图 Timer 的优点是调参直观，但实际出现了三个权威源：Character 保存开火/弹药状态、WeaponComponent 执行射击、蓝图决定射速。它带来的问题包括：
 
-- 容易调射速和表现。
-- 能直接连接枪口动画和音效。
+- 重复启动 Timer 可能形成双倍射速。
+- 松开、换弹和死亡任一路径漏清理时仍会调用 `Fire()`。
+- 换弹动画、Character 布尔值和蓝图 Timer 可能互相不同步。
 
-风险：
+本轮把弹药、射速、连续射击、换弹状态和两个 Timer 全部移到 WeaponComponent；Enhanced Input 绑定及 Mapping Context 生命周期统一收回 Character。Character 只提交意图并保存当前装备引用，WeaponComponent 不再依赖输入系统类型。
 
-- 重复启动 Timer 会导致双倍射速。
-- 松开、换弹和死亡路径漏清理时仍会调用 `Fire()`。
-- 蓝图 Timer 与 C++ 状态可能不同步。
+优化效果不是“凭空提高 FPS”，而是建立单一权威：
 
-后续如果需要更强的工程一致性，可以把射速 Timer 移到 WeaponComponent，蓝图只响应 `OnWeaponFirePerformed`。这主要提升状态可靠性，不应在没有 Bug 证据时宣传成“性能优化”。
+- 开火间隔由 `RoundsPerMinute` 唯一计算，并有时间门禁拒绝过快重复调用。
+- 换弹、死亡和 `EndPlay()` 都能在同一对象内清理射击 Timer。
+- 每把武器实例保存自己的弹药，为以后切枪保留正确的所有权边界。
+- 蓝图不再参与 Gameplay 射速计算，只响应结果事件。
 
 ### 5.3 换弹结算的取舍
 
-当前 C++ Timer 是弹药结算权威：
+当前换弹使用 C++ 事务接口：
 
 ```text
-StartReload
--> CharacterState = Reloading
--> Reload Timer
--> FinishReload
--> 一次性搬运弹药
+Character::RequestReload
+-> WeaponComponent::RequestReload
+-> ActionState = Reloading / ReloadSequence++
+-> AnimNotify 调用 CommitReload
+-> Montage Completed 调用 FinishReload
+-> Montage Interrupted 调用 CancelReload
+-> 带序列号的 Timer 只作超时恢复
 ```
 
-优点是动画 Notify 丢失时仍能完成换弹；问题是 Montage 播放速率或中断可能与固定时长不同步。
+`bReloadAmmoCommitted` 保证一轮换弹只搬运一次弹药，序列号拒绝旧 Timer，状态门禁拒绝已经结束的换弹回调。动画 Notify 丢失时 Timer 仍能恢复，但正式蓝图接线完成前还不能算 Montage 闭环验收。
 
-可比较的后续方案：
-
-1. Timer 权威，动画时长严格匹配。
-2. AnimNotify 权威，Timer 只做超时兜底。
-3. Montage 回调权威，AnimNotify 只处理弹匣视觉。
-
-无论选哪种，都要有 `ReloadSequenceId` 或 `bAmmoCommitted`，保证一轮换弹只结算一次。
+这里采用的语义是：弹匣插入 Notify 是弹药提交点，Montage 回调决定事务正常完成或取消，Timer 只保证异常情况下不会永久卡在 `Reloading`。蓝图下一步必须补齐三个回调并完成中断矩阵测试。
 
 ## 6. AI 与 Game Thread
 
@@ -753,14 +753,14 @@ Baseline
 
 | 模块 | 职责和功能设计 | 关键数据结构 | 设计方式 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| Character 与 WeaponComponent | Character 管输入和角色状态；WeaponComponent 管拾取、射击、弹药、换弹及命中查询；蓝图负责动画和表现 | `EFPCharacterState`、`FTimerHandle`、动态多播委托 | 组件模式、状态模式、观察者模式 | 已实现，仍需最终拾取和换弹回归 |
+| Character 与 WeaponComponent | Character 管输入意图、移动和当前装备引用；WeaponComponent 管拾取、射击、弹药、换弹及命中查询；蓝图负责动画和表现 | `EFPWeaponActionState`、`FTimerHandle`、动态多播委托 | 组件模式、状态模式、观察者模式 | C++ 已实现，仍需换弹 Montage 回归 |
 | HealthComponent | 玩家和敌人复用同一套扣血、血量变化和死亡广播；组件本身不需要 Tick | 当前/最大血量、受伤/血量/死亡委托 | 组件模式、观察者模式 | 已实现 |
 | EnemyCharacter 近战 | Montage 的 `AnimNotifyState` 控制攻击窗口；`WeaponTop/WeaponEnd` 双 Socket 连续 Sweep；每次攻击只结算一次 | `TSet<TWeakObjectPtr<AActor>>`、`TArray<FHitResult>`、攻击结束 Timer | 状态约束、事件驱动、集合去重 | 已实现 |
-| EnemyAIController | Timer 驱动 Idle/Chase/Attack/Dead 决策；NavMesh 和 MoveTo 负责路径执行；角色只处理自身战斗行为 | `EFPEnemyAIState`、决策 Timer、玩家和管理器引用 | 状态模式、更新方法 | 已实现；优化后数据待测 |
-| SurroundManager | 分配内外圈包围槽位、攻击名额和死亡释放，避免所有敌人争抢玩家中心点 | `TArray<FSurroundSlot>`、`TMap<TWeakObjectPtr<Enemy>, int32>`、`TSet<TWeakObjectPtr<Enemy>>` | 中介者/管理器、弱引用生命周期管理 | 已实现；行为与性能仍需固定场景验收 |
-| GameMode | 统一管理波次、出生点、倒计时、存活数和胜负；生成后向 AI 注入玩家和包围管理器 | `TArray<FfpstrueWaveConfig>`、出生点数组、多个 `FTimerHandle`、状态委托 | 管理器、观察者模式 | 已实现 |
+| EnemyAIController | Timer 驱动 Idle/Chase/Attack/Dead 决策；NavMesh 和 MoveTo 负责路径执行；角色只处理自身战斗行为 | `EFPEnemyAIState`、决策 Timer、玩家和管理器引用 | 状态模式、更新方法 | 已实现；已有固定数量性能数据，响应延迟仍待量化 |
+| SurroundManager | 分配内外圈包围槽位、攻击名额和死亡释放，避免所有敌人争抢玩家中心点 | `TArray<FSurroundSlot>`、`TMap<TWeakObjectPtr<Enemy>, int32>`、`TSet<TWeakObjectPtr<Enemy>>` | 中央协调器、弱引用生命周期管理 | 已实现；公平性和复杂地形仍需专项验收 |
+| GameMode | 统一管理波次、出生点、倒计时、存活数和胜负；敌人注册表统一接收 Death/Destroy；生成后向 AI 注入上下文 | `TArray<FfpstrueWaveConfig>`、`TSet<TWeakObjectPtr<Enemy>>`、多个 Timer 和状态委托 | 规则协调器、观察者模式、幂等事务 | 已实现；原地重开尚未实现 |
 | UMG | 通过 Health、Ammo、Wave、RemainingTime 和 Result 事件更新显示，避免把业务状态放进 Widget | 动态多播委托、Widget 实例引用 | 观察者模式、表现层分离 | 接口已实现，最终 UI 闭环待回归 |
-| 纹理流送 | 处理工业场景出现的 Texture Streaming Pool 超预算，而不是单纯扩大 Pool | Streaming Pool、Wanted/Resident Mips、纹理组和单纹理设置 | 基于证据的资源预算 | 已定位，尚未完成前后测量 |
+| 纹理流送 | 处理工业场景的流送预算，而不是单纯扩大 Pool | Streaming Pool、Wanted/Resident Mips、纹理组和单纹理设置 | 基于证据的资源预算 | 六张纹理定点治理已测量，减少 60 MB；VSM 告警仍是独立待办 |
 
 ### 15.1 当前核心调用链
 
@@ -793,8 +793,8 @@ GameMode 启动波次
 | AI-001 | 旧敌人直接追玩家，远距离和有障碍时行为不稳定 | 运行观察和代码检查；追击、决策和角色移动耦合，没有稳定的 NavMesh 路径执行边界 | 拆出 AIController，改为 Timer 驱动 FSM 和 NavMesh MoveTo | 只有当前 Baseline，优化后待测 | 待验证 |
 | AI-002 | 多个敌人向玩家中心同一点移动，产生堆叠、拥堵和重复 MoveTo | 观察所有 AI 的目标位置；根因是所有敌人共享同一个 `MoveToActor(Player)` 目标 | 增加环形槽位、NavMesh 投影、攻击名额和死亡释放 | 行为已跑通；拥堵数量和 MoveTo 次数待测 | 待验证 |
 | AI-003 | 敌人数量增加后 Game Thread 成本快速增长 | CSV Profiler 分解 Game、Animation、CharacterMovement 和 Pathfinding | 已增加 AI 决策统计点；下一步只做决策降频/错峰、距离分级、动画 URO 和死亡停更中有数据支持的项 | 见第 17 节 | 已测量 Baseline |
-| COMBAT-001 | 连续 Sweep 可能在同一次挥砍中重复命中同一 Actor | 攻击窗口日志、断点和命中结果检查；一次攻击会跨多帧产生多个命中结果 | 使用本次攻击命中集合去重，并在攻击结束、中断和死亡时清理 | 正确性回归已通过；查询成本待测 | 已实现 |
-| LIFE-001 | Montage 中断或死亡后仍可能保留攻击窗口、Timer 或回调 | 复现中断和死亡路径，检查状态和 Timer 生命周期 | `EndAttackWindow()`、Timer 清理、Delegate 解绑和死亡幂等保护 | 正确性已验证；内存曲线待测 | 已实现 |
+| COMBAT-001 | 连续 Sweep 或多窗口可能在同一次挥砍中重复命中同一 Actor | 攻击窗口日志、断点和命中结果检查；一次攻击会跨多帧产生多个命中结果 | 去重集合改为整轮攻击共享，只在 `TryAttackTarget()` 开始时重置 | C++ 已编译；PIE 多窗口/重复 Notify 回归待完成 | 已实现/待回归 |
+| LIFE-001 | Montage 中断或死亡后仍可能保留攻击窗口、Timer 或回调 | 沿中断和死亡路径检查状态、Timer 与 Delegate 生命周期 | `EndAttackWindow()`、Timer 清理、Delegate 解绑、死亡与结算幂等保护 | C++ 已编译；完整中断矩阵和内存回落待测 | 已实现/待回归 |
 | TEX-001 | 编辑器中曾出现 Texture Streaming Pool 超预算提示 | 用固定路线独立运行 CSV 复测；运行时 `WantedMips` 约 206～213 MB，远低于 1000 MB 预算，未复现运行时超池 | 未盲目扩大 Pool，也未全局降低纹理质量；将编辑器瞬时常驻资源与运行时预算分开处理 | 见第 23 节 | 运行时已排除 |
 
 ## 17. 高密度 AI 原始 Baseline
@@ -814,16 +814,16 @@ Saved/Profiling/CSV/FPS_Baseline_20260731/
 
 | 敌人数 | 有效帧 | Frame Avg ms | Frame P95 ms | Game Avg ms | Game P95 ms | GPU Avg ms | Animation ms | CharacterMovement ms | Pathfinding ms |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 2378 | 12.77 | 15.02 | 3.25 | 3.99 | 10.44 | 0.364 | 0.561 | 0.007 |
-| 20 | 2285 | 13.27 | 15.48 | 4.20 | 5.10 | 11.06 | 0.584 | 0.846 | 0.016 |
-| 40 | 2138 | 14.18 | 15.87 | 6.26 | 7.61 | 12.48 | 0.908 | 1.633 | 0.184 |
-| 80 | 1908 | 15.89 | 17.52 | 11.43 | 12.89 | 14.49 | 1.712 | 3.087 | 0.329 |
-| 160 | 1460 | 20.77 | 23.21 | 20.76 | 23.25 | 16.92 | 3.190 | 6.919 | 0.686 |
+| 10 | 2377 | 12.752 | 15.014 | 3.233 | - | 10.443 | 0.364 | 0.561 | 0.000 |
+| 20 | 2284 | 13.256 | 15.478 | 4.178 | - | 11.059 | 0.584 | 0.846 | 0.001 |
+| 40 | 2137 | 14.165 | 15.869 | 6.239 | - | 12.476 | 0.908 | 1.633 | 0.013 |
+| 80 | 1907 | 15.872 | 17.523 | 11.404 | - | 14.489 | 1.713 | 3.087 | 0.026 |
+| 160 | 1459 | 20.741 | 23.196 | 20.733 | - | 16.916 | 3.190 | 6.920 | 0.071 |
 
 当前数据能够支持的结论：
 
 1. 80 个敌人时平均帧时间仍低于 16.67 ms，但 P95 已超过 16.67 ms，不能称为“稳定 60 FPS”。
-2. 160 个敌人时 Game Thread 平均 20.76 ms，已经成为主要限制。
+2. 160 个敌人时 Game Thread 平均 20.733 ms，已经成为主要限制。
 3. `CharacterMovement + Animation` 从 10 个敌人的约 0.925 ms 增长到 160 个敌人的约 10.109 ms，是比 Pathfinding 更明确的优化对象。
 4. Pathfinding 成本随数量上升，但当前数据不支持“寻路是最大瓶颈”的说法。
 5. 下一轮应优先验证距离分级更新、动画 URO、死亡停更和决策错峰，而不是先上多线程或重写寻路算法。
@@ -939,7 +939,7 @@ Baseline 中 Animation 从 10 人的 0.364 ms 增长到 160 人的 3.190 ms。
 
 #### AI-O3：CharacterMovement 分级实验
 
-Baseline 中 CharacterMovement 从 10 人的 0.561 ms 增长到 160 人的 6.919 ms，是当前最明确的 CPU 成本。
+Baseline 中 CharacterMovement 从 10 人的 0.561 ms 增长到 160 人的 6.920 ms，是当前最明确的 CPU 成本。
 
 具体操作：
 
@@ -1157,9 +1157,9 @@ UE 5.5 Development Editor 构建成功。
 160 敌人 Baseline 中：
 
 ```text
-CharacterMovement = 6.919 ms
+CharacterMovement = 6.920 ms
 Animation = 3.190 ms
-Pathfinding = 0.686 ms
+Pathfinding = 0.071 ms
 ```
 
 因此优先处理移动和动画更新，不重写 NavMesh，也不为了简历强行加入 AI 多线程。
@@ -1424,3 +1424,7 @@ MakeUniformSpreadDirection(Forward, SpreadAngle)
 - 中心和边缘不应出现明显非预期密度偏差。
 - 瞄准模式点云半径应明显小于腰射。
 - 连续射击叠加散布时，点云半径应随 `ConsecutiveShotCount` 增大并受 `MaxContinuousFireSpreadAngle` 限制；停止射击超过 `SpreadResetDelay` 后应恢复基础散布。
+
+## 25. 架构内容已合并
+
+架构重构过程、权威所有权、通信方式、设计模式和条件变化题已经统一到 [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md) 第 13、15、22 章。本文件只保留开发经历、Bug、实验过程和原始优化证据，避免同一架构结论维护两份。
