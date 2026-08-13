@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | 当前架构是什么、面试怎么讲 | [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md) | 当前事实、职责、调用链、设计模式、选型、场景题和面试回答 |
 | 现在还要做什么 | [PROJECT_TASK_CHECKLIST.md](PROJECT_TASK_CHECKLIST.md) | 唯一活动任务清单和完成标准 |
+| 今天如何把蓝图接成可运行闭环 | [BLUEPRINT_RUNTIME_WIRING_GUIDE.md](BLUEPRINT_RUNTIME_WIRING_GUIDE.md) | GameMode、玩家、武器、敌人、UI 接线顺序和 PIE 验收 |
 | 性能数字的原始基线是什么 | [../Source/fpstrue/PERFORMANCE_BASELINE.md](../Source/fpstrue/PERFORMANCE_BASELINE.md) | 固定测试条件、原始指标和数据限制 |
 
 ## 专题学习记录

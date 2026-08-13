@@ -138,14 +138,15 @@
 - [x] 玩家和敌人使用 Capsule + CharacterMovement；枪械使用 Line Trace；近战使用攻击窗口内的帧间 Sphere Sweep。
 - [x] 敌人死亡先关闭移动和 Capsule，再由蓝图开启 Ragdoll，C++ 下一帧检查物理状态并施加命中冲量。
 - [ ] 在敌人蓝图回归 `OnEnemyDied -> Ragdoll Profile -> Set Simulate Physics(true)`，验证没有 Physics Asset 时的失败表现。
-- [ ] 建立项目专用 Weapon/Melee Trace Channel 和碰撞响应矩阵；通用伤害入口中的 Weapon Trace 任务完成后在此做固定用例验收。
+- [x] 近战封版保留 `ECC_Pawn` 对象查询、`TargetCharacter` 精确过滤和整轮命中去重，不新增专用近战碰撞通道。
+- [ ] 枪械是否建立独立 Weapon Trace Channel 单独评估，不与近战查询绑定迁移。
 - [ ] 用可配置骨骼集合、Physical Material 或 Hit Zone 替换头部骨骼名硬编码。
 - [ ] 记录 10/25/50 个活动 Ragdoll 的 CPU Physics、Frame P95、对象数和内存回落，确定尸体数量预算。
 - [ ] 对 `bTraceComplex`、Sphere 半径和帧间采样数做固定靶场 A/B，同时记录准确率和 Scene Query 成本。
 - [ ] 为射击、近战、Overlap、死亡切换和物理冲量建立碰撞测试矩阵，覆盖 Ignore/Overlap/Block 和 NoCollision/QueryOnly/QueryAndPhysics。
 - [ ] 增加 WeaponLineTrace、MeleeSweep、ReturnedHit、ActiveAttackWindow 和 RagdollActive 计数器，并为 Weapon Trace 添加 Scene Query 统计标签。
 - [ ] 记录默认攻击窗口实际 NotifyTick 数，计算并实测 `SampleCount + 1` 次 Sweep 的每轮查询量。
-- [ ] 评估单目标近战改为专用 Melee Channel + SphereSweepSingle，同时让 WorldStatic 成为阻挡对象。
+- [ ] 使用薄墙、门框和动态门回归近战隔墙问题；若复现，优先增加现有 Visibility/LOS 校验。
 - [ ] 用剑刃端点位移和 TraceRadius 推导自适应采样数，与固定 4 采样做漏判率/查询量 A/B。
 - [ ] 在 Debug Draw、屏幕消息和高频日志关闭条件下采集 Scene Query 数据。
 - [ ] 建立 Ragdoll `Full -> Sleeping -> Frozen -> Destroyed` 分级策略，按距离、可见性、Awake 状态和全局预算转换。

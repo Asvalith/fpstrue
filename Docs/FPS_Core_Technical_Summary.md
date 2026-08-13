@@ -523,6 +523,12 @@ C++ CanAttack / TryAttackTarget
 
 C++ 定义 Notify State 的行为；Montage 资产决定攻击窗口的位置和长度。
 
+最终职责边界：`EnemyAIController` 决定是否攻击，`AnimNotifyState` 只转发动画时间，`EnemyCharacter` 独占 Socket Sweep、整轮去重和攻击收口，`HealthComponent` 独占扣血与一次性死亡，蓝图只选择 Montage 和播放表现。当前只有敌人使用近战，因此不为一个实现者额外引入通用攻击接口或 MeleeComponent。
+
+正式查询保持 `SweepMultiByObjectType(ECC_Pawn)`，随后以 `HitActor == TargetCharacter` 精确过滤，并由 `HitActorsThisAttack` 保证整轮攻击只结算一次。本轮不新增专用近战碰撞通道：当前没有友伤、盾牌、可破坏物或多目标横扫规则，也没有数据证明 Pawn 候选过滤是瓶颈。已知的 WorldStatic 不参与阻挡问题通过薄墙/门框 PIE 用例记录；若实际复现隔墙伤害，优先增加已有通道的视线校验，再根据新增玩法决定是否升级碰撞语义。
+
+旧的 `Enemy Attack Hit` 单点 Notify 只作为资产兼容路径保留。正式 Montage 统一使用 `Enemy Attack Window`，同一 Montage 不能同时连接两套伤害入口。
+
 详细记录见 [Enemy_Attack_Window.md](Enemy_Attack_Window.md)。
 
 ## 8. Unreal 命名规范
@@ -1108,7 +1114,7 @@ UI/关卡确认开始
 
 **最终处理**：AnimNotifyState 只定义有效窗口；记录 `weapontop/weaponend` 上一帧和当前帧位置，默认沿刀刃取 4 个采样点做帧间 Sphere Sweep，再补当前 base-to-tip Sweep；`TSet<TWeakObjectPtr<AActor>>` 和 `bHitTargetThisAttack` 保证整轮攻击最多对目标提交一次伤害。攻击结束、中断、死亡和超时统一关闭窗口并释放攻击 Token。
 
-**取舍与遗留风险**：Sphere Sweep 比单点检测更稳，但查询量更高；固定 4 采样仍需和按端点位移自适应采样做 A/B。当前 `SweepMultiByObjectType(ECC_Pawn)` 不会让 WorldStatic 墙体成为阻挡结果，仍存在隔墙伤害风险，下一步应使用专用 Melee Channel 和固定碰撞矩阵验证。
+**取舍与遗留风险**：Sphere Sweep 比单点检测更稳，但查询量更高；固定 4 采样仍需和按端点位移自适应采样做 A/B。当前 `SweepMultiByObjectType(ECC_Pawn)` 不会让 WorldStatic 墙体成为阻挡结果，所以隔墙用例仍需验证。本轮不增加专用近战通道；若问题实际复现，先增加现有可见性/视线校验，玩法出现盾牌、阵营或可破坏物后再评估更细的碰撞矩阵。
 
 **结果与验证边界**：连续检测和整轮去重已在 C++ 实现；多窗口 Montage、中断、低帧率、高速挥砍、隔墙和死亡中断仍需 PIE 验收。未完成这些用例前不能说“近战碰撞完全可靠”。
 
@@ -2934,21 +2940,9 @@ ByObjectType(ECC_Pawn)
 -> Gameplay 再检查 HitActor == TargetCharacter
 ```
 
-近战的正确性和性能问题是同一个根：它只查询 Pawn，WorldStatic 不在对象集合中，所以墙不会成为阻挡结果；附近其他 Enemy Pawn 又可能进入 Multi 结果，最后才被目标指针过滤。
+近战当前只查询 Pawn，WorldStatic 不在对象集合中，所以墙不会成为阻挡结果；附近其他 Enemy Pawn 可能进入 Multi 结果，但最终会被 `TargetCharacter` 和整轮命中集合过滤。
 
-更合适的候选改造：
-
-```text
-新增 MeleeTrace Channel
-Player Pawn：Block
-WorldStatic/需要挡刀的门：Block
-Enemy Pawn：Ignore
-攻击者自身：Ignored Actor
--> SphereSweepSingleByChannel
--> 第一个阻挡对象是玩家才结算伤害
-```
-
-这样同时解决穿墙命中、无关敌人候选和 Multi 结果遍历。是否真的改成 Single 还要确认横扫多人、友伤和可破坏物规则；当前单目标近战适合，未来多目标横扫则需保留 Multi 并按距离/阻挡关系处理。
+当前封板决定是不新增 MeleeTrace Channel。原因是单玩家、单目标、攻击 Token 限流的规则还不需要独立碰撞语义，新增通道反而要求同步迁移角色、敌人、门和关卡资产。先用固定的薄墙/门框用例验证；若确有隔墙伤害，则在 `ApplyDamage` 前增加现有 Visibility/LOS 校验。只有新增盾牌、友伤、可破坏物或多目标横扫时，再把碰撞响应升级为独立设计问题。
 
 枪械应建立独立 WeaponTrace Channel，而不是继续复用 Visibility：
 
@@ -3256,7 +3250,7 @@ Collision Enabled
 - Trigger 使用 Overlap/QueryOnly，不应模拟刚体接触。
 - 死亡 Capsule 已设为 NoCollision，避免它和 Ragdoll Mesh 同时形成两套碰撞。
 
-针对 Scene Query，则是专用 Weapon/Melee Channel、Single/Multi 和早期过滤。分层不是手写一棵检测树；UE 底层已经有空间加速结构，项目层主要负责提供准确的过滤语义。
+针对 Scene Query，当前先使用现有 Weapon Trace 与 `ECC_Pawn` 对象查询、Single/Multi 选择和早期 Gameplay 过滤。分层不是手写一棵检测树；UE 底层已经有空间加速结构，项目层主要负责提供准确且经过用例验证的过滤语义。
 
 每次改 Profile 都要验证双向响应。A 对 B 的最终结果取双方中更宽松的响应：任一方 Ignore 则忽略，Block 与 Overlap 组合得到 Overlap，只有双方都 Block 才真正阻挡。只改其中一个蓝图而不检查另一方，容易出现编辑器里“看起来设了 Block”但运行结果仍不符合预期。
 
@@ -3318,14 +3312,14 @@ Substepping 的重点是“用更多小步换稳定性”，不是性能优化�
 | Physics LOD | CharacterMovement/动画有距离分级；尸体有 LifeSpan | 建立活动 Ragdoll 预算和 Full/Sleep/Frozen/Destroy 状态 | 高 |
 | 休眠 | Chaos 可自动休眠；代码尚无尸体治理 | 统计 Awake 时间，稳定后 Sleep；超预算再冻结 | 高 |
 | 简化碰撞体 | Capsule、Sphere、Physics Asset 基础形状 | 审计 Physics Asset Body/Constraint、自碰撞和 Complex Trace | 高 |
-| 分层检测 | Pawn/Ragdoll Profile、死亡 Capsule NoCollision | 专用 Weapon/Melee Channel 和完整碰撞矩阵 | 最高 |
+| 分层检测 | Pawn/Ragdoll Profile、死亡 Capsule NoCollision、近战 ECC_Pawn + 目标过滤 | 固定碰撞矩阵与薄墙/门框回归；出现新玩法语义后再拆通道 | 最高 |
 | 并行计算 | 引擎可用 Task Graph/异步物理 | 先用 Insights 找 Physics/Sync 热点，再评估设置 | 低，数据触发 |
 | 时间步 | 当前配置未发现项目级覆写 | 仅在 Ragdoll 稳定性问题出现后做 Substep A/B | 低，问题触发 |
 
 当前最划算的路线不是先改线程或时间步，而是：
 
 ```text
-碰撞通道与 Query 计数器
+碰撞矩阵回归与 Query 计数器
 -> Ragdoll 活动数量/清理预算
 -> Sleep/Freeze 状态治理
 -> Physics Asset 简化
@@ -3420,7 +3414,7 @@ Substepping 的重点是“用更多小步换稳定性”，不是性能优化�
 
 **当前根因**：`SweepMultiByObjectType(ECC_Pawn)` 只返回 Pawn，墙体不是候选，也就不能挡住伤害。
 
-**回答主线**：建立 MeleeTrace Channel，让 WorldStatic 和 Player Block、同阵营 Enemy Ignore；单目标攻击用 SphereSweepSingle 获取第一个阻挡对象，只有玩家才结算。若设计是横扫多人，则 Multi 结果按距离和 Blocking Hit 截断。
+**回答主线**：先承认当前 `ECC_Pawn` 查询不能把墙作为阻挡结果，并用薄墙、门框、动态门固定用例确认问题是否真实出现。当前封板不新增碰撞通道；若复现，则在提交伤害前使用现有 Visibility/LOS 查询验证敌人与目标之间没有阻挡。玩法扩展到盾牌、阵营、可破坏物或横扫多人时，再设计独立响应矩阵，而不是提前增加配置。
 
 **验证**：薄墙、门框、玩家贴墙、敌人贴墙、动态门分别回归。
 
@@ -3821,7 +3815,7 @@ FinalDamage = Mitigation(RawDamage, Armor, Resistance)
 - HealthComponent 只负责合法化数值、扣血、事件和一次死亡。
 - 蓝图只负责受击、血迹、声音、布娃娃等表现。
 
-当前封版优先级是通用 Damageable 合同、专用 Weapon/Melee Channel 和隔墙测试。距离衰减、护甲、穿透只有在玩法需要时再加，否则会增加配置和测试维度，却不能证明基础伤害链更正确。
+当前封版优先级是通用 Damageable 合同、现有查询规则的碰撞矩阵回归和隔墙测试。近战保留 `ECC_Pawn`；距离衰减、护甲、穿透和新碰撞通道只有在玩法需要时再加，否则会增加配置和测试维度，却不能证明基础伤害链更正确。
 
 ### 25.9 3C：当前最需要补深度的单机模块
 
@@ -3959,7 +3953,7 @@ RandomSeed 或 SpreadIndex
 #### P0：把当前单机主线变成可验收闭环
 
 1. 完成 Reload Notify、Completed、Interrupted 接线，验证换弹中不能开枪且中断不提交弹药。
-2. 建立专用 Weapon/Melee Channel，完成隔墙、玻璃、敌人、TargetDummy 和物理物体矩阵。
+2. 保留近战 `ECC_Pawn`，完成隔墙、门框、敌人、TargetDummy 和物理物体固定矩阵；枪械通道是否拆分单独评估。
 3. 用通用 Damageable/HitZone 规则移除 WeaponComponent 对具体 Enemy 类和骨骼字符串的依赖。
 4. 完成 HUD 初始快照、事件更新、胜负、暂停与重新开始，不使用 Widget Tick。
 5. 回归玩家死亡立即失败、倒计时归零且存活才胜利，以及同帧死亡/归零。
@@ -5150,7 +5144,7 @@ CPU 软光栅需要变换 Occluder、写低分辨率深度并测试 Bounds。UE 
 
 仍需验证：
 
-- 专用 Weapon/Melee Channel。
+- 近战 `ECC_Pawn` 查询的薄墙/门框回归结果。
 - 隔墙近战。
 - Simple/Complex A/B。
 - 10/25/50 Ragdoll。
