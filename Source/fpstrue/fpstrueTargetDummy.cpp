@@ -3,7 +3,6 @@
 #include "fpstrueTargetDummy.h"
 #include "fpstrueHealthComponent.h"
 #include "Components/StaticMeshComponent.h"
-#include "Engine/Engine.h"
 
 AfpstrueTargetDummy::AfpstrueTargetDummy()
 {
@@ -23,7 +22,6 @@ void AfpstrueTargetDummy::BeginPlay()
 
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnHealthChanged.AddUniqueDynamic(this, &AfpstrueTargetDummy::HandleHealthChanged);
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueTargetDummy::HandleDeath);
 	}
 }
@@ -32,38 +30,14 @@ void AfpstrueTargetDummy::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (HealthComponent != nullptr)
 	{
-		HealthComponent->OnHealthChanged.RemoveDynamic(this, &AfpstrueTargetDummy::HandleHealthChanged);
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueTargetDummy::HandleDeath);
 	}
 
 	Super::EndPlay(EndPlayReason);
 }
 
-void AfpstrueTargetDummy::HandleHealthChanged(float NewHealth)
-{
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			8,
-			2.0f,
-			FColor::Cyan,
-			FString::Printf(TEXT("%s Health: %.0f"), *GetName(), NewHealth)
-		);
-	}
-}
-
 void AfpstrueTargetDummy::HandleDeath()
 {
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			9,
-			DestroyDelay,
-			FColor::Red,
-			FString::Printf(TEXT("%s Dead"), *GetName())
-		);
-	}
-
 	SetActorEnableCollision(false);
 	if (bDestroyOnDeath)
 	{

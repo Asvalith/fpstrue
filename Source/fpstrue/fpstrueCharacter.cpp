@@ -112,7 +112,12 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		}
 		else
 		{
-			UE_LOG(LogTemplateCharacter, Error, TEXT("FireAction is NULL. Assign IA_Shoot in BP_FirstPersonCharacter."));
+			UE_LOG(
+				LogTemplateCharacter,
+				Error,
+				TEXT("%s (%s): FireAction is NULL."),
+				*GetName(),
+				*GetClass()->GetPathName());
 		}
 
 		if (RunAction)
@@ -122,10 +127,6 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		else
 		{
 			UE_LOG(LogTemplateCharacter, Error, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(15, 5.0f, FColor::Red, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
-			}
 		}
 
 		if (AimAction)
@@ -145,8 +146,6 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 				this,
 				&AfpstrueCharacter::StartReload
 			);
-
-			UE_LOG(LogTemplateCharacter, Warning, TEXT("ReloadAction bound successfully."));
 		}
 		else
 		{
@@ -191,16 +190,6 @@ void AfpstrueCharacter::StartSprint()
 
 	bIsSprinting = !bIsSprinting;
 	GetCharacterMovement()->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			15,
-			0.8f,
-			bIsSprinting ? FColor::Green : FColor::White,
-			FString::Printf(TEXT("%s: %.0f"), bIsSprinting ? TEXT("Sprint") : TEXT("Walk"), GetCharacterMovement()->MaxWalkSpeed)
-		);
-	}
 }
 
 void AfpstrueCharacter::StopSprint()
@@ -230,11 +219,6 @@ void AfpstrueCharacter::StartAim()
 	{
 		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(16, 0.8f, bIsAiming ? FColor::Cyan : FColor::White, bIsAiming ? TEXT("Aim: true") : TEXT("Aim: false"));
-	}
 }
 void AfpstrueCharacter::StopAim()
 {
@@ -245,11 +229,6 @@ void AfpstrueCharacter::StopAim()
 	{
 		OnAimChanged(false);
 		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
-	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(16, 0.8f, FColor::White, TEXT("Aim: false"));
 	}
 }
 
@@ -278,15 +257,6 @@ void AfpstrueCharacter::StopWeaponFire()
 void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 {
 	OnPlayerHealthChanged(NewHealth);
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			10,
-			1.5f,
-			FColor::Cyan,
-			FString::Printf(TEXT("Player Health: %.0f"), NewHealth)
-		);
-	}
 }
 
 void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
@@ -329,16 +299,6 @@ void AfpstrueCharacter::HandleDeath()
 
 	OnPlayerDeathReported.Broadcast(this);
 	OnPlayerDied();
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			11,
-			3.0f,
-			FColor::Red,
-			TEXT("Player Dead")
-		);
-	}
 }
 
 bool AfpstrueCharacter::IsReloading() const

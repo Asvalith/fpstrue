@@ -61,14 +61,14 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
 	float MoveAcceptanceRadius = 75.0f;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
+	float CombatMoveAcceptanceRadius = 15.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "25.0"))
 	float PathRefreshDistance = 150.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "25.0"))
 	float SlotArrivalTolerance = 100.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.5"))
-	float AttackTokenTimeout = 4.0f;
 
 private:
 	void StartDecisionTimer();
@@ -78,12 +78,12 @@ private:
 	float GetNextDecisionInterval() const;
 	bool PrepareDecisionContext();
 	bool HandleActiveAttack();
-	bool HandleAttackToken();
+	bool HandleAttackApproach();
 	bool HandleSurroundMovement();
 	void UpdateFacingTarget();
 	void SetAIState(EFPEnemyAIState NewState);
-	void MoveToGoal(const FVector& GoalLocation);
-	void ReleaseSurroundResources(bool bReleaseSlot);
+	void MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius);
+	void ReleaseSurroundSlot();
 	AfpstrueCharacter* ResolveTarget() const;
 	AfpstrueSurroundManager* ResolveSurroundManager() const;
 	bool IsTargetUsable(const AfpstrueCharacter* Target) const;
@@ -100,8 +100,5 @@ private:
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
 	FVector LastMoveGoal = FVector::ZeroVector;
 	bool bHasMoveGoal = false;
-	bool bHasAttackToken = false;
-	bool bObservedAttackInProgress = false;
-	float AttackTokenAcquiredTime = 0.0f;
 	FTimerHandle DecisionTimerHandle;
 };

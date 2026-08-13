@@ -96,8 +96,6 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 		return;
 	}
 
-	ReleaseAttackToken(Enemy);
-
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	int32* SlotIndexPtr = EnemyToSlot.Find(EnemyKey);
 	if (SlotIndexPtr == nullptr)
@@ -151,13 +149,15 @@ bool AfpstrueSurroundManager::GetAttackApproachLocation(
 	AfpstrueEnemyCharacter* Enemy,
 	FVector& OutLocation)
 {
-	if (!IsValid(Enemy) || !IsValid(TargetCharacter) || !HasAttackToken(Enemy))
+	if (!IsValid(Enemy) || !IsValid(TargetCharacter))
 	{
 		return false;
 	}
 
 	const int32* SlotIndexPtr = EnemyToSlot.Find(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
-	if (SlotIndexPtr == nullptr || !SurroundSlots.IsValidIndex(*SlotIndexPtr))
+	if (SlotIndexPtr == nullptr
+		|| !SurroundSlots.IsValidIndex(*SlotIndexPtr)
+		|| SurroundSlots[*SlotIndexPtr].RingIndex != 0)
 	{
 		return false;
 	}
@@ -165,52 +165,6 @@ bool AfpstrueSurroundManager::GetAttackApproachLocation(
 	const FVector RawLocation =
 		CalculateRawSlotLocation(SurroundSlots[*SlotIndexPtr], AttackApproachRadius);
 	return ProjectToNavigation(RawLocation, OutLocation);
-}
-
-bool AfpstrueSurroundManager::RequestAttackToken(AfpstrueEnemyCharacter* Enemy)
-{
-	if (!IsValid(Enemy) || Enemy->IsDead())
-	{
-		return false;
-	}
-
-	CleanupInvalidEntries();
-
-	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	if (ActiveAttackers.Contains(EnemyKey))
-	{
-		return true;
-	}
-
-	const int32* SlotIndexPtr = EnemyToSlot.Find(EnemyKey);
-	if (SlotIndexPtr == nullptr
-		|| !SurroundSlots.IsValidIndex(*SlotIndexPtr)
-		|| SurroundSlots[*SlotIndexPtr].RingIndex != 0
-		|| ActiveAttackers.Num() >= MaxConcurrentAttackers)
-	{
-		return false;
-	}
-
-	ActiveAttackers.Add(EnemyKey);
-	return true;
-}
-
-void AfpstrueSurroundManager::ReleaseAttackToken(AfpstrueEnemyCharacter* Enemy)
-{
-	if (Enemy != nullptr)
-	{
-		ActiveAttackers.Remove(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
-	}
-}
-
-bool AfpstrueSurroundManager::HasAttackToken(const AfpstrueEnemyCharacter* Enemy) const
-{
-	return Enemy != nullptr
-		&& ActiveAttackers.Contains(
-			TWeakObjectPtr<AfpstrueEnemyCharacter>(
-				const_cast<AfpstrueEnemyCharacter*>(Enemy)
-			)
-		);
 }
 
 void AfpstrueSurroundManager::ResetManager()
@@ -221,7 +175,6 @@ void AfpstrueSurroundManager::ResetManager()
 	}
 
 	EnemyToSlot.Reset();
-	ActiveAttackers.Reset();
 	TargetCharacter = nullptr;
 }
 
@@ -242,13 +195,6 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 		Iterator.RemoveCurrent();
 	}
 
-	for (auto Iterator = ActiveAttackers.CreateIterator(); Iterator; ++Iterator)
-	{
-		if (!Iterator->IsValid())
-		{
-			Iterator.RemoveCurrent();
-		}
-	}
 }
 
 int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
@@ -397,11 +343,7 @@ void AfpstrueSurroundManager::DrawDebugSlots()
 			continue;
 		}
 
-		FColor SlotColor = Slot.Occupant.IsValid() ? FColor::Cyan : FColor::Green;
-		if (Slot.Occupant.IsValid() && HasAttackToken(Slot.Occupant.Get()))
-		{
-			SlotColor = FColor::Red;
-		}
+		const FColor SlotColor = Slot.Occupant.IsValid() ? FColor::Cyan : FColor::Green;
 
 		DrawDebugSphere(
 			GetWorld(),

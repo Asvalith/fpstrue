@@ -8,6 +8,7 @@
 #include "fpstruePerformanceStats.h"
 #include "fpstrueSurroundManager.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
@@ -25,7 +26,7 @@ DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
 AfpstrueGameMode::AfpstrueGameMode()
 	: Super()
 {
-	static ConstructorHelpers::FClassFinder<APawn> PlayerPawnClassFinder(TEXT("/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter"));
+	static ConstructorHelpers::FClassFinder<APawn> PlayerPawnClassFinder(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter"));
 	DefaultPawnClass = PlayerPawnClassFinder.Class;
 	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
 }
@@ -158,14 +159,6 @@ void AfpstrueGameMode::StartNextWave()
 
 	++CurrentWave;
 	OnWaveChanged.Broadcast(CurrentWave, ConfiguredWaveCount);
-	UE_LOG(
-		LogTemp,
-		Warning,
-		TEXT("Wave %d/%d started. Enemies to spawn: %d"),
-		CurrentWave,
-		ConfiguredWaveCount,
-		GetEnemyCountForWave(CurrentWave)
-	);
 
 	SpawnCurrentWave();
 
@@ -293,59 +286,101 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 		return;
 	}
 
-	FVector SpawnLocation = SpawnPoint->GetActorLocation();
-	if (bUseNearbyLocation && ReusedSpawnPointRadius > 0.0f)
+	UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (NavSystem == nullptr)
 	{
-		if (UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+		UE_LOG(LogTemp, Error, TEXT("Enemy spawn requires a valid navigation system."));
+		return;
+	}
+
+	const AfpstrueEnemyCharacter* EnemyDefaults = WaveEnemyClass.GetDefaultObject();
+	const UCapsuleComponent* DefaultCapsule = EnemyDefaults != nullptr
+		? EnemyDefaults->GetCapsuleComponent()
+		: nullptr;
+	const float CapsuleHalfHeight = DefaultCapsule != nullptr
+		? DefaultCapsule->GetScaledCapsuleHalfHeight()
+		: 96.0f;
+	const FVector SpawnOrigin = SpawnPoint->GetActorLocation();
+	const FVector ProjectionExtent(150.0f, 150.0f, 500.0f);
+	const float RetryRadius = FMath::Max(ReusedSpawnPointRadius, 300.0f);
+	constexpr int32 MaxSpawnAttempts = 8;
+
+	AfpstrueEnemyCharacter* SpawnedEnemy = nullptr;
+	for (int32 Attempt = 0; Attempt < MaxSpawnAttempts && SpawnedEnemy == nullptr; ++Attempt)
+	{
+		FVector CandidateLocation = SpawnOrigin;
+		if ((bUseNearbyLocation || Attempt > 0) && RetryRadius > 0.0f)
 		{
 			FNavLocation NearbyLocation;
-			if (NavSystem->GetRandomReachablePointInRadius(SpawnLocation, ReusedSpawnPointRadius, NearbyLocation))
+			if (!NavSystem->GetRandomReachablePointInRadius(
+				SpawnOrigin,
+				RetryRadius,
+				NearbyLocation))
 			{
-				SpawnLocation = NearbyLocation.Location;
+				continue;
 			}
+			CandidateLocation = NearbyLocation.Location;
 		}
+
+		FNavLocation ProjectedLocation;
+		if (!NavSystem->ProjectPointToNavigation(
+			CandidateLocation,
+			ProjectedLocation,
+			ProjectionExtent))
+		{
+			continue;
+		}
+
+		const FVector SpawnLocation = ProjectedLocation.Location
+			+ FVector::UpVector * (CapsuleHalfHeight + 2.0f);
+		FRotator SpawnRotation = SpawnPoint->GetActorRotation();
+		if (PlayerCharacter)
+		{
+			const FVector ToPlayer = PlayerCharacter->GetActorLocation() - SpawnLocation;
+			SpawnRotation = FRotator(0.0f, ToPlayer.Rotation().Yaw, 0.0f);
+		}
+
+		const FTransform SpawnTransform(SpawnRotation, SpawnLocation, FVector::OneVector);
+		FActorSpawnParameters SpawnParameters;
+		SpawnParameters.SpawnCollisionHandlingOverride =
+			ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
+
+		SpawnedEnemy = World->SpawnActor<AfpstrueEnemyCharacter>(
+			WaveEnemyClass,
+			SpawnTransform,
+			SpawnParameters);
 	}
-
-	FRotator SpawnRotation = SpawnPoint->GetActorRotation();
-	if (PlayerCharacter)
-	{
-		const FVector ToPlayer = PlayerCharacter->GetActorLocation() - SpawnLocation;
-		SpawnRotation = FRotator(0.0f, ToPlayer.Rotation().Yaw, 0.0f);
-	}
-
-	const FTransform SpawnTransform(SpawnRotation, SpawnLocation, FVector::OneVector);
-	FActorSpawnParameters SpawnParameters;
-	SpawnParameters.SpawnCollisionHandlingOverride =
-		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-
-	AfpstrueEnemyCharacter* SpawnedEnemy = World->SpawnActor<AfpstrueEnemyCharacter>(
-		WaveEnemyClass,
-		SpawnTransform,
-		SpawnParameters
-	);
 
 	if (SpawnedEnemy)
 	{
 		INC_DWORD_STAT(STAT_fpstrueEnemySpawnCount);
 
-		if (AfpstrueEnemyAIController* EnemyController =
-			Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController()))
+		if (SpawnedEnemy->GetController() == nullptr)
+		{
+			SpawnedEnemy->SpawnDefaultController();
+		}
+
+		AfpstrueEnemyAIController* EnemyController =
+			Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController());
+		if (EnemyController != nullptr)
 		{
 			EnemyController->InitializeCombatContext(
 				PlayerCharacter,
 				SurroundManager
 			);
 		}
+		else
+		{
+			UE_LOG(
+				LogTemp,
+				Error,
+				TEXT("Enemy %s has controller %s; expected fpstrueEnemyAIController."),
+				*GetNameSafe(SpawnedEnemy),
+				*GetNameSafe(SpawnedEnemy->GetController())
+			);
+		}
 
 		RegisterEnemy(SpawnedEnemy);
-		UE_LOG(
-			LogTemp,
-			Warning,
-			TEXT("Enemy spawned: %s at %s. Alive enemies: %d"),
-			*GetNameSafe(SpawnedEnemy),
-			*SpawnLocation.ToString(),
-			AliveEnemyCount
-		);
 	}
 	else
 	{

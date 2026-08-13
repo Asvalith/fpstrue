@@ -27,6 +27,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	void HandleAttackFinishedNotify();
 
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	bool SetAttackPresentationDuration(float DurationSeconds);
+
 	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
 	void BeginAttackWindow();
 
@@ -97,6 +100,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	float AttackAnimationDuration = 1.2f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.1"))
+	float AttackFailSafeDuration = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
+	float AttackCompletionGracePeriod = 0.1f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Trace", meta = (ClampMin = "0.0"))
 	float AttackTraceRadius = 50.0f;
 
@@ -124,11 +133,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	bool bDestroyOnDeath = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Death|Physics", meta = (ClampMin = "0.0"))
-	float DeathImpulseStrength = 70000.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Death|Physics", meta = (ClampMin = "0.0", ClampMax = "15000.0"))
+	float DeathImpulseStrength = 10000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Death|Physics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DeathImpulseUpwardBias = 0.15f;
+	float DeathImpulseUpwardBias = 0.05f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance")
 	bool bEnableMovementUpdateTiering = true;
@@ -172,6 +181,7 @@ private:
 	void SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd);
 	bool TryApplyAttackDamage(AActor* HitActor);
 	void CancelAttackWindow();
+	void ScheduleAttackFinish(float DurationSeconds);
 	void FinishAttack();
 	bool CanAttack() const;
 	void SetAttackAnimationPriority(bool bHighPriority);
@@ -183,7 +193,6 @@ private:
 	float LastAttackTime = 0.0f;
 	bool bIsDead = false;
 	bool bIsAttacking = false;
-	bool bDamageAppliedThisAttack = false;
 	bool bHitTargetThisAttack = false;
 	bool bAttackWindowActive = false;
 	bool bHasPreviousWeaponSample = false;

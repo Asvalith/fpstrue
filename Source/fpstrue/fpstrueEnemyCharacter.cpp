@@ -33,6 +33,14 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 void AfpstrueEnemyCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+	SetActorTickEnabled(false);
+
+	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	{
+		CharacterMesh->SetSimulatePhysics(false);
+		CharacterMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		CharacterMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	}
 
 	if (HealthComponent != nullptr)
 	{
@@ -51,7 +59,7 @@ void AfpstrueEnemyCharacter::BeginPlay()
 
 	if (UWorld* World = GetWorld())
 	{
-		LastAttackTime = World->GetTimeSeconds();
+		LastAttackTime = World->GetTimeSeconds() - AttackInterval;
 	}
 }
 
@@ -162,45 +170,32 @@ bool AfpstrueEnemyCharacter::TryAttackTarget()
 		return false;
 	}
 
-	if (UWorld* World = GetWorld())
-	{
-		LastAttackTime = World->GetTimeSeconds();
-	}
-
 	CancelAttackWindow();
 	HitActorsThisAttack.Reset();
 	bIsAttacking = true;
-	bDamageAppliedThisAttack = false;
 	bHitTargetThisAttack = false;
 	SetAttackAnimationPriority(true);
+	FaceTarget();
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		Movement->StopMovementImmediately();
 	}
 
+	ScheduleAttackFinish(FMath::Max(AttackAnimationDuration, AttackFailSafeDuration));
 	OnAttackStarted();
-
-	GetWorldTimerManager().SetTimer(
-		AttackFinishTimerHandle,
-		this,
-		&AfpstrueEnemyCharacter::FinishAttack,
-		AttackAnimationDuration,
-		false
-	);
 
 	return true;
 }
 
 void AfpstrueEnemyCharacter::HandleAttackHitNotify()
 {
-	if (bIsDead || !bIsAttacking || bDamageAppliedThisAttack)
+	if (bIsDead || !bIsAttacking || bHitTargetThisAttack)
 	{
 		return;
 	}
 
-	bDamageAppliedThisAttack = true;
-	bHitTargetThisAttack = PerformMeleeHit();
+	PerformMeleeHit();
 }
 
 void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
@@ -209,6 +204,17 @@ void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
 	{
 		FinishAttack();
 	}
+}
+
+bool AfpstrueEnemyCharacter::SetAttackPresentationDuration(float DurationSeconds)
+{
+	if (bIsDead || !bIsAttacking || DurationSeconds <= 0.0f)
+	{
+		return false;
+	}
+
+	ScheduleAttackFinish(DurationSeconds);
+	return true;
 }
 
 void AfpstrueEnemyCharacter::BeginAttackWindow()
@@ -432,7 +438,6 @@ bool AfpstrueEnemyCharacter::TryApplyAttackDamage(AActor* HitActor)
 	}
 
 	HitActorsThisAttack.Add(WeakHitActor);
-	bDamageAppliedThisAttack = true;
 	bHitTargetThisAttack = true;
 	OnAttackLanded();
 	return true;
@@ -444,6 +449,17 @@ void AfpstrueEnemyCharacter::CancelAttackWindow()
 	bHasPreviousWeaponSample = false;
 	PreviousWeaponBase = FVector::ZeroVector;
 	PreviousWeaponTip = FVector::ZeroVector;
+}
+
+void AfpstrueEnemyCharacter::ScheduleAttackFinish(float DurationSeconds)
+{
+	GetWorldTimerManager().SetTimer(
+		AttackFinishTimerHandle,
+		this,
+		&AfpstrueEnemyCharacter::FinishAttack,
+		FMath::Max(0.01f, DurationSeconds + AttackCompletionGracePeriod),
+		false
+	);
 }
 
 void AfpstrueEnemyCharacter::FinishAttack()
@@ -458,6 +474,10 @@ void AfpstrueEnemyCharacter::FinishAttack()
 	bIsAttacking = false;
 	SetAttackAnimationPriority(false);
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
+	if (UWorld* World = GetWorld())
+	{
+		LastAttackTime = World->GetTimeSeconds();
+	}
 
 	if (!bHitTarget)
 	{
@@ -541,7 +561,6 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	bIsDead = true;
 	CancelAttackWindow();
 	bIsAttacking = false;
-	bDamageAppliedThisAttack = true;
 	HitActorsThisAttack.Reset();
 	SetAttackAnimationPriority(false);
 	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
@@ -582,6 +601,9 @@ void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 		return;
 	}
 
+	CharacterMesh->SetEnableGravity(true);
+	CharacterMesh->WakeAllRigidBodies();
+
 	const FVector ImpulseDirection =
 		(LastDamageDirection + FVector::UpVector * DeathImpulseUpwardBias).GetSafeNormal();
 	if (ImpulseDirection.IsNearlyZero())
@@ -590,7 +612,7 @@ void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 	}
 
 	CharacterMesh->AddImpulseAtLocation(
-		ImpulseDirection * DeathImpulseStrength,
+		ImpulseDirection * FMath::Clamp(DeathImpulseStrength, 0.0f, 15000.0f),
 		LastDamageLocation,
 		LastDamageBoneName
 	);

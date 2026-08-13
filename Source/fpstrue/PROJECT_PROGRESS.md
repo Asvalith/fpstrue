@@ -702,14 +702,14 @@ Bullet_BP：视觉子弹
 
 ### 11.1 当前已经落地的代码
 
-- `AfpstrueEnemyCharacter` 继承 `ACharacter`，负责敌人的目标、追击、攻击和死亡规则；`enemy_BP` 作为蓝图子类负责模型、动画和表现。
+- `AfpstrueEnemyCharacter` 继承 `ACharacter`，负责敌人的攻击、伤害和死亡规则；`AfpstrueEnemyAIController` 负责目标与追击状态，`enemy_BP` 负责模型、动画和表现。
 - 玩家与敌人复用 `UfpstrueHealthComponent`，组件监听 Owner 的 `OnTakeAnyDamage`，统一维护生命值并广播 `OnHealthChanged`、`OnDeath`。
 - 敌人攻击已经具备距离、冷却、存活状态和攻击中状态检查。
 - C++ 通过 `OnAttackStarted` 通知蓝图播放攻击表现。
 - `enemy_BP` 已实现 `OnAttackStarted`，并接入两个 In-Place 攻击 Montage；Root Motion 版本暂不进入当前攻击链。
-- 攻击命中帧由蓝图动画通知调用 `HandleAttackHitNotify()`，C++ 使用 `bDamageAppliedThisAttack` 保证每次攻击最多结算一次。
-- C++ 使用 Sphere Sweep 检测玩家，命中后调用 `ApplyDamage`，最终由玩家的 `HealthComponent` 扣血。
-- 攻击结束使用 `AttackFinishTimerHandle` 恢复攻击状态；敌人死亡时清理该 Timer、停止移动并关闭 Capsule 碰撞。
+- 攻击 Montage 使用 `Enemy Attack Window` NotifyState 驱动剑刃连续 Sphere Sweep，`HitActorsThisAttack` 和 `bHitTargetThisAttack` 保证一轮攻击最多结算一次。
+- C++ 对 `weapontop/weaponend` 两个 Socket 之间的刀刃轨迹跨帧补采样，命中后调用 `ApplyDamage`，最终由玩家的 `HealthComponent` 扣血。
+- 攻击完成或中断由 Montage 回调调用 `HandleAttackFinishedNotify()`；`AttackFinishTimerHandle` 只做丢失回调时的超时恢复。敌人死亡时清理 Timer、攻击窗口、移动和 Capsule 碰撞。
 - `HealthComponent` 自身不启用 Tick，属于事件驱动组件。
 
 ### 11.2 已经理解并能够继续练习的内容
@@ -724,7 +724,7 @@ Bullet_BP：视觉子弹
 
 ### 11.3 当前仍需接通和验证
 
-- 在攻击 Montage 的实际命中帧添加 Notify，并调用 `HandleAttackHitNotify()`。
+- 在正式攻击 Montage 的有效挥砍区间添加 `Enemy Attack Window` NotifyState，并删除同一 Montage 中旧的单点 `Enemy Attack Hit`。
 - 实机验证一次攻击只扣一次血，挥空不扣血，死亡或攻击中断后不再回调伤害。
 - 将蓝图中的立即 `Destroy Actor` 改为合理的延迟回收，否则布娃娃效果和尸体观察时间不足。
 - 验证尸体回收前的移动组件、Actor Tick、阴影和物理开销，而不是凭感觉宣称优化有效。
@@ -735,13 +735,13 @@ Bullet_BP：视觉子弹
 
 以后不能以“项目中存在这段代码”作为掌握证明，必须逐级验收：
 
-1. 不看代码，完整口述 `Tick -> TryAttackTarget -> OnAttackStarted -> AnimNotify -> Sphere Sweep -> ApplyDamage -> HealthComponent`。
+1. 不看代码，完整口述 `AIController Timer FSM -> TryAttackTarget -> OnAttackStarted -> Montage -> Attack Window -> Sphere Sweep -> ApplyDamage -> HealthComponent`。
 2. 解释 `BlueprintImplementableEvent`、`BlueprintCallable`、Delegate、Timer 和 Tick 各自解决什么问题。
 3. 解释为什么攻击伤害由 C++ 结算、动画由蓝图播放，以及反过来设计会有什么风险。
-4. 解释为什么需要 `bDamageAppliedThisAttack`，并给出重复 Notify、Montage 中断和死亡中断的测试方法。
+4. 解释为什么同时需要 `HitActorsThisAttack` 与 `bHitTargetThisAttack`，并给出跨帧重复命中、Montage 中断和死亡中断的测试方法。
 5. 对比 Line Trace、Sphere Sweep 和纯距离判断在近战检测中的优缺点。
 6. 闭卷写出精简版 `CanAttack()`、`HandleAttackHitNotify()` 和生命值扣减逻辑。
-7. 面对追问能够指出当前方案缺陷：逐帧 AI、直线追击、Timer 与 Montage 时长耦合、尸体生命周期尚未量化。
+7. 面对追问能够指出当前方案缺陷：蓝图资产仍需完成统一接线、近战尚未增加遮挡校验、尸体生命周期和攻击查询成本仍需量化。
 
 掌握等级：
 
@@ -767,13 +767,15 @@ Bullet_BP：视觉子弹
 
 - 新增 `AfpstrueEnemyAIController`。
 - 新增 `EFPEnemyAIState`：`Idle / Chase / Attack / Dead`。
-- AIController 关闭 Tick，使用 `DecisionInterval = 0.2f` 的 Timer 做决策。
+- AIController 关闭 Tick，使用一次性 Timer 调度决策；攻击、追击、远距和空闲分别采用 `0.1 / 0.25 / 0.5 / 1.0` 秒更新间隔。
 - Chase 状态使用 `MoveToActor()`，后续依赖关卡 NavMesh 绕障。
 - Attack 状态停止移动、面向玩家，并调用敌人已有的 `TryAttackTarget()`。
+- 战斗接近使用独立的 `CombatMoveAcceptanceRadius = 15`，避免把 `AttackRange` 直接传给寻路后叠加胶囊体半径，导致敌人在攻击范围外提前停止。
 - `AfpstrueEnemyCharacter` 默认设置 `AIControllerClass = AfpstrueEnemyAIController::StaticClass()`。
 - `AutoPossessAI` 设置为 `PlacedInWorldOrSpawned`，支持场景放置和动态生成敌人。
 - 移除敌人自身的旧 `Tick()`、`UpdateEnemy()`、`MoveTowardTarget()` 和 `AddMovementInput` 追逐职责。
 - 保留原有攻击窗口、剑刃 Sweep、`ApplyDamage -> HealthComponent`、受伤/死亡和攻击蓝图事件。
+- 攻击状态由 C++ 独占，Montage 回传实际时长并在完成或中断时收尾；Timer 仅负责丢失动画回调时的恢复。
 
 已验证：
 

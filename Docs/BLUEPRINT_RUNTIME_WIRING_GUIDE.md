@@ -11,13 +11,42 @@
 /Game/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter
 ```
 
-带 `IA_Shoot / IA_reload / IA_Aim / IA_Run`、玩家死亡事件和 `PostProcessComponent` 的完整版本是第二个。打开当前关卡的 World Settings，确认 GameMode Override 指向实际使用的 `fpstruegamemode` 蓝图，再在该 GameMode 的 Class Defaults 中把 Default Pawn Class 明确设置为完整版本。不要只依赖 C++ 构造函数的旧模板路径。
+带 `IA_Shoot / IA_reload / IA_Aim / IA_Run`、玩家死亡事件和 `PostProcessComponent` 的完整版本是第二个。C++ fallback、编辑器启动地图、独立运行地图和全局 GameMode 已统一到这套正式资产。当前关卡的 World Settings 仍应显式指向 `fpstruegamemode`，该 GameMode 的 Class Defaults 也应明确显示完整玩家蓝图，避免以后改项目默认值时关卡行为悄悄变化。
 
 当前关卡资产是：
 
 ```text
 /Game/FactoryDistrict/Maps/Demonstration
 ```
+
+第一部分的入口关系固定为：
+
+```text
+Project Settings / Maps & Modes
+-> Editor Startup Map = Demonstration
+-> Game Default Map = Demonstration
+-> Default GameMode = fpstruegamemode
+
+Demonstration / World Settings
+-> GameMode Override = fpstruegamemode
+
+fpstruegamemode / Class Defaults
+-> Default Pawn Class = 完整 BP_FirstPersonCharacter
+-> Enemy Class = enemy_BP
+-> Game Duration = 90
+```
+
+这一部分的架构边界：
+
+| 位置 | 只保留什么 | 不应该出现什么 |
+| --- | --- | --- |
+| Project Settings | 默认地图和默认 GameMode | 波次、倒计时或敌人引用 |
+| World Settings | 当前关卡的 GameMode Override | 重复配置一套玩法规则 |
+| `fpstruegamemode` 蓝图 | Default Pawn、EnemyClass 和可调参数 | Tick、生成循环、倒计时蓝图 Timer |
+| Demonstration Level Blueprint | 菜单转游戏、创建 HUD、调用一次 `StartGameMode` | 自己生成敌人、维护剩余时间或判断胜负 |
+| C++ GameMode | 前置校验、波次、Timer、注册表和胜负 | Montage、HUD 文本和角色表现 |
+
+优化思路是把 Level Blueprint 从“玩法管理器”降为“关卡入口适配器”。Level Blueprint 知道本关卡何时结束菜单演出，但不知道一波有几个敌人、倒计时如何递减，也不保存游戏是否已经结束。规则全部落到 GameMode 后，重新开始会通过新 World 自动得到新状态，换关卡也只需替换数据配置。
 
 开始 PIE 前检查：
 
@@ -46,6 +75,36 @@ Any Key
 -> Cast To fpstrueGameMode
 -> Start GameMode
 ```
+
+当前 `Demonstration` 已包含 `Get Game Mode -> Cast -> Start GameMode`，第一部分只需要整理成一条执行链：
+
+```text
+Any Key Pressed
+-> Do Once
+-> 菜单退出与视角切换
+-> Create Widget(ingame) / Add To Viewport
+-> Set Input Mode Game Only
+-> Get Game Mode
+-> Cast To fpstrueGameMode
+-> Start GameMode
+```
+
+`Delay` 只有在等待菜单淡出或镜头 Blend 时才保留；它不能用于等待 GameMode“准备好”。GameMode 在关卡开始时已经存在。如果没有必须等待的视觉演出，删除这段 Delay，让输入到玩法启动的时序可预测。
+
+临时诊断接线：
+
+```text
+Cast Failed
+-> Print String("Wrong GameMode")
+
+Start GameMode
+-> Is Game Running
+-> Branch
+   True  -> Print String("Game started")
+   False -> 查看 Output Log 中的 StartGameMode failed
+```
+
+验收完成后删除或注释这两个 `Print String`，备注“入口测试用”。不要把 Start 后无条件执行的 Print 当作成功证据，因为函数内部前置校验失败时也会返回到蓝图执行链。
 
 HUD 应先绑定事件，再启动 GameMode，这样不会错过 `StartGameMode()` 立即广播的 90 秒、波次 0 和存活数 0。
 
@@ -132,7 +191,7 @@ OnWeaponReloadStarted(bWasEmptyReload)
 -> Play Montage
 
 Montage 的弹匣插入帧
--> Reload Commit Notify
+-> Add Notify -> Reload Commit（`UfpstrueAnimNotify_ReloadCommit`）
 -> WeaponComponent::CommitReload()
 
 Montage Completed
@@ -142,13 +201,22 @@ Montage Interrupted
 -> WeaponComponent::CancelReload()
 ```
 
-`CommitReload()`、`FinishReload()` 和 `CancelReload()` 都有状态门禁，重复回调不会重复提交弹药。蓝图不要在 Montage 开始时直接加满弹匣，也不要用 Delay 维护另一份 `IsReloading`。C++ Timer 只负责资源漏 Notify 时的超时恢复。
+`CommitReload()`、`FinishReload()` 和 `CancelReload()` 都有状态门禁，重复回调不会重复提交弹药。不要把 `OnBlendOut` 接到 `FinishReload()`，Blend Out 早于 Montage 真正完成，会提前解锁开火。蓝图不要在 Montage 开始时直接加满弹匣，也不要用 Delay 维护另一份 `IsReloading`。当前 `Play Montage` 代理节点使用 `OnCompleted/OnInterrupted` 收口，C++ 的 5 秒 Timer 只做回调丢失时的安全恢复。
 
 换弹中开火会被 `WeaponComponent::CanFire()` 拒绝。正确的“不可打断”不是强行禁止 Montage 被覆盖，而是任何输入、动画中断或死亡都不能绕过武器状态机。
 
 ## 5. 敌人蓝图与 Montage
 
 `enemy_BP` 的父类必须是 `AfpstrueEnemyCharacter`。删除或断开旧的 Tick 追击、循环 Timer、`AI MoveTo` 和蓝图直接 `ApplyDamage`，移动与攻击决策由 `AfpstrueEnemyAIController` 处理。
+
+在 `enemy_BP -> Class Defaults -> Pawn` 中确认：
+
+```text
+AI Controller Class = fpstrueEnemyAIController
+Auto Possess AI = Placed in World or Spawned
+```
+
+动态生成后 GameMode 会在 Controller 缺失时调用 `SpawnDefaultController()`；如果蓝图覆盖成其他 Controller，Output Log 会明确报告实际类型。
 
 攻击接线：
 
@@ -159,12 +227,11 @@ Event OnAttackStarted
 -> Play Montage
 
 Play Montage OnCompleted
-Play Montage OnBlendOut
 Play Montage OnInterrupted
 -> HandleAttackFinishedNotify
 ```
 
-`FinishAttack()` 在 C++ 中是幂等的，因此多个收尾回调汇入同一个函数是允许的。Timer 仍保留为 Montage 回调缺失时的最长时限兜底。
+`FinishAttack()` 在 C++ 中是幂等的，因此完成和中断回调汇入同一个函数是允许的。不要用 `OnBlendOut` 提前结束攻击状态。当前 `Play Montage` 代理节点使用完成和中断回调收口，Timer 使用 5 秒安全时限兜底。攻击冷却从本轮攻击真正结束后开始计算。
 
 每个被随机选择的正式攻击 Montage：
 
@@ -173,7 +240,7 @@ Play Montage OnInterrupted
 3. 同一 Montage 删除旧 `Enemy Attack Hit`，防止两套伤害入口并存。
 4. 不在 Notify 图或敌人蓝图里直接 `ApplyDamage`。
 
-当前旧单点 Notify 仍被 `EnemyWarrior_DoubleLightAttack_InP_Montage` 引用，但该资产不在 `enemy_BP` 的正式随机攻击列表中。先完成资产迁移和保存，再删除旧 C++ 类。
+旧单点 `Enemy Attack Hit` 仅保留兼容性。它不再会因为一次挥空而阻止后续刀刃窗口检测，但正式攻击 Montage 仍应只使用 `Enemy Attack Window`，避免两条检测路径并存。
 
 敌人表现事件：
 
@@ -223,3 +290,78 @@ Play Montage OnInterrupted
 | 一刀扣多次 | 同一 Montage 是否还保留旧 Enemy Attack Hit 或蓝图 ApplyDamage |
 | 换弹被打断后还能开枪 | Interrupted 是否接 CancelReload；是否还有蓝图自建开火 Timer/弹药变量 |
 | 死亡后仍追击或攻击 | 是否使用正确 C++ 父类；旧 Tick/Timer/AI MoveTo 是否仍在运行 |
+
+## 9. 2026-08-14 最终接线补充
+
+本节只追加当天实际确认过的接线边界，不替换前面的完整说明。
+
+### 9.1 敌人 BeginPlay
+
+删除旧 `Set Timer by Function Name(chase player)` 后，不能把它前后的动画初始化执行线一起删除。最终保留：
+
+```text
+BeginPlay
+-> Mesh / Get Anim Instance
+-> Cast To enemy_anim
+-> 保存 As Enemy Anim
+-> 初始化速度和动画
+```
+
+追击由 `fpstrueEnemyAIController` 自动启动，不需要蓝图调用 Chase：
+
+```text
+AI Controller Class = fpstrueEnemyAIController
+Auto Possess AI = Placed in World or Spawned
+```
+
+### 9.2 剩余时间文字绑定
+
+当前项目保留原有 UMG Text Binding，不再额外绑定 `OnRemainingTimeChanged`。绑定函数必须让 Cast 位于白色执行路径中：
+
+```text
+Get_剩余时间文字_Text
+-> Cast To fpstrueGameMode
+-> Return Node
+```
+
+数据连接：
+
+```text
+Get Game Mode.ReturnValue -> Cast.Object
+Cast.As fpstrueGameMode -> Get Remaining Time.Target
+Get Remaining Time.ReturnValue -> To Text(Integer) -> Return Value
+```
+
+不要使用 `ToText(Object)`；不要创建 `TextRenderComponent::SetText`。如果改成手动 SetText，Target 必须是设计器中勾选了 Is Variable 的实际 TextBlock/RichTextBlock。
+
+### 9.3 换弹 Montage
+
+```text
+OnWeaponReloadStarted
+-> 同时播放手臂和武器换弹 Montage
+
+Reload Commit Notify
+-> Current WeaponComponent.CommitReload
+
+手臂 Montage Completed
+-> Current WeaponComponent.FinishReload
+
+手臂 Montage Interrupted
+-> Current WeaponComponent.CancelReload
+```
+
+组件 Target 不能接 TP Weapon Mesh。武器 Montage 可以并行播放，但只选择一条权威完成回调提交 `FinishReload/CancelReload`，避免两个 Montage 竞争收口。
+
+### 9.4 结果界面
+
+```text
+OnGameResult(bPlayerWon)
+-> Create Widget(winorfail)
+-> 设置创建实例的 bPlayerWon
+-> Add To Viewport（Target = ReturnValue）
+-> Remove ingame
+-> Set Input Mode UI Only
+-> Show Mouse Cursor = true
+```
+
+`winorfail` 内只读取结果并更新文字，不再次调用 `OnGameResult`，避免递归和无限循环。

@@ -174,7 +174,7 @@ DisableMovement
 当前 C++ 流程：
 
 ```text
-Tick -> UpdateEnemy
+AIController Decision Timer -> UpdateAI
 -> CanAttack
 -> TryAttackTarget
 -> bIsAttacking = true
@@ -189,8 +189,8 @@ Tick -> UpdateEnemy
 
 ```text
 bIsAttacking = true
-bDamageAppliedThisAttack = false
 bHitTargetThisAttack = false
+HitActorsThisAttack.Reset()
 停止当前移动
 ```
 

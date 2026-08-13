@@ -39,10 +39,6 @@ public:
 	);
 	bool GetAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation);
 
-	bool RequestAttackToken(AfpstrueEnemyCharacter* Enemy);
-	void ReleaseAttackToken(AfpstrueEnemyCharacter* Enemy);
-	bool HasAttackToken(const AfpstrueEnemyCharacter* Enemy) const;
-
 	void ResetManager();
 
 protected:
@@ -60,9 +56,6 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Slots", meta = (ClampMin = "150.0"))
 	float OuterRadius = 430.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Attack", meta = (ClampMin = "1", ClampMax = "8"))
-	int32 MaxConcurrentAttackers = 2;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Attack", meta = (ClampMin = "50.0"))
 	float AttackApproachRadius = 120.0f;
@@ -90,6 +83,5 @@ private:
 
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
-	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
 	FTimerHandle DebugDrawTimerHandle;
 };

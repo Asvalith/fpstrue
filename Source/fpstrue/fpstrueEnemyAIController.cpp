@@ -55,7 +55,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 void AfpstrueEnemyAIController::OnUnPossess()
 {
 	ClearDecisionTimer();
-	ReleaseSurroundResources(true);
+	ReleaseSurroundSlot();
 	ControlledEnemy = nullptr;
 	TargetCharacter = nullptr;
 	SurroundManager = nullptr;
@@ -67,7 +67,7 @@ void AfpstrueEnemyAIController::OnUnPossess()
 void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ClearDecisionTimer();
-	ReleaseSurroundResources(true);
+	ReleaseSurroundSlot();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -77,7 +77,7 @@ void AfpstrueEnemyAIController::StopAI()
 	ClearDecisionTimer();
 	TargetCharacter = nullptr;
 	bHasMoveGoal = false;
-	ReleaseSurroundResources(true);
+	ReleaseSurroundSlot();
 
 	if (ControlledEnemy != nullptr)
 	{
@@ -158,22 +158,26 @@ void AfpstrueEnemyAIController::UpdateAI()
 		return;
 	}
 
-	if (bHasAttackToken && bObservedAttackInProgress)
-	{
-		ReleaseSurroundResources(false);
-	}
-
 	const float DistanceToTarget = ControlledEnemy->GetDistanceToTarget2D();
 	if (DistanceToTarget > ControlledEnemy->GetChaseRange())
 	{
-		ReleaseSurroundResources(false);
 		SetAIState(EFPEnemyAIState::Idle);
 		StopMovement();
 		bHasMoveGoal = false;
 		return;
 	}
 
-	if (HandleAttackToken() || HandleSurroundMovement())
+	if (ControlledEnemy->IsTargetInAttackRange())
+	{
+		SetAIState(EFPEnemyAIState::Attack);
+		StopMovement();
+		bHasMoveGoal = false;
+		ControlledEnemy->FaceTarget();
+		ControlledEnemy->TryAttackTarget();
+		return;
+	}
+
+	if (HandleAttackApproach() || HandleSurroundMovement())
 	{
 		return;
 	}
@@ -181,7 +185,7 @@ void AfpstrueEnemyAIController::UpdateAI()
 	SetAIState(EFPEnemyAIState::Chase);
 	INC_DWORD_STAT(STAT_fpstrueAIMoveRequestCount);
 	CSV_CUSTOM_STAT(fpstrueAI, MoveRequestCount, 1, ECsvCustomStatOp::Accumulate);
-	MoveToActor(TargetCharacter, ControlledEnemy->GetAttackRange());
+	MoveToActor(TargetCharacter, CombatMoveAcceptanceRadius);
 }
 
 float AfpstrueEnemyAIController::GetNextDecisionInterval() const
@@ -196,7 +200,6 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval() const
 	const float DistanceToTarget = ControlledEnemy->GetDistanceToTarget2D();
 	const bool bNeedsCombatResponse =
 		ControlledEnemy->IsAttacking()
-		|| bHasAttackToken
 		|| AIState == EFPEnemyAIState::Attack
 		|| DistanceToTarget <= ControlledEnemy->GetAttackRange() * 1.5f;
 	if (bNeedsCombatResponse)
@@ -249,7 +252,7 @@ bool AfpstrueEnemyAIController::PrepareDecisionContext()
 
 	if (!IsTargetUsable(TargetCharacter))
 	{
-		ReleaseSurroundResources(true);
+		ReleaseSurroundSlot();
 		SetAIState(EFPEnemyAIState::Idle);
 		StopMovement();
 		bHasMoveGoal = false;
@@ -274,7 +277,6 @@ bool AfpstrueEnemyAIController::HandleActiveAttack()
 		return false;
 	}
 
-	bObservedAttackInProgress = true;
 	SetAIState(EFPEnemyAIState::Attack);
 	StopMovement();
 	bHasMoveGoal = false;
@@ -282,46 +284,21 @@ bool AfpstrueEnemyAIController::HandleActiveAttack()
 	return true;
 }
 
-bool AfpstrueEnemyAIController::HandleAttackToken()
+bool AfpstrueEnemyAIController::HandleAttackApproach()
 {
-	if (!bHasAttackToken)
+	if (SurroundManager == nullptr)
 	{
 		return false;
-	}
-
-	const UWorld* World = GetWorld();
-	const bool bTokenTimedOut =
-		World != nullptr
-		&& World->GetTimeSeconds() - AttackTokenAcquiredTime >= AttackTokenTimeout;
-	if (bTokenTimedOut)
-	{
-		ReleaseSurroundResources(false);
-		return false;
-	}
-
-	if (ControlledEnemy->IsTargetInAttackRange())
-	{
-		SetAIState(EFPEnemyAIState::Attack);
-		StopMovement();
-		bHasMoveGoal = false;
-		ControlledEnemy->FaceTarget();
-		if (ControlledEnemy->TryAttackTarget())
-		{
-			bObservedAttackInProgress = true;
-		}
-		return true;
 	}
 
 	FVector AttackGoal;
-	if (SurroundManager != nullptr
-		&& SurroundManager->GetAttackApproachLocation(ControlledEnemy, AttackGoal))
+	if (SurroundManager->GetAttackApproachLocation(ControlledEnemy, AttackGoal))
 	{
 		SetAIState(EFPEnemyAIState::Chase);
-		MoveToGoal(AttackGoal);
+		MoveToGoal(AttackGoal, CombatMoveAcceptanceRadius);
 		return true;
 	}
 
-	ReleaseSurroundResources(false);
 	return false;
 }
 
@@ -338,21 +315,15 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 				FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), SlotGoal)
 				<= FMath::Square(SlotArrivalTolerance);
 
-			if (bInnerRing && bAtSlot && SurroundManager->RequestAttackToken(ControlledEnemy))
+			if (bInnerRing)
 			{
-				bHasAttackToken = true;
-				bObservedAttackInProgress = false;
-				AttackTokenAcquiredTime = GetWorld()->GetTimeSeconds();
-
 				FVector AttackGoal;
 				if (SurroundManager->GetAttackApproachLocation(ControlledEnemy, AttackGoal))
 				{
 					SetAIState(EFPEnemyAIState::Chase);
-					MoveToGoal(AttackGoal);
+					MoveToGoal(AttackGoal, CombatMoveAcceptanceRadius);
 					return true;
 				}
-
-				ReleaseSurroundResources(false);
 			}
 
 			SetAIState(EFPEnemyAIState::Chase);
@@ -364,7 +335,7 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 			}
 			else
 			{
-				MoveToGoal(SlotGoal);
+				MoveToGoal(SlotGoal, MoveAcceptanceRadius);
 			}
 			return true;
 		}
@@ -394,7 +365,7 @@ void AfpstrueEnemyAIController::UpdateFacingTarget()
 	SetControlRotation(TargetRotation);
 }
 
-void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation)
+void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius)
 {
 	const bool bNeedsNewPath =
 		!bHasMoveGoal
@@ -405,26 +376,18 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation)
 	{
 		INC_DWORD_STAT(STAT_fpstrueAIMoveRequestCount);
 		CSV_CUSTOM_STAT(fpstrueAI, MoveRequestCount, 1, ECsvCustomStatOp::Accumulate);
-		MoveToLocation(GoalLocation, MoveAcceptanceRadius, true, true, true, false, nullptr, true);
+		MoveToLocation(GoalLocation, AcceptanceRadius, true, true, true, false, nullptr, true);
 		LastMoveGoal = GoalLocation;
 		bHasMoveGoal = true;
 	}
 }
 
-void AfpstrueEnemyAIController::ReleaseSurroundResources(bool bReleaseSlot)
+void AfpstrueEnemyAIController::ReleaseSurroundSlot()
 {
 	if (SurroundManager != nullptr && ControlledEnemy != nullptr)
 	{
-		SurroundManager->ReleaseAttackToken(ControlledEnemy);
-		if (bReleaseSlot)
-		{
-			SurroundManager->ReleaseSurroundSlot(ControlledEnemy);
-		}
+		SurroundManager->ReleaseSurroundSlot(ControlledEnemy);
 	}
-
-	bHasAttackToken = false;
-	bObservedAttackInProgress = false;
-	AttackTokenAcquiredTime = 0.0f;
 }
 
 void AfpstrueEnemyAIController::SetAIState(EFPEnemyAIState NewState)

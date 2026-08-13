@@ -22,6 +22,7 @@ constexpr int32 DefaultReserveAmmo = 90;
 constexpr float DefaultReloadDuration = 0.8f;
 constexpr float DefaultEmptyReloadDuration = 1.2f;
 constexpr float DefaultRoundsPerMinute = 600.0f;
+constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 
 FVector MakeUniformSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
 {
@@ -156,11 +157,7 @@ void UfpstrueWeaponComponent::Fire()
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
 	{
-		const float RecoilMultiplier = Character->IsAiming() ? GetConfiguredAimRecoilMultiplier() : 1.0f;
-		const float Pitch = GetConfiguredRecoilPitch();
-		const float Yaw = GetConfiguredRecoilYaw();
-		PlayerController->AddPitchInput(-Pitch * RecoilMultiplier);
-		PlayerController->AddYawInput(FMath::FRandRange(-Yaw, Yaw) * RecoilMultiplier);
+		ApplyRecoil(PlayerController);
 	}
 
 }
@@ -201,19 +198,8 @@ bool UfpstrueWeaponComponent::RequestReload()
 	bReloadAmmoCommitted = false;
 	++ActiveReloadSequence;
 	SetActionState(EFPWeaponActionState::Reloading);
+	ScheduleReloadTimeout(FMath::Max(GetConfiguredReloadDuration(bWasEmptyReload), ReloadFailSafeDuration));
 	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
-
-	if (UWorld* World = GetWorld())
-	{
-		FTimerDelegate ReloadDelegate;
-		ReloadDelegate.BindUObject(this, &UfpstrueWeaponComponent::HandleReloadTimeout, ActiveReloadSequence);
-		World->GetTimerManager().SetTimer(
-			ReloadTimerHandle,
-			ReloadDelegate,
-			GetConfiguredReloadDuration(bWasEmptyReload),
-			false
-		);
-	}
 
 	return true;
 }
@@ -231,6 +217,17 @@ bool UfpstrueWeaponComponent::CommitReload()
 	ReserveAmmo -= AmmoToLoad;
 	bReloadAmmoCommitted = true;
 	BroadcastAmmoChanged();
+	return true;
+}
+
+bool UfpstrueWeaponComponent::SetReloadPresentationDuration(float DurationSeconds)
+{
+	if (ActionState != EFPWeaponActionState::Reloading || DurationSeconds <= 0.0f)
+	{
+		return false;
+	}
+
+	ScheduleReloadTimeout(DurationSeconds);
 	return true;
 }
 
@@ -277,12 +274,15 @@ void UfpstrueWeaponComponent::HandleOwnerDeath()
 	{
 		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+		World->GetTimerManager().ClearTimer(RecoilRecoveryTimerHandle);
 	}
 
 	++ActiveReloadSequence;
 	bReloadAmmoCommitted = false;
 	ConsecutiveShotCount = 0;
 	LastShotTimeSeconds = -1.0;
+	AccumulatedRecoilPitch = 0.0f;
+	AccumulatedRecoilYaw = 0.0f;
 	bWeaponGameplayEnabled = false;
 	SetActionState(EFPWeaponActionState::Disabled);
 
@@ -330,6 +330,24 @@ void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
 
 	ActionState = NewState;
 	OnWeaponActionStateChanged.Broadcast(ActionState);
+}
+
+void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
+
+	FTimerDelegate ReloadDelegate;
+	ReloadDelegate.BindUObject(this, &UfpstrueWeaponComponent::HandleReloadTimeout, ActiveReloadSequence);
+	World->GetTimerManager().SetTimer(
+		ReloadTimerHandle,
+		ReloadDelegate,
+		FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod),
+		false
+	);
 }
 
 void UfpstrueWeaponComponent::HandleReloadTimeout(int32 ReloadSequence)
@@ -448,11 +466,15 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 			);
 		}
 
-		if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
+		if (HitResult.GetActor() != nullptr
+			&& !HitResult.GetActor()->IsA<AfpstrueEnemyCharacter>())
 		{
-			if (HitComponent->IsSimulatingPhysics())
+			if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
 			{
-				HitComponent->AddImpulseAtLocation(ShotDirection * GetConfiguredTraceImpulse(), HitResult.ImpactPoint);
+				if (HitComponent->IsSimulatingPhysics())
+				{
+					HitComponent->AddImpulseAtLocation(ShotDirection * GetConfiguredTraceImpulse(), HitResult.ImpactPoint);
+				}
 			}
 		}
 
@@ -479,6 +501,93 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 		);
 	}
 #endif
+}
+
+void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
+{
+	if (PlayerController == nullptr)
+	{
+		return;
+	}
+
+	const float RecoilMultiplier = Character != nullptr && Character->IsAiming()
+		? GetConfiguredAimRecoilMultiplier()
+		: 1.0f;
+	const float PitchKick = -GetConfiguredRecoilPitch() * RecoilMultiplier;
+	const float YawKick = FMath::FRandRange(
+		-GetConfiguredRecoilYaw(),
+		GetConfiguredRecoilYaw()) * RecoilMultiplier;
+	const float NewPitch = FMath::Clamp(
+		AccumulatedRecoilPitch + PitchKick,
+		-GetConfiguredMaxAccumulatedRecoilPitch(),
+		0.0f);
+	const float NewYaw = FMath::Clamp(
+		AccumulatedRecoilYaw + YawKick,
+		-GetConfiguredMaxAccumulatedRecoilYaw(),
+		GetConfiguredMaxAccumulatedRecoilYaw());
+
+	PlayerController->AddPitchInput(NewPitch - AccumulatedRecoilPitch);
+	PlayerController->AddYawInput(NewYaw - AccumulatedRecoilYaw);
+	AccumulatedRecoilPitch = NewPitch;
+	AccumulatedRecoilYaw = NewYaw;
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(
+			RecoilRecoveryTimerHandle,
+			this,
+			&UfpstrueWeaponComponent::UpdateRecoilRecovery,
+			RecoilRecoveryTickInterval,
+			true,
+			GetConfiguredRecoilRecoveryDelay());
+	}
+}
+
+void UfpstrueWeaponComponent::UpdateRecoilRecovery()
+{
+	UWorld* World = GetWorld();
+	APlayerController* PlayerController = Character != nullptr
+		? Cast<APlayerController>(Character->GetController())
+		: nullptr;
+	if (World == nullptr || PlayerController == nullptr || Character->IsDead())
+	{
+		ClearRecoilState();
+		return;
+	}
+
+	const float RecoverySpeed = GetConfiguredRecoilRecoverySpeed();
+	const float NewPitch = FMath::FInterpConstantTo(
+		AccumulatedRecoilPitch,
+		0.0f,
+		RecoilRecoveryTickInterval,
+		RecoverySpeed);
+	const float NewYaw = FMath::FInterpConstantTo(
+		AccumulatedRecoilYaw,
+		0.0f,
+		RecoilRecoveryTickInterval,
+		RecoverySpeed);
+
+	PlayerController->AddPitchInput(NewPitch - AccumulatedRecoilPitch);
+	PlayerController->AddYawInput(NewYaw - AccumulatedRecoilYaw);
+	AccumulatedRecoilPitch = NewPitch;
+	AccumulatedRecoilYaw = NewYaw;
+
+	if (FMath::IsNearlyZero(AccumulatedRecoilPitch, KINDA_SMALL_NUMBER)
+		&& FMath::IsNearlyZero(AccumulatedRecoilYaw, KINDA_SMALL_NUMBER))
+	{
+		ClearRecoilState();
+	}
+}
+
+void UfpstrueWeaponComponent::ClearRecoilState()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(RecoilRecoveryTimerHandle);
+	}
+
+	AccumulatedRecoilPitch = 0.0f;
+	AccumulatedRecoilYaw = 0.0f;
 }
 
 int32 UfpstrueWeaponComponent::GetTraceCount() const
@@ -551,6 +660,30 @@ float UfpstrueWeaponComponent::GetConfiguredAimRecoilMultiplier() const
 	return WeaponData != nullptr ? WeaponData->AimRecoilMultiplier : AimRecoilMultiplier;
 }
 
+float UfpstrueWeaponComponent::GetConfiguredRecoilRecoveryDelay() const
+{
+	return WeaponData != nullptr ? WeaponData->RecoilRecoveryDelay : RecoilRecoveryDelay;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredRecoilRecoverySpeed() const
+{
+	return WeaponData != nullptr ? WeaponData->RecoilRecoverySpeed : RecoilRecoverySpeed;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredMaxAccumulatedRecoilPitch() const
+{
+	return WeaponData != nullptr
+		? WeaponData->MaxAccumulatedRecoilPitch
+		: MaxAccumulatedRecoilPitch;
+}
+
+float UfpstrueWeaponComponent::GetConfiguredMaxAccumulatedRecoilYaw() const
+{
+	return WeaponData != nullptr
+		? WeaponData->MaxAccumulatedRecoilYaw
+		: MaxAccumulatedRecoilYaw;
+}
+
 float UfpstrueWeaponComponent::GetConfiguredReloadDuration(bool bEmptyReload) const
 {
 	if (WeaponData != nullptr)
@@ -616,6 +749,7 @@ void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+		World->GetTimerManager().ClearTimer(RecoilRecoveryTimerHandle);
 	}
 
 	if (Character != nullptr)
@@ -625,6 +759,8 @@ void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	bWeaponGameplayEnabled = false;
 	bIsEquipped = false;
+	AccumulatedRecoilPitch = 0.0f;
+	AccumulatedRecoilYaw = 0.0f;
 	SetActionState(EFPWeaponActionState::Disabled);
 	Character = nullptr;
 	Super::EndPlay(EndPlayReason);

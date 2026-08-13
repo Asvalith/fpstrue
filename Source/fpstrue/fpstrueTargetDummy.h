@@ -22,9 +22,6 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UFUNCTION()
-	void HandleHealthChanged(float NewHealth);
-
-	UFUNCTION()
 	void HandleDeath();
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Target")

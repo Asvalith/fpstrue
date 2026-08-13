@@ -396,7 +396,7 @@ TryAttackTarget
 
 - `HitActorsThisAttack` 记录本次攻击已经处理的 Actor。
 - `bHitTargetThisAttack` 保证当前单目标攻击不会重复命中。
-- `bDamageAppliedThisAttack` 兼容单点 Notify 路径。
+- 旧单点 Notify 只保留兼容性；挥空不会阻止后续连续刀刃窗口继续检测。
 - `FinishAttack()`、死亡和 EndPlay 都清理窗口、集合和 Timer。
 
 **极低帧率仍漏检怎么办：** 根据剑刃位移和旋转增加有限子采样，或适当扩大 Sweep 半径。采样数必须设上限，并记录每帧 Sweep 数和 Game Thread 成本。判定更宽会增加“空气刀”风险，需要与动画和碰撞体一起 A/B。

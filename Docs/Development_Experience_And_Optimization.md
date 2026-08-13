@@ -162,7 +162,6 @@ HitActorsThisAttack
 bIsAttacking
 bAttackWindowActive
 bHitTargetThisAttack
-bDamageAppliedThisAttack
 ```
 
 这些变量承担不同职责，不能用一个“正在攻击”布尔值代替全部状态。
@@ -170,7 +169,7 @@ bDamageAppliedThisAttack
 ### 3.3 已知边界
 
 - 玩家在窗口中死亡后，`TryApplyAttackDamage` 会拒绝继续扣血，但敌人的攻击状态可能等到 Timer 才结束。
-- Montage 被替换或中断时，需要确认 Completed、Blend Out、Interrupted 和 Notify End 都能收口。
+- Montage 被替换或中断时，需要确认 Completed、Interrupted 和 Notify End 都能收口；Blend Out 不提前解锁 Gameplay 状态。
 - 蓝图表现变量 `bAttackMontagePlaying` 不能替代 C++ 的 `bIsAttacking`。
 
 后续可以让玩家死亡事件主动通知正在攻击的敌人收尾，但要先解决敌人与目标之间的订阅和解绑生命周期。
@@ -1441,3 +1440,298 @@ MakeUniformSpreadDirection(Forward, SpreadAngle)
 ## 25. 架构内容已合并
 
 架构重构过程、权威所有权、通信方式、设计模式和条件变化题已经统一到 [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md) 第 13、15、22 章。本文件只保留开发经历、Bug、实验过程和原始优化证据，避免同一架构结论维护两份。
+
+## 26. 2026-08-14 运行链路联调与排障记录
+
+本节是追加记录，不替换前文结论。当天目标是让重构后的 C++ 规则重新接回现有蓝图资产，并把开始游戏、生成、AI、攻击、射击、换弹、HUD 和胜负串成可运行闭环。排障过程中暴露出的主要问题不是单个算法错误，而是 C++ 默认值、蓝图序列化配置、对象引用和动画回调之间的运行时边界没有完全对齐。
+
+### 26.1 当天问题总表
+
+| 现象 | 根因或定位结果 | 处理 | 状态 |
+| --- | --- | --- | --- |
+| 调用 `StartGameMode` 后没有倒计时和敌人 | 需要区分关卡入口事件是否执行、Cast 是否成功、GameMode 内部前置条件是否通过 | 固定 World Settings、GameMode Class Defaults 和启动顺序；内部失败写 Output Log | 已接通，继续做完整回归 |
+| 倒计时最初显示 0 | Widget 构造时 `RemainingTime` 可能尚未由 `StartGameMode()` 初始化；绑定函数执行链也曾绕过 Cast | 保留原有文字绑定函数，确保 `Entry -> Cast -> Return`，数据使用 `GetRemainingTime -> ToText(Integer)` | 已恢复原方案 |
+| 敌人生成后完全不移动 | `enemy_BP` 的 `AI Controller Class` 没有设置，运行日志显示 Controller 为 `None` | 设置 `fpstrueEnemyAIController`，并确认 Auto Possess AI | 根因确认并修复配置 |
+| 删除旧 `chase player` Timer 后敌人停止 | 旧蓝图 Timer 一直是实际追击入口，掩盖了新 AIController 没有接管 | 删除旧追击 Timer，但保留 AnimInstance、速度和动画初始化执行链 | 已完成蓝图迁移 |
+| 部分敌人生成失败 | 出生点重用或周围存在碰撞，单次 SpawnActor 无法找到合法位置 | NavMesh 投影、随机可达点、最多 8 次重试、胶囊高度偏移和失败日志 | C++ 已实现，待固定场景复测失败率 |
+| 敌人靠近玩家后像被弹开 | 排除双重追击和 Root Motion 后，重点定位为 Mesh 与 Capsule 同时参与实体碰撞 | 存活时 Mesh 关闭物理，仅 Query，并忽略 Pawn；实体碰撞交给 Capsule | C++ 已修改，待重新 PIE 复验 |
+| 敌人接近后不立即攻击 | 旧攻击名额和环形站位会让近距离敌人等待；寻路停止半径也可能叠加胶囊半径 | 移除攻击名额限制；战斗接近使用独立 Acceptance Radius；攻击结束后再计算冷却 | 已进入当前代码 |
+| 换弹动画可被开火打断，或按 R 没反应 | 动画时长、弹药提交和 Gameplay 状态由不同节点维护；错误 Target 还会让组件函数没有被调用 | WeaponComponent 独占换弹状态；Reload Commit Notify 提交弹药；Completed/Interrupted 收口 | 已实现，需普通/空仓换弹回归 |
+| `Fire` 节点出现 Warning | 把 TP Weapon 的 SkeletalMesh 引用接到了 WeaponComponent 函数 Target | 从当前武器组件引用调用 `Fire`，蓝图不再执行第二套射击结算 | 已纠正接线 |
+| 枪口连续上抬且不恢复 | 原实现每发直接叠加输入，没有累计上限和恢复过程 | 增加累计 Pitch/Yaw 上限、恢复延迟和定频恢复 Timer | C++ 已实现，手感参数待调 |
+| 结果 UMG 无限循环或文字不对 | 把 Widget `self` 当成创建结果或事件再次调用自身；胜负值没有传入实际实例 | GameMode 事件只创建一次 Widget；CreateWidget 返回值作为 Target；结果值在同一实例初始化 | 蓝图已调整，需胜负双路径复测 |
+| UMG `Set Text` 无法连接或显示对象名 | 混用了 TextRenderComponent、TextBlock、RichTextBlock，并把控件对象接入 `ToText(Object)` | 从实际文字控件引用拉出对应 `SetText`；整数接 `ToText(Integer)` | 原理和最终接法已确认 |
+| Output Log 持续打印 `collect garbage` | `mainmenu` 蓝图里存在测试 `Print String`，不是 UE GC 自带提示 | 已定位到 `Content/FirstPerson/UI/mainmenu.uasset`；删除 Print 后仍要单独判断是否保留手动 GC | 定位完成，需保存资产后复验日志 |
+| Visual Studio 外部编译 LNK1104/退出码 6 | UnrealEditor 正持有 DLL 且 Live Coding 已启用 | 编辑器内用 `Ctrl+Alt+F11`；完整编译前先退出编辑器 | 流程确认 |
+
+### 26.2 GameMode 启动链：节点执行不等于玩法成功
+
+当天一度出现蓝图执行线已经走到 `GameStart`，但倒计时和敌人仍未出现。关键认识是：
+
+```text
+蓝图白线走过 StartGameMode 节点
+!=
+StartGameMode 内部所有前置条件通过
+```
+
+最终启动边界固定为：
+
+```text
+Demonstration Level Blueprint
+-> 菜单退出和 HUD 创建
+-> Get Game Mode
+-> Cast To fpstrueGameMode
+-> StartGameMode（只调用一次）
+
+AfpstrueGameMode::StartGameMode
+-> 防重复启动
+-> 解析玩家、EnemyClass、EnemySpawn、World
+-> RemainingTime = GameDuration
+-> 广播初始 UI 快照
+-> 启动倒计时和第一波
+```
+
+诊断时不能只在 `StartGameMode` 节点后放一个无条件 `Print String`，因为函数即使内部提前返回，蓝图白线仍会继续。更可靠的证据是内部失败日志、`IsGameRunning()`、波次/时间事件和实际 Spawn 日志。验收后删除临时屏幕打印，避免把测试信息带进封版。
+
+### 26.3 AIController 没有接管：旧蓝图逻辑掩盖了配置错误
+
+#### 现象
+
+删除 `enemy_BP` 中的循环 `chase player` Timer 后，敌人原地不动；重新接回 Timer 又能追玩家，因此一开始容易误判为“旧 Timer 必须保留”。
+
+#### 证据
+
+GameMode 在动态生成后检查实际 Controller，Output Log 给出了直接证据：
+
+```text
+Enemy enemy_BP_C_0 has controller None; expected fpstrueEnemyAIController.
+```
+
+#### 根因
+
+`AfpstrueEnemyCharacter` 构造函数已经设置：
+
+```cpp
+AIControllerClass = AfpstrueEnemyAIController::StaticClass();
+AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+```
+
+但 `enemy_BP` 是已经存在并保存过的蓝图子类。蓝图 Class Defaults 可以序列化覆盖 C++ 默认值，因此“源码里有默认值”不能证明运行实例采用该值。当天检查发现 `AI Controller Class` 实际没有设置。
+
+#### 最终处理
+
+```text
+enemy_BP / Class Defaults / Pawn
+-> AI Controller Class = fpstrueEnemyAIController
+-> Auto Possess AI = Placed in World or Spawned
+```
+
+旧 Timer 必须删除，否则新旧两套系统会同时下发移动意图。BeginPlay 中的动画初始化仍需保留并重新跨过 Timer 接线：
+
+```text
+BeginPlay
+-> Get Anim Instance
+-> Cast enemy_anim
+-> 保存 AnimInstance 引用
+-> 初始化速度和动画
+```
+
+运行时权威调用链变为：
+
+```text
+Spawn enemy_BP
+-> SpawnDefaultController / Auto Possess AI
+-> AfpstrueEnemyAIController::OnPossess
+-> 一次性 Decision Timer
+-> Idle / Chase / Attack / Dead
+-> MoveToLocation / MoveToActor
+-> CharacterMovement + NavMesh
+```
+
+这次问题的面试价值是：旧功能“还能工作”不代表新架构已经接管，它可能只是回退路径仍在掩盖配置错误。验证架构迁移必须检查运行时对象类型，而不是只检查源码类。
+
+### 26.4 SpawnActor 失败：生成点合法不等于胶囊可生成
+
+倒计时开始后仍出现部分 `SpawnActor failed for enemy class enemy_BP_C`。TargetPoint 位于地图中，也不代表敌人胶囊在该位置不会与地面、墙体或前一个敌人重叠。当前生成流程增加：
+
+1. 获取 NavigationSystem，缺失时直接报告配置错误。
+2. 读取敌人默认胶囊半高，将 NavMesh 表面点抬高到合理胶囊中心。
+3. 首次位置失败后，在可达半径内随机选择候选点。
+4. 每个敌人最多尝试 8 次。
+5. 使用 `AdjustIfPossibleButDontSpawnIfColliding`，避免为了凑数把重叠敌人强行塞进场景。
+6. 最终失败保留错误日志，不虚增 AliveEnemyCount。
+
+这里的取舍是正确性优先于“必须生成成功”。强制 `AlwaysSpawn` 会把生成失败转换成重叠、弹飞和寻路拥堵，问题只是从日志转移到运行时。后续应记录每波请求数、成功数和重试次数，才能判断 SpawnPoint 密度是否合理。
+
+### 26.5 靠近后弹开：查询碰撞与实体碰撞必须分工
+
+在旧追击 Timer 删除、攻击资源确认使用 InPlace Montage 后，靠近玩家仍可能出现敌人被推出的视觉。玩家胶囊半径为 55，敌人胶囊半径为 42；战斗接近半径 120 大于两者半径和 97，理论上导航应在发生胶囊穿透前停止。因此继续检查 Mesh 是否同时使用 `QueryAndPhysics`。
+
+当前 C++ 在敌人 BeginPlay 强制：
+
+```cpp
+CharacterMesh->SetSimulatePhysics(false);
+CharacterMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+CharacterMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+```
+
+职责划分是：
+
+- Capsule：存活期移动阻挡、NavAgent 尺寸和角色实体碰撞。
+- SkeletalMesh：保留 Visibility/Weapon Trace 查询，用于骨骼命中和头身差异伤害。
+- 死亡蓝图：关闭 Capsule，把 Mesh 切为 Ragdoll、Query And Physics 和 Simulate Physics。
+
+不能简单把 Mesh 设为 NoCollision，因为项目需要骨骼命中；也不能让 Mesh 和 Capsule 同时承担存活期实体阻挡，否则 Physics Asset 的多个刚体可能参与解穿透。这项修改已进入代码，但必须在新的 PIE 生命周期中复验，因为 Live Coding 后已经存在的敌人不会重新执行 BeginPlay。
+
+### 26.6 攻击状态：取消名额限制，但不取消状态门禁
+
+当天需求明确为“不设置攻击名额限制，靠近后立刻攻击”。因此 SurroundManager 只负责分配环形接近位置，不再持有 Attack Token。AIController 的近战流程是：
+
+```text
+进入 AttackRange
+-> StopMovement
+-> FaceTarget
+-> TryAttackTarget
+-> bIsAttacking = true
+-> OnAttackStarted
+-> 蓝图播放 InPlace Montage
+-> Enemy Attack Window 做刀刃 Sweep
+-> Completed / Interrupted 收尾
+-> 从 FinishAttack 时刻开始计算 AttackInterval
+```
+
+取消攻击名额不等于所有状态都可重入。以下门禁仍然必须存在：死亡只处理一次、同一轮攻击只开始一次、同一目标每轮只扣一次、攻击窗口只在 Montage 有效区间开启、完成和中断都只能把状态收口一次。
+
+### 26.7 换弹事务：动画负责时机，WeaponComponent 负责真相
+
+当天出现过换弹动画尚未完成就能继续射击，以及按 R 后动画或组件函数没有执行。根因包括错误 Target、把枪 Mesh 当成 WeaponComponent、在多个蓝图节点保存换弹布尔值，以及用 Montage Blend Out 过早结束 Gameplay 状态。
+
+最终事务分为三阶段：
+
+```text
+RequestReload
+-> 检查弹匣、备弹、死亡和当前 ActionState
+-> ActionState = Reloading
+-> 广播 OnWeaponReloadStarted
+
+Reload Commit Notify（弹匣插入时刻）
+-> UfpstrueAnimNotify_ReloadCommit::Notify
+-> 找到当前 WeaponComponent
+-> CommitReload（只转移一次弹药）
+
+Montage Completed
+-> FinishReload
+
+Montage Interrupted
+-> CancelReload
+```
+
+`CanFire()` 只读取 WeaponComponent 的 ActionState，因此动画被其他 Montage 中断也不能绕过状态机。`OnBlendOut` 不作为完成依据，因为它可能早于真正 Completed；C++ Timer 只负责动画回调丢失后的安全恢复，不承担正常换弹时序。
+
+### 26.8 射击接线与后坐力
+
+`Fire` 的 Target 是 `UfpstrueWeaponComponent`。TP Weapon 是 SkeletalMeshComponent，只能提供 Socket、AnimInstance 和表现资源，不能作为 WeaponComponent Gameplay API 的 Target。重构后的关系是：
+
+```text
+IA_Shoot
+-> Character 提交 StartFire / StopFire 意图
+-> Current WeaponComponent 管射速、弹药和 LineTrace
+-> OnWeaponFirePerformed 通知蓝图播放 Montage/声音/枪口火焰
+```
+
+当天还观察到连续射击时视角只持续向上偏移。当前代码增加累计后坐力上限、瞄准倍率、恢复延迟和 60 Hz 恢复 Timer；死亡和 EndPlay 会清理恢复 Timer。它解决的是状态无上限和无恢复的问题，最终 Pitch、Yaw、恢复速度仍需以固定靶墙测试调参，不能只凭一次试玩宣称手感完成。
+
+### 26.9 HUD：先分清对象，再选择事件或绑定
+
+当天 UI 接线反复出错的共同原因是把三类对象混为一谈：
+
+| 对象 | 可以作为谁的 Target |
+| --- | --- |
+| `fpstrueGameMode` 实例 | `GetRemainingTime`、GameMode Delegate |
+| `ingame` UserWidget 的 `self` | 当前 Widget 自己的函数 |
+| `TextBlock/RichTextBlock` 控件变量 | 对应 UMG `SetText` |
+
+`TextRenderComponent::SetText` 属于场景中的 3D TextRender，不是 UMG 控件。`ToText(Object)` 会把控件对象转成名称或描述，也不是把倒计时数字转成文字。
+
+当天最终保留原有文字属性绑定函数，原因是项目只有少量 HUD 字段，现阶段可读性优先：
+
+```text
+Get_剩余时间文字_Text Entry
+-> Cast To fpstrueGameMode
+-> Return Node
+
+Get Game Mode
+-> Cast.Object
+
+Cast.As fpstrueGameMode
+-> Get Remaining Time.Target
+
+Get Remaining Time
+-> To Text(Integer)
+-> Return Value
+```
+
+关键错误是 Entry 曾直接连到 Return，Cast 没在执行路径上，导致 Cast Warning 和 Getter Error。恢复 `Entry -> Cast Success -> Return` 后，原绑定方案即可继续工作。
+
+事件驱动 Delegate 仍是大量 HUD 字段或高频复杂计算时的优化方向，但不应为了“形式上事件驱动”让简单 Widget 出现多层引用和重复初始化。若采用属性绑定，技术文档必须诚实说明它可能被 Slate 多次求值，绑定函数中只能做常量级读取，不能搜索 Actor、分配对象或执行复杂查询。
+
+### 26.10 胜负 Widget 的实例边界
+
+`OnGameResult(bool bPlayerWon)` 只提供结果，不应该在结果 Widget 内再次调用同名事件。正确关系是：
+
+```text
+Level Blueprint / UI Owner 收到 OnGameResult
+-> Create Widget(winorfail)
+-> 把 bPlayerWon 写入创建出的实际实例
+-> Add To Viewport（Target = CreateWidget ReturnValue）
+-> 移除 ingame
+-> UI Only + Show Mouse Cursor
+
+winorfail Construct
+-> 读取自己的 bPlayerWon
+-> Select Text / Select Color
+-> 更新实际 TextBlock/RichTextBlock
+```
+
+无限循环通常来自 Custom Event 在自身执行链中再次调用同名函数，或把 `self` 错接到一个应当接 CreateWidget 返回值的节点。UI 调试时应先说清楚“谁创建谁、结果存在哪个实例、SetText 修改哪个控件”，再连执行线。
+
+### 26.11 调试输出和编译流程
+
+日志中的：
+
+```text
+LogBlueprintUserMessages: [mainmenu_C_0] collect garbage
+```
+
+来自 `mainmenu` 蓝图中的测试 `Print String`。它与真正的 `Collect Garbage` 节点是两件事：删除 Print 只会移除日志；是否保留手动 GC 要根据强引用和卡顿证据单独判断。常规 UMG 关闭应使用 RemoveFromParent 并清理持有引用，让 UE 按自身时机回收，不能把强制 GC 当成 Widget 销毁 API。
+
+Visual Studio 出现 LNK1104 或 Build.bat 退出码 6 时，先检查 UnrealEditor 和 Live Coding：
+
+- 编辑器开启 Live Coding：使用 `Ctrl+Alt+F11` 迭代编译。
+- 需要完整 Development Editor 编译：保存所有蓝图并退出 UnrealEditor，再运行 Build.bat。
+- Live Coding 修改只影响新代码；依赖 BeginPlay 的初始化修复必须重新开始 PIE。
+- 蓝图出现旧函数签名或红色节点时，先编译 C++，再右键 Refresh Node，最后编译并保存蓝图。
+
+### 26.12 当天形成的排障顺序
+
+以后遇到“代码看起来正确但游戏不工作”，按以下顺序收敛：
+
+1. 确认正确工作区、关卡、GameMode、Pawn 和实际运行蓝图类。
+2. 用蓝图断点或最小临时输出确认入口事件执行。
+3. 检查 Cast Failed 和函数内部前置条件，不把白线通过当作成功。
+4. 打印或记录运行时对象类型，确认 C++ 类真的接管实例。
+5. 检查蓝图 Class Defaults 是否覆盖 C++ 构造默认值。
+6. 搜索旧 Tick、Timer、AI MoveTo、ApplyDamage 和自建状态变量，排除双权威源。
+7. 对 Montage 分别验证 Started、Notify、Completed、Interrupted 和死亡中断。
+8. 对碰撞问题区分 Query、Physics、Capsule、Mesh 和 Ragdoll 生命周期。
+9. 对 UMG 先确认 Target 类型和实例所有权，再检查数据转换。
+10. 修复后重新开始 PIE，清理临时 Print/Debug Draw，并从 Output Log 做最终复验。
+
+### 26.13 尚未伪装成完成的事项
+
+- 存活期 Mesh QueryOnly/Pawn Ignore 修改需要在重新执行 BeginPlay 后验证“靠近弹开”是否消失。
+- Spawn 重试需要记录固定三波中的请求数、成功数和失败数。
+- 普通换弹、空仓换弹、Notify 提交前中断、提交后中断、换弹中开火仍要形成测试矩阵。
+- 胜利和失败两个结果都要验证文字、颜色、鼠标、输入模式和重新开始。
+- `mainmenu` 的测试 Print 删除后要重新运行并确认日志不再出现。
+- 资产级蓝图和 Montage 无法由源码静态检查证明正确，必须保存后进行 PIE 回归。
