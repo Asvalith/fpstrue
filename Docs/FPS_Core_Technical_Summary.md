@@ -3598,7 +3598,7 @@ Substepping 的重点是“用更多小步换稳定性”，不是性能优化�
 | 弹药与换弹 | C++ 已实现，蓝图未闭环 | L2 | 有动作状态、序列号、Commit 幂等和超时恢复；Notify 与 Montage 中断仍需接线验收 |
 | 伤害 | 核心已实现 | L2 | PointDamage、头/身体差异、HealthComponent 和死亡幂等已完成；通用 Damageable、距离衰减、护甲和穿透未完成 |
 | Character | 核心已实现 | L2 | Enhanced Input、移动、冲刺、瞄准、死亡协调；输入语义和移动参数调优证据不足 |
-| Camera | 部分实现 | L1 | 第一人称相机和 OnAimChanged 接口存在；ADS FOV、ViewModel FOV、靠墙收枪与屏幕反馈缺少完整证据 |
+| Camera 与后处理 | 部分实现 | L1-L2 | 第一人称相机、OnAimChanged 和角色蓝图 PostProcessComponent 存在；受伤/死亡混合、ADS FOV、ViewModel FOV 与靠墙收枪仍需 PIE 回归 |
 | Control | 基础实现 | L1 | 键鼠和 Enhanced Input 可用；没有用户灵敏度、ADS 倍率、手柄曲线和辅助瞄准系统 |
 | AI 与对局 | 已实现 | L2-L3 | Timer FSM、NavMesh、包围槽位、攻击名额、三波与 90 秒结算已存在 |
 | 网络同步 | 未实现 | L0 | 当前 FPS 是单机项目，没有 RPC、Replication、预测或服务器回溯 |
@@ -3694,7 +3694,7 @@ Direction = normalize(Forward + Right * r*cos(phi) + Up * r*sin(phi))
 
 - 相比直接均匀半径，准星圆盘内的样本面积分布更均匀。
 - 腰射和瞄准有不同基础散布。
-- 连射按发数增加散布，并有上限和停止后的重置时间。
+- 连射按发数增加散布并受上限约束；普通 `StopFire()` 路径会立即清零，尚无渐进恢复曲线。
 - Shotgun 数据可让一次开火执行多条独立射线。
 
 严格来说，它是“切平面圆盘面积均匀后再归一化”，不是对球面立体角完全均匀。小散布角下差异很小，适合当前枪械。若题目要求在圆锥立体角内严格均匀，可使用：
@@ -3706,7 +3706,7 @@ phi = 2 * PI * v
 
 然后在 Forward/Right/Up 基底中构造方向。
 
-教程提到的移动、站姿、瞄准和连射因子可整理为：
+面试官把条件扩展到移动、站姿、瞄准和连射时，可整理为：
 
 ```text
 FinalSpread =
@@ -3717,7 +3717,17 @@ FinalSpread =
     + ContinuousFireSpread
 ```
 
-当前只实现了 Aim 和 ContinuousFire。下一步应从 CharacterMovement 读取地面速度、是否 Falling，并将最终散布和归一化准星扩散通过事件交给 HUD。不要为了覆盖教程而盲目增加随机项，先定义站立、移动、冲刺、空中和 ADS 五个固定靶场用例。
+当前只实现了 Aim 和 ContinuousFire，且 `StopFire()` 会立即重置连续射击计数。移动、空中、姿态因子、渐进恢复和准星同步只作为后期深入追问方向，不进入当前封版范围。若题目要求扩展，应先定义站立、移动、冲刺、空中和 ADS 五个固定靶场用例，再决定是否读取 CharacterMovement 状态。
+
+三种“均匀”不能混用：
+
+| 目标 | 采样方式 | 当前结论 |
+| --- | --- | --- |
+| 垂直靶面面积均匀 | `r = sqrt(u) * tan(MaxAngle)` | 当前实现 |
+| 圆锥立体角均匀 | `cos(theta) = 1 - u * (1 - cos(MaxAngle))` | `VRandCone` 一类的方向采样目标 |
+| 常见真实弹着群 | 二维高斯、截断高斯或经验分布 | 中心通常更密，不应声称“均匀更真实” |
+
+当前散布角只有几度，靶面均匀与立体角均匀的视觉差异很小。项目选择靶面均匀是为了准星覆盖可解释，并不代表它在所有玩法里更正确。
 
 均匀随机也不一定产生最佳手感：
 
@@ -3842,12 +3852,12 @@ Posture: Standing / Crouching
 
 #### Camera
 
-当前代码有第一人称相机和 `OnAimChanged` 表现接口，但没有证据证明以下内容已闭环：
+当前代码有第一人称相机和 `OnAimChanged` 表现接口；`BP_FirstPersonCharacter` 已确认存在蓝图创建的 `PostProcessComponent`、受伤/死亡事件、Timeline/Blend Weight，以及饱和度、对比度、暗角和景深设置。以下内容仍需运行时回归：
 
 - ADS FOV 插值及中断恢复。
 - World FOV 与 ViewModel FOV 是否分离。
 - 枪口靠墙时的穿模、收枪或射击阻挡。
-- Damage Direction、Hit Marker、受击后处理和低血量反馈。
+- Damage Direction、Hit Marker，以及受伤 Timeline 与死亡 Timeline 是否争抢同一 Blend Weight。
 
 ADS 插值应由一个权威状态驱动。输入只改变 `bIsAiming`，相机或表现对象读取该状态插值，换弹、死亡和取消瞄准统一回到默认值。不要让多个 Timeline 各自记住 FOV。
 
@@ -5966,3 +5976,138 @@ AfpstrueEnemyAIController
 ```
 
 最值得优先背熟的项目拷打是：换弹互斥、死亡幂等、同帧胜负、无敌人生成、AI 原地不动、近战漏检、攻击令牌释放、160 敌人性能判断和 UI 初始快照。这些问题都能直接指向当前源码，而不是停留在概念层。
+
+## 31. 蓝图后处理、渲染阶段与基础功能查漏补缺
+
+### 31.1 当前项目事实
+
+`PostProcessComponent` 不是在 Character C++ 构造函数中创建的，而是在以下蓝图中创建和配置：
+
+```text
+Content/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter.uasset
+```
+
+资产中可以确认 `PostProcessComponent`、`BlendWeight`、`OnPlayerDamaged`、`OnPlayerDied`、Timeline、饱和度、对比度、暗角和景深参数。当前蓝图还配置了色彩偏移。C++ 的职责是完成伤害与死亡规则，再发出 `OnPlayerDamaged` 和 `OnPlayerDied`；蓝图响应事件，播放 Camera Shake、声音和 Timeline，并改变后处理混合权重。
+
+```text
+HealthComponent 判定伤害/死亡
+-> AfpstrueCharacter 转发蓝图事件
+-> BP_FirstPersonCharacter 播放 Timeline
+-> Timeline Update 写 PostProcessComponent.BlendWeight
+-> 当前相机 View 汇总后处理来源
+-> Render Thread / GPU 执行后处理 Pass
+```
+
+因此不能说“C++ 实现了后处理 Shader”。准确说法是：**C++ 提供权威 Gameplay 事件，角色蓝图持有并驱动局部后处理表现。**
+
+### 31.2 为什么放在角色蓝图
+
+当前项目是单机第一人称游戏，受伤、死亡和瞄准反馈都围绕本地玩家视角。放在角色蓝图有以下理由：
+
+- 与玩家 Pawn 生命周期一致，切换角色或销毁角色时容易统一清理。
+- 动画、Camera Shake、声音和后处理可以在同一表现层快速调参。
+- Timeline 曲线属于视觉节奏，不需要写死在 C++ 规则层。
+- Gameplay 只广播事件，不依赖具体色彩和镜头参数。
+
+替代方案与条件：
+
+| 位置 | 适用条件 | 代价 |
+| --- | --- | --- |
+| Character 蓝图的 PostProcessComponent | 当前单机、本地角色反馈 | 多个 Timeline 可能争抢同一权重 |
+| CameraComponent Post Process Settings | 后处理只属于某个相机 | 相机蓝图更容易积累表现逻辑 |
+| PlayerCameraManager | 需要统一协调 Shake、FOV 和多个镜头效果 | 需要额外管理效果优先级与生命周期 |
+| 关卡 PostProcessVolume | 全局色调、区域环境和天气 | 不适合表达不受玩家位置影响的受伤脉冲 |
+
+Character 上的组件在当前单机项目中足够。若改成分屏或联网，不能默认它天然只影响拥有者，需要重新检查每个 View 的后处理来源，或迁移到本地 PlayerCameraManager/CameraComponent。
+
+### 31.3 Blend Weight 与 Timeline 到底做了什么
+
+`BlendWeight` 控制这组后处理设置参与最终 View 设置合成的权重：
+
+- `0`：该组件不贡献效果。
+- `1`：按完整配置参与合成。
+- `0~1`：与其他来源按权重混合。
+
+Timeline 每次 `Update` 在 Gameplay 侧更新一个浮点值，最终 View 收集组件、相机和关卡 Volume 的设置，渲染器再在 GPU 上执行对应效果。Timeline 本身不是 Shader，也不在 GPU 上计算 Gameplay 曲线。
+
+受伤常用 `0 -> 1 -> 0`，死亡常用 `0 -> 1` 后保持。若二者共用同一组件和权重，两个 Timeline 会形成最后写入者覆盖。当前必须在 PIE 中验证死亡事件会停止受伤 Timeline，或者拆成独立的 Damage/Death 后处理层。
+
+### 31.4 这些效果在哪个渲染阶段
+
+当前桌面渲染路径可用下面的简化顺序解释。UE 会根据版本、平台和设置合并或重排具体 RDG Pass，面试中不应把简图说成固定源码调用顺序。
+
+```text
+Depth / Base Pass
+-> GBuffer：BaseColor、Normal、Roughness、Depth 等
+-> 屏幕空间环境光遮蔽候选阶段（当前项目未实现 SSAO）
+-> Deferred Lighting / Lumen Lighting
+-> Translucency
+-> Post Processing：DOF、Bloom、Exposure 等
+-> Color Grading + Filmic Tonemapping
+-> Vignette / Final Output / UI Composite
+```
+
+| 效果 | 所需输入 | 所在阶段与作用 |
+| --- | --- | --- |
+| 饱和度、对比度、色彩偏移 | 已完成光照的 Scene Color | 后处理调色与 Tonemapper 链，改变整屏颜色，不改材质 GBuffer |
+| 暗角 | 屏幕 UV 与 Scene Color | 后处理末端的镜头效果，压暗画面边缘 |
+| 景深 DOF | Scene Color、Depth、镜头参数 | 后处理链中按焦距和深度做模糊，通常早于最终输出调色 |
+| SSAO | Scene Depth、GBuffer Normal | 延迟渲染中的屏幕空间遮蔽，在最终调色前影响环境/间接光观感 |
+
+色彩调节和暗角是当前角色蓝图表现；SSAO 不是“最后给画面加一层黑边”，也不是可见性遮挡剔除。它利用当前屏幕的深度与法线估计局部遮蔽，法线贴图写入 GBuffer 后也可能影响其结果。
+
+### 31.5 SSAO 的诚实边界
+
+**当前项目没有实现或验收 SSAO，不能列入成果。** 资源或引擎默认结构中出现 `AmbientOcclusion` 字段，不能证明关卡已启用覆盖，更不能证明效果和成本经过验证。
+
+它适合作为后期追问：
+
+1. SSAO 为什么需要 Depth 和 Normal，为什么属于屏幕空间近似。
+2. 屏幕外几何、遮挡后几何和物体厚度未知会造成什么缺失、漏光或 Halo。
+3. Radius、Intensity、Quality 增大分别怎样影响质量与 GPU 成本。
+4. SSAO、DFAO、RTAO 与 Lumen 自身遮蔽的输入和适用条件有什么差异。
+5. 为什么 AO 只应增强接触和缝隙层次，不能替代直接光阴影。
+
+如果未来做候选实验，最小证据是固定机位下 `AO Off/On` 截图、`Visualize Ambient Occlusion`、相同画质的 ProfileGPU Pass 时间，以及拐角、薄物体、屏幕边缘和动态角色四类瑕疵检查。本轮只保留知识储备，不进入封版任务。
+
+### 31.6 教程基础功能追问矩阵
+
+教程目录中的功能不能只回答“做过”。应按所有权、调用链和验收状态回答：
+
+| 模块 | 当前项目事实 | 重点追问 | 仍需验收 |
+| --- | --- | --- | --- |
+| 手臂、相机、移动、跳跃、冲刺 | Character C++ 与第一人称动画资产存在 | CharacterMovement 参数、输入优先级、World/ViewModel FOV | 动画切换、相机延迟、阴影和脚步声 PIE |
+| 瞄准、射击、弹药、换弹、散布、后坐力 | WeaponComponent 拥有权威状态和命中链 | Hitscan 取舍、换弹事务、靶面采样、机械/视觉后坐力 | Montage Notify、中断、ADS 景深和准星同步 |
+| 枪口火焰、抛壳、声音、曳光和命中反馈 | 表现资产与蓝图入口存在 | 为什么订阅真实射击事件，如何限制表现事件数量 | 每次真实射击只播放一次，取消/死亡不残留 |
+| 敌人动画、追逐、寻路和速度 | AIController Timer FSM、NavMesh 与 AnimBP 资产存在 | FSM/BT 取舍、MoveTo、不可达目标、决策降频 | 动态 Spawn 后 Possess、NavMesh 覆盖和路径失败 |
+| 随机模型、吼叫、脚步、受击和死亡表现 | Enemy 蓝图和资源层负责 | 表现事件与死亡事实为何分离、Ragdoll 生命周期 | 随机资源、声音衰减、受击 Montage 与尸体清理 |
+| RVO 与群体围攻 | 蓝图资产包含 RVO/Avoidance 配置，C++ 使用 SurroundManager 槽位和攻击令牌 | RVO 只解决局部避障，为什么不能替代战术站位 | RVO 是否实际启用，以及与 CharacterMovement/槽位的冲突 |
+| 主菜单、按键开始、HUD、暂停 | mainmenu、ingame、pause Widget 资产存在 | Widget 生命周期、输入模式、初始快照、事件驱动 | 创建/移除、暂停恢复、血量弹药首次值和重新开始 |
+| 波次、倒计时、胜负 | GameMode C++ 已有三波、90 秒和唯一结算 | 玩家死亡立即失败、时间到且存活才胜利、同帧竞争 | EnemyClass、EnemySpawn Tag、蓝图事件绑定和完整 PIE |
+| 角色受伤/死亡后处理 | Character 蓝图 PostProcessComponent 已确认 | Blueprint/C++ 边界、Blend Weight、Timeline 冲突、GPU 阶段 | 连续受伤、死亡打断和恢复默认值 |
+| SSAO | 未实现 | Depth/Normal、屏幕空间局限、Lumen 关系和 GPU 成本 | 不属于当前封版验收 |
+
+### 31.7 后处理效果的面试追问链
+
+```text
+你做了什么
+-> PostProcessComponent 在哪里创建，谁触发
+-> 为什么放在 Character 蓝图而不是 C++ 或关卡 Volume
+-> Timeline 和 BlendWeight 如何控制强度
+-> 多个后处理来源如何按 Priority/Weight 合成
+-> 饱和度、对比度、色彩偏移、暗角和 DOF 位于什么阶段
+-> 为什么 SSAO 虽在 Post Process 设置中，却依赖 Depth/GBuffer Normal
+-> 如何用 ProfileGPU 和固定机位证明效果与成本
+-> 如果默认参数不够，怎样升级到 Post Process Material
+-> Before/After Tonemapping 如何影响 HDR、颜色精度和带宽
+-> 什么时候才值得修改 Renderer/RDG Pass 或引擎 Shader
+```
+
+标准回答应始终分三层：当前已实现的是蓝图参数和 Timeline 混合；可扩展方案是 Post Process Material、CustomDepth/Stencil 或 PlayerCameraManager；修改 Renderer 源码属于有明确画质、性能或数据输入需求时的最后一层，不应包装成当前成果。
+
+官方参考：
+
+- [Post Process Effects](https://dev.epicgames.com/documentation/unreal-engine/post-process-effects-in-unreal-engine)
+- [Color Grading and the Filmic Tonemapper](https://dev.epicgames.com/documentation/en-us/unreal-engine/color-grading-and-the-filmic-tonemapper-in-unreal-engine)
+- [Ambient Occlusion](https://dev.epicgames.com/documentation/unreal-engine/ambient-occlusion?application_version=4.27)
+- [FMath::VRandCone](https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/Core/FMath/VRandCone)

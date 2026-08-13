@@ -347,9 +347,13 @@ WeaponComponent 在此基础上叠加：
 - 腰射或瞄准基础散布。
 - 连续射击次数乘以 SpreadStep。
 - MaxContinuousSpread 上限。
-- 停火超过 ResetDelay 后重置连续射击扩散。
+- 普通 `StopFire()` 会立即清零连续射击计数，当前没有渐进恢复曲线。
 
-**继续追问“游戏枪械一定要面积均匀吗”：** 不一定。中心偏置、环形散布和固定 Pattern 都可能是有意设计，但需要用明确概率分布或数据曲线实现，不能把错误采样包装成手感设计。
+**继续追问“这是严格圆锥均匀吗”：** 当前实现是准星切平面或垂直靶面面积均匀，不是严格的球面立体角均匀。严格圆锥采样应让 `cos(theta)` 在 `[cos(MaxAngle), 1]` 上均匀。当前角度只有几度，两者差异很小。
+
+**继续追问“为什么不用 VRandCone”：** `VRandCone` 本身没有数学错误，UE 官方将其定义为圆锥内均匀随机单位向量。项目改成圆盘采样，是把设计目标从立体角均匀改为准星覆盖面积均匀。
+
+**继续追问“游戏枪械一定要面积均匀吗”：** 不一定。中心偏置、环形散布、固定 Pattern、二维高斯和截断高斯都可能是有意设计。真实弹着群通常中心更密，不能说均匀采样天然更符合真实枪械。本项目保留当前实现，其他模型只作为条件变化题。
 
 ### Q15. 部位伤害怎么实现，有什么扩展问题
 
@@ -519,9 +523,9 @@ TryAttackTarget
 
 **停止条件：** 达到目标平台帧预算后停止继续牺牲动画响应和画质。优化目标是满足预算，不是让所有统计数字无限降低。
 
-## 5. 高频扩展追问
+## 5. 高频扩展与图形追问
 
-这部分不是当前项目成果。只有面试官主动把单机 FPS 扩展到网络或复杂技能系统时才回答。
+本节同时包含条件扩展和图形追问。网络、GAS 与 SSAO 不是当前项目成果；角色蓝图后处理是当前实现，但修改 Renderer 只属于进一步方案。回答时必须逐项标明边界。
 
 ### Q25. 如果把当前 FPS 改成联机，最先改什么
 
@@ -550,6 +554,30 @@ CharacterMovement 已提供成熟的移动预测与服务器校正能力，但�
 迁移时不会把 WeaponComponent 整体机械替换。可以先把 Health/Ammo 等资源映射为 Attribute，把 Reload/Fire/Skill 抽成 Ability，把伤害与 Buff 抽成 GameplayEffect，再决定哪些原有武器逻辑保留为底层执行器。
 
 官方资料中，GAS 的核心是 AbilitySystemComponent、GameplayAbility、AttributeSet、GameplayEffect、GameplayTag 和 GameplayCue 的协作；它支持复制与预测，但这些能力仍需要正确的 Owner/Avatar、执行策略和生命周期设计。
+
+### Q27. 为什么把 PostProcessComponent 创建在角色蓝图中
+
+**当前事实：** `PostProcessComponent` 创建在 `BP_FirstPersonCharacter` 蓝图，不在 Character C++ 中。C++ 的 HealthComponent 和 Character 决定受伤/死亡并发出事件，蓝图用 Timeline 修改 `BlendWeight`，播放受伤或死亡视觉反馈。
+
+**选择理由：** 这是单机本地玩家的表现逻辑，需要和 Camera Shake、声音、动画一起快速调参。Gameplay 规则不应依赖饱和度、对比度、色彩偏移、暗角或景深的具体数值。
+
+**继续追问“为什么不用关卡 Volume”：** 关卡 Volume 适合环境区域和全局调色；受伤效果不应因为玩家离开某个空间而消失。若改为分屏、观战或联网，应重新评估 CameraComponent 或 PlayerCameraManager，不能默认 Character 上的组件天然只影响拥有者视图。
+
+**继续追问“两个 Timeline 同时写 BlendWeight”：** 最后写入者会覆盖前者。受伤脉冲与死亡保持应拆成独立层，或死亡时停止受伤 Timeline 并独占权重。
+
+### Q28. 饱和度、对比度、色彩偏移、暗角和景深在哪个阶段完成
+
+**回答：** 游戏先完成深度/Base Pass、GBuffer 和光照，再进入后处理链。DOF 根据 Scene Depth 和镜头参数模糊 Scene Color；饱和度、对比度与色彩偏移属于调色/Tonemapper 链；暗角属于较晚的屏幕镜头效果。UE 可能按版本和平台把多个效果合并到同一 RDG Pass，准确成本应查看 ProfileGPU，而不是只背一张固定顺序图。
+
+Timeline 在 Game Thread 更新混合权重，渲染器汇总相机、组件和 Volume 的最终 View 设置，GPU 才执行全屏处理。Timeline 不是 Shader。
+
+### Q29. 项目实现 SSAO 了吗，为什么仍然要会讲
+
+**结论：** 没有实现或验收，不能列为项目成果。它属于图形学后期追问。
+
+SSAO 使用当前屏幕的 Scene Depth 与 GBuffer Normal 估计局部环境光遮蔽，通常在最终调色前参与环境/间接光观感。它只能看到屏幕已有信息，因此会遇到屏幕边缘消失、屏幕外遮挡缺失、薄物体厚度未知和 Halo 等问题。Radius、Intensity 和 Quality 会在接触层次、伪影与 GPU 成本之间取舍。
+
+如果要求加入项目，先做固定机位 `Off/On`、`Visualize Ambient Occlusion` 和 ProfileGPU A/B，再检查当前 Lumen 配置是否已经提供相关遮蔽，避免重复加深和重复付费。
 
 ## 6. 模拟面试追问链
 
@@ -608,6 +636,21 @@ CharacterMovement 已提供成熟的移动预测与服务器校正能力，但�
 -> 纹理减少 60 MB 为什么不等于帧率提升
 ```
 
+### 6.5 后处理链
+
+```text
+PostProcessComponent 在哪里创建
+-> 为什么属于角色蓝图表现层
+-> Timeline 与 BlendWeight 谁在 CPU、谁在 GPU
+-> 多个组件和 Volume 如何混合
+-> DOF、调色、Tonemapper 和暗角是什么顺序
+-> SSAO 为什么需要 Depth 与 Normal
+-> SSAO 为什么不是遮挡剔除
+-> 如何用 ProfileGPU 和固定机位验证成本
+-> 什么时候使用 Post Process Material
+-> 什么时候才值得修改 Renderer/RDG Pass
+```
+
 ## 7. 面试前必背数据
 
 | 数据 | 正确表述 |
@@ -646,3 +689,7 @@ CharacterMovement 已提供成熟的移动预测与服务器校正能力，但�
 - [Remote Procedure Calls](https://dev.epicgames.com/documentation/unreal-engine/remote-procedure-calls-in-unreal-engine)
 - [Actor Role and Remote Role](https://dev.epicgames.com/documentation/en-us/unreal-engine/actor-role-and-remote-role-in-unreal-engine)
 - [Using Gameplay Abilities](https://dev.epicgames.com/documentation/en-us/unreal-engine/using-gameplay-abilities-in-unreal-engine)
+- [Post Process Effects](https://dev.epicgames.com/documentation/unreal-engine/post-process-effects-in-unreal-engine)
+- [Color Grading and the Filmic Tonemapper](https://dev.epicgames.com/documentation/en-us/unreal-engine/color-grading-and-the-filmic-tonemapper-in-unreal-engine)
+- [Ambient Occlusion](https://dev.epicgames.com/documentation/unreal-engine/ambient-occlusion?application_version=4.27)
+- [FMath::VRandCone](https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/Core/FMath/VRandCone)
