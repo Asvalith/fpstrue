@@ -2,6 +2,10 @@
 
 更新时间：2026-08-12
 
+> 文档身份：2026-08-12 历史阶段快照，保留当时判断，不回填为当前状态。
+>
+> 当前入口见 [Docs/README.md](../README.md)；最新架构见 [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md)；最新性能见 [PERFORMANCE_BASELINE.md](../PERFORMANCE_BASELINE.md)；活动任务见 [PROJECT_TASK_CHECKLIST.md](../PROJECT_TASK_CHECKLIST.md)。
+
 ## 2026-08-12 生命周期边界审计
 
 - HealthComponent 增加每次生命只广播一次死亡的显式标记，并在 Reset 时开启新生命周期。

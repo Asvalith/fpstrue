@@ -128,7 +128,7 @@ protected:
 	bool bDrawAttackTrace = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	float DestroyDelay = 300.0f;
+	float DestroyDelay = 30.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	bool bDestroyOnDeath = true;
@@ -138,6 +138,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Death|Physics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DeathImpulseUpwardBias = 0.05f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Hit Reaction", meta = (ClampMin = "0.0", ClampMax = "1000.0"))
+	float HitReactionImpulseStrength = 120.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance")
 	bool bEnableMovementUpdateTiering = true;
@@ -153,6 +156,12 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
 	float FarRateMovementTickInterval = 0.066667f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance")
+	bool bEnableShadowDistanceTiering = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float ShadowCullDistance = 3000.0f;
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
 	void OnAttackStarted();
@@ -185,6 +194,7 @@ private:
 	void FinishAttack();
 	bool CanAttack() const;
 	void SetAttackAnimationPriority(bool bHighPriority);
+	void ApplyHitReactionImpulse();
 	void ApplyDeathImpulse();
 
 	UPROPERTY()

@@ -1,5 +1,7 @@
 # 从 Actor 生命周期到 TaskGraph：UE 5.5 Tick 调度源码学习
 
+> 文档身份：源码学习记录，用项目代码作案例，但不代表项目当前任务或已实现功能清单。
+>
 > 源码版本：Unreal Engine 5.5
 > 研究范围：`Runtime/Engine` 与 `Runtime/Core`
 > 项目案例：`fpstrue_safe2`

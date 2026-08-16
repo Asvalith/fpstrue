@@ -132,6 +132,8 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		if (AimAction)
 		{
 			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
+			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopAim);
+			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Canceled, this, &AfpstrueCharacter::StopAim);
 		}
 		else
 		{
@@ -202,23 +204,16 @@ void AfpstrueCharacter::StartAim()
 {
 	if (EquippedWeaponComponent == nullptr
 		|| IsDead()
-		|| IsReloading())
+		|| IsReloading()
+		|| bIsAiming)
 	{
 		return;
 	}
 
-	bIsAiming = !bIsAiming;
-	OnAimChanged(bIsAiming);
-
-	if (bIsAiming)
-	{
-		bIsSprinting = false;
-		GetCharacterMovement()->MaxWalkSpeed = AimWalkSpeed;
-	}
-	else
-	{
-		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
-	}
+	bIsAiming = true;
+	bIsSprinting = false;
+	GetCharacterMovement()->MaxWalkSpeed = AimWalkSpeed;
+	OnAimChanged(true);
 }
 void AfpstrueCharacter::StopAim()
 {

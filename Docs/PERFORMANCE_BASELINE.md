@@ -1,8 +1,12 @@
 # FPS Performance Baseline
 
+> 文档身份：项目性能数字与实验边界的唯一权威来源。
+>
+> 最新结论：2026-08-16 最终矩阵见第 12 节，性能封口与发布边界见第 13 节。第 1～9 节保留早期基线和纹理实验过程，不应用旧数字覆盖最终矩阵。
+
 ## 1. 测试目的
 
-记录优化前的真实性能，后续所有 CPU、GPU、动画、AI 和纹理优化都必须使用相同条件复测，禁止只凭体感描述“性能提升”。
+记录各阶段的真实性能，后续所有 CPU、GPU、动画、AI 和纹理优化都必须使用相同条件复测，禁止只凭体感描述“性能提升”。
 
 本轮是“现有玩法基线”，用于验证采集流程和发现主要瓶颈。当前波次会让存活敌人数依次达到 5、12、21，因此它还不是最终的固定 10/25/50 敌人压力测试。
 
@@ -305,3 +309,184 @@ Texture Memory Used 从 288.59 MB 降到 228.91 MB。
 目前还缺同机位画质回归截图，VSM 警告也属于另一条待办，
 所以我不会把这次结果描述成已经解决了全部显存或阴影问题。
 ```
+
+## 10. 封板前运行时优化实现
+
+### 10.1 已实现
+
+- 敌人 Actor 和 AIController 不使用每帧 Tick；AI 使用一次性 Timer，并按攻击、追击、远距和空闲状态选择 `0.1 / 0.25 / 0.5 / 1.0` 秒决策间隔。
+- `MoveTo` 仅在目标位置变化超过阈值或路径已经空闲时刷新，避免重复提交相同导航请求。
+- 敌人 Skeletal Mesh 开启 Update Rate Optimization，并按可见性和攻击优先级调整骨骼更新策略。
+- CharacterMovement 按目标距离使用全速、约 30 Hz 和约 15 Hz 三档组件更新频率；攻击状态恢复全速更新。
+- 敌人死亡时停止 AI、Movement 和攻击 Timer，关闭 Capsule，进入 Ragdoll，并通过 `SetLifeSpan` 统一回收；C++ 默认尸体保留时间由 300 秒收紧为 30 秒。
+- 波次生成由同帧循环改为默认每 `0.05` 秒生成一个敌人的队列。结束游戏或 EndPlay 时清理生成 Timer 和队列。
+- 高密度场景重复使用出生点时，NavMesh 随机采样半径按复用次数平方根扩大，最大限制为 2000 cm；失败日志记录出生点、复用次数和采样半径。
+
+### 10.2 为什么这样修改
+
+- 原始测试中整波生成的 Actor Spawning 峰值达到 `10.719 ms`，分帧生成用于削平单帧组件注册、动画初始化和 Controller 创建成本。
+- 100/160 敌人测试表明 CharacterMovement 和 Animation 明显高于 Pathfinding，因此优先降低远距离更新频率，不重写 NavMesh 或引入复杂 AI 框架。
+- 300 秒 Ragdoll 会让物理体、骨骼网格和阴影在多波次中长期累积，30 秒默认值更符合当前 90 秒玩法时长。
+- 扩大高密度生成半径用于减少出生点附近空间耗尽导致的 Spawn 失败，不使用 `AlwaysSpawn` 强行制造重叠敌人。
+
+### 10.3 当前证据边界
+
+上述代码已经完成 Development Editor 编译，并在全新独立进程中完成 `10 / 20 / 40 / 80 / 160` 五档固定规模复测。每档均达到目标存活数量、完成 10 秒预热和约 30 秒 CSV 采样，并保留运行日志与截图。
+
+本轮证据已经覆盖：
+
+1. 固定规模敌人生成、AI 决策、Movement、Animation、GPU 和纹理数据。
+2. Texture Streaming Pool 在五档测试中均未出现超预算警告。
+3. VSM Non-Nanite 队列在正式矩阵中只在 80 敌人档出现 1 次；后续多组 80 敌人实验也各出现 1 次，因此属于低速率但可复现的残留风险。
+4. 高密度档存在 CharacterMovement `Max iterations 8 hit` 警告，说明拥挤接触和移动模拟仍是进一步扩容时的治理重点。
+
+两个零引用旧 UI 模板资产已清理，全量蓝图编译已经达到 `0 errors / 0 warnings / 0 failed to load`。Shipping 打包和打包后冒烟测试仍延后到玩法蓝图回归之后；这不影响本节的 Development 性能结论，也不能据此宣称发布验收已经完成。
+
+## 11. VSM Non-Nanite 队列诊断
+
+### 11.1 已确认的根因范围
+
+- `VSM Non-Nanite Marking Job Queue overflow` 在 10 敌人基线中、敌人生成前已经出现，因此厂区场景资源是主因，敌人和尸体阴影只是运行时放大器。
+- UE 5.5 的标记着色器会把覆盖大量 VSM 页面的非 Nanite 实例放入共享的大实例任务队列；队列容量耗尽后触发该警告。这不是 Texture Streaming Pool，也不是 Nanite Streaming Pool 溢出。
+- 首次 Asset Registry 审计曾确认以下四个大场景网格为 `NaniteEnabled=False`：
+  - `/Game/FactoryDistrict/Meshes/Building_TypeD_A`
+  - `/Game/FactoryDistrict/Meshes/Pipes_Stack_A`
+  - `/Game/FactoryDistrict/Meshes/Pipes_Stack_B`
+  - `/Game/FactoryDistrict/Meshes/Pipes_Stack_C`
+- `Building_TypeD_A` 是大面积建筑网格，包含多个材质槽。后续治理已经逐项保存并复查候选资产；这份列表只保留为根因定位记录，不能继续当作当前未处理清单。此类资产启用 Nanite 时仍必须验证透明材质、碰撞、Fallback Mesh 和画面，不能批量盲开。
+
+### 11.2 工具与命令边界
+
+| 工具或命令 | 正确用途 | 不能证明的内容 |
+|---|---|---|
+| `r.Nanite 0` | 全局关闭 Nanite 做 A/B，观察问题是否随更多网格进入非 Nanite 路径而变化 | 不能作为修复；当前警告本来就来自非 Nanite 路径 |
+| `stat Nanite` | 查看 Nanite CPU 统计组 | 不能直接给出哪个非 Nanite Primitive 覆盖了最多 VSM 页面 |
+| `NaniteStats VirtualShadowMaps` | 查看 Nanite/VSM GPU 统计 | 不能替代具体 Primitive 诊断 |
+| Unreal Insights | 对比 GPU、RHI、Shadow/VSM Pass 时间和 CPU 提交成本 | 只有 Pass 成本，没有自动给出问题资产名单 |
+| `r.Shadow.Virtual.NonNanite.NumPageAreaDiagSlots 16` | 启用覆盖页面最多的非 Nanite Primitive 诊断 | 仅用于诊断，不应作为 Shipping 配置 |
+| `r.Shadow.Virtual.NonNanite.LargeInstancePageAreaThreshold 1` | 降低诊断阈值，配合日志输出 Actor 和组件名称 | 阈值过低会产生大量日志，只用于短时固定机位测试 |
+
+`r.Shadow.Virtual.NonNanite.MaxCulledInstanceAllocationSize` 对应另一条可见实例缓冲区溢出，不是本项目的 Marking Job Queue，不能用扩大该数值掩盖问题。
+
+### 11.3 治理顺序
+
+1. 固定地图、机位、分辨率和光照，启用页覆盖诊断，记录排名靠前的 Actor 与组件。
+2. 优先处理大面积、Opaque、静态的建筑和管线网格；逐个启用 Nanite，并验证材质、碰撞、Fallback Mesh 和视觉结果。
+3. 对纯装饰或远景组件关闭不必要的动态阴影，设置合理的距离裁剪；对必须保留非 Nanite 的资源补齐 LOD，并收紧 Bounds。
+4. 以 `r.Shadow.Virtual.NonNanite.IncludeInCoarsePages 0` 做单变量 A/B。若 Shadow/VSM 成本明显下降，再检查体积雾和前向半透明是否仍正确，确认后才考虑固化配置。
+5. 对远距离敌人和死亡尸体按距离关闭阴影，避免多波次持续增加非 Nanite 动态阴影成本。
+6. 每次只修改一类资源，复测警告、GPU Frame、ShadowDepths/VSM Pass 和画面截图。
+
+### 11.4 当前完成边界
+
+当前已经完成根因分类、引擎源码机制确认、页覆盖诊断、首批大面积场景资产治理、敌人阴影距离分级和三组单变量实验：
+
+- `IncludeInCoarsePages = 0`：80 敌人档不再出现队列警告，但平均 FPS 从 `55.19` 降到 `45.79`，Render Thread 从 `17.378 ms` 增至 `20.690 ms`。性能回退明显，因此不固化。
+- `DynamicCoarsePagePixelThreshold = 32 / 64`：两档仍各出现 1 次队列警告，不能解决问题。
+- `r.Shadow.RadiusThreshold = 0.02 / 0.03`：两档仍各出现 1 次队列警告，不能解决问题。
+
+项目配置只保留 `r.Shadow.Virtual.Enable=1`，没有写入实验性全局 CVar。正式五档矩阵共出现 1 次 VSM 队列警告；多组 80 敌人后续实验也各出现 1 次。当前只能证明警告没有形成连续刷屏或崩溃，但它仍可复现；缺少治理前后的多次同条件统计，不能虚构“频率下降”的结论。
+
+封板决策是保留默认渲染路径，接受当前单次但可复现的警告风险，不通过扩大队列或全局关闭粗页掩盖问题。若未来扩大到常态 80 个以上同屏敌人，应继续按诊断排名拆分大面积非 Nanite 阴影投射物，并对固定机位运行多次 A/B 取中位数。
+
+## 12. 2026-08-16 最终固定规模矩阵
+
+### 12.1 测试条件
+
+- Development Editor 独立进程。
+- 地图：`/Game/FactoryDistrict/Maps/Demonstration`。
+- 分辨率：1600 x 900，VSync 关闭。
+- 每档预热 10 秒，采样约 30 秒。
+- 固定敌人数：`10 / 20 / 40 / 80 / 160`。
+- 采样期间玩家无敌，排除玩家死亡和波次切换干扰。
+- 每档使用独立进程，成功达到目标敌人数后才开始采样。
+
+### 12.2 核心结果
+
+| 敌人数 | 平均 FPS | 平均帧时间 | P95 | P99 | Game Thread | Render Thread | GPU | CharacterMovement | Animation | Draw Calls |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 62.84 | 15.914 ms | 19.706 ms | 21.244 ms | 4.299 ms | 15.150 ms | 8.785 ms | 0.429 ms | 0.650 ms | 1659 |
+| 20 | 61.15 | 16.352 ms | 19.909 ms | 21.950 ms | 5.879 ms | 15.642 ms | 9.189 ms | 0.745 ms | 0.977 ms | 1806 |
+| 40 | 61.02 | 16.389 ms | 19.632 ms | 21.362 ms | 8.471 ms | 15.736 ms | 9.915 ms | 1.501 ms | 1.517 ms | 2088 |
+| 80 | 55.20 | 18.115 ms | 21.076 ms | 22.547 ms | 16.106 ms | 17.355 ms | 11.591 ms | 3.231 ms | 2.728 ms | 2536 |
+| 160 | 35.83 | 27.907 ms | 32.459 ms | 34.273 ms | 27.899 ms | 14.182 ms | 14.205 ms | 6.188 ms | 4.448 ms | 3458 |
+
+### 12.3 结论与发布容量
+
+- 当前机器上的稳定玩法容量可按 **40 个活跃敌人、约 60 FPS** 表述。
+- 80 敌人是压力档，平均约 55 FPS；160 敌人是极限档，Game Thread 已成为明确瓶颈。
+- 从 10 增至 160 敌人时，CharacterMovement 从 `0.429 ms` 增至 `6.188 ms`，Animation 从 `0.650 ms` 增至 `4.448 ms`，两者仍是扩容优先级。
+- Pathfinding 不是主要成本；不能为了展示复杂度而优先重写 NavMesh 或自建线程池。
+- Wanted Mips 在五档约为 `105 MB`，所有档位 Texture Pool 警告均为 0。
+- 80 敌人档出现 1 次 VSM 队列警告；其余四档为 0。结合后续 80 敌人实验，结论是单次但可复现的残留，而非彻底修复。
+- 与 2026-07-31 的旧矩阵相比，本轮整体帧率更低，不能把 LOD 和运行时治理描述成已经带来净性能提升。当前版本增加了更完整的 AI、动画、生成和生命周期逻辑，后续如需做优化收益对比，必须从当前版本重新建立单变量前后基线。
+
+### 12.4 原始证据
+
+```text
+Saved/Profiling/FPS_FinalLOD_20260816/
+  CSV/
+  Logs/
+  Screenshots/
+  manifest.csv
+  summary.csv
+  summary.md
+
+Saved/Profiling/VSM_CoarsePages_AB_20260816/
+Saved/Profiling/VSM_DynamicThreshold_20260816/
+Saved/Profiling/VSM_RadiusThreshold_20260816/
+```
+
+关键截图另存于 `Docs/PerformanceEvidence/20260816`，用于代码仓库中的固定证据索引。
+
+### 12.5 80 敌人生命周期回收
+
+测试链路：
+
+```text
+80 个活跃敌人采样 10 秒
+-> 对全部敌人调用 ApplyDamage
+-> HealthComponent 提交死亡
+-> EnemyCharacter 停止 AI、Movement、攻击 Timer 和 Capsule
+-> Ragdoll + SetLifeSpan(30s)
+-> 等待 35 秒
+-> 再采样 5 秒
+```
+
+| 状态 | Enemy Actor | FPS | Frame | Game Thread | Render Thread | GPU | Movement | Animation | UObject |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 活体 | 80 | 44.96 | 22.242 ms | 18.110 ms | 19.392 ms | 10.528 ms | 3.705 ms | 2.915 ms | 50,763 |
+| 回收后 | 0 | 68.51 | 14.596 ms | 5.444 ms | 14.082 ms | 7.843 ms | 0.106 ms | 0.266 ms | 49,876 |
+
+结果：
+
+- 35 秒后敌人 Actor 与 GameMode 注册数均由 `80` 回到 `0`，证明死亡后的 LifeSpan 和注销链能够完成回收。
+- UObject 数量减少 `887`，Movement 与 Animation 成本接近回到场景基线。
+- 本轮 VSM 队列和 Texture Pool 警告均为 0；活体阶段仍有 41 条 CharacterMovement 最大迭代警告。
+- MemReport 的进程物理内存从 `3616.00 MB` 增至 `3676.34 MB`。分配器会保留已提交页面，MemReport 本身也会扰动工作集，因此不能用工作集没有立即下降推翻 Actor/UObject 回收，也不能宣称总进程内存下降。
+
+原始证据：
+
+```text
+Saved/Profiling/LifecycleCleanup_80_20260816/
+```
+
+## 13. 性能封口与发布验收边界
+
+### 13.1 已完成
+
+- 纹理驻留资源治理有前后 MemReport 数据，约减少 60 MB 纹理驻留开销。
+- 固定规模五档性能矩阵、日志、CSV 和截图完整。
+- 80 敌人死亡后等待 35 秒的生命周期测试完成，Actor、注册数和 UObject 均有回落证据。
+- 敌人 LOD、动画更新率、移动分级、阴影距离和死亡回收已进入当前版本。
+- VSM 根因、引擎机制、资产排名与三个全局 CVar 方案均有实测证据。
+- 实验性 VSM 配置没有写入项目，避免为了消除警告引入更大的渲染回退。
+- 生命周期测试的临时命令行入口已经移除，正式源码重新完成 Development Editor 编译；构建日志为 `Saved/Logs/FinalPerformanceClosure_Build.log`。
+
+### 13.2 暂缓项
+
+- 实际玩法蓝图仍需完成 PIE 回归，确认编译通过的节点在真实对象和时序下行为正确。
+- PIE 回归通过后再执行 Shipping Cook/Package。
+- Shipping 包生成后再执行 10 敌人启动、输入、射击、AI、胜负和自动退出冒烟测试。
+
+因此当前状态是：**性能证据与蓝图编译已经封口，发布验收尚未封口。** 发布验收剩余项是玩法回归、Shipping 打包和产物冒烟，不再与性能治理混在一起。

@@ -142,7 +142,24 @@ void AfpstrueEnemyCharacter::FaceTarget()
 
 void AfpstrueEnemyCharacter::UpdatePerformanceTier(float DistanceToTarget)
 {
-	if (!bEnableMovementUpdateTiering || bIsDead || bIsAttacking)
+	if (bIsDead)
+	{
+		return;
+	}
+
+	if (bEnableShadowDistanceTiering)
+	{
+		if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+		{
+			const bool bShouldCastShadow = DistanceToTarget < ShadowCullDistance;
+			if (CharacterMesh->CastShadow != bShouldCastShadow)
+			{
+				CharacterMesh->SetCastShadow(bShouldCastShadow);
+			}
+		}
+	}
+
+	if (!bEnableMovementUpdateTiering || bIsAttacking)
 	{
 		return;
 	}
@@ -548,7 +565,25 @@ void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* Da
 		return;
 	}
 
+	ApplyHitReactionImpulse();
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
+}
+
+void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
+{
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	if (Movement == nullptr || HitReactionImpulseStrength <= 0.0f || Movement->MovementMode == MOVE_None)
+	{
+		return;
+	}
+
+	FVector HitDirection(LastDamageDirection.X, LastDamageDirection.Y, 0.0f);
+	if (!HitDirection.Normalize())
+	{
+		return;
+	}
+
+	Movement->AddImpulse(HitDirection * HitReactionImpulseStrength, true);
 }
 
 void AfpstrueEnemyCharacter::HandleDeath()
@@ -581,6 +616,15 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	{
+		CharacterMesh->SetCollisionProfileName(TEXT("Ragdoll"));
+		CharacterMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		CharacterMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		CharacterMesh->SetEnableGravity(true);
+		CharacterMesh->SetSimulatePhysics(true);
 	}
 
 	OnEnemyDeathReported.Broadcast(this);

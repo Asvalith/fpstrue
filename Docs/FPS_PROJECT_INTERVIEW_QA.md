@@ -4,6 +4,7 @@
 > 引擎：Unreal Engine 5.5
 > 定位：C++ 单机 PvE FPS 作品集项目
 > 范围：以当前源码能够证明的高中频问题为主，不把网络、Co-op 或 GAS 描述成已实现功能。
+> 文档身份：面试演练题库；架构事实以 [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md) 为准，性能数字以 [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md) 为准。
 
 ## 1. 使用规则
 
@@ -24,8 +25,8 @@
 - 当前敌人 FSM 是 `Idle/Chase/Attack/Dead`，没有 Patrol 和 Retreat 状态。
 - 当前武器使用 Hitscan，项目保留了 Projectile 类型文件不代表主战斗链正在使用实体子弹。
 - 当前没有对象池。对象池只能作为大量生成销毁被 Profile 证明为热点后的候选方案。
-- 当前不能宣称 160 AI 稳定 60 FPS。旧基线中 160 AI 平均约 48.2 FPS。
-- 100 AI 最终验收与旧 160 AI 基线条件不完全相同，不能拿二者直接计算优化百分比。
+- 当前不能宣称 160 AI 稳定 60 FPS。最终矩阵中 160 敌人平均约 `35.83 FPS`，Game Thread 已成为明确瓶颈。
+- 当前机器上的玩法容量按 40 个活跃敌人约 60 FPS 表述；80/160 是压力档。旧矩阵与当前版本条件不同，不能跨版本计算优化百分比。
 
 ### 1.3 回答结构
 
@@ -62,12 +63,12 @@
 
 架构上，玩家 Character 只接收输入并转发武器请求，WeaponComponent 持有弹药和武器事务，HealthComponent 统一处理伤害和死亡，EnemyAIController 使用 Timer 驱动的 `Idle/Chase/Attack/Dead` FSM，SurroundManager 通过双环槽位和攻击令牌限制敌人扎堆。C++ 负责规则和状态，蓝图负责 Montage、HUD 和特效表现。
 
-项目的技术重点不是只把功能跑起来，而是处理攻击窗口漏检、重复伤害、换弹被动画打断、死亡和结算重复触发、群体 AI 扎堆以及性能误判。我对 10 到 160 个敌人做过固定场景采样。160 AI 时 Game Thread 为 `20.733 ms`，其中 CharacterMovement `6.920 ms`、Animation `3.190 ms`、Pathfinding 只有 `0.071 ms`，所以优化优先级放在移动和动画分级，而不是重写寻路。
+项目的技术重点不是只把功能跑起来，而是处理攻击窗口漏检、重复伤害、换弹被动画打断、死亡和结算重复触发、群体 AI 扎堆以及性能误判。我对 10 到 160 个敌人做过固定场景采样。最终矩阵中 40 敌人约 `61.02 FPS`，80 敌人约 `55.20 FPS`，160 敌人约 `35.83 FPS`；160 敌人时 CharacterMovement 为 `6.188 ms`、Animation 为 `4.448 ms`。结合早期子系统采样中 Pathfinding 远低于这两项的结果，优化优先级放在移动和动画分级，而不是重写寻路。
 
 **不要这样说：**
 
 - “160 个敌人稳定 60 FPS。”数据不支持。
-- “已经做了完整 GPU 优化。”目前只有基线、纹理资源治理和问题归因。
+- “已经做了完整 GPU 优化。”目前有 GPU 基线、纹理治理和 VSM 单变量实验，但没有所有渲染 Pass 的逐项优化。
 - “做了 Co-op 和 GAS。”当前工程没有这些实现。
 
 ### Q2. 你的项目架构如何划分，为什么弹药不放在 Character 里
@@ -263,19 +264,18 @@ StartGameMode
 
 **结论：** 160 AI 时主要瓶颈转到 Game Thread，规模相关热点首先是 CharacterMovement 和 Animation，不是 Pathfinding。
 
-**基线数据：**
+**最终矩阵的 160 敌人数据：**
 
-| 项目 | 160 AI 数据 |
+| 项目 | 160 敌人数据 |
 | --- | ---: |
-| 平均 FPS | 48.2 |
-| Frame Avg | 20.741 ms |
-| Frame P95 | 23.196 ms |
-| Game Thread | 20.733 ms |
-| Render Thread | 8.751 ms |
-| GPU | 16.916 ms |
-| CharacterMovement | 6.920 ms |
-| Animation | 3.190 ms |
-| Pathfinding | 0.071 ms |
+| 平均 FPS | 35.83 |
+| Frame Avg | 27.907 ms |
+| Frame P95 | 32.459 ms |
+| Game Thread | 27.899 ms |
+| Render Thread | 14.182 ms |
+| GPU | 14.205 ms |
+| CharacterMovement | 6.188 ms |
+| Animation | 4.448 ms |
 
 **定位过程：**
 
@@ -293,7 +293,7 @@ StartGameMode
 - 死亡后停止 AI、Movement、碰撞和无用更新。
 - 最后根据新的 Profile 决定是否继续处理材质、阴影和场景 Draw Call。
 
-**诚实边界：** 100 AI 最终验收 Frame Avg 为 `15.41 ms`、P95 为 `16.58 ms`，但它与旧 160 AI 的数量和部分测试条件不同，只能分别报告，不能计算成精确优化百分比。
+**诚实边界：** 最终矩阵证明的是当前容量和瓶颈迁移，不是某个优化项的净收益。当前没有同版本逐项关闭 LOD、URO 和 Movement 分级的全档 A/B，不能把旧矩阵和新矩阵直接相减。
 
 ### Q12. 这个项目最难的问题是什么
 
@@ -305,7 +305,7 @@ StartGameMode
 
 **方向二，性能瓶颈误判：**
 
-敌人多时直觉容易怪 NavMesh，但数据表明 Pathfinding 只有 `0.071 ms`，CharacterMovement 与 Animation 才是主要规模成本。真正困难的是固定测试条件、把帧时间拆到系统、接受直觉错误，并让优化顺序服从证据。
+敌人多时直觉容易怪 NavMesh。早期子系统采样中 Pathfinding 约 `0.071 ms`，明显低于 CharacterMovement 与 Animation；最终矩阵又确认后两项随敌人数持续增长。真正困难的是固定测试条件、把帧时间拆到系统、接受直觉错误，并让优化顺序服从证据。
 
 **回答重点：** 难点必须包含现象、错误假设、定位工具、最终方案、数据和仍未解决的边界，不能只说“这个系统代码很多”。
 
@@ -430,7 +430,7 @@ TryAttackTarget
 
 ### Q19. 大量敌人时 Draw Call 怎么处理
 
-**现有证据：** 10 AI 时 Draw Calls 约 `2099`，160 AI 时约 `3537`。场景本身已有约两千个 Draw Call，敌人的 SkeletalMesh、材质 Pass 和阴影又随数量增加。
+**现有证据：** 最终矩阵中 10 敌人 Draw Calls 约 `1659`，160 敌人约 `3458`。场景本身已有较高的固定提交成本，敌人的 SkeletalMesh、材质 Pass 和阴影又随数量增加。
 
 **定位顺序：**
 
@@ -459,6 +459,7 @@ TryAttackTarget
 - 敌人死亡和 Destroyed 两条路径都可注销，但 Set Remove 保证只处理一次。
 - AIController、EnemyCharacter、WeaponComponent 和 HealthComponent 在 Stop/Death/EndPlay 中清 Timer 和 Delegate。
 - 敌人死亡后停止 Movement、碰撞和 AI，并按 LifeSpan 销毁。
+- 80 敌人统一死亡后等待 35 秒，Enemy Actor 与 GameMode 注册数由 80 回到 0，UObject 由 50,763 降到 49,876；这证明当前回收链可完成，但不能代替连续多波次长期审计。
 
 **强引用与弱引用：** `TObjectPtr` 配合 UPROPERTY 表达 UObject 强引用；`TWeakObjectPtr` 不阻止对象被回收，使用前必须检查有效性。弱引用解决悬空和生命周期延长问题，不等于自动清除容器中的无效条目。
 
@@ -476,21 +477,21 @@ TryAttackTarget
 - Texture Memory Used 从 `288.586 MB` 降至 `228.906 MB`。
 - P95 没有明显变化，因此收益是资源预算余量，不是帧率提升。
 
-**VSM 后续方向：** 使用 GPU Profile 和 VSM 统计找出大面积、动态、非 Nanite 的阴影投射者，评估距离、LOD、阴影策略、死亡尸体阴影和资产 Nanite 适配。当前只完成问题分类，不能宣称 VSM 警告已经修复。
+**VSM 当前结论：** 已完成根因分类、页覆盖诊断、首批大面积资产治理、敌人阴影距离分级，以及粗页开关、动态粗页阈值和阴影半径阈值的单变量实验。`IncludeInCoarsePages = 0` 虽消除该次警告，却让平均 FPS 从 `55.19` 降到 `45.79`，因此没有固化。80 敌人实验仍会单次复现队列警告，当前是接受残留风险，不能宣称彻底修复。
 
-### Q22. UI 为什么使用事件驱动，为什么初始值可能是 0
+### Q22. UI 为什么初始值可能是 0，为什么当前仍保留文字绑定
 
-**结论：** HUD 的血量、弹药、波次和倒计时只在数据变化时更新，不需要每帧 Cast 和读取；但事件驱动必须补一次初始快照。
+**结论：** C++ 已提供变化事件，长期方案应是“初始快照 + 增量事件”；但当前封板版本的剩余时间仍沿用已有 UMG Text Binding。本轮优先保证运行闭环，不把计划中的事件驱动重构冒充为已完成。
 
-**当前事件：**
+**已有事件接口：**
 
 - HealthComponent：`OnHealthChanged`。
 - WeaponComponent：`OnAmmoChanged` 和武器状态事件。
 - GameMode：`OnRemainingTimeChanged`、`OnWaveChanged`、`OnAliveEnemyCountChanged`、`OnGameResult`。
 
-**初始显示为 0 的原因：** Component 或 GameMode 可能在 Widget 创建前已经广播第一次值，晚绑定的 Widget 不会自动收到历史事件。
+**初始显示为 0 的原因：** Event 方案中，Widget 可能错过创建前的第一次广播；当前 Text Binding 方案中，常见根因是 Cast 没有接入白色执行链、Target 误接 `self`，或使用了 `ToText(Object)`。
 
-**正确初始化：** Widget 创建后先读取 `GetCurrentHealth/GetRemainingTime/GetCurrentAmmo` 等快照，再订阅变化事件；或者由统一 Initialize/Snapshot 接口完成。不要改成 Tick 轮询来掩盖绑定时序问题。
+**当前修复：** 绑定函数执行 `Get Game Mode -> Cast -> Get Remaining Time -> ToText(Integer) -> Return`。发布后若统一改为事件驱动，应先读取 `GetCurrentHealth/GetRemainingTime/GetCurrentAmmo` 快照，再订阅变化事件，并一次性删除旧 Binding，不能两套更新路径并存。
 
 ### Q23. 当前架构还有哪些问题
 
@@ -499,9 +500,9 @@ TryAttackTarget
 1. **命中对象耦合。** WeaponComponent 直接 Cast EnemyCharacter，应该抽象 Damageable/HitZone 契约。
 2. **同帧胜负不确定。** 玩家死亡和时间归零的先后可能决定结果，应统一结果评估入口和优先级。
 3. **初始快照时序。** HealthComponent 在 Owner 监听者绑定前可能已广播初始化生命，需要明确 Snapshot 流程。
-4. **换弹蓝图回归未完全闭环。** C++ 事务已有保护，还需验证 Montage Interrupted/BlendOut/死亡/切枪。
-5. **性能 A/B 条件不完全统一。** 需要固定机位和 UI，重复运行 20/40/80/100/160 AI 并报告中位数与 P95。
-6. **VSM 只完成归因。** 仍缺具体阴影投射资产和 GPU Pass 的定量治理。
+4. **编译通过不等于玩法通过。** 两个零引用旧模板 Widget 已清理且全量蓝图编译为 0 Error，但仍要统一回归换弹中断、死亡、UI、胜负和重启。
+5. **缺少同版本逐项 A/B。** 最终五档矩阵已经建立当前容量，但 LOD/URO/Movement 分级没有逐项关闭后的全档对照。
+6. **VSM 仍有残留。** 已完成归因和三组单变量实验，但 80 敌人档仍可能出现单次队列警告。
 
 **中期扩展：**
 
@@ -514,12 +515,12 @@ TryAttackTarget
 
 **回答：** 我不会先选听起来更高级的技术，而是先补齐证据缺口。
 
-1. 用相同关卡、机位、配置和敌人数重跑 CPU A/B，至少三次，记录 Avg/P95/P99。
+1. 先完成实际玩法蓝图回归，再执行 Shipping 打包和产物冒烟测试；全量蓝图编译已经通过。
 2. 增加 AI Decision Count、Move Request Count、攻击令牌等待时间和攻击响应延迟统计。
-3. 对 80/100/160 AI 分别确认 Movement、Animation、Draw 和 GPU 的瓶颈迁移。
-4. 对远距离 Movement/Animation 分级做画质与行为正确性回归。
-5. 用 ProfileGPU 定位 VSM、Shadow Depth、Lumen 和材质 Pass，再决定资产或渲染设置调整。
-6. 做连续波次对象数量与内存回落审计，确认是否真的需要对象池。
+3. 如需证明优化收益，在当前版本逐项关闭 Movement/Animation 分级，按 10/20/40/80/160 重跑至少三次并报告中位数、P95 和 P99。
+4. 对远距离 Movement/Animation 分级做画质、攻击窗口和行为正确性回归。
+5. 继续按页覆盖排名治理大面积非 Nanite 阴影投射物，并用 ProfileGPU 验证 Shadow/VSM 成本。
+6. 做连续多波次对象数量与内存回落审计，确认是否真的需要对象池。
 
 **停止条件：** 达到目标平台帧预算后停止继续牺牲动画响应和画质。优化目标是满足预算，不是让所有统计数字无限降低。
 
@@ -578,6 +579,24 @@ Timeline 在 Game Thread 更新混合权重，渲染器汇总相机、组件和 
 SSAO 使用当前屏幕的 Scene Depth 与 GBuffer Normal 估计局部环境光遮蔽，通常在最终调色前参与环境/间接光观感。它只能看到屏幕已有信息，因此会遇到屏幕边缘消失、屏幕外遮挡缺失、薄物体厚度未知和 Halo 等问题。Radius、Intensity 和 Quality 会在接触层次、伪影与 GPU 成本之间取舍。
 
 如果要求加入项目，先做固定机位 `Off/On`、`Visualize Ambient Occlusion` 和 ProfileGPU A/B，再检查当前 Lumen 配置是否已经提供相关遮蔽，避免重复加深和重复付费。
+
+### Q30. UE 的 GC 和 C++ 析构是什么关系
+
+**回答：** 普通 C++ 对象由作用域、RAII 和明确所有权管理；UObject 由 UE 的引用图和 GC 管理，两者不能混用。Actor 调用 `Destroy` 后先退出 World 生命周期并执行 `EndPlay`，不是立刻 `delete`；失去可达强引用后，才由后续 GC 完成 UObject 销毁和内存回收。
+
+项目中的 Timer、Delegate、AI 槽位、攻击窗口和 GameMode 注册必须在 Death/Stop/`EndPlay` 中幂等清理，不能等析构函数。成员 UObject 强持有使用 `UPROPERTY` + `TObjectPtr`，观察关系使用 `TWeakObjectPtr` 并在使用前检查有效性。手动 `CollectGarbage` 不是关闭 Widget 或销毁尸体的常规方案，因为会带来停顿。
+
+### Q31. 波次生成是否应该自建线程池并异步加载
+
+**回答：** 不先自建线程池。资源预取应优先使用 `UAssetManager`、`FStreamableManager` 和软引用，让 UE 的异步加载系统处理 IO；加载完成后回到安全线程，再用 Timer 分批 `SpawnActor`。Worker Thread 只处理纯数据，不能任意修改 UObject、World 或碰撞场景。
+
+当前基线没有证明波次切换存在加载尖峰，高敌人数的主要成本是 CharacterMovement、Animation 和 VSM，因此异步加载不会直接解决当前瓶颈。只有 Insights 显示 Game Thread 等待 IO、首次资源加载或组件创建影响 P95/P99 时，才把敌人类、Montage、Niagara 和音效改成软引用预取，并处理取消、失败回退和 Handle 生命周期。
+
+### Q32. 多敌人交互是不是项目的优化亮点
+
+**回答：** 它不是一个孤立算法，而是综合压力场景和治理链。敌人数量增加会同时放大 AI 决策、NavMesh 跟随、CharacterMovement、包围与攻击竞争、骨骼动画、阴影、Ragdoll、GameMode 注册和 GC 回落问题。
+
+当前项目已经使用 Timer FSM、距离决策分级、MoveTo/NavMesh、SurroundManager 槽位、Movement 降频、URO、可见性动画策略、四级骨骼 LOD、远距离阴影关闭和死亡生命周期清理。正确亮点是：用 `10/20/40/80/160` 固定矩阵定位瓶颈，再按系统治理并回归正确性；不是简单地说“支持很多敌人”。对象池、异步加载和 Animation Budget Allocator 仍是由数据触发的后续方案。
 
 ## 6. 模拟面试追问链
 
@@ -656,25 +675,26 @@ PostProcessComponent 在哪里创建
 | 数据 | 正确表述 |
 | --- | --- |
 | 60 FPS 预算 | 每帧约 `16.67 ms` |
-| 160 AI Frame Avg | `20.741 ms`，约 48.2 FPS |
-| 160 AI Frame P95 | `23.196 ms` |
-| 160 AI Game Thread | `20.733 ms` |
-| 160 AI CharacterMovement | `6.920 ms` |
-| 160 AI Animation | `3.190 ms` |
-| 160 AI Pathfinding | `0.071 ms` |
-| 100 AI 最终验收 | Frame Avg `15.41 ms`，P95 `16.58 ms` |
-| Draw Calls | 约 `2099 -> 3537`，随敌人规模增加 |
+| 40 敌人 | `61.02 FPS`，Frame Avg `16.389 ms`，当前玩法容量口径 |
+| 80 敌人 | `55.20 FPS`，Frame Avg `18.115 ms`，P95 `21.076 ms` |
+| 160 敌人 | `35.83 FPS`，Frame Avg `27.907 ms`，P95 `32.459 ms` |
+| 160 敌人 Game Thread | `27.899 ms` |
+| 160 敌人 CharacterMovement | `6.188 ms` |
+| 160 敌人 Animation | `4.448 ms` |
+| Draw Calls | `1659 -> 3458`，从 10 增至 160 敌人 |
 | Streaming 占用 | `212.27 MB -> 152.27 MB`，减少约 60 MB/28.3% |
 | Texture Memory Used | `288.586 MB -> 228.906 MB` |
+| 生命周期回收 | 80 个 Enemy Actor 和注册数回到 0，UObject 减少 887 |
+| VSM 残留 | 正式矩阵仅 80 敌人档出现 1 次；后续 80 敌人实验仍可单次复现 |
 
 ## 8. 参考入口
 
 ### 项目证据
 
-- `Source/fpstrue/PERFORMANCE_BASELINE.md`
+- `Docs/PERFORMANCE_BASELINE.md`
 - `Docs/FPS_Core_Technical_Summary.md`
-- `Source/fpstrue/CPP_BLUEPRINT_BOUNDARY.md`
-- `Source/fpstrue/AI_OPTIMIZATION_DECISION_RECORD.md`
+- `Docs/PROJECT_TASK_CHECKLIST.md`（当前 C++/蓝图边界与接线）
+- `Docs/Archive/AI_OPTIMIZATION_DECISION_RECORD.md`（历史决策原文）
 - `Source/fpstrue/fpstrueCharacter.cpp`
 - `Source/fpstrue/fpstrueWeaponComponent.cpp`
 - `Source/fpstrue/fpstrueHealthComponent.cpp`

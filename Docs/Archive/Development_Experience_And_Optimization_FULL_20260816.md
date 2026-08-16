@@ -1,10 +1,14 @@
 # FPS 开发经历与技术取舍复盘
 
+> 文档身份：问题与实验复盘，保留历史过程，不承担当前任务或性能数字的唯一维护。
+>
+> 同步状态：2026-08-16。本文已归档；当前架构见 [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md)，最新定量结果见 [PERFORMANCE_BASELINE.md](../PERFORMANCE_BASELINE.md)。
+>
 > 用途：面试中讨论开发过程、Bug、方案比较和后续优化。
 >
 > 规则：只把代码已经实现并验证过的内容说成“做过”；没有性能数据的内容只能说成“发现的风险、准备验证的方案”。
 >
-> 当前架构、设计模式和模拟面试的唯一正文见 [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md)。本文只保留经历与证据，避免重复维护。
+> 当前架构、设计模式和模拟面试的唯一正文见 [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md)。本文只保留经历与证据，避免重复维护。
 
 ## 1. 如何讲一个开发经历
 
@@ -734,9 +738,9 @@ Baseline
 
 ## 14. 关联文档
 
-- [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md)
-- [Health_And_Damage_System.md](Health_And_Damage_System.md)
-- [Enemy_Attack_Window.md](Enemy_Attack_Window.md)
+- [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md)
+- [Health_And_Damage_System_PRE_MERGE.md](Health_And_Damage_System_PRE_MERGE.md)
+- [Enemy_Attack_Window_PRE_MERGE.md](Enemy_Attack_Window_PRE_MERGE.md)
 - [Unreal Insights 官方文档](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-insights-in-unreal-engine)
 - [Animation Optimization 官方文档](https://dev.epicgames.com/documentation/unreal-engine/animation-optimization-in-unreal-engine)
 - [Animation Budget Allocator 官方文档](https://dev.epicgames.com/documentation/en-us/unreal-engine/animation-budget-allocator-in-unreal-engine)
@@ -1196,6 +1200,8 @@ UE 5.5 Development Editor 构建成功。
 
 ## 23. 100 AI 与纹理资源封版实验
 
+> 历史实验说明：本章保留 100 AI 与纹理治理的发现过程。当前容量口径已经由 2026-08-16 的 `10 / 20 / 40 / 80 / 160` 最终矩阵取代，见 [PERFORMANCE_BASELINE.md](../PERFORMANCE_BASELINE.md) 第 12 节。
+
 ### 23.1 实验目的与条件
 
 本轮只回答三个问题：
@@ -1439,7 +1445,7 @@ MakeUniformSpreadDirection(Forward, SpreadAngle)
 
 ## 25. 架构内容已合并
 
-架构重构过程、权威所有权、通信方式、设计模式和条件变化题已经统一到 [FPS_Core_Technical_Summary.md](FPS_Core_Technical_Summary.md) 第 13、15、22 章。本文件只保留开发经历、Bug、实验过程和原始优化证据，避免同一架构结论维护两份。
+架构重构过程、权威所有权、通信方式、设计模式和条件变化题已经统一到 [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md) 第 13、15、22 章。本文件只保留开发经历、Bug、实验过程和原始优化证据，避免同一架构结论维护两份。
 
 ## 26. 2026-08-14 运行链路联调与排障记录
 
@@ -1735,3 +1741,35 @@ Visual Studio 出现 LNK1104 或 Build.bat 退出码 6 时，先检查 UnrealEdi
 - 胜利和失败两个结果都要验证文字、颜色、鼠标、输入模式和重新开始。
 - `mainmenu` 的测试 Print 删除后要重新运行并确认日志不再出现。
 - 资产级蓝图和 Montage 无法由源码静态检查证明正确，必须保存后进行 PIE 回归。
+
+## 27. 封板性能收尾：生成尖峰与尸体预算
+
+### 27.1 问题
+
+基线中整波生成的 Actor Spawning 最大值达到 `10.719 ms`。原实现用一个 `for` 循环在同一帧创建全部敌人，组件注册、Skeletal Mesh、AnimInstance、Controller 和导航初始化会集中到同一帧。100/160 敌人压测还暴露了固定 300 cm 半径无法容纳大量胶囊体的问题，失败后继续同帧重试会同时制造卡顿和生成缺失。
+
+尸体原 C++ 默认保留 300 秒，超过当前 90 秒玩法时长。即使敌人已经从存活统计中移除，Ragdoll、Skeletal Mesh、碰撞和阴影仍会继续占用运行时预算。
+
+### 27.2 方案
+
+```text
+StartWave
+-> 打乱 SpawnPoint
+-> 建立待生成队列
+-> 立即生成 1 个
+-> 每 0.05 秒生成 1 个
+-> 队列结束、游戏结算或 EndPlay 时清理 Timer 和引用
+```
+
+出生点第一次使用原位置，后续复用时在 NavMesh 可达区域内采样。采样半径随复用次数按平方根增长，并限制最大 2000 cm。平方根增长对应“容纳数量增加时需要扩大可用面积”，同时避免半径线性增长导致敌人生成到过远区域。生成仍使用 `AdjustIfPossibleButDontSpawnIfColliding`，不选择 `AlwaysSpawn`，因为强行重叠只会把生成失败转换成角色解穿透和弹飞问题。
+
+尸体统一由 `SetLifeSpan` 回收，C++ 默认值改为 30 秒，蓝图类默认值仍可覆盖。当前不加入通用对象池：基线已经证明更明确的问题是同帧尖峰和生命周期过长，先用队列与预算解决；对象池会额外引入 Controller、Delegate、Timer、Health、Ragdoll 和动画状态的完整重置协议。
+
+### 27.3 证据边界
+
+- 正式源码已关闭热重载干扰并完成完整 Development Editor 编译，构建日志为 `Saved/Logs/FinalPerformanceClosure_Build.log`。
+- 分帧生成、30 秒尸体预算和运行时分级已进入最终 `10 / 20 / 40 / 80 / 160` 固定矩阵；当前容量按 40 个活跃敌人约 60 FPS 表述，80/160 只作为压力档。
+- 80 敌人生命周期测试中，等待 35 秒后 Enemy Actor 与 GameMode 注册数由 80 回到 0，UObject 减少 887；这证明对象链能够回收，但一次测试不能代替连续多波次的长期内存曲线。
+- VSM Non-Nanite 队列在 80 敌人实验中仍会单次复现。`IncludeInCoarsePages = 0` 虽消除该次警告，却造成明显 Render Thread 回退，因此没有固化实验 CVar，也不能宣称队列问题已经彻底解决。
+- 当前版本缺少逐项关闭 LOD、URO 和 Movement 分级的同版本全档 A/B，不能把旧矩阵与新矩阵差值包装成优化收益。
+- 蓝图全量编译仍被 `WB_Healthbar` 与 `WB_BaseButton` 阻塞；Shipping 打包和打包后冒烟测试属于发布验收，尚未完成。

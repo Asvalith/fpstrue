@@ -1,5 +1,7 @@
 # 敌人近战攻击窗口与连续剑刃检测
 
+> 文档身份：合并前的敌人近战时序与命中检测专题原文，已归档。AI 总体架构和当前完成度以 [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md) 为准。
+
 ## 1. 当前封板架构
 
 近战系统按“决策、时序、执行、生命”分层：
@@ -126,7 +128,7 @@ SweepMultiByObjectType(ECC_Pawn)
 6. `OnAttackLanded/Missed/Finished` 只播放反馈或收尾表现。
 7. 调试时临时打开 `bDrawAttackTrace`；验收后关闭，并备注为测试开关。
 
-更完整的接线顺序见 [BLUEPRINT_RUNTIME_WIRING_GUIDE.md](BLUEPRINT_RUNTIME_WIRING_GUIDE.md)。
+当前接线顺序见 [PROJECT_TASK_CHECKLIST.md](../PROJECT_TASK_CHECKLIST.md)。
 
 ## 8. 验收矩阵
 

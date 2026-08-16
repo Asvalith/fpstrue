@@ -10,10 +10,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
-#include "DrawDebugHelpers.h"
 #include "TimerManager.h"
-
-#define FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG 0
 
 namespace
 {
@@ -59,7 +56,6 @@ void UfpstrueWeaponComponent::StartFire()
 	{
 		if (bIsEquipped && bWeaponGameplayEnabled && CurrentAmmo <= 0)
 		{
-			OnWeaponDryFire.Broadcast();
 			RequestReload();
 		}
 		return;
@@ -71,7 +67,6 @@ void UfpstrueWeaponComponent::StartFire()
 	}
 
 	SetActionState(EFPWeaponActionState::Firing);
-	OnWeaponFireStarted.Broadcast();
 	Fire();
 
 	if (IsAutomatic() && ActionState == EFPWeaponActionState::Firing && HasAmmo())
@@ -96,14 +91,12 @@ void UfpstrueWeaponComponent::StopFire()
 		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
 	}
 
-	const bool bWasFiring = ActionState == EFPWeaponActionState::Firing;
 	ConsecutiveShotCount = 0;
 	LastShotTimeSeconds = -1.0;
 
-	if (bWasFiring)
+	if (ActionState == EFPWeaponActionState::Firing)
 	{
 		SetActionState(EFPWeaponActionState::Ready);
-		OnWeaponFireStopped.Broadcast();
 	}
 }
 
@@ -122,7 +115,6 @@ void UfpstrueWeaponComponent::Fire()
 
 	if (!CanFire())
 	{
-		OnWeaponDryFire.Broadcast();
 		StopFire();
 		RequestReload();
 		return;
@@ -146,7 +138,6 @@ void UfpstrueWeaponComponent::Fire()
 
 	if (!TryConsumeAmmo())
 	{
-		OnWeaponDryFire.Broadcast();
 		StopFire();
 		RequestReload();
 		return;
@@ -216,18 +207,6 @@ bool UfpstrueWeaponComponent::CommitReload()
 	CurrentAmmo += AmmoToLoad;
 	ReserveAmmo -= AmmoToLoad;
 	bReloadAmmoCommitted = true;
-	BroadcastAmmoChanged();
-	return true;
-}
-
-bool UfpstrueWeaponComponent::SetReloadPresentationDuration(float DurationSeconds)
-{
-	if (ActionState != EFPWeaponActionState::Reloading || DurationSeconds <= 0.0f)
-	{
-		return false;
-	}
-
-	ScheduleReloadTimeout(DurationSeconds);
 	return true;
 }
 
@@ -245,7 +224,6 @@ void UfpstrueWeaponComponent::FinishReload()
 	}
 
 	SetActionState(EFPWeaponActionState::Ready);
-	OnWeaponReloadFinished.Broadcast();
 }
 
 void UfpstrueWeaponComponent::CancelReload()
@@ -263,13 +241,10 @@ void UfpstrueWeaponComponent::CancelReload()
 	++ActiveReloadSequence;
 	bReloadAmmoCommitted = false;
 	SetActionState(EFPWeaponActionState::Ready);
-	OnWeaponReloadCanceled.Broadcast();
 }
 
 void UfpstrueWeaponComponent::HandleOwnerDeath()
 {
-	const bool bWasFiring = ActionState == EFPWeaponActionState::Firing;
-	const bool bWasReloading = ActionState == EFPWeaponActionState::Reloading;
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
@@ -285,15 +260,6 @@ void UfpstrueWeaponComponent::HandleOwnerDeath()
 	AccumulatedRecoilYaw = 0.0f;
 	bWeaponGameplayEnabled = false;
 	SetActionState(EFPWeaponActionState::Disabled);
-
-	if (bWasFiring)
-	{
-		OnWeaponFireStopped.Broadcast();
-	}
-	if (bWasReloading)
-	{
-		OnWeaponReloadCanceled.Broadcast();
-	}
 }
 
 bool UfpstrueWeaponComponent::TryConsumeAmmo()
@@ -304,7 +270,6 @@ bool UfpstrueWeaponComponent::TryConsumeAmmo()
 	}
 
 	--CurrentAmmo;
-	BroadcastAmmoChanged();
 	return true;
 }
 
@@ -329,7 +294,6 @@ void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
 	}
 
 	ActionState = NewState;
-	OnWeaponActionStateChanged.Broadcast(ActionState);
 }
 
 void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
@@ -358,11 +322,6 @@ void UfpstrueWeaponComponent::HandleReloadTimeout(int32 ReloadSequence)
 	}
 
 	FinishReload();
-}
-
-void UfpstrueWeaponComponent::BroadcastAmmoChanged()
-{
-	OnAmmoChanged.Broadcast(CurrentAmmo, MagazineSize, ReserveAmmo);
 }
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
@@ -415,39 +374,8 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
 
-#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
-	if (bShowDebugTrace)
-	{
-		DrawDebugLine(
-			World,
-			Start,
-			TraceTarget,
-			bHit ? FColor::Green : FColor::Red,
-			false,
-			1.0f,
-			0,
-			0.0f
-		);
-	}
-#endif
-
 	if (bHit)
 	{
-#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
-		if (bShowDebugTrace)
-		{
-			DrawDebugSphere(
-				World,
-				HitResult.ImpactPoint,
-				8.0f,
-				12,
-				FColor::Yellow,
-				false,
-				1.0f
-			);
-		}
-#endif
-
 		// TODO: Use a generic damageable contract; hit-zone rules should not require the enemy character class.
 		if (AfpstrueEnemyCharacter* HitEnemy = Cast<AfpstrueEnemyCharacter>(HitResult.GetActor()))
 		{
@@ -477,30 +405,7 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 				}
 			}
 		}
-
-#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
-		if (bShowDebugTrace && GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(
-				7,
-				1.0f,
-				FColor::Yellow,
-				FString::Printf(TEXT("Hit: %s"), *GetNameSafe(HitResult.GetActor()))
-			);
-		}
-#endif
 	}
-#if FPSTRUE_ENABLE_TEST_WEAPON_TRACE_DEBUG
-	else if (bShowDebugTrace && GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(
-			7,
-			1.0f,
-			FColor::Red,
-			TEXT("LineTrace missed")
-		);
-	}
-#endif
 }
 
 void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
@@ -738,7 +643,6 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	InitializeRuntimeState();
 	SetActionState(EFPWeaponActionState::Ready);
 	Character->SetEquippedWeaponComponent(this);
-	BroadcastAmmoChanged();
 
 	return true;
 }

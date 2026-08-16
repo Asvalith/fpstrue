@@ -1,5 +1,9 @@
 # 蓝图运行闭环接线指南
 
+> 文档身份：2026-08-16 合并前蓝图接线原文，已归档。当前接线与 PIE 回归只看 [PROJECT_TASK_CHECKLIST.md](../PROJECT_TASK_CHECKLIST.md)。
+>
+> 当前门禁：先修复 `WB_Healthbar` 与 `WB_BaseButton`，使 `Compile All Blueprints` 达到 0 Error，再按本文回归完整玩法。
+
 本文只整理编辑器中必须完成的资产配置和蓝图接线。Gameplay 状态与伤害规则已经由 C++ 持有，蓝图不要再复制第二套 Timer、弹药或伤害逻辑。
 
 ## 1. 先确认实际运行资产

@@ -1,5 +1,7 @@
 # FPS C++ 与蓝图职责边界
 
+> 文档身份：合并前的职责所有权速查表。当前接线见 [PROJECT_TASK_CHECKLIST.md](../PROJECT_TASK_CHECKLIST.md)，项目总架构见 [FPS_Core_Technical_Summary.md](../FPS_Core_Technical_Summary.md)。
+
 ## C++ 负责
 
 - Character 统一进行 Enhanced Input 绑定、Mapping Context 生命周期管理以及移动、视角、冲刺、瞄准、开火和换弹意图转发。

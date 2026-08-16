@@ -99,6 +99,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn", meta = (ClampMin = "0.0"))
 	float ReusedSpawnPointRadius = 300.0f;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn", meta = (ClampMin = "300.0"))
+	float MaxReusedSpawnPointRadius = 2000.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn", meta = (ClampMin = "0.01"))
+	float SpawnInterval = 0.05f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Time", meta = (ClampMin = "1"))
 	int32 GameDuration = 90;
 
@@ -110,7 +116,9 @@ private:
 	int32 GetEnemyCountForWave(int32 WaveNumber) const;
 	TSubclassOf<AfpstrueEnemyCharacter> GetEnemyClassForWave(int32 WaveNumber) const;
 	void SpawnCurrentWave();
-	void SpawnEnemyAtPoint(AActor* SpawnPoint, bool bUseNearbyLocation, TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass);
+	void SpawnNextQueuedEnemy();
+	void ClearSpawnQueue();
+	bool SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReuseCount, TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass);
 	bool RegisterEnemy(AfpstrueEnemyCharacter* Enemy);
 	bool UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount);
 	void StopActiveEnemies();
@@ -122,8 +130,10 @@ private:
 	void FinishGame(bool bPlayerWon);
 	void ClearGameplayTimers();
 	void BeginAutomatedBenchmark();
+	void WaitForAutomatedBenchmarkReady();
 	void StartAutomatedBenchmarkCapture();
 	void StopAutomatedBenchmarkCapture();
+	void ExitAutomatedBenchmark();
 	int32 GetBenchmarkEnemyCount() const;
 
 	UFUNCTION()
@@ -141,18 +151,31 @@ private:
 	UPROPERTY()
 	AfpstrueCharacter* PlayerCharacter = nullptr;
 
+	UPROPERTY()
+	TArray<AActor*> QueuedSpawnPoints;
+
+	UPROPERTY()
+	TSubclassOf<AfpstrueEnemyCharacter> QueuedEnemyClass;
+
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
 	int32 CurrentWave = 0;
 	int32 AliveEnemyCount = 0;
 	int32 RemainingTime = 0;
+	int32 PendingEnemySpawnCount = 0;
+	int32 NextQueuedSpawnIndex = 0;
+	int32 ConsecutiveSpawnFailureCount = 0;
 	bool bGameRunning = false;
 	bool bGameEnded = false;
 
 	FTimerHandle CountdownTimerHandle;
 	FTimerHandle WaveTimerHandle;
+	FTimerHandle SpawnTimerHandle;
+	FTimerHandle BenchmarkReadyTimerHandle;
 	FTimerHandle BenchmarkStartTimerHandle;
 	FTimerHandle BenchmarkStopTimerHandle;
+	FTimerHandle BenchmarkExitTimerHandle;
+	float AutomatedBenchmarkWarmup = 10.0f;
 	float AutomatedBenchmarkDuration = 30.0f;
 };
 

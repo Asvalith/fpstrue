@@ -24,13 +24,6 @@ enum class EFPWeaponActionState : uint8
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponReloadEvent, bool, bWasEmptyReload);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponActionStateChanged, EFPWeaponActionState, NewState);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
-	FFPAmmoChanged,
-	int32, CurrentAmmo,
-	int32, MagazineSize,
-	int32, ReserveAmmo
-);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
 	FWeaponTraceEvent,
 	bool, bHit,
@@ -51,23 +44,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Config")
 	TObjectPtr<UfpstrueWeaponDataAsset> WeaponData;
 
-	UFUNCTION(BlueprintPure, Category = "Weapon|Config")
 	UfpstrueWeaponDataAsset* GetWeaponData() const { return WeaponData; }
 
-	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
 
 	void StartFire();
 	void StopFire();
 
-	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool RequestReload();
 
-	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool CommitReload();
-
-	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
-	bool SetReloadPresentationDuration(float DurationSeconds);
 
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void FinishReload();
@@ -75,66 +61,31 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReload();
 
-	// Compatibility entry for existing Blueprints. Input cadence is now owned by this component.
-	UFUNCTION(BlueprintCallable, Category = "Weapon", meta = (DeprecatedFunction, DeprecationMessage = "Remove Blueprint fire timers and let WeaponComponent own fire cadence."))
-	void Fire();
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsEquipped() const { return bIsEquipped; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsReloading() const { return ActionState == EFPWeaponActionState::Reloading; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsFiring() const { return ActionState == EFPWeaponActionState::Firing; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool HasAmmo() const { return CurrentAmmo > 0; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool CanFire() const;
 
-	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	bool CanReload() const;
 
-	UFUNCTION(BlueprintPure, Category = "Weapon")
 	EFPWeaponActionState GetActionState() const { return ActionState; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetCurrentAmmo() const { return CurrentAmmo; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetMagazineSize() const { return MagazineSize; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetReserveAmmo() const { return ReserveAmmo; }
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FFPAmmoChanged OnAmmoChanged;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponActionStateChanged OnWeaponActionStateChanged;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponFireStarted;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponFireStopped;
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FWeaponFireEvent OnWeaponFirePerformed;
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponDryFire;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FWeaponReloadEvent OnWeaponReloadStarted;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponReloadFinished;
-
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
-	FWeaponFireEvent OnWeaponReloadCanceled;
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FWeaponTraceEvent OnWeaponTraceFinished;
@@ -195,19 +146,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.0"))
 	float ReloadCompletionGracePeriod = 0.1f;
 
-	UPROPERTY(EditAnywhere, Category = "Weapon|Debug")
-	bool bShowDebugTrace = false;
-
 protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	void Fire();
 	bool TryConsumeAmmo();
 	void InitializeRuntimeState();
 	void SetActionState(EFPWeaponActionState NewState);
 	void ScheduleReloadTimeout(float DurationSeconds);
 	void HandleReloadTimeout(int32 ReloadSequence);
-	void BroadcastAmmoChanged();
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
 	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle);
 	void ApplyRecoil(APlayerController* PlayerController);

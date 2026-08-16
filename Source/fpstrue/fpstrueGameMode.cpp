@@ -18,7 +18,6 @@
 #include "Misc/Parse.h"
 #include "NavigationSystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-#include "UObject/ConstructorHelpers.h"
 
 DEFINE_STAT(STAT_fpstrueWaveSpawnTime);
 DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
@@ -26,8 +25,6 @@ DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
 AfpstrueGameMode::AfpstrueGameMode()
 	: Super()
 {
-	static ConstructorHelpers::FClassFinder<APawn> PlayerPawnClassFinder(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter"));
-	DefaultPawnClass = PlayerPawnClassFinder.Class;
 	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
 }
 
@@ -157,6 +154,18 @@ void AfpstrueGameMode::StartNextWave()
 		return;
 	}
 
+	if (PendingEnemySpawnCount > 0)
+	{
+		GetWorldTimerManager().SetTimer(
+			WaveTimerHandle,
+			this,
+			&AfpstrueGameMode::StartNextWave,
+			FMath::Max(SpawnInterval, 0.01f),
+			false
+		);
+		return;
+	}
+
 	++CurrentWave;
 	OnWaveChanged.Broadcast(CurrentWave, ConfiguredWaveCount);
 
@@ -251,46 +260,118 @@ void AfpstrueGameMode::SpawnCurrentWave()
 		return;
 	}
 
-	TArray<AActor*> ShuffledSpawnPoints = SpawnPoints;
-	for (int32 Index = ShuffledSpawnPoints.Num() - 1; Index > 0; --Index)
+	ClearSpawnQueue();
+	QueuedSpawnPoints = SpawnPoints;
+	for (int32 Index = QueuedSpawnPoints.Num() - 1; Index > 0; --Index)
 	{
 		const int32 SwapIndex = FMath::RandRange(0, Index);
-		ShuffledSpawnPoints.Swap(Index, SwapIndex);
+		QueuedSpawnPoints.Swap(Index, SwapIndex);
 	}
 
-	const int32 EnemiesThisWave = GetEnemyCountForWave(CurrentWave);
-	const TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass = GetEnemyClassForWave(CurrentWave);
-	for (int32 EnemyIndex = 0; EnemyIndex < EnemiesThisWave; ++EnemyIndex)
+	PendingEnemySpawnCount = GetEnemyCountForWave(CurrentWave);
+	QueuedEnemyClass = GetEnemyClassForWave(CurrentWave);
+	NextQueuedSpawnIndex = 0;
+	ConsecutiveSpawnFailureCount = 0;
+
+	SpawnNextQueuedEnemy();
+	if (PendingEnemySpawnCount > 0)
 	{
-		const int32 SpawnPointIndex = EnemyIndex % ShuffledSpawnPoints.Num();
-		const bool bUseNearbyLocation = EnemyIndex >= ShuffledSpawnPoints.Num();
-		SpawnEnemyAtPoint(ShuffledSpawnPoints[SpawnPointIndex], bUseNearbyLocation, WaveEnemyClass);
+		GetWorldTimerManager().SetTimer(
+			SpawnTimerHandle,
+			this,
+			&AfpstrueGameMode::SpawnNextQueuedEnemy,
+			FMath::Max(SpawnInterval, 0.01f),
+			true
+		);
 	}
 }
 
-void AfpstrueGameMode::SpawnEnemyAtPoint(
+void AfpstrueGameMode::SpawnNextQueuedEnemy()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_SpawnQueuedEnemy);
+	SCOPE_CYCLE_COUNTER(STAT_fpstrueWaveSpawnTime);
+
+	if (!bGameRunning
+		|| PendingEnemySpawnCount <= 0
+		|| QueuedSpawnPoints.IsEmpty()
+		|| !QueuedEnemyClass)
+	{
+		ClearSpawnQueue();
+		return;
+	}
+
+	const int32 SpawnPointCount = QueuedSpawnPoints.Num();
+	const int32 SpawnPointIndex = NextQueuedSpawnIndex % SpawnPointCount;
+	const int32 SpawnPointReuseCount = NextQueuedSpawnIndex / SpawnPointCount;
+	const bool bSpawnSucceeded = SpawnEnemyAtPoint(
+		QueuedSpawnPoints[SpawnPointIndex],
+		SpawnPointReuseCount,
+		QueuedEnemyClass
+	);
+
+	++NextQueuedSpawnIndex;
+	if (bSpawnSucceeded)
+	{
+		--PendingEnemySpawnCount;
+		ConsecutiveSpawnFailureCount = 0;
+	}
+	else
+	{
+		++ConsecutiveSpawnFailureCount;
+		const int32 FailureLimit = FMath::Max(SpawnPointCount * 4, 8);
+		if (ConsecutiveSpawnFailureCount >= FailureLimit)
+		{
+			UE_LOG(
+				LogTemp,
+				Error,
+				TEXT("Enemy spawn queue stopped after %d consecutive failures with %d enemies remaining."),
+				ConsecutiveSpawnFailureCount,
+				PendingEnemySpawnCount
+			);
+			ClearSpawnQueue();
+			return;
+		}
+	}
+
+	if (PendingEnemySpawnCount <= 0)
+	{
+		ClearSpawnQueue();
+	}
+}
+
+void AfpstrueGameMode::ClearSpawnQueue()
+{
+	GetWorldTimerManager().ClearTimer(SpawnTimerHandle);
+	QueuedSpawnPoints.Reset();
+	QueuedEnemyClass = nullptr;
+	PendingEnemySpawnCount = 0;
+	NextQueuedSpawnIndex = 0;
+	ConsecutiveSpawnFailureCount = 0;
+}
+
+bool AfpstrueGameMode::SpawnEnemyAtPoint(
 	AActor* SpawnPoint,
-	bool bUseNearbyLocation,
+	int32 SpawnPointReuseCount,
 	TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass
 )
 {
 	if (!IsValid(SpawnPoint))
 	{
 		UE_LOG(LogTemp, Error, TEXT("Enemy spawn point is invalid."));
-		return;
+		return false;
 	}
 
 	UWorld* World = GetWorld();
 	if (World == nullptr)
 	{
-		return;
+		return false;
 	}
 
 	UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 	if (NavSystem == nullptr)
 	{
 		UE_LOG(LogTemp, Error, TEXT("Enemy spawn requires a valid navigation system."));
-		return;
+		return false;
 	}
 
 	const AfpstrueEnemyCharacter* EnemyDefaults = WaveEnemyClass.GetDefaultObject();
@@ -302,14 +383,20 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 		: 96.0f;
 	const FVector SpawnOrigin = SpawnPoint->GetActorLocation();
 	const FVector ProjectionExtent(150.0f, 150.0f, 500.0f);
-	const float RetryRadius = FMath::Max(ReusedSpawnPointRadius, 300.0f);
+	const bool bAutomatedBenchmark = GetBenchmarkEnemyCount() > 0;
+	const float ReuseScale = FMath::Sqrt(static_cast<float>(FMath::Max(SpawnPointReuseCount + 1, 1)));
+	const float RetryRadius = FMath::Clamp(
+		FMath::Max(ReusedSpawnPointRadius, 300.0f) * ReuseScale,
+		300.0f,
+		FMath::Max(MaxReusedSpawnPointRadius, 300.0f)
+	);
 	constexpr int32 MaxSpawnAttempts = 8;
 
 	AfpstrueEnemyCharacter* SpawnedEnemy = nullptr;
 	for (int32 Attempt = 0; Attempt < MaxSpawnAttempts && SpawnedEnemy == nullptr; ++Attempt)
 	{
 		FVector CandidateLocation = SpawnOrigin;
-		if ((bUseNearbyLocation || Attempt > 0) && RetryRadius > 0.0f)
+		if ((SpawnPointReuseCount > 0 || Attempt > 0) && RetryRadius > 0.0f)
 		{
 			FNavLocation NearbyLocation;
 			if (!NavSystem->GetRandomReachablePointInRadius(
@@ -343,7 +430,9 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 		const FTransform SpawnTransform(SpawnRotation, SpawnLocation, FVector::OneVector);
 		FActorSpawnParameters SpawnParameters;
 		SpawnParameters.SpawnCollisionHandlingOverride =
-			ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
+			bAutomatedBenchmark
+			? ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn
+			: ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 
 		SpawnedEnemy = World->SpawnActor<AfpstrueEnemyCharacter>(
 			WaveEnemyClass,
@@ -368,6 +457,7 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 				PlayerCharacter,
 				SurroundManager
 			);
+			SpawnedEnemy->UpdatePerformanceTier(SpawnedEnemy->GetDistanceToTarget2D());
 		}
 		else
 		{
@@ -381,11 +471,19 @@ void AfpstrueGameMode::SpawnEnemyAtPoint(
 		}
 
 		RegisterEnemy(SpawnedEnemy);
+		return true;
 	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("SpawnActor failed for enemy class %s"), *GetNameSafe(WaveEnemyClass.Get()));
-	}
+
+	UE_LOG(
+		LogTemp,
+		Error,
+		TEXT("SpawnActor failed for enemy class %s at %s after %d reuse(s), sample radius %.0f."),
+		*GetNameSafe(WaveEnemyClass.Get()),
+		*GetNameSafe(SpawnPoint),
+		SpawnPointReuseCount,
+		RetryRadius
+	);
+	return false;
 }
 
 bool AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
@@ -568,11 +666,13 @@ void AfpstrueGameMode::ClearGameplayTimers()
 {
 	GetWorldTimerManager().ClearTimer(CountdownTimerHandle);
 	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
+	ClearSpawnQueue();
+	GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
 	GetWorldTimerManager().ClearTimer(BenchmarkStartTimerHandle);
 	GetWorldTimerManager().ClearTimer(BenchmarkStopTimerHandle);
+	GetWorldTimerManager().ClearTimer(BenchmarkExitTimerHandle);
 }
 
-// TODO: Move benchmark orchestration to a development-only runner.
 void AfpstrueGameMode::BeginAutomatedBenchmark()
 {
 	StartGameMode();
@@ -585,19 +685,52 @@ void AfpstrueGameMode::BeginAutomatedBenchmark()
 	{
 		PlayerController->SetViewTarget(PlayerCharacter);
 	}
+	PlayerCharacter->SetCanBeDamaged(false);
 	UWidgetLayoutLibrary::RemoveAllWidgets(this);
 
-	float WarmupSeconds = 8.0f;
-	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkWarmup="), WarmupSeconds);
+	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkWarmup="), AutomatedBenchmarkWarmup);
 	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkDuration="), AutomatedBenchmarkDuration);
-	WarmupSeconds = FMath::Max(WarmupSeconds, 0.0f);
+	AutomatedBenchmarkWarmup = FMath::Max(AutomatedBenchmarkWarmup, 0.0f);
 	AutomatedBenchmarkDuration = FMath::Max(AutomatedBenchmarkDuration, 1.0f);
+
+	GetWorldTimerManager().SetTimer(
+		BenchmarkReadyTimerHandle,
+		this,
+		&AfpstrueGameMode::WaitForAutomatedBenchmarkReady,
+		0.25f,
+		true,
+		0.0f
+	);
+}
+
+void AfpstrueGameMode::WaitForAutomatedBenchmarkReady()
+{
+	if (!bGameRunning)
+	{
+		GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
+		return;
+	}
+
+	if (PendingEnemySpawnCount > 0)
+	{
+		return;
+	}
+
+	GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
+	UE_LOG(
+		LogTemp,
+		Display,
+		TEXT("Automated benchmark ready: requested=%d alive=%d warmup=%.1fs"),
+		GetBenchmarkEnemyCount(),
+		AliveEnemyCount,
+		AutomatedBenchmarkWarmup
+	);
 
 	GetWorldTimerManager().SetTimer(
 		BenchmarkStartTimerHandle,
 		this,
 		&AfpstrueGameMode::StartAutomatedBenchmarkCapture,
-		WarmupSeconds,
+		AutomatedBenchmarkWarmup,
 		false
 	);
 }
@@ -611,12 +744,18 @@ void AfpstrueGameMode::StartAutomatedBenchmarkCapture()
 		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("MemReport -full"));
 	}
 
+	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkScreenshot")))
+	{
+		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("Shot"));
+	}
+
 	UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("csvprofile start"));
 	UE_LOG(
 		LogTemp,
 		Display,
-		TEXT("Automated benchmark capture started: enemies=%d duration=%.1fs"),
+		TEXT("Automated benchmark capture started: requested=%d alive=%d duration=%.1fs"),
 		GetBenchmarkEnemyCount(),
+		AliveEnemyCount,
 		AutomatedBenchmarkDuration
 	);
 
@@ -633,6 +772,27 @@ void AfpstrueGameMode::StopAutomatedBenchmarkCapture()
 {
 	UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("csvprofile stop"));
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark capture stopped."));
+
+	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkAutoQuit")))
+	{
+		GetWorldTimerManager().SetTimer(
+			BenchmarkExitTimerHandle,
+			this,
+			&AfpstrueGameMode::ExitAutomatedBenchmark,
+			1.0f,
+			false
+		);
+	}
+}
+
+void AfpstrueGameMode::ExitAutomatedBenchmark()
+{
+	UKismetSystemLibrary::QuitGame(
+		this,
+		UGameplayStatics::GetPlayerController(this, 0),
+		EQuitPreference::Quit,
+		false
+	);
 }
 
 int32 AfpstrueGameMode::GetBenchmarkEnemyCount() const
