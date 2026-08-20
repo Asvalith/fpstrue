@@ -1,6 +1,6 @@
 # AI 敌人系统优化决策记录
 
-> 文档状态：历史方案与学习记录。当前已实现的是 Timer 驱动显式 FSM、NavMesh、双环槽位和 Attack Token；AI Perception、EQS 和复杂群体避障仍是条件触发后的候选方案。当前事实见 `Docs/FPS_Core_Technical_Summary.md`。
+> 文档状态：历史方案与学习记录，其中 Attack Token 等内容没有保留在当前实现。当前代码只有 Timer 驱动显式 FSM、NavMesh 和双环槽位；AI Perception、EQS 与复杂群体避障仍是候选方案。当前事实见 `Docs/FPS_Core_Technical_Summary.md`。
 
 ## 1. 优化目标
 

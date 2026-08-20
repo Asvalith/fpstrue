@@ -14,7 +14,7 @@
 | 数百个完整 Character 成为瓶颈 | Animation Budget、Significance、降频或代理 LOD | 远处表现降级 | Game Thread、Anim、Movement、视觉误差 |
 | 需要 500+ 简化单位 | Mass/数据导向模拟 | 现有 Actor 交互要重构 | 活跃实体数、CPU、内存、Draw Call |
 
-当前项目的 Timer FSM、NavMesh、双环槽位和 Attack Token 在 40 个活跃敌人的发布容量内继续成立，不因框架名称升级而重写。
+当前项目的 Timer FSM、NavMesh 和双环槽位在 40 个活跃敌人的发布容量内继续成立。当前没有 Attack Token；若以后需要限制同时攻击人数，再增加独立的攻击配额层。
 
 ## 2. 武器、碰撞与物理
 
@@ -69,4 +69,3 @@
 3. **最小替代**：先给能解决问题的最小增量，不直接堆框架。
 4. **代价与风险**：复杂度、内存、延迟、一致性或表现损失。
 5. **验证**：固定场景、单变量 A/B、P95/P99、对象数和正确性回归。
-

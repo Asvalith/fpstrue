@@ -826,13 +826,11 @@ Camera Start / Direction
 
 ## 16. 相关文档
 
-- `PROJECT_PROGRESS.md`：当前功能和蓝图进度。
-- `Docs/FPS_Core_Technical_Summary.md` 第 16 章：真实 Bug、环境故障和排查记录。
-- `AI_OPTIMIZATION_DECISION_RECORD.md`：AI 架构、性能取舍和决策记录。
-- `PERFORMANCE_BASELINE.md`：固定场景、指标与回归测试基线。
-- `FPS_PORTFOLIO_ACCEPTANCE_PLAN.md`：作品集封版范围和验收标准。
-- `RESUME_ENGINE_EARLY_2026-07.md`：简历草稿，内容必须随真实完成度更新。
-- `ENGINE_EARLY_SPRINT_2026-07-17_2026-07-30.md`：阶段冲刺计划，仅作为时间安排参考。
+- `Docs/FPS_Core_Technical_Summary.md`：当前架构、调用链、实战问题与面试准备。
+- `Docs/PERFORMANCE_BASELINE.md`：固定矩阵、纹理驻留、VSM 与生命周期证据。
+- `Docs/PROJECT_TASK_CHECKLIST.md`：当前蓝图、玩法与发布门禁。
+- `Docs/Learning/EXTENSION_TOPICS.md`：条件变化后的替换方案索引。
+- `Docs/Archive/`：旧决策、阶段进度和简历草稿，仅用于回看历史。
 
 ## 17. 最终路线原则
 
