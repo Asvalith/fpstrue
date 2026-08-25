@@ -10,6 +10,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 
@@ -26,6 +28,10 @@ AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
+	bDisableDecisionThrottlingForBenchmark = FParse::Param(
+		FCommandLine::Get(),
+		TEXT("BenchmarkDisableAIThrottling")
+	);
 
 	ControlledEnemy = Cast<AfpstrueEnemyCharacter>(InPawn);
 	if (ControlledEnemy == nullptr)
@@ -60,6 +66,7 @@ void AfpstrueEnemyAIController::OnUnPossess()
 	TargetCharacter = nullptr;
 	SurroundManager = nullptr;
 	bHasMoveGoal = false;
+	LastSharedTargetGeneration = 0;
 
 	Super::OnUnPossess();
 }
@@ -77,6 +84,7 @@ void AfpstrueEnemyAIController::StopAI()
 	ClearDecisionTimer();
 	TargetCharacter = nullptr;
 	bHasMoveGoal = false;
+	LastSharedTargetGeneration = 0;
 	ReleaseSurroundSlot();
 
 	if (ControlledEnemy != nullptr)
@@ -104,6 +112,20 @@ void AfpstrueEnemyAIController::InitializeCombatContext(
 	{
 		SurroundManager->RequestSurroundSlot(ControlledEnemy);
 	}
+}
+
+void AfpstrueEnemyAIController::ApplyBenchmarkPathFollowingTickOverride(
+	bool bDisablePathFollowingTick)
+{
+	if (UPathFollowingComponent* PathFollowing = GetPathFollowingComponent())
+	{
+		PathFollowing->SetComponentTickEnabled(!bDisablePathFollowingTick);
+	}
+}
+
+void AfpstrueEnemyAIController::SetSignificanceDecisionMultiplier(float NewMultiplier)
+{
+	SignificanceDecisionMultiplier = FMath::Max(1.0f, NewMultiplier);
 }
 
 void AfpstrueEnemyAIController::StartDecisionTimer()
@@ -183,18 +205,21 @@ void AfpstrueEnemyAIController::UpdateAI()
 	}
 
 	SetAIState(EFPEnemyAIState::Chase);
-	INC_DWORD_STAT(STAT_fpstrueAIMoveRequestCount);
-	CSV_CUSTOM_STAT(fpstrueAI, MoveRequestCount, 1, ECsvCustomStatOp::Accumulate);
-	MoveToActor(TargetCharacter, CombatMoveAcceptanceRadius);
+	HandleSharedPursuit();
 }
 
 float AfpstrueEnemyAIController::GetNextDecisionInterval() const
 {
+	if (bDisableDecisionThrottlingForBenchmark)
+	{
+		return AttackDecisionInterval;
+	}
+
 	if (ControlledEnemy == nullptr
 		|| ControlledEnemy->IsDead()
 		|| !IsTargetUsable(TargetCharacter))
 	{
-		return IdleDecisionInterval;
+		return IdleDecisionInterval * SignificanceDecisionMultiplier;
 	}
 
 	const float DistanceToTarget = ControlledEnemy->GetDistanceToTarget2D();
@@ -210,15 +235,15 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval() const
 	if (AIState == EFPEnemyAIState::Idle
 		|| DistanceToTarget > ControlledEnemy->GetChaseRange())
 	{
-		return IdleDecisionInterval;
+		return IdleDecisionInterval * SignificanceDecisionMultiplier;
 	}
 
 	if (DistanceToTarget >= FarDecisionDistance)
 	{
-		return FarDecisionInterval;
+		return FarDecisionInterval * SignificanceDecisionMultiplier;
 	}
 
-	return ChaseDecisionInterval;
+	return ChaseDecisionInterval * SignificanceDecisionMultiplier;
 }
 
 bool AfpstrueEnemyAIController::PrepareDecisionContext()
@@ -265,7 +290,6 @@ bool AfpstrueEnemyAIController::PrepareDecisionContext()
 		SurroundManager->SetTargetCharacter(TargetCharacter);
 	}
 
-	ControlledEnemy->UpdatePerformanceTier(ControlledEnemy->GetDistanceToTarget2D());
 	UpdateFacingTarget();
 	return true;
 }
@@ -307,6 +331,11 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 	if (SurroundManager != nullptr
 		&& SurroundManager->RequestSurroundSlot(ControlledEnemy))
 	{
+		if (HandleAttackApproach())
+		{
+			return true;
+		}
+
 		FVector SlotGoal;
 		bool bInnerRing = false;
 		if (SurroundManager->GetAssignedSlotLocation(ControlledEnemy, SlotGoal, bInnerRing))
@@ -314,17 +343,6 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 			const bool bAtSlot =
 				FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), SlotGoal)
 				<= FMath::Square(SlotArrivalTolerance);
-
-			if (bInnerRing)
-			{
-				FVector AttackGoal;
-				if (SurroundManager->GetAttackApproachLocation(ControlledEnemy, AttackGoal))
-				{
-					SetAIState(EFPEnemyAIState::Chase);
-					MoveToGoal(AttackGoal, CombatMoveAcceptanceRadius);
-					return true;
-				}
-			}
 
 			SetAIState(EFPEnemyAIState::Chase);
 			if (bAtSlot)
@@ -335,13 +353,43 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 			}
 			else
 			{
-				MoveToGoal(SlotGoal, MoveAcceptanceRadius);
+				const float SlotMoveAcceptanceRadius =
+					bInnerRing ? CombatMoveAcceptanceRadius : MoveAcceptanceRadius;
+				MoveToGoal(SlotGoal, SlotMoveAcceptanceRadius);
 			}
 			return true;
 		}
 	}
 
 	return false;
+}
+
+bool AfpstrueEnemyAIController::HandleSharedPursuit()
+{
+	FVector SharedGoal;
+	uint32 TargetGeneration = 0;
+	if (SurroundManager != nullptr
+		&& SurroundManager->GetSharedTargetSnapshot(
+			SharedGoal,
+			TargetGeneration
+		))
+	{
+		const bool bTargetChanged = TargetGeneration != LastSharedTargetGeneration;
+		const bool bPathIdle = GetMoveStatus() == EPathFollowingStatus::Idle;
+		if (bTargetChanged || !bHasMoveGoal || bPathIdle)
+		{
+			const float PursuitAcceptanceRadius = FMath::Max(
+				MoveAcceptanceRadius,
+				ControlledEnemy->GetAttackRange() * 0.8f
+			);
+			MoveToGoal(SharedGoal, PursuitAcceptanceRadius);
+			LastSharedTargetGeneration = TargetGeneration;
+		}
+		return true;
+	}
+
+	MoveToGoal(TargetCharacter->GetActorLocation(), MoveAcceptanceRadius);
+	return true;
 }
 
 void AfpstrueEnemyAIController::UpdateFacingTarget()
@@ -367,10 +415,14 @@ void AfpstrueEnemyAIController::UpdateFacingTarget()
 
 void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius)
 {
+	const bool bAtGoal = ControlledEnemy != nullptr
+		&& FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), GoalLocation)
+		<= FMath::Square(FMath::Max(AcceptanceRadius, 1.0f));
 	const bool bNeedsNewPath =
-		!bHasMoveGoal
+		bDisableDecisionThrottlingForBenchmark
+		|| !bHasMoveGoal
 		|| FVector::DistSquared2D(GoalLocation, LastMoveGoal) >= FMath::Square(PathRefreshDistance)
-		|| GetMoveStatus() == EPathFollowingStatus::Idle;
+		|| (GetMoveStatus() == EPathFollowingStatus::Idle && !bAtGoal);
 
 	if (bNeedsNewPath)
 	{

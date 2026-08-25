@@ -18,7 +18,7 @@
 可以证明的结果：
 
 - 完成 `10 / 20 / 40 / 80 / 160` 敌人固定规模矩阵。
-- 当前机器上约 40 个活跃敌人可维持约 60 FPS；80 是压力档，160 已明显受 Game Thread 限制。
+- 当前机器上约 40 个活跃敌人可维持约 60 FPS；80 是压力档。最新 160 敌人 Trace 显示 RenderThread 是整帧关键路径，Game Thread 同时受到角色移动、物理同步和动画压力。
 - 已在代码中实现 AI 决策降频、路径刷新阈值、移动 Tick 分级、动画可见性策略、阴影距离分级和尸体延迟回收。
 - 六张高占用植物纹理的驻留内存降低约 60 MB。
 - 已分离 Texture Streaming Pool 与 VSM Non-Nanite 队列问题，并完成多组单变量实验。
@@ -27,6 +27,8 @@
 ## 2. 固定性能矩阵
 
 测试条件：Development Editor 独立进程、`Demonstration`、1600x900、关闭 VSync、预热 10 秒、采样约 30 秒。
+
+这张矩阵用于说明敌人数增长趋势，来自较早的固定版本。最新线程归因以 2026-08-24 的 Insights Trace 和定向消融为准，不能把两个版本的数据直接拼成优化前后收益。
 
 | 敌人数 | FPS | Frame ms | P95 ms | P99 ms | Game Thread ms | Render Thread ms | GPU ms | CharacterMovement ms | Animation ms | Draw Calls |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -40,9 +42,39 @@
 
 - `10 -> 40`：帧率仍约 60，Game Thread、移动和动画成本随敌人数增长。
 - `80`：Game Thread 与 Render Thread 都接近帧预算，属于压力档。
-- `160`：Game Thread 为 27.899 ms，明显高于 GPU 14.205 ms，首先应治理 CPU 侧敌人更新。
+- `160`：旧矩阵中的 Game Thread 为 27.899 ms，说明 CPU 侧敌人更新已经超出帧预算；最新 Trace 进一步发现 RenderThread 关键路径也超过 GT，不能只写成单一 GT 瓶颈。
 - 路径查询不是这组数据中的第一大项；移动、动画和敌人生命周期更值得优先处理。
 - 不能只看平均 FPS。P95/P99 用于暴露生成、回收、寻路或资源流送造成的尖峰。
+
+### 2.2 Profile-first 定位与定向验证
+
+最新流程为：
+
+```text
+15 秒 Insights Trace
+-> Timing 与 Task Graph 缩小范围
+-> 排除低占用系统
+-> 只验证 CharacterMovement 和 SkeletalMesh 两个候选
+-> 每组重复两次并比较关键线程
+```
+
+Trace 的 449 个有效 CSV 帧中，Game Thread 均值约 27.61 ms、P95 约 30.07 ms。GT 主要分类为：`EndPhysics` 等待 9.94 ms、CharacterMovement 5.61 ms、其他任务同步等待 4.91 ms、TickActors 4.21 ms、Animation 3.69 ms、SyncBodies 0.96 ms 和 EndOfFrameUpdates 0.76 ms。这里的 Timing 父节点和 CSV 分类存在包含关系，不能直接相加。
+
+稳定区间选择 `42.7878396-42.8234201 s` 的 P95 附近帧进行调用树检查：`FEngineLoop::Tick` 为 35.581 ms，`UWorld_Tick` 为 24.674 ms；其中一段 `TickCompletionEvents -> WaitUntilTasksComplete -> WaitForTasks` 阻塞 9.362 ms，帧末另有 8.923 ms 的 `GameThreadWaitForTask`。相同时间窗内 Foreground Worker 被动态光追 Mesh Batch、阴影设置和 RDG 异步任务占用，说明 EndPhysics 等待同时受到任务依赖和共享 Worker 竞争影响，不能把整段时间简单写成“Chaos 计算”或“AI 成本”。
+
+Timing 截图另外保留了两处高耗时帧：`42.448 s` 附近 CSV 201 的 40.4 ms 帧，以及 `42.859 s` 附近 CSV 213 的 43.6 ms 帧。两者都展开到 `UWorld_Tick -> TickCompletionEvents -> WaitUntilTasksComplete -> WaitForTasks`，对应等待约 14.0 ms 和 14.7 ms，证明该热点不是单个异常尖峰。第二张图的 `48.6 ms` 是跨帧选区，不作为单帧数据引用。截图见 `Docs/PerformanceEvidence/20260824/Insights_GT_HighFrame_42.448s.png` 和 `Insights_GT_TailFrame_42.859s.png`。
+
+可直接治理的第一层是 CharacterMovement、碰撞/物理同步和骨骼动画；任务等待需要沿 Task Graph 检查被等待任务。AI 决策约 0.08 ms、PathFollowing 约 0.11 ms、攻击 Sweep 约 0.007 ms，Timer、UI 和 Streaming 也都低于 0.2 ms，因此没有继续穷举关闭这些低占用模块。
+
+| 组别 | Frame | GT | RT | GPU | EndPhysics | Movement | Animation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 38.06 ms | 30.81 ms | 36.88 ms | 13.98 ms | 13.18 ms | 5.55 ms | 3.50 ms |
+| CharacterMovementTickOff | 32.96 ms | 16.19 ms | 32.49 ms | 12.46 ms | 7.39 ms | 0.07 ms | 2.60 ms |
+| SkeletalMeshTickOff | 27.49 ms | 21.38 ms | 26.63 ms | 11.17 ms | 10.06 ms | 5.12 ms | 0.24 ms |
+
+Render/RHI 进一步显示动态骨骼光追几何是重要成本：RHIThread 的 Bottom-Level Acceleration Structure 构建约 9.86 ms，RenderThread 的动态光追实例收集约 2.35 ms，GPU 的 Skinned Geometry BLAS 约 1.43 ms。阴影深度约 2.78 ms，Lumen Lighting 与 Screen Probe Gather 分别约 1.56 ms 和 1.39 ms。复杂建筑会参与阴影和 Lumen，但当前不能把它写成第一根因。
+
+关闭组件 Tick 是诊断上限，不是最终方案。可落地方向是限制完整频率移动与动画的并发数量、使用动画预算和骨骼 LOD，并单独评估敌人是否必须进入硬件 Ray Tracing 场景。完整证据见 `Docs/PerformanceEvidence/20260824/README.md`。
 
 ## 3. 代码中已经实现的优化
 
@@ -57,18 +89,55 @@
 
 这减少了每帧 AI 判断和重复路径请求，但没有实现行为树、EQS 或 AI Perception。
 
-### 3.2 移动、动画与阴影分级
+### 3.2 Significance Manager 统一更新分级
 
-`AfpstrueEnemyCharacter` 根据与玩家的距离调整成本：
+旧方案同时存在敌人自身距离分级和 GameMode 固定名额预算。固定名额组虽然降低了移动、动画 Tick 数量，但 160 敌人实测没有形成端到端收益，并出现部分敌人等待或响应失真的问题，因此没有继续叠加第三套规则。
 
-- 近距离移动 Tick 间隔为 0；中距离约 0.033 秒；远距离约 0.066 秒。
-- 开启 Animation Update Rate Optimization。
-- 不可见时使用 `OnlyTickMontagesWhenNotRendered`；进入攻击时恢复完整姿态刷新，避免近战 Socket 位置失真。
-- 超过 `ShadowCullDistance` 后关闭动态阴影，当前默认距离为 3000 cm。
+当前改为一个统一入口：
 
-这里的取舍是：远处允许响应精度下降，近战攻击窗口仍保证动画与碰撞一致。
+```text
+GameMode 每 0.25 秒提交玩家视点
+-> Significance Manager 并行计算敌人与视点的距离重要度
+-> Sequential 回调进入 EnemyCharacter
+-> 统一设置 AI 决策倍率、CharacterMovement Tick、骨骼动画 Tick 和远距离阴影
+```
 
-### 3.3 出生和死亡生命周期
+分级使用四个清晰的距离边界：5 m 内为 `Full`，5-10 m 为 `Reduced`，10-100 m 为 `Background`，超过 100 m 才退出追击。50 m 以后关闭动态阴影。UE 代码中的对应厘米值为 `500 / 1000 / 5000 / 10000`。默认参数为：
+
+| 等级 | 移动 Tick | 动画 Tick | AI 决策间隔倍率 |
+| --- | ---: | ---: | ---: |
+| Full（0-5 m） | 每帧 | 每帧 | 1.0 |
+| Reduced（5-10 m） | 0.05 s | 0.05 s | 1.5 |
+| Background（10-100 m） | 0.10 s | 0.10 s | 2.0 |
+
+攻击中、攻击窗口开启或目标已经进入攻击范围的敌人强制使用 `Full`，攻击决策间隔不参与降频。这样 10-100 m 的敌人只降低反应精度，不会关闭寻路、停止攻击或改变伤害结果。超过 50 m 可关闭敌人动态阴影；碰撞响应、攻击 Sweep、受伤和死亡逻辑不由显著性分级修改。
+
+Significance Manager 内部可并行执行只读的重要度计算，但 UObject、组件 Tick 和阴影状态只能在 `Sequential` 回调中修改。敌人在 BeginPlay 注册、首次死亡和 EndPlay 注销，避免延迟回收的尸体继续参与评分，也避免管理器持有失效对象。
+
+本次接入替换了固定名额预算，不与其叠加。代码已落地，但完整构建和同条件 A/B 尚未完成，因此当前只能表述为“统一了更新分级入口”，不能宣称已经获得性能收益。
+
+### 3.3 其他策略的采用边界
+
+- 分帧：波次出生已经按 0.05 秒间隔拆分，避免集中 Spawn 峰值。
+- Timer：AI FSM 使用一次性 Timer，不开启 AIController Actor Tick；Timer 的价值来自降频，不是天然比 Tick 快。
+- `ParallelFor`：不手写并行修改 Actor。显著性只读计算交给插件并行，组件状态仍回到游戏线程顺序更新。
+- 碰撞：装饰物和关卡资产应按“不交互则关闭、只查询则 Query Only”的原则逐资产治理；敌人的近战查询、Pawn 阻挡和死亡布娃娃不能被统一关闭。
+- 动画：现有实现包含动画 Tick 分级、不可见更新策略和攻击时恢复全速。Property Access、动画线程代理和 Animation Budget Allocator 尚未作为已实现内容。
+- UI：血量、弹药和倒计时已经从 UMG 属性轮询改为 Delegate 事件更新；这条优化独立于敌人显著性分级。
+- Draw Call：使用 `stat RHI` 观察 DrawPrimitive/Draw Calls，但复杂骨骼敌人不能直接使用 ISM/HISM 合批代替。
+
+### 3.4 Significance A/B 验收方案
+
+使用同版本、同地图、同机位、同随机种子和相同敌人数各运行至少两次：
+
+```text
+候选组：默认启用 Significance Manager
+基线组：-BenchmarkDisableEnemySignificance
+```
+
+记录 FPS、Frame/GT/RT/GPU 的平均值与 P95/P99，Movement、Animation、AI Decision 数量和耗时，以及移动/骨骼 Tick 数。性能之外必须回归：远处敌人仍寻路，靠近后能及时追击和攻击，攻击窗口不漏判，死亡后能注销并按 30 秒回收。只有候选组尾帧改善且行为无回退，才保留该方案。
+
+### 3.5 出生和死亡生命周期
 
 `AfpstrueGameMode` 将单波生成拆成 0.05 秒间隔的队列，避免同一帧集中 Spawn。出生点使用 NavMesh 可达采样，并限制单个敌人的尝试次数。
 
@@ -184,7 +253,7 @@ r.Shadow.Virtual.Enable=1
 
 | 问题 | 回答核心 |
 | --- | --- |
-| 为什么 160 敌人先优化 CPU | Game Thread 27.899 ms，明显高于 GPU 14.205 ms；移动和动画随数量增长 |
+| 160 敌人的第一瓶颈在哪里 | 最新 Trace 中 RT Critical Path 约 32.27 ms，高于 GT 27.39 ms 和 GPU 13.67 ms；GT 内部第一来源是 CharacterMovement 与 EndPhysics 等待，RT/RHI 主要受动态骨骼光追几何、阴影和 Lumen 影响 |
 | 为什么不用平均 FPS 作为唯一指标 | 平均值会隐藏生成、回收、寻路和流送尖峰，需要 P95/P99 |
 | Timer 一定比 Tick 快吗 | 不是；收益来自降低不必要的调用频率，Timer 过密同样有成本 |
 | LOD 解决什么 | 降低远处网格、骨骼和动画成本；不能替代 AI、碰撞和生命周期治理 |
@@ -210,7 +279,10 @@ Saved/Profiling/VSM_CoarsePages_AB_20260816
 Saved/Profiling/VSM_DynamicThreshold_20260816
 Saved/Profiling/VSM_RadiusThreshold_20260816
 Saved/Profiling/LifecycleCleanup_80_20260816
+Saved/Profiling/InsightsFirstDiagnosis_20260824
+Saved/Profiling/ProfileGuidedAblation_20260824
 Docs/PerformanceEvidence/20260816
+Docs/PerformanceEvidence/20260824
 Saved/Logs/FinalPerformanceClosure_Build.log
 ```
 

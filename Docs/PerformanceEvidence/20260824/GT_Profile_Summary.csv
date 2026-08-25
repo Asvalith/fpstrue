@@ -1,0 +1,21 @@
+Metric,Average_ms,Median_ms,P95_ms,Max_ms,Interpretation
+GameThreadTime,27.606,27.156,30.071,,Overall GT counter across 449 valid frames
+EventWait_EndPhysics,9.943,9.766,12.057,15.410,Primary synchronization wait
+CharacterMovement,5.613,5.523,6.455,21.843,Primary actionable gameplay execution cost
+EventWait_Other,4.912,4.586,8.216,59.467,Frame-end or task synchronization; investigate dependency before optimization
+TickActors,4.206,4.227,4.740,5.387,Aggregate tick category; overlaps child categories
+Animation,3.693,3.776,4.189,4.554,Skeletal and animation update cost
+SyncBodies,0.963,0.945,1.154,1.585,Physics result synchronization
+EndOfFrameUpdates,0.755,0.663,0.930,7.427,Primitive and component end-of-frame updates
+EventWait_PostPhysics,0.220,0.173,0.471,1.536,Secondary synchronization wait
+QueueTicks,0.168,0.163,0.217,0.356,Low priority
+UI,0.165,0.154,0.238,0.351,Low priority
+Physics_GameThread,0.155,0.145,0.229,0.537,Direct GT physics work is low compared with waits
+TimerManager,0.092,0.075,0.246,0.459,Low priority
+RenderAssetStreaming,0.080,0.078,0.125,0.665,Low priority on GT
+AI_Decision,0.076,,,,Low priority in this trace
+PathFollowing,0.114,,,,Low priority in this trace
+AttackSweep,0.007,,,,Low priority in this trace
+P95_FEngineLoopTick,35.581,,,,Representative frame at 42.7878396-42.8234201 seconds
+P95_EndPhysics_WaitForTasks,9.362,,,,Wait chain in representative P95 frame
+P95_FrameEnd_GameThreadWaitForTask,8.923,,,,Frame-end synchronization in representative P95 frame

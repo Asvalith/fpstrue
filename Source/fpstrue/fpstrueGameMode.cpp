@@ -9,15 +9,19 @@
 #include "fpstrueSurroundManager.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "NavigationSystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "SignificanceManager.h"
 
 DEFINE_STAT(STAT_fpstrueWaveSpawnTime);
 DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
@@ -117,6 +121,7 @@ void AfpstrueGameMode::StartGameMode()
 	);
 
 	StartNextWave();
+	StartEnemySignificanceUpdates();
 }
 
 void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -457,7 +462,6 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(
 				PlayerCharacter,
 				SurroundManager
 			);
-			SpawnedEnemy->UpdatePerformanceTier(SpawnedEnemy->GetDistanceToTarget2D());
 		}
 		else
 		{
@@ -666,6 +670,7 @@ void AfpstrueGameMode::ClearGameplayTimers()
 {
 	GetWorldTimerManager().ClearTimer(CountdownTimerHandle);
 	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
+	GetWorldTimerManager().ClearTimer(EnemySignificanceTimerHandle);
 	ClearSpawnQueue();
 	GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
 	GetWorldTimerManager().ClearTimer(BenchmarkStartTimerHandle);
@@ -673,8 +678,53 @@ void AfpstrueGameMode::ClearGameplayTimers()
 	GetWorldTimerManager().ClearTimer(BenchmarkExitTimerHandle);
 }
 
+void AfpstrueGameMode::StartEnemySignificanceUpdates()
+{
+	const bool bDisabledForBenchmark =
+		FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemySignificance"))
+		|| FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemyUpdateBudget"));
+	if (!bEnableEnemySignificance || bDisabledForBenchmark)
+	{
+		return;
+	}
+
+	GetWorldTimerManager().SetTimer(
+		EnemySignificanceTimerHandle,
+		this,
+		&AfpstrueGameMode::UpdateEnemySignificance,
+		FMath::Max(EnemySignificanceUpdateInterval, 0.1f),
+		true,
+		0.1f
+	);
+}
+
+void AfpstrueGameMode::UpdateEnemySignificance()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_UpdateEnemySignificance);
+	if (!IsValid(PlayerCharacter))
+	{
+		return;
+	}
+
+	USignificanceManager* Manager = USignificanceManager::Get(GetWorld());
+	if (Manager == nullptr)
+	{
+		return;
+	}
+
+	TArray<FTransform> Viewpoints;
+	Viewpoints.Reserve(1);
+	Viewpoints.Add(PlayerCharacter->GetActorTransform());
+	Manager->Update(Viewpoints);
+}
+
 void AfpstrueGameMode::BeginAutomatedBenchmark()
 {
+	int32 BenchmarkSeed = 1337;
+	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkSeed="), BenchmarkSeed);
+	FMath::RandInit(BenchmarkSeed);
+	UE_LOG(LogTemp, Display, TEXT("Automated benchmark random seed: %d"), BenchmarkSeed);
+
 	StartGameMode();
 	if (!bGameRunning)
 	{
@@ -737,6 +787,31 @@ void AfpstrueGameMode::WaitForAutomatedBenchmarkReady()
 
 void AfpstrueGameMode::StartAutomatedBenchmarkCapture()
 {
+	ApplyAutomatedBenchmarkDiagnosticOverrides();
+
+	FString BenchmarkTraceFile;
+	if (FParse::Value(FCommandLine::Get(), TEXT("BenchmarkTraceFile="), BenchmarkTraceFile) &&
+		!BenchmarkTraceFile.IsEmpty())
+	{
+		BenchmarkTraceFile.TrimQuotesInline();
+		const FString TraceCommand = FString::Printf(
+			TEXT("Trace.File %s cpu,frame,bookmark,task,stats"),
+			*BenchmarkTraceFile
+		);
+		UKismetSystemLibrary::ExecuteConsoleCommand(this, TraceCommand);
+		UKismetSystemLibrary::ExecuteConsoleCommand(
+			this,
+			TEXT("Trace.RegionBegin AutomatedBenchmarkCapture")
+		);
+		bAutomatedBenchmarkTraceActive = true;
+		UE_LOG(
+			LogTemp,
+			Display,
+			TEXT("Automated benchmark Insights trace started: %s"),
+			*BenchmarkTraceFile
+		);
+	}
+
 	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkTextureStats")))
 	{
 		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("DumpTextureStreamingStats"));
@@ -768,9 +843,134 @@ void AfpstrueGameMode::StartAutomatedBenchmarkCapture()
 	);
 }
 
+void AfpstrueGameMode::ApplyAutomatedBenchmarkDiagnosticOverrides()
+{
+	const bool bDisableAttackSweep = FParse::Param(
+		FCommandLine::Get(),
+		TEXT("BenchmarkDisableAttackSweep")
+	);
+	const bool bDisablePawnCollision = FParse::Param(
+		FCommandLine::Get(),
+		TEXT("BenchmarkDisableEnemyPawnCollision")
+	);
+	const bool bDisablePathFollowingTick = FParse::Param(
+		FCommandLine::Get(),
+		TEXT("BenchmarkDisablePathFollowingTick")
+	);
+	const bool bDisableCharacterMovementTick = FParse::Param(
+		FCommandLine::Get(),
+		TEXT("BenchmarkDisableCharacterMovementTick")
+	);
+	const bool bDisableSkeletalMeshTick = FParse::Param(
+		FCommandLine::Get(),
+		TEXT("BenchmarkDisableSkeletalMeshTick")
+	);
+	const bool bDisableEnemySignificance =
+		FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemySignificance"))
+		|| FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemyUpdateBudget"));
+
+	int32 AppliedEnemyCount = 0;
+	int32 FullRateMovementCount = 0;
+	int32 MidRateMovementCount = 0;
+	int32 FarRateMovementCount = 0;
+	int32 AttackingEnemyCount = 0;
+	int32 ShadowCastingEnemyCount = 0;
+	int32 MovementTickEnabledCount = 0;
+	int32 SkeletalMeshTickEnabledCount = 0;
+
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
+	{
+		AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get();
+		if (Enemy == nullptr)
+		{
+			continue;
+		}
+
+		Enemy->ApplyBenchmarkDiagnosticOverrides(
+			bDisableAttackSweep,
+			bDisablePawnCollision,
+			bDisableCharacterMovementTick
+		);
+
+		if (AfpstrueEnemyAIController* EnemyController =
+			Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+		{
+			EnemyController->ApplyBenchmarkPathFollowingTickOverride(
+				bDisablePathFollowingTick
+			);
+		}
+
+		if (const UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement())
+		{
+			MovementTickEnabledCount += Movement->IsComponentTickEnabled() ? 1 : 0;
+			const float TickInterval = Movement->GetComponentTickInterval();
+			if (TickInterval <= KINDA_SMALL_NUMBER)
+			{
+				++FullRateMovementCount;
+			}
+			else if (TickInterval <= 0.075f)
+			{
+				++MidRateMovementCount;
+			}
+			else
+			{
+				++FarRateMovementCount;
+			}
+		}
+
+		AttackingEnemyCount += Enemy->IsAttacking() ? 1 : 0;
+		if (USkeletalMeshComponent* CharacterMesh = Enemy->GetMesh())
+		{
+			if (bDisableSkeletalMeshTick)
+			{
+				CharacterMesh->SetComponentTickEnabled(false);
+			}
+			SkeletalMeshTickEnabledCount +=
+				CharacterMesh->IsComponentTickEnabled() ? 1 : 0;
+			ShadowCastingEnemyCount += CharacterMesh->CastShadow ? 1 : 0;
+		}
+		++AppliedEnemyCount;
+	}
+
+	UE_LOG(
+		LogTemp,
+		Display,
+		TEXT("Benchmark diagnostics applied: enemies=%d attackSweepOff=%d pawnCollisionOff=%d pathFollowingTickOff=%d characterMovementTickOff=%d skeletalMeshTickOff=%d significanceOff=%d"),
+		AppliedEnemyCount,
+		bDisableAttackSweep ? 1 : 0,
+		bDisablePawnCollision ? 1 : 0,
+		bDisablePathFollowingTick ? 1 : 0,
+		bDisableCharacterMovementTick ? 1 : 0,
+		bDisableSkeletalMeshTick ? 1 : 0,
+		bDisableEnemySignificance ? 1 : 0
+	);
+	UE_LOG(
+		LogTemp,
+		Display,
+		TEXT("Benchmark enemy snapshot: movementFull=%d movementMid=%d movementFar=%d movementTickEnabled=%d skeletalMeshTickEnabled=%d attacking=%d castingShadow=%d"),
+		FullRateMovementCount,
+		MidRateMovementCount,
+		FarRateMovementCount,
+		MovementTickEnabledCount,
+		SkeletalMeshTickEnabledCount,
+		AttackingEnemyCount,
+		ShadowCastingEnemyCount
+	);
+}
+
 void AfpstrueGameMode::StopAutomatedBenchmarkCapture()
 {
 	UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("csvprofile stop"));
+	if (bAutomatedBenchmarkTraceActive)
+	{
+		UKismetSystemLibrary::ExecuteConsoleCommand(
+			this,
+			TEXT("Trace.RegionEnd AutomatedBenchmarkCapture")
+		);
+		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("Trace.Stop"));
+		bAutomatedBenchmarkTraceActive = false;
+		UE_LOG(LogTemp, Display, TEXT("Automated benchmark Insights trace stopped."));
+	}
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark capture stopped."));
 
 	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkAutoQuit")))

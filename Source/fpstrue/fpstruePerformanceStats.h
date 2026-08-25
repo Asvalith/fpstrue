@@ -38,3 +38,31 @@ DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(
 	STATGROUP_fpstruePerformance,
 	FPSTRUE_API
 );
+
+DECLARE_CYCLE_STAT_EXTERN(
+	TEXT("Attack Sweep Time"),
+	STAT_fpstrueAttackSweepTime,
+	STATGROUP_fpstruePerformance,
+	FPSTRUE_API
+);
+
+DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(
+	TEXT("Attack Sweep Count"),
+	STAT_fpstrueAttackSweepCount,
+	STATGROUP_fpstruePerformance,
+	FPSTRUE_API
+);
+
+DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(
+	TEXT("Sweep Returned Hit Count"),
+	STAT_fpstrueSweepReturnedHitCount,
+	STATGROUP_fpstruePerformance,
+	FPSTRUE_API
+);
+
+DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(
+	TEXT("Attack Window Update Count"),
+	STAT_fpstrueAttackWindowUpdateCount,
+	STATGROUP_fpstruePerformance,
+	FPSTRUE_API
+);

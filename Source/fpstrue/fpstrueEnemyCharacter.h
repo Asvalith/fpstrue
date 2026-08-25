@@ -13,6 +13,13 @@ class UfpstrueHealthComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyDeathReported, AfpstrueEnemyCharacter*, DeadEnemy);
 
+enum class EFPEnemySignificanceTier : uint8
+{
+	Full,
+	Reduced,
+	Background
+};
+
 UCLASS(Blueprintable)
 class FPSTRUE_API AfpstrueEnemyCharacter : public ACharacter
 {
@@ -22,48 +29,35 @@ public:
 	AfpstrueEnemyCharacter();
 
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	void HandleAttackHitNotify();
-
-	UFUNCTION(BlueprintCallable, Category = "Combat")
 	void HandleAttackFinishedNotify();
 
-	UFUNCTION(BlueprintCallable, Category = "Combat")
-	bool SetAttackPresentationDuration(float DurationSeconds);
-
-	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
 	void BeginAttackWindow();
 
-	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
 	void UpdateAttackWindow();
 
-	UFUNCTION(BlueprintCallable, Category = "Combat|Attack Window")
 	void EndAttackWindow();
 
-	UFUNCTION(BlueprintPure, Category = "AI")
 	bool IsDead() const { return bIsDead; }
 
-	UFUNCTION(BlueprintPure, Category = "AI")
 	bool IsAttacking() const { return bIsAttacking; }
 
-	UFUNCTION(BlueprintPure, Category = "AI")
 	bool IsTargetInAttackRange() const;
 
-	UFUNCTION(BlueprintPure, Category = "AI")
 	float GetChaseRange() const { return ChaseRange; }
 
-	UFUNCTION(BlueprintPure, Category = "AI")
 	float GetAttackRange() const { return AttackRange; }
 
-	UFUNCTION(BlueprintPure, Category = "AI")
 	float GetDistanceToTarget2D() const;
 
-	UFUNCTION(BlueprintCallable, Category = "AI")
 	void SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter);
 
-	UFUNCTION(BlueprintCallable, Category = "AI")
 	void FaceTarget();
 
-	void UpdatePerformanceTier(float DistanceToTarget);
+	void ApplyBenchmarkDiagnosticOverrides(
+		bool bDisableAttackSweep,
+		bool bDisablePawnCollision,
+		bool bDisableCharacterMovementTick
+	);
 
 	UPROPERTY(BlueprintAssignable, Category = "AI")
 	FOnEnemyDeathReported OnEnemyDeathReported;
@@ -86,10 +80,10 @@ protected:
 	float MoveSpeed = 500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	float ChaseRange = 20000.0f;
+	float ChaseRange = 10000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
-	float AttackRange = 150.0f;
+	float AttackRange = 230.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
 	float AttackDamage = 10.0f;
@@ -146,34 +140,37 @@ protected:
 	bool bEnableMovementUpdateTiering = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
-	float FullRateMovementDistance = 2000.0f;
+	float FullRateMovementDistance = 500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
-	float MidRateMovementDistance = 4000.0f;
+	float MidRateMovementDistance = 1000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
-	float MidRateMovementTickInterval = 0.033333f;
+	float MidRateMovementTickInterval = 0.05f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
-	float FarRateMovementTickInterval = 0.066667f;
+	float FarRateMovementTickInterval = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float MidRateAnimationTickInterval = 0.05f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
+	float FarRateAnimationTickInterval = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "1.0"))
+	float ReducedDecisionIntervalMultiplier = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "1.0"))
+	float BackgroundDecisionIntervalMultiplier = 2.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance")
 	bool bEnableShadowDistanceTiering = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "0.0"))
-	float ShadowCullDistance = 3000.0f;
+	float ShadowCullDistance = 5000.0f;
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
 	void OnAttackStarted();
-
-	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
-	void OnAttackLanded();
-
-	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
-	void OnAttackMissed();
-
-	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
-	void OnAttackFinished(bool bHitTarget);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnEnemyDamaged(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
@@ -194,6 +191,11 @@ private:
 	void FinishAttack();
 	bool CanAttack() const;
 	void SetAttackAnimationPriority(bool bHighPriority);
+	void RegisterWithSignificanceManager();
+	void UnregisterFromSignificanceManager();
+	void ApplySignificance(float Significance);
+	void ApplySignificanceTier(EFPEnemySignificanceTier NewTier);
+	void ApplySignificanceIntervals();
 	void ApplyHitReactionImpulse();
 	void ApplyDeathImpulse();
 
@@ -206,6 +208,10 @@ private:
 	bool bHitTargetThisAttack = false;
 	bool bAttackWindowActive = false;
 	bool bHasPreviousWeaponSample = false;
+	bool bDisableAnimationOptimizationsForBenchmark = false;
+	bool bDisableAttackSweepForBenchmark = false;
+	bool bRegisteredWithSignificanceManager = false;
+	EFPEnemySignificanceTier SignificanceTier = EFPEnemySignificanceTier::Full;
 
 	FVector PreviousWeaponBase = FVector::ZeroVector;
 	FVector PreviousWeaponTip = FVector::ZeroVector;

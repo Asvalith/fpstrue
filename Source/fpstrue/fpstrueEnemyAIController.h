@@ -31,16 +31,16 @@ public:
 	virtual void OnUnPossess() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	UFUNCTION(BlueprintPure, Category = "AI")
-	EFPEnemyAIState GetAIState() const { return AIState; }
-
-	UFUNCTION(BlueprintCallable, Category = "AI")
 	void StopAI();
 
 	void InitializeCombatContext(
 		AfpstrueCharacter* NewTargetCharacter,
 		AfpstrueSurroundManager* NewSurroundManager
 	);
+
+	void ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick);
+
+	void SetSignificanceDecisionMultiplier(float NewMultiplier);
 
 protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
@@ -80,6 +80,7 @@ private:
 	bool HandleActiveAttack();
 	bool HandleAttackApproach();
 	bool HandleSurroundMovement();
+	bool HandleSharedPursuit();
 	void UpdateFacingTarget();
 	void SetAIState(EFPEnemyAIState NewState);
 	void MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius);
@@ -99,6 +100,9 @@ private:
 
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
 	FVector LastMoveGoal = FVector::ZeroVector;
+	uint32 LastSharedTargetGeneration = 0;
 	bool bHasMoveGoal = false;
+	bool bDisableDecisionThrottlingForBenchmark = false;
+	float SignificanceDecisionMultiplier = 1.0f;
 	FTimerHandle DecisionTimerHandle;
 };

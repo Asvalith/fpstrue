@@ -108,6 +108,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Time", meta = (ClampMin = "1"))
 	int32 GameDuration = 90;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Performance|Game Thread")
+	bool bEnableEnemySignificance = true;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Performance|Game Thread", meta = (ClampMin = "0.1"))
+	float EnemySignificanceUpdateInterval = 0.25f;
+
 private:
 	void CacheSpawnPoints();
 	bool CreateSurroundManager();
@@ -129,8 +135,11 @@ private:
 	void UpdateCountdown();
 	void FinishGame(bool bPlayerWon);
 	void ClearGameplayTimers();
+	void StartEnemySignificanceUpdates();
+	void UpdateEnemySignificance();
 	void BeginAutomatedBenchmark();
 	void WaitForAutomatedBenchmarkReady();
+	void ApplyAutomatedBenchmarkDiagnosticOverrides();
 	void StartAutomatedBenchmarkCapture();
 	void StopAutomatedBenchmarkCapture();
 	void ExitAutomatedBenchmark();
@@ -167,10 +176,12 @@ private:
 	int32 ConsecutiveSpawnFailureCount = 0;
 	bool bGameRunning = false;
 	bool bGameEnded = false;
+	bool bAutomatedBenchmarkTraceActive = false;
 
 	FTimerHandle CountdownTimerHandle;
 	FTimerHandle WaveTimerHandle;
 	FTimerHandle SpawnTimerHandle;
+	FTimerHandle EnemySignificanceTimerHandle;
 	FTimerHandle BenchmarkReadyTimerHandle;
 	FTimerHandle BenchmarkStartTimerHandle;
 	FTimerHandle BenchmarkStopTimerHandle;

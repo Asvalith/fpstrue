@@ -22,6 +22,7 @@ struct FInputActionValue;
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
 //动态多播委托，用于在玩家死亡时通知其他系统:DYNAMIC可以被蓝图绑定
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerDeathReported, AfpstrueCharacter*, DeadPlayer);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEquippedWeaponChanged, UfpstrueWeaponComponent*, WeaponComponent);
 
 UENUM(BlueprintType)
 enum class EFPCharacterState : uint8
@@ -47,43 +48,22 @@ public:
 	//蓝图直接访问Mesh1P和FirstPersonCameraComponent组件
 	USkeletalMeshComponent* GetMesh1P() const { return Mesh1P; }
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
-	
-	//蓝图中可以调用的换弹请求。
-	UFUNCTION(BlueprintCallable, Category = "Weapon")
-	void RequestReload();
 
 	//装备/卸下武器组件
 	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
 	void ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent);
 
 
-	//转发武器状态查询到装备的武器组件，角色本身不再直接管理武器状态
+	//Character只暴露当前装备关系，武器运行时状态由WeaponComponent持有
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool HasEquippedWeapon() const { return EquippedWeaponComponent != nullptr; }
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	UfpstrueWeaponComponent* GetEquippedWeaponComponent() const { return EquippedWeaponComponent; }
 
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool IsReloading() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool HasAmmo() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool CanFireWeapon() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	int32 GetCurrentAmmo() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	int32 GetMagazineSize() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	int32 GetReserveAmmo() const;
-
-	UFUNCTION(BlueprintPure, Category = "Weapon")
-	bool IsFiring() const;
+	// HUD在拾取或清空武器时切换弹药事件来源，避免每帧查询。
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FOnEquippedWeaponChanged OnEquippedWeaponChanged;
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsAiming() const { return bIsAiming; }
@@ -121,6 +101,7 @@ protected:
 
 	//生命周期回调：Actor 销毁前、控制器变更时、引擎在 Possess 时调用（参数是增强输入组件）
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	//**待优化，用InputSubsystem
 	virtual void NotifyControllerChanged() override;
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 
@@ -128,14 +109,14 @@ protected:
 	//处理输入的函数，绑定到增强输入组件的动作上
 	void Move(const FInputActionValue& Value);
 	void Look(const FInputActionValue& Value);
-	void StartWeaponFire();
-	void StopWeaponFire();
-	void StartReload();
 	void StartSprint();
 	void StopSprint();
 	void StartAim();
 	void StopAim();
-	
+	void StartWeaponFire();
+	void StopWeaponFire();
+	void StartReload();
+
 	//绑定到 HealthComponent 的血量变化委托。
 	UFUNCTION()
 	void HandleHealthChanged(float NewHealth);
@@ -164,7 +145,7 @@ protected:
 	void OnPlayerDied();
 
 private:
-	/// 组件指针、配置参数、内部状态
+	/// **组件指针**、配置参数、内部状态
 	//Mesh1P
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Mesh", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<USkeletalMeshComponent> Mesh1P;
@@ -223,9 +204,9 @@ private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (AllowPrivateAccess = "true"))
 	bool bIsAiming = false;
 
-	//装备的武器组件指针，蓝图可读，编辑器不可编辑，Transient
+	//装备的武器组件指针，蓝图可读，编辑器不可编辑。Transient？
 	UPROPERTY(Transient)
-	//强引用：装备期间防止武器组件被 GC 回收。
+	//强引用：装备期间防止武器组件被 GC 回收。TObjectPtr？
 	TObjectPtr<UfpstrueWeaponComponent> EquippedWeaponComponent;
 
 	//增强输入子系统的弱指针，便于移除 Mapping Context

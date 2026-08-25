@@ -9,9 +9,7 @@ namespace
 {
 	AfpstrueEnemyCharacter* GetEnemyOwner(USkeletalMeshComponent* MeshComp)
 	{
-		return MeshComp != nullptr
-			? Cast<AfpstrueEnemyCharacter>(MeshComp->GetOwner())
-			: nullptr;
+		return MeshComp != nullptr? Cast<AfpstrueEnemyCharacter>(MeshComp->GetOwner()): nullptr;
 	}
 }
 

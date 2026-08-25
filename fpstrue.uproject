@@ -17,6 +17,10 @@
 			"TargetAllowList": [
 				"Editor"
 			]
+		},
+		{
+			"Name": "SignificanceManager",
+			"Enabled": true
 		}
 	]
 }

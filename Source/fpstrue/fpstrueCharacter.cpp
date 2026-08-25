@@ -16,94 +16,126 @@
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
-
+// 生命周期
 AfpstrueCharacter::AfpstrueCharacter()
-{
+{	//胶囊体
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
-		
+
+
+	//弹簧臂创建、挂载、位置、长度
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(GetCapsuleComponent());
 	CameraBoom->SetRelativeLocation(FVector(-10.f, 0.f, 60.f));
+	//弹簧伸缩碰撞检测？
+	//CameraBoom->TargetArmLength = 300.0f; bCameraBoom->TargetArmLength = 0.0f;
 	CameraBoom->TargetArmLength = 0.0f;
+	//旋转跟随
 	CameraBoom->bUsePawnControlRotation = true;
+	//平滑延迟效果（位置、旋转延迟跟随）
 	CameraBoom->bEnableCameraLag = true;
 	CameraBoom->CameraLagSpeed = 3.0f;
 	CameraBoom->bEnableCameraRotationLag = true;
 	CameraBoom->CameraRotationLagSpeed = 3.0f;
 
+	//相机创建、挂载、**关闭自身控制**
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
 	FirstPersonCameraComponent->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FirstPersonCameraComponent->bUsePawnControlRotation = false;
 
+	//网格体创建、可见性、挂载、关闭动静态阴影投射、
 	Mesh1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("CharacterMesh1P"));
+	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
 	Mesh1P->SetOnlyOwnerSee(true);
 	Mesh1P->SetupAttachment(FirstPersonCameraComponent);
 	Mesh1P->bCastDynamicShadow = false;
 	Mesh1P->CastShadow = false;
-	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
-	PrimaryActorTick.bCanEverTick = false;
 
+	//禁用tick（逻辑完全由事件驱动（输入、碰撞、动画通知等））
+	PrimaryActorTick.bCanEverTick = false;
+	//自定义健康组件
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
 
 }
 
 void AfpstrueCharacter::BeginPlay()
 {
+	//开始游戏时基函数调用
 	Super::BeginPlay();
 
 	if (HealthComponent != nullptr)
 	{
+		//订阅事件（受攻击、掉血、死亡）
 		HealthComponent->OnHealthChanged.AddUniqueDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
 		HealthComponent->OnDamageReceived.AddUniqueDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
 
-	Mesh1P->SetVisibility(EquippedWeaponComponent != nullptr, true);
-	Mesh1P->SetHiddenInGame(EquippedWeaponComponent == nullptr, true);
+
+	//**开局没有捡到枪的时候先隐藏mesh1P
+	const bool bHasWeapon = EquippedWeaponComponent != nullptr;
+	Mesh1P->SetHiddenInGame(!bHasWeapon, true);
+	//获取速度（这里需要每帧更新吗？）
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
 void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+
+	//游戏结束时，禁用开火、禁止输入（重复吗？）
 	StopWeaponFire();
 	RemoveInputMappingContexts();
+
 	if (HealthComponent != nullptr)
 	{
+		//移除订阅（不移除会怎么样？）
+		//举例：HealthComponent发布，AfpstrueCharacter订阅，&HandleHealthChanged获取地址
+		//为什么能订阅？保存了Uobjectptr of HealthComponent
 		HealthComponent->OnHealthChanged.RemoveDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
 		HealthComponent->OnDamageReceived.RemoveDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
+	//最后调用基类
 	Super::EndPlay(EndPlayReason);
 }
 
 
+//玩家控制变更（游戏开始、角色切换）
 void AfpstrueCharacter::NotifyControllerChanged()
-{
+{	//停火、禁输入
 	StopWeaponFire();
+	//移除旧输入映射（安全吗）
 	RemoveInputMappingContexts();
+	//执行基类
 	Super::NotifyControllerChanged();
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
+		//通过当前玩家的 PlayerController 获取对应的LocalPlayer，再从LocalPlayer中找到 Enhanced Input子系统，用来管理该玩家的输入映射
+		//目的是：Controller变化后重新获取当前玩家对应的Enhanced Input管理器
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
 		{
+			//保存输入管理器引用，把输入配置加载进去
+			//注意BoundInputSubsystem是弱指针
 			BoundInputSubsystem = Subsystem;
 			ApplyInputMappingContexts();
 		}
 	}
 }
 
+//输入绑定注册
 void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
-{	
+{
+	//确定是新版的注册系统
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
+
+		//绑定基础移动
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
-
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
-
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
 
+		//条件绑定：检查开火前提，绑定开火（三个事件）
 		if (FireAction)
 		{
 			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartWeaponFire);
@@ -120,6 +152,8 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 				*GetClass()->GetPathName());
 		}
 
+
+		//条件绑定：检查冲刺前提，绑定冲刺（瞄准、换弹、死亡时强制关闭）
 		if (RunAction)
 		{
 			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartSprint);
@@ -129,6 +163,7 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			UE_LOG(LogTemplateCharacter, Error, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
 		}
 
+		//条件绑定：检查瞄准前提，绑定开火（三个事件）
 		if (AimAction)
 		{
 			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
@@ -140,6 +175,7 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			UE_LOG(LogTemplateCharacter, Error, TEXT("AimAction is NULL. Assign IA_Aim in BP_FirstPersonCharacter."));
 		}
 
+		//条件绑定：检查换弹前提，绑定开火（仅绑定started，不需要Completed、Canceled）
 		if (ReloadAction)
 		{
 			EnhancedInputComponent->BindAction(
@@ -160,13 +196,46 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	}
 }
 
+void AfpstrueCharacter::ApplyInputMappingContexts()
+{
+	//为什么是.Get()？得到弱指针内部真正的指针
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get();
+	if (Subsystem == nullptr)
+	{
+		return;
+	}
+	//从保存的 Enhanced Input 子系统中取出输入管理器，
+	// 如果有效，就把默认输入映射 DefaultMappingContext 加载进去，让玩家的按键重新生效。
+	if (DefaultMappingContext != nullptr)
+	{
+		Subsystem->AddMappingContext(DefaultMappingContext, 0);
+	}
+}
 
+void AfpstrueCharacter::RemoveInputMappingContexts()
+{
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get())
+	{
+		if (DefaultMappingContext != nullptr)
+		{
+			Subsystem->RemoveMappingContext(DefaultMappingContext);
+		}
+	}
+	//使用reset进一步避免槽位复用
+	BoundInputSubsystem.Reset();
+}
+
+
+////玩家状态相关：状态优先级链：Death > Reload > Aim > Sprint > Walk。
 void AfpstrueCharacter::Move(const FInputActionValue& Value)
 {
+	//获得向量
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
+		// 有Controller，交给移动组件移动;
+		//X:左右，Y:前后
 		AddMovementInput(GetActorForwardVector(), MovementVector.Y);
 		AddMovementInput(GetActorRightVector(), MovementVector.X);
 	}
@@ -174,10 +243,13 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 
 void AfpstrueCharacter::Look(const FInputActionValue& Value)
 {
+	//获得向量
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
+		//有Controller，交给修改旋转;
+		//X：摇头  Y：点头
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
 	}
@@ -185,41 +257,53 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 
 void AfpstrueCharacter::StartSprint()
 {
-	if (IsDead() || IsReloading() || bIsAiming)
+	//检测状态约束行为。如何优化？？？
+	const bool bWeaponReloading = EquippedWeaponComponent != nullptr
+		&& EquippedWeaponComponent->IsReloading();
+	if (IsDead() || bWeaponReloading || bIsAiming)
 	{
 		return;
 	}
-
+	//标记状态实现sprint、speed的优化
 	bIsSprinting = !bIsSprinting;
 	GetCharacterMovement()->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
 }
 
 void AfpstrueCharacter::StopSprint()
 {
+	//停止冲刺
 	bIsSprinting = false;
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
+
+//
 void AfpstrueCharacter::StartAim()
 {
-	if (EquippedWeaponComponent == nullptr
-		|| IsDead()
-		|| IsReloading()
-		|| bIsAiming)
+	//检查状态避免状态冲突
+	const bool bWeaponReloading = EquippedWeaponComponent != nullptr
+		&& EquippedWeaponComponent->IsReloading();
+	if (EquippedWeaponComponent == nullptr || IsDead() || bWeaponReloading || bIsAiming)
 	{
 		return;
 	}
 
+	//检查瞄准前置条件
 	bIsAiming = true;
 	bIsSprinting = false;
 	GetCharacterMovement()->MaxWalkSpeed = AimWalkSpeed;
 	OnAimChanged(true);
 }
+
 void AfpstrueCharacter::StopAim()
 {
+	//*****
+	//保留原来状态
 	const bool bWasAiming = bIsAiming;
+	//无条件复位
 	bIsAiming = false;
 
+	//原来是在瞄准的话，修改状态
 	if (bWasAiming)
 	{
 		OnAimChanged(false);
@@ -227,28 +311,72 @@ void AfpstrueCharacter::StopAim()
 	}
 }
 
-
-void AfpstrueCharacter::StartReload()
-{
-	RequestReload();
-}
-
+// 武器交互
 void AfpstrueCharacter::StartWeaponFire()
 {
+	//开火检查玩家状态，有枪？或者？
 	if (EquippedWeaponComponent != nullptr && !IsDead())
 	{
+		//转入weapon
 		EquippedWeaponComponent->StartFire();
 	}
 }
+
 
 void AfpstrueCharacter::StopWeaponFire()
 {
 	if (EquippedWeaponComponent != nullptr)
 	{
+		//转入weapon
 		EquippedWeaponComponent->StopFire();
 	}
 }
 
+void AfpstrueCharacter::StartReload()
+{
+	if (EquippedWeaponComponent == nullptr
+		|| IsDead()
+		|| !EquippedWeaponComponent->CanReload())
+	{
+		return;
+	}
+
+	StopAim();
+	StopSprint();
+	EquippedWeaponComponent->RequestReload();
+}
+
+
+//装备枪支，可见性设置
+void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
+{
+	if (WeaponComponent == nullptr || EquippedWeaponComponent == WeaponComponent)
+	{
+		return;
+	}
+
+	EquippedWeaponComponent = WeaponComponent;
+	Mesh1P->SetHiddenInGame(false, true);
+	OnEquippedWeaponChanged.Broadcast(WeaponComponent);
+	OnWeaponEquipped(WeaponComponent);
+}
+
+//清除枪支、禁止开火、可见性设置
+void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent)
+{
+	if (EquippedWeaponComponent == nullptr || EquippedWeaponComponent != WeaponComponent)
+	{
+		return;
+	}
+
+	StopWeaponFire();
+	EquippedWeaponComponent = nullptr;
+	Mesh1P->SetHiddenInGame(true, true);
+	OnEquippedWeaponChanged.Broadcast(nullptr);
+}
+
+// 生命与伤害
+//生命组件内部事件转发给Character的蓝图表现层，用于UI和动画的更新
 void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 {
 	OnPlayerHealthChanged(NewHealth);
@@ -296,16 +424,6 @@ void AfpstrueCharacter::HandleDeath()
 	OnPlayerDied();
 }
 
-bool AfpstrueCharacter::IsReloading() const
-{
-	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
-}
-
-bool AfpstrueCharacter::HasAmmo() const
-{
-	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->HasAmmo();
-}
-
 bool AfpstrueCharacter::IsDead() const
 {
 	return bDeathHandled || (HealthComponent != nullptr && HealthComponent->IsDead());
@@ -326,96 +444,7 @@ float AfpstrueCharacter::GetHealthNormalized() const
 	return HealthComponent != nullptr ? HealthComponent->GetHealthNormalized() : 0.0f;
 }
 
-bool AfpstrueCharacter::CanFireWeapon() const
-{
-	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->CanFire();
-}
-
-void AfpstrueCharacter::RequestReload()
-{
-	if (EquippedWeaponComponent == nullptr || !EquippedWeaponComponent->CanReload())
-	{
-		return;
-	}
-
-	StopAim();
-	StopSprint();
-	EquippedWeaponComponent->RequestReload();
-}
-
-void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
-{
-	if (WeaponComponent == nullptr || EquippedWeaponComponent == WeaponComponent)
-	{
-		return;
-	}
-
-	EquippedWeaponComponent = WeaponComponent;
-	Mesh1P->SetHiddenInGame(false, true);
-	Mesh1P->SetVisibility(true, true);
-	OnWeaponEquipped(WeaponComponent);
-}
-
-void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent)
-{
-	if (EquippedWeaponComponent == nullptr || EquippedWeaponComponent != WeaponComponent)
-	{
-		return;
-	}
-
-	StopWeaponFire();
-	EquippedWeaponComponent = nullptr;
-	Mesh1P->SetVisibility(false, true);
-	Mesh1P->SetHiddenInGame(true, true);
-}
-
-void AfpstrueCharacter::ApplyInputMappingContexts()
-{
-	UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get();
-	if (Subsystem == nullptr)
-	{
-		return;
-	}
-
-	if (DefaultMappingContext != nullptr)
-	{
-		Subsystem->AddMappingContext(DefaultMappingContext, 0);
-	}
-}
-
-void AfpstrueCharacter::RemoveInputMappingContexts()
-{
-	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get())
-	{
-		if (DefaultMappingContext != nullptr)
-		{
-			Subsystem->RemoveMappingContext(DefaultMappingContext);
-		}
-	}
-
-	BoundInputSubsystem.Reset();
-}
-
-int32 AfpstrueCharacter::GetCurrentAmmo() const
-{
-	return EquippedWeaponComponent != nullptr ? EquippedWeaponComponent->GetCurrentAmmo() : 0;
-}
-
-int32 AfpstrueCharacter::GetMagazineSize() const
-{
-	return EquippedWeaponComponent != nullptr ? EquippedWeaponComponent->GetMagazineSize() : 0;
-}
-
-int32 AfpstrueCharacter::GetReserveAmmo() const
-{
-	return EquippedWeaponComponent != nullptr ? EquippedWeaponComponent->GetReserveAmmo() : 0;
-}
-
-bool AfpstrueCharacter::IsFiring() const
-{
-	return EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsFiring();
-}
-
+// 角色状态
 EFPCharacterState AfpstrueCharacter::GetCharacterState() const
 {
 	if (IsDead())

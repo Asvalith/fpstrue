@@ -39,6 +39,8 @@ public:
 	UFUNCTION(BlueprintPure, Category="Health")
 	bool IsDead() const { return CurrentHealth <= 0.0f; }
 
+
+	//为什么是变量，不是委托吗？
 	UPROPERTY(BlueprintAssignable, Category="Health")
 	FOnDamageReceived OnDamageReceived;
 
@@ -55,15 +57,14 @@ protected:
 	UFUNCTION()
 	void HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser);
 
-private:
-	void ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
-
-protected:
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Health", meta=(ClampMin="1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Health", meta = (ClampMin = "1.0"))
 	float MaxHealth = 100.0f;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Health")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health")
 	float CurrentHealth = 100.0f;
 
 	bool bDeathBroadcast = false;
+
+private:
+	void ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 };

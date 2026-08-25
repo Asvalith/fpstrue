@@ -32,13 +32,61 @@ void AfpstrueSurroundManager::BeginPlay()
 void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(DebugDrawTimerHandle);
+	GetWorldTimerManager().ClearTimer(SharedTargetTimerHandle);
 	ResetManager();
 	Super::EndPlay(EndPlayReason);
 }
 
 void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
 {
+	if (TargetCharacter == NewTargetCharacter && bHasSharedTargetSnapshot)
+	{
+		return;
+	}
+
 	TargetCharacter = NewTargetCharacter;
+	if (!IsValid(TargetCharacter))
+	{
+		bHasSharedTargetSnapshot = false;
+		GetWorldTimerManager().ClearTimer(SharedTargetTimerHandle);
+		return;
+	}
+
+	UpdateSharedTargetSnapshot(true);
+	GetWorldTimerManager().SetTimer(
+		SharedTargetTimerHandle,
+		this,
+		&AfpstrueSurroundManager::RefreshSharedTargetSnapshot,
+		FMath::Max(SharedTargetRefreshInterval, 0.05f),
+		true
+	);
+}
+
+void AfpstrueSurroundManager::RefreshSharedTargetSnapshot()
+{
+	UpdateSharedTargetSnapshot(false);
+}
+
+void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
+{
+	if (!IsValid(TargetCharacter))
+	{
+		return;
+	}
+
+	const FVector CurrentTargetLocation = TargetCharacter->GetActorLocation();
+	const bool bMovedEnough = FVector::DistSquared2D(
+		CurrentTargetLocation,
+		CachedTargetLocation
+	) >= FMath::Square(SharedTargetMoveThreshold);
+	if (!bForce && bHasSharedTargetSnapshot && !bMovedEnough)
+	{
+		return;
+	}
+
+	CachedTargetLocation = CurrentTargetLocation;
+	bHasSharedTargetSnapshot = true;
+	++SharedTargetGeneration;
 }
 
 void AfpstrueSurroundManager::BuildSlots()
@@ -156,15 +204,35 @@ bool AfpstrueSurroundManager::GetAttackApproachLocation(
 
 	const int32* SlotIndexPtr = EnemyToSlot.Find(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
 	if (SlotIndexPtr == nullptr
-		|| !SurroundSlots.IsValidIndex(*SlotIndexPtr)
-		|| SurroundSlots[*SlotIndexPtr].RingIndex != 0)
+		|| !SurroundSlots.IsValidIndex(*SlotIndexPtr))
 	{
 		return false;
 	}
 
-	const FVector RawLocation =
-		CalculateRawSlotLocation(SurroundSlots[*SlotIndexPtr], AttackApproachRadius);
+	const FfpstrueSurroundSlot& Slot = SurroundSlots[*SlotIndexPtr];
+	const float ApproachRadius =
+		Slot.RingIndex == 0 ? AttackApproachRadius : OuterAttackApproachRadius;
+	const FVector Direction(
+		FMath::Cos(Slot.AngleRadians),
+		FMath::Sin(Slot.AngleRadians),
+		0.0f
+	);
+	const FVector RawLocation = TargetCharacter->GetActorLocation() + Direction * ApproachRadius;
 	return ProjectToNavigation(RawLocation, OutLocation);
+}
+
+bool AfpstrueSurroundManager::GetSharedTargetSnapshot(
+	FVector& OutLocation,
+	uint32& OutTargetGeneration) const
+{
+	if (!bHasSharedTargetSnapshot)
+	{
+		return false;
+	}
+
+	OutTargetGeneration = SharedTargetGeneration;
+	OutLocation = CachedTargetLocation;
+	return true;
 }
 
 void AfpstrueSurroundManager::ResetManager()
@@ -176,6 +244,9 @@ void AfpstrueSurroundManager::ResetManager()
 
 	EnemyToSlot.Reset();
 	TargetCharacter = nullptr;
+	bHasSharedTargetSnapshot = false;
+	SharedTargetGeneration = 0;
+	GetWorldTimerManager().ClearTimer(SharedTargetTimerHandle);
 }
 
 void AfpstrueSurroundManager::CleanupInvalidEntries()
@@ -282,7 +353,7 @@ FVector AfpstrueSurroundManager::CalculateRawSlotLocation(
 	const FfpstrueSurroundSlot& Slot,
 	float RadiusOverride) const
 {
-	if (!IsValid(TargetCharacter))
+	if (!bHasSharedTargetSnapshot)
 	{
 		return GetActorLocation();
 	}
@@ -293,7 +364,7 @@ FVector AfpstrueSurroundManager::CalculateRawSlotLocation(
 		FMath::Sin(Slot.AngleRadians),
 		0.0f
 	);
-	return TargetCharacter->GetActorLocation() + Direction * Radius;
+	return CachedTargetLocation + Direction * Radius;
 }
 
 bool AfpstrueSurroundManager::ProjectToNavigation(

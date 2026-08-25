@@ -56,4 +56,6 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 	{	//注销组件，从Actor数组中移除，标记为待销毁。UObject内存回收由UE的对象生命周期/GC机制处理。
 		DestroyComponent();
 	}
+	////相关八股
+	////UE 的事件解绑、Component 生命周期、UObject 指针安全、一次性事务设计
 }

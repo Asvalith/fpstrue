@@ -38,6 +38,10 @@ public:
 		bool& bOutInnerRing
 	);
 	bool GetAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation);
+	bool GetSharedTargetSnapshot(
+		FVector& OutLocation,
+		uint32& OutTargetGeneration
+	) const;
 
 	void ResetManager();
 
@@ -60,8 +64,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Attack", meta = (ClampMin = "50.0"))
 	float AttackApproachRadius = 120.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Attack", meta = (ClampMin = "100.0"))
+	float OuterAttackApproachRadius = 220.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Navigation")
 	FVector NavigationProjectionExtent = FVector(120.0f, 120.0f, 250.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Shared Target", meta = (ClampMin = "0.05"))
+	float SharedTargetRefreshInterval = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Shared Target", meta = (ClampMin = "25.0"))
+	float SharedTargetMoveThreshold = 200.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Debug")
 	bool bDrawDebugSlots = false;
@@ -71,6 +84,8 @@ protected:
 
 private:
 	void BuildSlots();
+	void RefreshSharedTargetSnapshot();
+	void UpdateSharedTargetSnapshot(bool bForce);
 	void CleanupInvalidEntries();
 	int32 FindBestFreeSlot(const FVector& EnemyLocation);
 	void PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex);
@@ -81,7 +96,12 @@ private:
 	UPROPERTY()
 	AfpstrueCharacter* TargetCharacter = nullptr;
 
+	FVector CachedTargetLocation = FVector::ZeroVector;
+	uint32 SharedTargetGeneration = 0;
+	bool bHasSharedTargetSnapshot = false;
+
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	FTimerHandle DebugDrawTimerHandle;
+	FTimerHandle SharedTargetTimerHandle;
 };

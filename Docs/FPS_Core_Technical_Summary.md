@@ -36,7 +36,6 @@
 | --- | --- | --- |
 | `AfpstrueCharacter` | Enhanced Input、移动、冲刺、瞄准、当前武器引用、玩家死亡协调 | `fpstrueCharacter.h/.cpp` |
 | `UfpstrueWeaponComponent` | 弹药、武器状态、射速 Timer、换弹事务、散布、后坐力、Hitscan | `fpstrueWeaponComponent.h/.cpp` |
-| `UfpstrueWeaponDataAsset` | 武器静态配置；不保存某把武器的运行时弹药 | `fpstrueWeaponDataAsset.h` |
 | `UfpstruePickUpComponent` | 一次性 Overlap 拾取和消费后自销毁 | `fpstruePickUpComponent.h/.cpp` |
 | `UfpstrueHealthComponent` | 统一扣血、Clamp、伤害事件和一次性死亡广播 | `fpstrueHealthComponent.h/.cpp` |
 | `AfpstrueEnemyCharacter` | 近战事务、连续 Sweep、受击、Ragdoll 和死亡回收 | `fpstrueEnemyCharacter.h/.cpp` |
@@ -70,9 +69,6 @@ CancelReload
 
 ```text
 OnAttackStarted
-OnAttackLanded
-OnAttackMissed
-OnAttackFinished
 OnEnemyDamaged
 OnEnemyDied
 ```
@@ -106,21 +102,23 @@ IA_Shoot Started
 散布实现严格按当前代码描述：
 
 ```cpp
-DiskRadius = tan(SpreadAngle)
-Radius = sqrt(FRand()) * DiskRadius
+MaxRadius = tan(SpreadAngle)
+Sigma = MaxRadius / 3
+TruncatedProbability = 1 - exp(-0.5 * 3 * 3)
+Radius = Sigma * sqrt(-2 * log(1 - FRand() * TruncatedProbability))
 Angle = FRand() * 2 * PI
 Direction = normalize(Forward + Right * x + Up * y)
 ```
 
-`sqrt(random)` 使圆盘面积采样均匀，避免样本集中在圆心。它是瞄准方向切平面上的均匀圆盘采样，再归一化为方向；不能夸大为严格的“均匀立体角圆锥采样”。连续射击会增加散布角，停火超过 `SpreadResetDelay` 后重置。
+当前采用二维截断高斯采样，使弹着点在准星中心附近概率更高，向边缘逐渐衰减。`SpreadAngle` 仍表示最大偏角，代码将该边界设为 `3σ`，使用截断分布的反函数直接采样，因此不会产生超出最大散布角的离群弹道，也不会因简单 Clamp 在边界堆积样本。连续射击会增加散布角，停火超过 `SpreadResetDelay` 后重置。
 
 当前命中规则：
 
 - 使用 `ECC_Visibility` 和复杂碰撞查询。
 - 忽略玩家与武器 Owner。
 - `head`、`neck_01` 使用头部伤害，其余使用身体伤害。
-- 只对 `AfpstrueEnemyCharacter` 提交伤害；通用 Damageable 接口仍是待扩展项。
-- 非敌人物理组件才添加冲量；敌人受击由 EnemyCharacter 自己处理，避免双冲量。
+- 对射线命中的 Actor 提交点伤害，由目标自身决定是否处理伤害。
+- 非 Character 物理组件才添加冲量；角色受击表现由角色自身处理，避免双冲量。
 
 ### 4.2 换弹事务
 
@@ -285,7 +283,6 @@ StartNextWave
 - **Observer**：动态多播委托把规则事件发送给 GameMode、UI 和蓝图表现。
 - **State**：Weapon ActionState、Enemy FSM 和一次性死亡状态控制非法转换。
 - **Coordinator**：GameMode 协调全局规则，SurroundManager 协调群体站位。
-- **Data Driven**：WeaponDataAsset 保存共享静态配置，Component 保存实例状态。
 - **Command/Adapter 倾向**：Character 把输入意图转发给 Weapon，而不实现武器规则。
 
 不要把每个函数都强行命名为设计模式。面试时应先讲职责和问题，再说明模式只是对现有结构的概括。
