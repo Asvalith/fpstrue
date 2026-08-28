@@ -20,144 +20,157 @@ class AfpstrueCharacter;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
-//¶¯Ì¬¶à²¥Î¯ÍĞ£¬ÓÃÓÚÔÚÍæ¼ÒËÀÍöÊ±Í¨ÖªÆäËûÏµÍ³:DYNAMIC¿ÉÒÔ±»À¶Í¼°ó¶¨
+//åŠ¨æ€å¤šæ’­å§”æ‰˜ï¼Œç”¨äºåœ¨ç©å®¶æ­»äº¡æ—¶é€šçŸ¥å…¶ä»–ç³»ç»Ÿ:DYNAMICå¯ä»¥è¢«è“å›¾ç»‘å®š
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerDeathReported, AfpstrueCharacter*, DeadPlayer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEquippedWeaponChanged, UfpstrueWeaponComponent*, WeaponComponent);
 
-UENUM(BlueprintType)
-enum class EFPCharacterState : uint8
-{
-	Idle       UMETA(DisplayName = "Idle"),
-	Moving     UMETA(DisplayName = "Moving"),
-	// ReloadÇ¨ÒÆÖÁweapon×é¼ş£¬½ÇÉ«²»ÔÙÖ±½Ó¹ÜÀíreload×´Ì¬
-	Reloading  UMETA(Hidden),
-	Dead       UMETA(DisplayName = "Dead")
-};
-
-UCLASS(config=Game)
+/** ç©å®¶è§’è‰²æ¨¡å—ï¼šè¿æ¥è¾“å…¥ã€ç§»åŠ¨ã€æ­¦å™¨å’Œé€šç”¨ HealthComponentï¼Œå¹¶æŠŠçŠ¶æ€å˜åŒ–è½¬å‘ç»™è“å›¾è¡¨ç°å±‚ã€‚ */
+UCLASS(config = Game)
 class FPSTRUE_API AfpstrueCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
 public:
-	/// ¶ÔÍâ½Ó¿Ú£¨²éÑ¯¡¢ÇëÇó£©
+	/// å¯¹å¤–æ¥å£ï¼ˆæŸ¥è¯¢ã€è¯·æ±‚ï¼‰
 
+	// åˆ›å»ºç›¸æœºã€ç¬¬ä¸€äººç§° Mesh å’Œ HealthComponentï¼Œè§’è‰²æœ¬èº«ä¸å¯ç”¨ Tickã€‚
 	AfpstrueCharacter();
+	// ç»‘å®šå¥åº·äº‹ä»¶ã€åŒæ­¥ HUD åˆå§‹è¡€é‡å¹¶åˆå§‹åŒ–ç§»åŠ¨é€Ÿåº¦ã€‚
 	virtual void BeginPlay() override;
 
-	//À¶Í¼Ö±½Ó·ÃÎÊMesh1PºÍFirstPersonCameraComponent×é¼ş
+	//è“å›¾ç›´æ¥è®¿é—®Mesh1På’ŒFirstPersonCameraComponentç»„ä»¶
+	// WeaponComponent è£…å¤‡æ—¶ä½¿ç”¨ç¬¬ä¸€äººç§° Mesh çš„ GripPointã€‚
 	USkeletalMeshComponent* GetMesh1P() const { return Mesh1P; }
+	// WeaponComponent çš„ Hitscan ä½¿ç”¨è¯¥ç›¸æœºç¡®å®šå°„çº¿èµ·ç‚¹å’Œæ–¹å‘ã€‚
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 
-	//×°±¸/Ğ¶ÏÂÎäÆ÷×é¼ş
+	//è£…å¤‡/å¸ä¸‹æ­¦å™¨ç»„ä»¶
+	// PickUp/WeaponComponent è£…å¤‡æˆåŠŸåç™»è®°å½“å‰æ­¦å™¨å¹¶é€šçŸ¥ HUD/è“å›¾ã€‚
 	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
+	// æ­¦å™¨é”€æ¯æˆ–å¸ä¸‹æ—¶æ¸…ç©ºè£…å¤‡å…³ç³»å¹¶é€šçŸ¥ HUDã€‚
 	void ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent);
 
-
-	//CharacterÖ»±©Â¶µ±Ç°×°±¸¹ØÏµ£¬ÎäÆ÷ÔËĞĞÊ±×´Ì¬ÓÉWeaponComponent³ÖÓĞ
+	//Characteråªæš´éœ²å½“å‰è£…å¤‡å…³ç³»ï¼Œæ­¦å™¨è¿è¡Œæ—¶çŠ¶æ€ç”±WeaponComponentæŒæœ‰
+	// WeaponComponent è£…å¤‡å‰æ£€æŸ¥ç©å®¶æ˜¯å¦å·²ç»æŒæœ‰æ­¦å™¨ã€‚
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool HasEquippedWeapon() const { return EquippedWeaponComponent != nullptr; }
 
+	// HUD å’Œè“å›¾è¯»å–å½“å‰æ­¦å™¨ï¼›å¼¹è¯çŠ¶æ€ä»ç”± WeaponComponent æŒæœ‰ã€‚
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	UfpstrueWeaponComponent* GetEquippedWeaponComponent() const { return EquippedWeaponComponent; }
 
-	// HUDÔÚÊ°È¡»òÇå¿ÕÎäÆ÷Ê±ÇĞ»»µ¯Ò©ÊÂ¼şÀ´Ô´£¬±ÜÃâÃ¿Ö¡²éÑ¯¡£
+	// HUDåœ¨æ‹¾å–æˆ–æ¸…ç©ºæ­¦å™¨æ—¶åˆ‡æ¢å¼¹è¯äº‹ä»¶æ¥æºï¼Œé¿å…æ¯å¸§æŸ¥è¯¢ã€‚
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FOnEquippedWeaponChanged OnEquippedWeaponChanged;
 
+	// WeaponComponent ç”¨å®ƒé€‰æ‹©ç„å‡†æ•£å¸ƒå’ŒåååŠ›å€ç‡ã€‚
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsAiming() const { return bIsAiming; }
 
-
-	//×ª·¢HealthComponent£¬½ÇÉ«±¾Éí²»ÔÙÖ±½Ó¹ÜÀíÉúÃüÖµ×´Ì¬
+	//è½¬å‘HealthComponentï¼Œè§’è‰²æœ¬èº«ä¸å†ç›´æ¥ç®¡ç†ç”Ÿå‘½å€¼çŠ¶æ€
+	// GameModeã€æ­¦å™¨å’Œè¾“å…¥è§„åˆ™é€šè¿‡è¿™é‡Œè¯»å–ç©å®¶æ­»äº¡äº‹å®ã€‚
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsDead() const;
 
+	// HUD åˆå§‹åŒ–æ—¶è¯»å–å½“å‰è¡€é‡ã€‚
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetCurrentHealth() const;
 
+	// HUD åˆå§‹åŒ–æ—¶è¯»å–æœ€å¤§è¡€é‡ã€‚
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetMaxHealth() const;
 
+	// UI è¿›åº¦æ¡è¯»å–å½’ä¸€åŒ–è¡€é‡ï¼›å˜åŒ–ä»ç”±äº‹ä»¶é©±åŠ¨ã€‚
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetHealthNormalized() const;
 
-	//×ª·¢HealthComponentµÄÒıÓÃ£¬Í¬Ê±·½±ãÀ¶Í¼ÖĞÖ±½Ó·ÃÎÊHealthComponentµÄÆäËû¹¦ÄÜ
+	//è½¬å‘HealthComponentçš„å¼•ç”¨ï¼ŒåŒæ—¶æ–¹ä¾¿è“å›¾ä¸­ç›´æ¥è®¿é—®HealthComponentçš„å…¶ä»–åŠŸèƒ½
+	// EnemyCombatComponent å’Œ GameMode é€šè¿‡è¯¥å¼•ç”¨å¤ç”¨é€šç”¨ç”Ÿå‘½å€¼åˆ¤æ–­ã€‚
 	UFUNCTION(BlueprintPure, Category = "Health")
 	UfpstrueHealthComponent* GetHealthComponent() const { return HealthComponent; }
 
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnPlayerDeathReported OnPlayerDeathReported;
 
-	//×´Ì¬ºÍÒÆ¶¯Ïà¹Ø
-	UFUNCTION(BlueprintPure, Category = "State")
-	EFPCharacterState GetCharacterState() const;
-
-	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool IsSprinting() const { return bIsSprinting; }
-
 protected:
-	///// ÉúÃüÖÜÆÚ»Øµ÷¡¢ÊäÈë´¦Àí¡¢ÊÂ¼ş´¦Àí
+	// ==================== ç”Ÿå‘½å‘¨æœŸã€è¾“å…¥ä¸äº‹ä»¶å¤„ç† ====================
 
-	//ÉúÃüÖÜÆÚ»Øµ÷£ºActor Ïú»ÙÇ°¡¢¿ØÖÆÆ÷±ä¸üÊ±¡¢ÒıÇæÔÚ Possess Ê±µ÷ÓÃ£¨²ÎÊıÊÇÔöÇ¿ÊäÈë×é¼ş£©
+	//ç”Ÿå‘½å‘¨æœŸå›è°ƒï¼šActor é”€æ¯å‰ã€æ§åˆ¶å™¨å˜æ›´æ—¶ã€å¼•æ“åœ¨ Possess æ—¶è°ƒç”¨ï¼ˆå‚æ•°æ˜¯å¢å¼ºè¾“å…¥ç»„ä»¶ï¼‰
+	// åœæ­¢æŒç»­å¼€ç«ã€ç§»é™¤è¾“å…¥æ˜ å°„å¹¶è§£é™¤å¥åº·äº‹ä»¶ã€‚
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	//**´ıÓÅ»¯£¬ÓÃInputSubsystem
+	// Controller å˜åŒ–æ—¶æŠŠ Mapping Context è¿ç§»åˆ°æ–°çš„æœ¬åœ°ç©å®¶å­ç³»ç»Ÿã€‚
 	virtual void NotifyControllerChanged() override;
+	// æŠŠå¢å¼ºè¾“å…¥ Action ç»‘å®šåˆ°ç§»åŠ¨ã€ç„å‡†ã€å¼€ç«å’Œæ¢å¼¹æ¥å£ã€‚
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 
-
-	//´¦ÀíÊäÈëµÄº¯Êı£¬°ó¶¨µ½ÔöÇ¿ÊäÈë×é¼şµÄ¶¯×÷ÉÏ
+	//å¤„ç†è¾“å…¥çš„å‡½æ•°ï¼Œç»‘å®šåˆ°å¢å¼ºè¾“å…¥ç»„ä»¶çš„åŠ¨ä½œä¸Š
+	// æŠŠäºŒç»´ç§»åŠ¨è¾“å…¥è½¬æ¢ä¸ºå‰å/å·¦å³ç§»åŠ¨ã€‚
 	void Move(const FInputActionValue& Value);
+	// æŠŠäºŒç»´è§†è§’è¾“å…¥è½¬æ¢ä¸º Yaw/Pitchã€‚
 	void Look(const FInputActionValue& Value);
+	// è¾“å…¥å¼€å§‹æ—¶æ£€æŸ¥æ­»äº¡ã€æ¢å¼¹å’Œç„å‡†çº¦æŸï¼Œå†è¿›å…¥å†²åˆºã€‚
 	void StartSprint();
+	// é€€å‡ºå†²åˆºå¹¶æ¢å¤æ­£å¸¸æ­¥é€Ÿã€‚
 	void StopSprint();
+	// æ£€æŸ¥æ­¦å™¨ä¸è§’è‰²çŠ¶æ€åè¿›å…¥ç„å‡†ï¼Œå¹¶é€šçŸ¥è“å›¾è¡¨ç°ã€‚
 	void StartAim();
+	// é€€å‡ºç„å‡†å¹¶æ¢å¤æ­£å¸¸æ­¥é€Ÿã€‚
 	void StopAim();
+	// æŠŠå¼€ç«è¾“å…¥è½¬äº¤å½“å‰ WeaponComponentã€‚
 	void StartWeaponFire();
+	// æŠŠåœæ­¢å¼€ç«è¾“å…¥è½¬äº¤å½“å‰ WeaponComponentã€‚
 	void StopWeaponFire();
+	// ç»“æŸç„å‡†/å†²åˆºåå‘ WeaponComponent è¯·æ±‚æ¢å¼¹ã€‚
 	void StartReload();
 
-	//°ó¶¨µ½ HealthComponent µÄÑªÁ¿±ä»¯Î¯ÍĞ¡£
+	//ç»‘å®šåˆ° HealthComponent çš„è¡€é‡å˜åŒ–å§”æ‰˜ã€‚
+	// æŠŠé€šç”¨è¡€é‡å˜åŒ–è½¬å‘ç»™ç©å®¶è“å›¾å’Œ HUDã€‚
 	UFUNCTION()
 	void HandleHealthChanged(float NewHealth);
-	//°ó¶¨µ½ÊÜÉËÎ¯ÍĞ¡£²ÎÊıÈı¼şÌ×£ºÉËº¦Á¿¡¢ÉËº¦À´Ô´ Actor¡¢ÕØÊÂ¿ØÖÆÆ÷£¨ÓÃÓÚ¼Æ·ÖÅĞ¶¨£©£¬×ª·¢¸øÀ¶Í¼ OnPlayerDamaged¡£
+	//ç»‘å®šåˆ°å—ä¼¤å§”æ‰˜ã€‚å‚æ•°ä¸‰ä»¶å¥—ï¼šä¼¤å®³é‡ã€ä¼¤å®³æ¥æº Actorã€è‚‡äº‹æ§åˆ¶å™¨ï¼ˆç”¨äºè®¡åˆ†åˆ¤å®šï¼‰ï¼Œè½¬å‘ç»™è“å›¾ OnPlayerDamagedã€‚
+	// æŠŠé€šç”¨å—ä¼¤äº‹ä»¶è½¬å‘ç»™ç©å®¶å—å‡»è¡¨ç°ã€‚
 	UFUNCTION()
 	void HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
-	//°ó¶¨µ½ËÀÍöÎ¯ÍĞ
+	//ç»‘å®šåˆ°æ­»äº¡å§”æ‰˜
+	// åœæ­¢ç§»åŠ¨å’Œæ­¦å™¨ï¼Œæ‰§è¡Œä¸€æ¬¡ç©å®¶æ­»äº¡è¡¨ç°å¹¶é€šçŸ¥ GameModeã€‚
 	UFUNCTION()
 	void HandleDeath();
 
-
-	//À¶Í¼ÊÂ¼ş£ºÃé×¼×´Ì¬±ä»¯¡¢ÎäÆ÷×°±¸¡¢ÑªÁ¿±ä»¯¡¢ÊÜÉË¡¢ËÀÍö
+	//è“å›¾äº‹ä»¶ï¼šç„å‡†çŠ¶æ€å˜åŒ–ã€æ­¦å™¨è£…å¤‡ã€è¡€é‡å˜åŒ–ã€å—ä¼¤ã€æ­»äº¡
+	// è“å›¾ç”¨å®ƒåˆ‡æ¢ç„å‡†åŠ¨ç”»å’Œ UIã€‚
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnAimChanged(bool bNewIsAiming);
 
+	// è“å›¾ç”¨å®ƒæ’­æ”¾è£…å¤‡è¡¨ç°ã€‚
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnWeaponEquipped(UfpstrueWeaponComponent* WeaponComponent);
 
+	// è“å›¾/HUD å“åº”è¡€é‡å˜åŒ–ã€‚
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnPlayerHealthChanged(float NewHealth);
 
+	// è“å›¾æ’­æ”¾ç©å®¶å—å‡»åé¦ˆã€‚
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnPlayerDamaged(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 
+	// è“å›¾æ’­æ”¾ç©å®¶æ­»äº¡è¡¨ç°ã€‚
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnPlayerDied();
 
 private:
-	/// **×é¼şÖ¸Õë**¡¢ÅäÖÃ²ÎÊı¡¢ÄÚ²¿×´Ì¬
+	/// **ç»„ä»¶æŒ‡é’ˆ**ã€é…ç½®å‚æ•°ã€å†…éƒ¨çŠ¶æ€
 	//Mesh1P
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Mesh", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<USkeletalMeshComponent> Mesh1P;
 
-	//Ïà»úÏà¹Ø
+	//ç›¸æœºç›¸å…³
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<USpringArmComponent> CameraBoom;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UCameraComponent> FirstPersonCameraComponent;
 
-	//ÊäÈë×Ê²úÅäÖÃ
+	//è¾“å…¥èµ„äº§é…ç½®
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
 
@@ -185,8 +198,7 @@ private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UfpstrueHealthComponent> HealthComponent;
 
-
-	//ÒÆ¶¯ËÙ¶ÈÅäÖÃ²ÎÊı£¬À¶Í¼¿É¶Á£¬±à¼­Æ÷¿É±à¼­
+	//ç§»åŠ¨é€Ÿåº¦é…ç½®å‚æ•°ï¼Œè“å›¾å¯è¯»ï¼Œç¼–è¾‘å™¨å¯ç¼–è¾‘
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	float WalkSpeed = 300.0f;
 
@@ -196,27 +208,28 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	float AimWalkSpeed = 120.0f;
 
-
-	//ÔËĞĞÊ±×´Ì¬±äÁ¿£¬À¶Í¼¿É¶Á£¬±à¼­Æ÷²»¿É±à¼­
+	//è¿è¡Œæ—¶çŠ¶æ€å˜é‡ï¼Œè“å›¾å¯è¯»ï¼Œç¼–è¾‘å™¨ä¸å¯ç¼–è¾‘
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	bool bIsSprinting = false;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (AllowPrivateAccess = "true"))
 	bool bIsAiming = false;
 
-	//×°±¸µÄÎäÆ÷×é¼şÖ¸Õë£¬À¶Í¼¿É¶Á£¬±à¼­Æ÷²»¿É±à¼­¡£Transient£¿
+	// è£…å¤‡å…³ç³»åªåœ¨è¿è¡Œæ—¶å­˜åœ¨ï¼Œä¸å‚ä¸åºåˆ—åŒ–ã€‚
 	UPROPERTY(Transient)
-	//Ç¿ÒıÓÃ£º×°±¸ÆÚ¼ä·ÀÖ¹ÎäÆ÷×é¼ş±» GC »ØÊÕ¡£TObjectPtr£¿
+	// å¼ºå¼•ç”¨ä¿è¯è£…å¤‡æœŸé—´ç»„ä»¶ä¸ä¼šè¢« GC å›æ”¶ã€‚
 	TObjectPtr<UfpstrueWeaponComponent> EquippedWeaponComponent;
 
-	//ÔöÇ¿ÊäÈë×ÓÏµÍ³µÄÈõÖ¸Õë£¬±ãÓÚÒÆ³ı Mapping Context
+	//å¢å¼ºè¾“å…¥å­ç³»ç»Ÿçš„å¼±æŒ‡é’ˆï¼Œä¾¿äºç§»é™¤ Mapping Context
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> BoundInputSubsystem;
 
-
-	// Ó¦ÓÃºÍÒÆ³ıÊäÈëÓ³ÉäÉÏÏÂÎÄ£¨UMGÇĞ»»£©
+	// åº”ç”¨å’Œç§»é™¤è¾“å…¥æ˜ å°„ä¸Šä¸‹æ–‡ï¼ˆUMGåˆ‡æ¢ï¼‰
+	// æŠŠé»˜è®¤ Mapping Context æ·»åŠ åˆ°å½“å‰ LocalPlayerã€‚
 	void ApplyInputMappingContexts();
+	// ä»æ—§ LocalPlayer ç§»é™¤æœ¬è§’è‰²æ·»åŠ çš„ Mapping Contextã€‚
 	void RemoveInputMappingContexts();
 
-	//ËÀÍö´¦Àí±êÖ¾£¬·ÀÖ¹ÖØ¸´´¦ÀíËÀÍöÊÂ¼ş
-	bool bDeathHandled = false;
+	//æ­»äº¡å¤„ç†æ ‡å¿—ï¼Œé˜²æ­¢é‡å¤å¤„ç†æ­»äº¡äº‹ä»¶
+	// HealthComponent ä¿å­˜æ­»äº¡äº‹å®ï¼›è¿™é‡Œåªé˜²æ­¢æ­»äº¡è¡¨ç°å’Œå¹¿æ’­é‡å¤æ‰§è¡Œã€‚
+	bool bDeathEffectsApplied = false;
 };

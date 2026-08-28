@@ -12,16 +12,14 @@ class APlayerController;
 class UCameraComponent;
 class UWorld;
 
-
-////UENUM(BlueprintType)
 //Weapon组件状态枚举
 UENUM(BlueprintType)
 enum class EFPWeaponActionState : uint8
 {
-	Ready      UMETA(DisplayName = "Ready"),
-	Firing     UMETA(DisplayName = "Firing"),
-	Reloading  UMETA(DisplayName = "Reloading"),
-	Disabled   UMETA(DisplayName = "Disabled")
+	Ready UMETA(DisplayName = "Ready"),
+	Firing UMETA(DisplayName = "Firing"),
+	Reloading UMETA(DisplayName = "Reloading"),
+	Disabled UMETA(DisplayName = "Disabled")
 };
 
 //动态多播委托类型
@@ -30,26 +28,15 @@ enum class EFPWeaponActionState : uint8
 //弹药发生变化时广播
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponReloadEvent, bool, bWasEmptyReload);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
-	FWeaponAmmoChangedEvent,
-	int32, CurrentAmmo,
-	int32, MagazineSize,
-	int32, ReserveAmmo
-);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FWeaponAmmoChangedEvent, int32, CurrentAmmo, int32, MagazineSize, int32, ReserveAmmo);
 
 //Hitscan命中结果
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
-	FWeaponTraceEvent,
-	bool, bHit,
-	FVector, TraceStart,
-	FVector, TraceEnd,
-	FVector, TraceTarget,
-	FHitResult, HitResult
-);
-
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FWeaponTraceEvent, bool, bHit, FVector, TraceStart, FVector, TraceEnd, FVector, TraceTarget,
+											  FHitResult, HitResult);
 
 //BlueprintSpawnableComponent：可在蓝图Actor的Components面板
-UCLASS(Blueprintable, BlueprintType, ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+/** 玩家武器模块：独占装备、动作状态、弹药事务、Hitscan、散布和后坐力，并通过事件驱动 HUD/蓝图。 */
+UCLASS(Blueprintable, BlueprintType, ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 {
 	GENERATED_BODY()
@@ -64,8 +51,9 @@ public:
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
 
 	// ==================== Fire ====================
-	//开火、停止射击
+	// Character 的输入入口调用；校验状态后开始单发或自动射击。
 	void StartFire();
+	// Character 松开输入、换弹、死亡和 EndPlay 时调用，停止持续射击。
 	void StopFire();
 
 	// ==================== Reload ====================
@@ -77,12 +65,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool RequestReload();
 
+	// Reload AnimNotify 调用：把备弹提交到弹匣，每次事务只允许成功一次。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool CommitReload();
 
+	// 换弹动画结束时调用：退出 Reloading 并恢复 Ready。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void FinishReload();
 
+	// 动画中断、死亡或卸载时调用：取消换弹事务并恢复安全状态。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReload();
 
@@ -91,6 +82,7 @@ public:
 	void HandleOwnerDeath();
 
 	// ==================== State / Rule Query ====================
+	// Character 的冲刺/瞄准规则读取当前是否换弹。
 	UFUNCTION(BlueprintPure, Category = "Weapon|State")
 	bool IsReloading() const { return ActionState == EFPWeaponActionState::Reloading; }
 
@@ -98,16 +90,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|State")
 	bool IsFiring() const { return ActionState == EFPWeaponActionState::Firing; }
 
+	// Character 在提交换弹请求前检查弹匣、备弹和动作状态。
 	bool CanReload() const;
 
 	// ==================== Ammo Query ====================
 	//UI可查询子弹数量相关
+	// HUD 初始化时读取当前弹匣；变化由 OnAmmoChanged 推送。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetCurrentAmmo() const { return CurrentAmmo; }
 
+	// HUD 初始化时读取弹匣容量。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetMagazineSize() const { return MagazineSize; }
 
+	// HUD 初始化时读取剩余备弹。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
 	int32 GetReserveAmmo() const { return ReserveAmmo; }
 
@@ -143,20 +139,25 @@ private:
 	//状态边界
 	//统一检查武器已装备、未禁用且角色存活
 	bool IsOperational() const;
+	// 检查当前动作、控制器和弹药是否允许射击。
 	bool CanFire() const;
+	// 射击和换弹规则读取弹匣是否还有弹药。
 	bool HasAmmo() const { return CurrentAmmo > 0; }
 
 	// ==================== Fire System ====================
-	//射击基础逻辑
+	// 自动射击 Timer 和首次按下输入共用的单次射击入口。
 	void Fire();
+	// 原子地扣除一发弹药并广播 HUD 更新。
 	bool TryConsumeAmmo();
-	//射线检测
+	// 根据相机、瞄准状态和连续射击次数计算本发 Hitscan。
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
-	//执行trace
+	// 执行一条带散布的射线，处理伤害、冲量和命中事件。
 	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle);
 
 	// ==================== Reload System ====================
 	// 第三层：Transaction 由 Request/Commit/Finish/Cancel Reload 维护
+	//使旧换弹回调失效，并清空本次换弹的提交标记
+	void InvalidateReloadTransaction();
 	// 第四层：Recovery
 	//设置换弹保护Timer（换弹没有完成则自动恢复）
 	void ScheduleReloadTimeout(float DurationSeconds);
@@ -164,14 +165,16 @@ private:
 	void HandleReloadTimeout(int32 ReloadSequence);
 
 	// ==================== Recoil System ====================
-	//后坐力
+	// 射击成功后把随机水平/垂直后坐力应用到 PlayerController。
 	void ApplyRecoil(APlayerController* PlayerController);
-	//枪口回正
+	// Timer 驱动相机逐步抵消累计后坐力。
 	void UpdateRecoilRecovery();
-	//清除清口回正
+	// 停止恢复 Timer 并清空累计后坐力。
 	void ClearRecoilState();
 
 	// ==================== Runtime Helpers ====================
+	//死亡或组件结束时统一清理Timer和临时状态
+	void ResetWeaponRuntimeState();
 	//**第一次装备或运行时启动时初始化弹药等运行时数据
 	void InitializeRuntimeState();
 	//弹药改变后统一广播给UI

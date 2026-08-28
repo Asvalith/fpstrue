@@ -1,28 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "fpstrueEnemyCharacter.h"
+#include "fpstrueBenchmarkConfig.h"
 #include "fpstrueCharacter.h"
 #include "fpstrueEnemyAIController.h"
+#include "fpstrueEnemyAnimationSharingCoordinator.h"
+#include "fpstrueEnemyCombatComponent.h"
 #include "fpstrueHealthComponent.h"
-#include "fpstruePerformanceStats.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "DrawDebugHelpers.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "Kismet/GameplayStatics.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Parse.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h"
-#include "ProfilingDebugging/CsvProfiler.h"
+#include "Math/RotationMatrix.h"
 #include "SignificanceManager.h"
 
-DEFINE_STAT(STAT_fpstrueAttackSweepTime);
-DEFINE_STAT(STAT_fpstrueAttackSweepCount);
-DEFINE_STAT(STAT_fpstrueSweepReturnedHitCount);
-DEFINE_STAT(STAT_fpstrueAttackWindowUpdateCount);
-CSV_DEFINE_CATEGORY(fpstrueCombat, true);
+// ==================== 组件初始化与生命周期 ====================
 
 AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 {
@@ -35,11 +28,11 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
 		CharacterMesh->bEnableUpdateRateOptimizations = true;
-		CharacterMesh->VisibilityBasedAnimTickOption =
-			EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
+		CharacterMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 	}
 
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
+	CombatComponent = CreateDefaultSubobject<UfpstrueEnemyCombatComponent>(TEXT("CombatComponent"));
 }
 
 void AfpstrueEnemyCharacter::BeginPlay()
@@ -47,32 +40,30 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	Super::BeginPlay();
 	SetActorTickEnabled(false);
 
-	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableMovementTiering")))
+	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	if (BenchmarkConfig.bDisableMovementTiering)
 	{
 		bEnableMovementUpdateTiering = false;
 	}
-	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableShadowTiering")))
-	{
-		bEnableShadowDistanceTiering = false;
-	}
-	bDisableAnimationOptimizationsForBenchmark = FParse::Param(
-		FCommandLine::Get(),
-		TEXT("BenchmarkDisableAnimationOptimizations")
-	);
+	bDisableEnemyRayTracingForBenchmark = BenchmarkConfig.bDisableEnemyRayTracing;
+	bDisableEnemyShadowsForBenchmark = BenchmarkConfig.bDisableEnemyShadows;
+	bDisableAnimationOptimizationsForBenchmark = BenchmarkConfig.bDisableAnimationOptimizations;
 
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
+		if (bDisableEnemyRayTracingForBenchmark)
+		{
+			CharacterMesh->SetVisibleInRayTracing(false);
+		}
+		if (bDisableEnemyShadowsForBenchmark)
+		{
+			CharacterMesh->SetCastShadow(false);
+		}
 		if (bDisableAnimationOptimizationsForBenchmark)
 		{
 			CharacterMesh->bEnableUpdateRateOptimizations = false;
-			CharacterMesh->VisibilityBasedAnimTickOption =
-				EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+			CharacterMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 		}
-		if (!bEnableShadowDistanceTiering)
-		{
-			CharacterMesh->SetCastShadow(true);
-		}
-
 		CharacterMesh->SetSimulatePhysics(false);
 		CharacterMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		CharacterMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
@@ -93,19 +84,17 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	}
 	bUseControllerRotationYaw = false;
 
-	if (UWorld* World = GetWorld())
-	{
-		LastAttackTime = World->GetTimeSeconds() - AttackInterval;
-	}
-
 	RegisterWithSignificanceManager();
 }
 
 void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	SuspendAnimationSharing();
 	UnregisterFromSignificanceManager();
-	CancelAttackWindow();
-	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
+	if (CombatComponent != nullptr)
+	{
+		CombatComponent->ResetCombat();
+	}
 	if (HealthComponent != nullptr)
 	{
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
@@ -115,11 +104,8 @@ void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-float AfpstrueEnemyCharacter::TakeDamage(
-	float DamageAmount,
-	FDamageEvent const& DamageEvent,
-	AController* EventInstigator,
-	AActor* DamageCauser)
+float AfpstrueEnemyCharacter::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator,
+										 AActor* DamageCauser)
 {
 	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
 	{
@@ -148,36 +134,53 @@ float AfpstrueEnemyCharacter::TakeDamage(
 	return Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 }
 
-float AfpstrueEnemyCharacter::GetDistanceToTarget2D() const
-{
-	if (TargetCharacter == nullptr)
-	{
-		return MAX_flt;
-	}
+// ==================== 状态查询与玩法接口 ====================
 
-	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
-	return FVector(ToTarget.X, ToTarget.Y, 0.0f).Size();
+bool AfpstrueEnemyCharacter::IsDead() const
+{
+	return HealthComponent != nullptr && HealthComponent->IsDead();
 }
 
-void AfpstrueEnemyCharacter::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
+bool AfpstrueEnemyCharacter::IsAttacking() const
 {
-	TargetCharacter = NewTargetCharacter;
+	return CombatComponent != nullptr && CombatComponent->IsAttacking();
+}
+
+bool AfpstrueEnemyCharacter::IsCombatActive() const
+{
+	return CombatComponent != nullptr && CombatComponent->IsCombatActive();
+}
+
+bool AfpstrueEnemyCharacter::RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const
+{
+	const bool bRecentlyInteracted = CurrentTime - LastCombatRelevantTime <= FMath::Max(GraceSeconds, 0.0f);
+	return IsCombatActive() || IsTargetInAttackRange() || bRecentlyInteracted;
+}
+
+float AfpstrueEnemyCharacter::GetDistanceToTarget2D() const
+{
+	return CombatComponent != nullptr ? CombatComponent->GetDistanceToTarget2D() : MAX_flt;
+}
+
+float AfpstrueEnemyCharacter::GetAttackRange() const
+{
+	return CombatComponent != nullptr ? CombatComponent->GetConfiguredAttackRange() : 0.0f;
+}
+
+float AfpstrueEnemyCharacter::GetEffectiveAttackRange() const
+{
+	return CombatComponent != nullptr ? CombatComponent->GetEffectiveAttackRange() : 0.0f;
 }
 
 void AfpstrueEnemyCharacter::FaceTarget()
 {
-	if (TargetCharacter == nullptr)
+	if (CombatComponent != nullptr)
 	{
-		return;
-	}
-
-	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
-	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
-	if (!HorizontalToTarget.IsNearlyZero())
-	{
-		SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
+		CombatComponent->FaceTarget();
 	}
 }
+
+// ==================== Gameplay Significance：目标距离与交互状态 ====================
 
 void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 {
@@ -193,8 +196,7 @@ void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 	}
 
 	Manager->RegisterObject(
-		this,
-		TEXT("Enemy"),
+		this, TEXT("Enemy"),
 		[](USignificanceManager::FManagedObjectInfo* ObjectInfo, const FTransform& Viewpoint)
 		{
 			const AfpstrueEnemyCharacter* Enemy = Cast<AfpstrueEnemyCharacter>(ObjectInfo->GetObject());
@@ -203,10 +205,7 @@ void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 				return 0.0f;
 			}
 
-			const float Distance = FVector::Dist2D(
-				Enemy->GetActorLocation(),
-				Viewpoint.GetLocation()
-			);
+			const float Distance = FVector::Dist2D(Enemy->GetActorLocation(), Viewpoint.GetLocation());
 			return 1.0f / (1.0f + Distance);
 		},
 		USignificanceManager::EPostSignificanceType::Sequential,
@@ -217,8 +216,7 @@ void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 			{
 				Enemy->ApplySignificance(NewSignificance);
 			}
-		}
-	);
+		});
 	bRegisteredWithSignificanceManager = true;
 }
 
@@ -241,14 +239,13 @@ void AfpstrueEnemyCharacter::UnregisterFromSignificanceManager()
 
 void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 {
-	if (bIsDead)
+	if (IsDead())
 	{
 		return;
 	}
-
 	const float FullRateThreshold = 1.0f / (1.0f + FullRateMovementDistance);
 	const float MidRateThreshold = 1.0f / (1.0f + MidRateMovementDistance);
-	const bool bRequiresFullRate = bIsAttacking || bAttackWindowActive || IsTargetInAttackRange();
+	const bool bRequiresFullRate = IsCombatActive() || IsTargetInAttackRange();
 
 	EFPEnemySignificanceTier NewTier = EFPEnemySignificanceTier::Background;
 	if (bRequiresFullRate || Significance >= FullRateThreshold)
@@ -260,31 +257,22 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 		NewTier = EFPEnemySignificanceTier::Reduced;
 	}
 
-	if (bEnableShadowDistanceTiering)
-	{
-		if (USkeletalMeshComponent* CharacterMesh = GetMesh())
-		{
-			const float ShadowThreshold = 1.0f / (1.0f + ShadowCullDistance);
-			const bool bShouldCastShadow = Significance >= ShadowThreshold;
-			if (CharacterMesh->CastShadow != bShouldCastShadow)
-			{
-				CharacterMesh->SetCastShadow(bShouldCastShadow);
-			}
-		}
-	}
-
 	ApplySignificanceTier(NewTier);
 }
 
 void AfpstrueEnemyCharacter::ApplySignificanceTier(EFPEnemySignificanceTier NewTier)
 {
-	if (bIsDead)
+	if (IsDead())
+	{
+		return;
+	}
+	if (SignificanceTier == NewTier)
 	{
 		return;
 	}
 
 	SignificanceTier = NewTier;
-	ApplySignificanceIntervals();
+	ApplyGameplaySignificanceIntervals();
 
 	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
 	{
@@ -307,27 +295,24 @@ void AfpstrueEnemyCharacter::ApplySignificanceTier(EFPEnemySignificanceTier NewT
 	}
 }
 
-void AfpstrueEnemyCharacter::ApplySignificanceIntervals()
+void AfpstrueEnemyCharacter::ApplyGameplaySignificanceIntervals()
 {
-	if (bIsDead)
+	if (IsDead())
 	{
 		return;
 	}
 
 	float MovementTickInterval = 0.0f;
-	float AnimationTickInterval = 0.0f;
-	if (!bIsAttacking && bEnableMovementUpdateTiering)
+	if (!IsAttacking() && bEnableMovementUpdateTiering)
 	{
 		switch (SignificanceTier)
 		{
 		case EFPEnemySignificanceTier::Reduced:
 			MovementTickInterval = MidRateMovementTickInterval;
-			AnimationTickInterval = MidRateAnimationTickInterval;
 			break;
 
 		case EFPEnemySignificanceTier::Background:
 			MovementTickInterval = FarRateMovementTickInterval;
-			AnimationTickInterval = FarRateAnimationTickInterval;
 			break;
 
 		case EFPEnemySignificanceTier::Full:
@@ -340,21 +325,295 @@ void AfpstrueEnemyCharacter::ApplySignificanceIntervals()
 	{
 		Movement->SetComponentTickInterval(MovementTickInterval);
 	}
+}
 
-	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+// ==================== Render Significance：可见性、相机距离与渲染预算 ====================
+
+FFPEnemyRenderSignificanceSample AfpstrueEnemyCharacter::EvaluateRenderSignificance(const FFPEnemyRenderViewContext& ViewContext,
+																					const FFPEnemyRenderSignificancePolicy& Policy)
+{
+	FFPEnemyRenderSignificanceSample Sample;
+	if (IsDead())
 	{
-		CharacterMesh->SetComponentTickInterval(
-			bDisableAnimationOptimizationsForBenchmark ? 0.0f : AnimationTickInterval
-		);
+		return Sample;
+	}
+
+	const USkeletalMeshComponent* CharacterMesh = GetMesh();
+	const FVector BoundsOrigin = CharacterMesh != nullptr ? CharacterMesh->Bounds.Origin : GetActorLocation();
+	const float BoundsRadius = CharacterMesh != nullptr ? FMath::Max(CharacterMesh->Bounds.SphereRadius, 1.0f) : 100.0f;
+
+	const FVector ToEnemy = BoundsOrigin - ViewContext.ViewLocation;
+	Sample.Distance = ToEnemy.Size();
+
+	const FRotationMatrix ViewRotationMatrix(ViewContext.ViewRotation);
+	const float ForwardDistance = FVector::DotProduct(ToEnemy, ViewRotationMatrix.GetUnitAxis(EAxis::X));
+	const float HorizontalDistance = FVector::DotProduct(ToEnemy, ViewRotationMatrix.GetUnitAxis(EAxis::Y));
+	const float VerticalDistance = FVector::DotProduct(ToEnemy, ViewRotationMatrix.GetUnitAxis(EAxis::Z));
+
+	const float HalfHorizontalFOVRadians = FMath::DegreesToRadians(FMath::Clamp(ViewContext.HorizontalFOVDegrees, 5.0f, 170.0f) * 0.5f);
+	const float HorizontalTangent = FMath::Max(FMath::Tan(HalfHorizontalFOVRadians), 0.01f);
+	const float VerticalTangent = HorizontalTangent / FMath::Max(ViewContext.AspectRatio, 0.1f);
+	const float SafeForwardDistance = FMath::Max(ForwardDistance, 1.0f);
+	const float ProjectedHorizontalRadius = BoundsRadius / (SafeForwardDistance * HorizontalTangent);
+	const float ProjectedVerticalRadius = BoundsRadius / (SafeForwardDistance * VerticalTangent);
+	const float NormalizedHorizontalPosition = HorizontalDistance / (SafeForwardDistance * HorizontalTangent);
+	const float NormalizedVerticalPosition = VerticalDistance / (SafeForwardDistance * VerticalTangent);
+
+	const bool bBoundsInFront = ForwardDistance + BoundsRadius > 0.0f;
+	const auto IntersectsFrustum = [bBoundsInFront, NormalizedHorizontalPosition, NormalizedVerticalPosition, ProjectedHorizontalRadius,
+									ProjectedVerticalRadius](float Margin)
+	{
+		return bBoundsInFront && FMath::Abs(NormalizedHorizontalPosition) <= 1.0f + Margin + ProjectedHorizontalRadius &&
+			   FMath::Abs(NormalizedVerticalPosition) <= 1.0f + Margin + ProjectedVerticalRadius;
+	};
+
+	Sample.bInPrimaryFrustum = IntersectsFrustum(0.0f);
+	Sample.bInExpandedFrustum = IntersectsFrustum(FMath::Max(Policy.ExpandedFrustumMargin, 0.0f));
+	Sample.FrustumFactor = Sample.bInPrimaryFrustum ? 1.0f : (Sample.bInExpandedFrustum ? 0.5f : 0.0f);
+
+	if (Sample.bInPrimaryFrustum)
+	{
+		LastPrimaryFrustumTime = ViewContext.TimeSeconds;
+	}
+	const float RecentGraceSeconds = FMath::Max(Policy.RecentFrustumGraceSeconds, 0.0f);
+	if (Sample.bInPrimaryFrustum)
+	{
+		Sample.RecentFrustumFactor = 1.0f;
+	}
+	else if (RecentGraceSeconds > 0.0f)
+	{
+		const float TimeSincePrimaryFrustum = ViewContext.TimeSeconds - LastPrimaryFrustumTime;
+		Sample.RecentFrustumFactor = 1.0f - FMath::Clamp(TimeSincePrimaryFrustum / RecentGraceSeconds, 0.0f, 1.0f);
+	}
+
+	const float ProjectedScreenRadius = ForwardDistance > 0.0f ? FMath::Max(ProjectedHorizontalRadius, ProjectedVerticalRadius) : 0.0f;
+	Sample.ScreenCoverageFactor =
+		Sample.bInExpandedFrustum ? FMath::Clamp(ProjectedScreenRadius / FMath::Max(Policy.ScreenRadiusForFullScore, 0.001f), 0.0f, 1.0f)
+								  : 0.0f;
+
+	const float NearDistance = FMath::Max(Policy.NearDistance, 0.0f);
+	const float FarDistance = FMath::Max(Policy.FarDistance, NearDistance + 1.0f);
+	Sample.DistanceFactor = 1.0f - FMath::Clamp((Sample.Distance - NearDistance) / (FarDistance - NearDistance), 0.0f, 1.0f);
+
+	const float FrustumWeight = FMath::Max(Policy.FrustumWeight, 0.0f);
+	const float ScreenCoverageWeight = FMath::Max(Policy.ScreenCoverageWeight, 0.0f);
+	const float RecentFrustumWeight = FMath::Max(Policy.RecentFrustumWeight, 0.0f);
+	const float DistanceWeight = FMath::Max(Policy.DistanceWeight, 0.0f);
+	const float WeightSum = FMath::Max(FrustumWeight + ScreenCoverageWeight + RecentFrustumWeight + DistanceWeight, KINDA_SMALL_NUMBER);
+	Sample.Score = FMath::Clamp((Sample.FrustumFactor * FrustumWeight + Sample.ScreenCoverageFactor * ScreenCoverageWeight +
+								 Sample.RecentFrustumFactor * RecentFrustumWeight + Sample.DistanceFactor * DistanceWeight) /
+									WeightSum,
+								0.0f, 1.0f);
+
+	RenderSignificanceScore = Sample.Score;
+	return Sample;
+}
+
+EFPEnemyRenderSignificanceTier AfpstrueEnemyCharacter::ResolveNaturalRenderSignificanceTier(const FFPEnemyRenderSignificanceSample& Sample,
+																							const FFPEnemyRenderSignificancePolicy& Policy)
+{
+	const UWorld* World = GetWorld();
+	const float CurrentTime = World != nullptr ? World->GetTimeSeconds() : 0.0f;
+	if (!Policy.bEnableRenderTiering)
+	{
+		if (NaturalRenderSignificanceTier != EFPEnemyRenderSignificanceTier::Full)
+		{
+			LastNaturalRenderTierChangeTime = CurrentTime;
+		}
+		NaturalRenderSignificanceTier = EFPEnemyRenderSignificanceTier::Full;
+		PendingRenderDemotionTier = NaturalRenderSignificanceTier;
+		PendingRenderDemotionStartTime = -MAX_flt;
+		return NaturalRenderSignificanceTier;
+	}
+
+	const float FullEnterThreshold = FMath::Clamp(Policy.FullEnterThreshold, 0.0f, 1.0f);
+	const float FullExitThreshold = FMath::Min(FMath::Clamp(Policy.FullExitThreshold, 0.0f, 1.0f), FullEnterThreshold);
+	const float ReducedEnterThreshold = FMath::Min(FMath::Clamp(Policy.ReducedEnterThreshold, 0.0f, 1.0f), FullExitThreshold);
+	const float ReducedExitThreshold = FMath::Min(FMath::Clamp(Policy.ReducedExitThreshold, 0.0f, 1.0f), ReducedEnterThreshold);
+
+	EFPEnemyRenderSignificanceTier DesiredTier = NaturalRenderSignificanceTier;
+	switch (NaturalRenderSignificanceTier)
+	{
+	case EFPEnemyRenderSignificanceTier::Full:
+		if (Sample.Score < ReducedExitThreshold)
+		{
+			DesiredTier = EFPEnemyRenderSignificanceTier::Background;
+		}
+		else if (Sample.Score < FullExitThreshold)
+		{
+			DesiredTier = EFPEnemyRenderSignificanceTier::Reduced;
+		}
+		break;
+
+	case EFPEnemyRenderSignificanceTier::Reduced:
+		if (Sample.Score >= FullEnterThreshold)
+		{
+			DesiredTier = EFPEnemyRenderSignificanceTier::Full;
+		}
+		else if (Sample.Score < ReducedExitThreshold)
+		{
+			DesiredTier = EFPEnemyRenderSignificanceTier::Background;
+		}
+		break;
+
+	case EFPEnemyRenderSignificanceTier::Background:
+	default:
+		if (Sample.Score >= FullEnterThreshold)
+		{
+			DesiredTier = EFPEnemyRenderSignificanceTier::Full;
+		}
+		else if (Sample.Score >= ReducedEnterThreshold)
+		{
+			DesiredTier = EFPEnemyRenderSignificanceTier::Reduced;
+		}
+		break;
+	}
+
+	if (DesiredTier == NaturalRenderSignificanceTier)
+	{
+		PendingRenderDemotionTier = NaturalRenderSignificanceTier;
+		PendingRenderDemotionStartTime = -MAX_flt;
+		return NaturalRenderSignificanceTier;
+	}
+
+	const auto GetTierPriority = [](EFPEnemyRenderSignificanceTier Tier)
+	{
+		switch (Tier)
+		{
+		case EFPEnemyRenderSignificanceTier::Full:
+			return 2;
+		case EFPEnemyRenderSignificanceTier::Reduced:
+			return 1;
+		case EFPEnemyRenderSignificanceTier::Background:
+		default:
+			return 0;
+		}
+	};
+
+	if (GetTierPriority(DesiredTier) > GetTierPriority(NaturalRenderSignificanceTier))
+	{
+		NaturalRenderSignificanceTier = DesiredTier;
+		LastNaturalRenderTierChangeTime = CurrentTime;
+		PendingRenderDemotionTier = NaturalRenderSignificanceTier;
+		PendingRenderDemotionStartTime = -MAX_flt;
+		return NaturalRenderSignificanceTier;
+	}
+
+	if (PendingRenderDemotionTier != DesiredTier || PendingRenderDemotionStartTime < 0.0f)
+	{
+		PendingRenderDemotionTier = DesiredTier;
+		PendingRenderDemotionStartTime = CurrentTime;
+	}
+
+	const bool bMinimumHoldElapsed = CurrentTime - LastNaturalRenderTierChangeTime >= FMath::Max(Policy.MinimumTierHoldSeconds, 0.0f);
+	const bool bDemotionDelayElapsed = CurrentTime - PendingRenderDemotionStartTime >= FMath::Max(Policy.DemotionDelaySeconds, 0.0f);
+	if (bMinimumHoldElapsed && bDemotionDelayElapsed)
+	{
+		NaturalRenderSignificanceTier = DesiredTier;
+		LastNaturalRenderTierChangeTime = CurrentTime;
+		PendingRenderDemotionTier = NaturalRenderSignificanceTier;
+		PendingRenderDemotionStartTime = -MAX_flt;
+	}
+
+	return NaturalRenderSignificanceTier;
+}
+
+void AfpstrueEnemyCharacter::ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier NewTier, bool bShouldCastShadow,
+														 bool bShouldBeVisibleInRayTracing, bool bInForceFullAnimationAndLOD,
+														 const FFPEnemyRenderSignificancePolicy& Policy)
+{
+	if (IsDead())
+	{
+		return;
+	}
+
+	RenderSignificanceTier = Policy.bEnableRenderTiering ? NewTier : EFPEnemyRenderSignificanceTier::Full;
+	bRenderShouldCastShadow = bShouldCastShadow;
+	bRenderShouldBeVisibleInRayTracing = bShouldBeVisibleInRayTracing;
+	bGameplayAnimationProtection = bInForceFullAnimationAndLOD;
+	LastRenderSignificancePolicy = Policy;
+	bHasRenderSignificancePolicy = true;
+	ApplyRenderSignificanceSettings();
+	RefreshAnimationSharingRegistration();
+}
+
+void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
+{
+	if (IsDead() || !bHasRenderSignificancePolicy)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* CharacterMesh = GetMesh();
+	if (CharacterMesh == nullptr)
+	{
+		return;
+	}
+
+	float AnimationTickInterval = 0.0f;
+	int32 RequestedMinLOD = LastRenderSignificancePolicy.FullMinLOD;
+	const bool bUseFullAnimationAndLOD = IsAttacking() || bGameplayAnimationProtection;
+	if (!bUseFullAnimationAndLOD && LastRenderSignificancePolicy.bEnableRenderTiering)
+	{
+		switch (RenderSignificanceTier)
+		{
+		case EFPEnemyRenderSignificanceTier::Reduced:
+			AnimationTickInterval = MidRateAnimationTickInterval;
+			RequestedMinLOD = LastRenderSignificancePolicy.ReducedMinLOD;
+			break;
+
+		case EFPEnemyRenderSignificanceTier::Background:
+			AnimationTickInterval = FarRateAnimationTickInterval;
+			RequestedMinLOD = LastRenderSignificancePolicy.BackgroundMinLOD;
+			break;
+
+		case EFPEnemyRenderSignificanceTier::Full:
+		default:
+			break;
+		}
+	}
+
+	CharacterMesh->SetComponentTickInterval(
+		bDisableAnimationOptimizationsForBenchmark || !LastRenderSignificancePolicy.bEnableAnimationTickTiering ? 0.0f
+																												: AnimationTickInterval);
+
+	if (!LastRenderSignificancePolicy.bEnableSkeletalLOD || bUseFullAnimationAndLOD)
+	{
+		RequestedMinLOD = 0;
+	}
+	const int32 LODCount = FMath::Max(CharacterMesh->GetNumLODs(), 1);
+	const int32 SafeMinLOD = FMath::Clamp(RequestedMinLOD, 0, LODCount - 1);
+	if (AppliedMinimumLOD != SafeMinLOD)
+	{
+		CharacterMesh->OverrideMinLOD(SafeMinLOD);
+		AppliedMinimumLOD = SafeMinLOD;
+	}
+
+	const bool bShouldCastShadow =
+		bDisableEnemyShadowsForBenchmark ? false : (!LastRenderSignificancePolicy.bEnableShadowBudget || bRenderShouldCastShadow);
+	if (CharacterMesh->CastShadow != bShouldCastShadow)
+	{
+		CharacterMesh->SetCastShadow(bShouldCastShadow);
+	}
+
+	const bool bShouldBeVisibleInRayTracing = !bDisableEnemyRayTracingForBenchmark &&
+											  (!LastRenderSignificancePolicy.bEnableRayTracingBudget || bRenderShouldBeVisibleInRayTracing);
+	if (CharacterMesh->bVisibleInRayTracing != bShouldBeVisibleInRayTracing)
+	{
+		// 光栅可见性保持不变；这里只控制动态骨骼是否进入硬件光追场景和 BLAS 更新链。
+		CharacterMesh->SetVisibleInRayTracing(bShouldBeVisibleInRayTracing);
 	}
 }
 
-void AfpstrueEnemyCharacter::ApplyBenchmarkDiagnosticOverrides(
-	bool bDisableAttackSweep,
-	bool bDisablePawnCollision,
-	bool bDisableCharacterMovementTick)
+// ==================== Benchmark 诊断开关 ====================
+
+void AfpstrueEnemyCharacter::ApplyBenchmarkDiagnosticOverrides(bool bDisableAttackSweep, bool bDisablePawnCollision,
+															   bool bDisableCharacterMovementTick)
 {
-	bDisableAttackSweepForBenchmark = bDisableAttackSweep;
+	if (CombatComponent != nullptr)
+	{
+		CombatComponent->SetAttackSweepDisabledForBenchmark(bDisableAttackSweep);
+	}
 
 	if (bDisablePawnCollision)
 	{
@@ -367,350 +626,72 @@ void AfpstrueEnemyCharacter::ApplyBenchmarkDiagnosticOverrides(
 	}
 }
 
+// ==================== 战斗接口与动画优先级桥接 ====================
+
 bool AfpstrueEnemyCharacter::TryAttackTarget()
 {
-	if (!CanAttack())
-	{
-		return false;
-	}
-
-	CancelAttackWindow();
-	HitActorsThisAttack.Reset();
-	bIsAttacking = true;
-	bHitTargetThisAttack = false;
-	SetAttackAnimationPriority(true);
-	FaceTarget();
-
-	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
-	{
-		Movement->StopMovementImmediately();
-	}
-
-	ScheduleAttackFinish(FMath::Max(AttackAnimationDuration, AttackFailSafeDuration));
-	OnAttackStarted();
-
-	return true;
+	return CombatComponent != nullptr && CombatComponent->TryAttackTarget();
 }
 
 void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
 {
-	if (bIsAttacking)
+	if (CombatComponent != nullptr)
 	{
-		FinishAttack();
+		CombatComponent->HandleAttackFinishedNotify();
 	}
 }
 
 void AfpstrueEnemyCharacter::BeginAttackWindow()
 {
-	if (bIsDead || !bIsAttacking)
+	if (CombatComponent != nullptr)
 	{
-		return;
+		CombatComponent->BeginAttackWindow();
 	}
-
-	CancelAttackWindow();
-
-	FVector CurrentWeaponBase;
-	FVector CurrentWeaponTip;
-	if (!GetWeaponBladeSegment(CurrentWeaponBase, CurrentWeaponTip))
-	{
-		UE_LOG(
-			LogTemp,
-			Warning,
-			TEXT("%s cannot start attack window: sockets '%s' and '%s' must both exist."),
-			*GetName(),
-			*WeaponTraceStartSocketName.ToString(),
-			*WeaponTraceEndSocketName.ToString()
-		);
-		return;
-	}
-
-	bAttackWindowActive = true;
-	bHasPreviousWeaponSample = true;
-	PreviousWeaponBase = CurrentWeaponBase;
-	PreviousWeaponTip = CurrentWeaponTip;
 }
 
 void AfpstrueEnemyCharacter::UpdateAttackWindow()
 {
-	if (!bAttackWindowActive || bIsDead || !bIsAttacking)
+	if (CombatComponent != nullptr)
 	{
-		return;
+		CombatComponent->UpdateAttackWindow();
 	}
-
-	INC_DWORD_STAT(STAT_fpstrueAttackWindowUpdateCount);
-	CSV_CUSTOM_STAT(
-		fpstrueCombat,
-		AttackWindowUpdateCount,
-		1,
-		ECsvCustomStatOp::Accumulate
-	);
-
-	FVector CurrentWeaponBase;
-	FVector CurrentWeaponTip;
-	if (!GetWeaponBladeSegment(CurrentWeaponBase, CurrentWeaponTip))
-	{
-		CancelAttackWindow();
-		return;
-	}
-
-	if (!bHasPreviousWeaponSample)
-	{
-		PreviousWeaponBase = CurrentWeaponBase;
-		PreviousWeaponTip = CurrentWeaponTip;
-		bHasPreviousWeaponSample = true;
-		return;
-	}
-
-	if (bDisableAttackSweepForBenchmark)
-	{
-		PreviousWeaponBase = CurrentWeaponBase;
-		PreviousWeaponTip = CurrentWeaponTip;
-		return;
-	}
-
-	const int32 SampleCount = FMath::Clamp(WeaponTraceSampleCount, 2, 8);
-	for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
-	{
-		const float Alpha = static_cast<float>(SampleIndex) / static_cast<float>(SampleCount - 1);
-		const FVector PreviousSample = FMath::Lerp(PreviousWeaponBase, PreviousWeaponTip, Alpha);
-		const FVector CurrentSample = FMath::Lerp(CurrentWeaponBase, CurrentWeaponTip, Alpha);
-		SweepWeaponSegment(PreviousSample, CurrentSample);
-	}
-
-	SweepWeaponSegment(CurrentWeaponBase, CurrentWeaponTip);
-
-	PreviousWeaponBase = CurrentWeaponBase;
-	PreviousWeaponTip = CurrentWeaponTip;
 }
 
 void AfpstrueEnemyCharacter::EndAttackWindow()
 {
-	if (!bAttackWindowActive)
+	if (CombatComponent != nullptr)
 	{
-		return;
-	}
-
-	CancelAttackWindow();
-}
-
-bool AfpstrueEnemyCharacter::PerformMeleeHit()
-{
-	UWorld* World = GetWorld();
-	if (World == nullptr || TargetCharacter == nullptr || TargetCharacter->IsDead())
-	{
-		return false;
-	}
-
-	const FVector TraceStart = GetActorLocation() + FVector(0.0f, 0.0f, AttackTraceHeight);
-	const FVector TraceEnd = TraceStart + GetActorForwardVector() * AttackRange;
-
-	FCollisionObjectQueryParams ObjectQueryParams;
-	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
-
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyMeleeTrace), false, this);
-	QueryParams.AddIgnoredActor(this);
-
-	TArray<FHitResult> HitResults;
-	const bool bHitAnyPawn = World->SweepMultiByObjectType(
-		HitResults,
-		TraceStart,
-		TraceEnd,
-		FQuat::Identity,
-		ObjectQueryParams,
-		FCollisionShape::MakeSphere(AttackTraceRadius),
-		QueryParams
-	);
-
-	bool bHitPlayer = false;
-	if (bHitAnyPawn)
-	{
-		for (const FHitResult& HitResult : HitResults)
-		{
-			if (HitResult.GetActor() != TargetCharacter)
-			{
-				continue;
-			}
-
-			bHitPlayer = TryApplyAttackDamage(TargetCharacter);
-			break;
-		}
-	}
-
-	if (bDrawAttackTrace)
-	{
-		const FColor DebugColor = bHitPlayer ? FColor::Green : FColor::Red;
-		DrawDebugLine(World, TraceStart, TraceEnd, DebugColor, false, 1.0f, 0, 2.0f);
-		DrawDebugSphere(World, TraceStart, AttackTraceRadius, 16, DebugColor, false, 1.0f);
-		DrawDebugSphere(World, TraceEnd, AttackTraceRadius, 16, DebugColor, false, 1.0f);
-	}
-
-	return bHitPlayer;
-}
-
-bool AfpstrueEnemyCharacter::GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const
-{
-	const USkeletalMeshComponent* CharacterMesh = GetMesh();
-	if (CharacterMesh == nullptr
-		|| !CharacterMesh->DoesSocketExist(WeaponTraceStartSocketName)
-		|| !CharacterMesh->DoesSocketExist(WeaponTraceEndSocketName))
-	{
-		return false;
-	}
-
-	OutBladeBase = CharacterMesh->GetSocketLocation(WeaponTraceStartSocketName);
-	OutBladeTip = CharacterMesh->GetSocketLocation(WeaponTraceEndSocketName);
-	return true;
-}
-
-void AfpstrueEnemyCharacter::SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd)
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemy_AttackSweep);
-	CSV_SCOPED_TIMING_STAT(fpstrueCombat, AttackSweepTime);
-	SCOPE_CYCLE_COUNTER(STAT_fpstrueAttackSweepTime);
-	INC_DWORD_STAT(STAT_fpstrueAttackSweepCount);
-	CSV_CUSTOM_STAT(fpstrueCombat, AttackSweepCount, 1, ECsvCustomStatOp::Accumulate);
-
-	UWorld* World = GetWorld();
-	if (World == nullptr)
-	{
-		return;
-	}
-
-	FCollisionObjectQueryParams ObjectQueryParams;
-	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
-
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyWeaponTrace), false, this);
-	QueryParams.AddIgnoredActor(this);
-
-	TArray<FHitResult> HitResults;
-	const bool bHitAnyPawn = World->SweepMultiByObjectType(
-		HitResults,
-		TraceStart,
-		TraceEnd,
-		FQuat::Identity,
-		ObjectQueryParams,
-		FCollisionShape::MakeSphere(WeaponTraceRadius),
-		QueryParams
-	);
-
-	INC_DWORD_STAT_BY(STAT_fpstrueSweepReturnedHitCount, HitResults.Num());
-	CSV_CUSTOM_STAT(
-		fpstrueCombat,
-		SweepReturnedHitCount,
-		HitResults.Num(),
-		ECsvCustomStatOp::Accumulate
-	);
-
-	if (bDrawAttackTrace)
-	{
-		const FColor DebugColor = bHitAnyPawn ? FColor::Green : FColor::Yellow;
-		DrawDebugLine(World, TraceStart, TraceEnd, DebugColor, false, 0.1f, 0, 1.5f);
-		DrawDebugSphere(World, TraceStart, WeaponTraceRadius, 8, DebugColor, false, 0.1f);
-		DrawDebugSphere(World, TraceEnd, WeaponTraceRadius, 8, DebugColor, false, 0.1f);
-	}
-
-	if (!bHitAnyPawn)
-	{
-		return;
-	}
-
-	for (const FHitResult& HitResult : HitResults)
-	{
-		TryApplyAttackDamage(HitResult.GetActor());
+		CombatComponent->EndAttackWindow();
 	}
 }
-
-bool AfpstrueEnemyCharacter::TryApplyAttackDamage(AActor* HitActor)
-{
-	if (HitActor == nullptr
-		|| HitActor != TargetCharacter
-		|| TargetCharacter->IsDead()
-		|| bHitTargetThisAttack)
-	{
-		return false;
-	}
-
-	const TWeakObjectPtr<AActor> WeakHitActor(HitActor);
-	if (HitActorsThisAttack.Contains(WeakHitActor))
-	{
-		return false;
-	}
-
-	const float AppliedDamage = UGameplayStatics::ApplyDamage(
-		HitActor,
-		AttackDamage,
-		GetController(),
-		this,
-		nullptr
-	);
-
-	if (AppliedDamage <= 0.0f)
-	{
-		return false;
-	}
-
-	HitActorsThisAttack.Add(WeakHitActor);
-	bHitTargetThisAttack = true;
-	return true;
-}
-
-void AfpstrueEnemyCharacter::CancelAttackWindow()
-{
-	bAttackWindowActive = false;
-	bHasPreviousWeaponSample = false;
-	PreviousWeaponBase = FVector::ZeroVector;
-	PreviousWeaponTip = FVector::ZeroVector;
-}
-
-void AfpstrueEnemyCharacter::ScheduleAttackFinish(float DurationSeconds)
-{
-	GetWorldTimerManager().SetTimer(
-		AttackFinishTimerHandle,
-		this,
-		&AfpstrueEnemyCharacter::FinishAttack,
-		FMath::Max(0.01f, DurationSeconds + AttackCompletionGracePeriod),
-		false
-	);
-}
-
-void AfpstrueEnemyCharacter::FinishAttack()
-{
-	if (!bIsAttacking)
-	{
-		return;
-	}
-
-	EndAttackWindow();
-	bIsAttacking = false;
-	SetAttackAnimationPriority(false);
-	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
-	if (UWorld* World = GetWorld())
-	{
-		LastAttackTime = World->GetTimeSeconds();
-	}
-
-	HitActorsThisAttack.Reset();
-}
-
 void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 {
+	if (bHighPriority)
+	{
+		// 独立 Montage/Notify 开始前先解除 LeaderPose，攻击逻辑不依赖共享动画。
+		SuspendAnimationSharing();
+	}
+
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
 		if (bDisableAnimationOptimizationsForBenchmark)
 		{
-			CharacterMesh->VisibilityBasedAnimTickOption =
-				EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+			CharacterMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 		}
 		else
 		{
-			CharacterMesh->VisibilityBasedAnimTickOption = bHighPriority
-				? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
-				: EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
+			CharacterMesh->VisibilityBasedAnimTickOption = bHighPriority ? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
+																		 : EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 		}
 
 		if (bHighPriority)
 		{
 			CharacterMesh->SetComponentTickInterval(0.0f);
+			if (AppliedMinimumLOD != 0)
+			{
+				CharacterMesh->OverrideMinLOD(0);
+				AppliedMinimumLOD = 0;
+			}
 		}
 	}
 
@@ -723,45 +704,25 @@ void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 	}
 	else
 	{
-		ApplySignificanceIntervals();
+		ApplyGameplaySignificanceIntervals();
+		ApplyRenderSignificanceSettings();
+		RefreshAnimationSharingRegistration();
 	}
 }
-
 
 bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
 {
-	if (TargetCharacter == nullptr)
-	{
-		return false;
-	}
-
-	const FVector ToTarget = TargetCharacter->GetActorLocation() - GetActorLocation();
-	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
-
-	const float EnemyRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
-	const float TargetRadius = TargetCharacter->GetCapsuleComponent()->GetScaledCapsuleRadius();
-	const float MinimumReachableDistance = EnemyRadius + TargetRadius + 5.0f;
-	const float EffectiveAttackRange = FMath::Max(AttackRange, MinimumReachableDistance);
-
-	return HorizontalToTarget.Size() <= EffectiveAttackRange;
+	return CombatComponent != nullptr && CombatComponent->IsTargetInAttackRange();
 }
 
-bool AfpstrueEnemyCharacter::CanAttack() const
+AfpstrueCharacter* AfpstrueEnemyCharacter::GetCombatTarget() const
 {
-	const UWorld* World = GetWorld();
-	if (World == nullptr)
-	{
-		return false;
-	}
-
-	return TargetCharacter != nullptr
-		&& TargetCharacter->GetHealthComponent() != nullptr
-		&& !TargetCharacter->GetHealthComponent()->IsDead()
-		&& !bIsDead
-		&& !bIsAttacking
-		&& IsTargetInAttackRange()
-		&& World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
+	// AIController 是目标状态的唯一拥有者；角色只在执行战斗和重要性判断时读取。
+	const AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(GetController());
+	return EnemyController != nullptr ? EnemyController->GetTargetCharacter() : nullptr;
 }
+
+// ==================== 受击与死亡 ====================
 
 void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
@@ -769,6 +730,12 @@ void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* Da
 	{
 		return;
 	}
+	if (const UWorld* World = GetWorld())
+	{
+		LastCombatRelevantTime = World->GetTimeSeconds();
+	}
+	// 受击表现由原 AnimBP/Montage 独立播放；下一次渲染重要性更新会进入 Full 保护期。
+	SuspendAnimationSharing();
 
 	ApplyHitReactionImpulse();
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
@@ -793,18 +760,19 @@ void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
 
 void AfpstrueEnemyCharacter::HandleDeath()
 {
-	if (bIsDead)
+	if (bDeathEffectsApplied)
 	{
 		return;
 	}
 
-	bIsDead = true;
+	bDeathEffectsApplied = true;
+	SuspendAnimationSharing();
 	UnregisterFromSignificanceManager();
-	CancelAttackWindow();
-	bIsAttacking = false;
-	HitActorsThisAttack.Reset();
+	if (CombatComponent != nullptr)
+	{
+		CombatComponent->ResetCombat();
+	}
 	SetAttackAnimationPriority(false);
-	GetWorldTimerManager().ClearTimer(AttackFinishTimerHandle);
 
 	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
 	{
@@ -855,16 +823,44 @@ void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 	CharacterMesh->SetEnableGravity(true);
 	CharacterMesh->WakeAllRigidBodies();
 
-	const FVector ImpulseDirection =
-		(LastDamageDirection + FVector::UpVector * DeathImpulseUpwardBias).GetSafeNormal();
+	const FVector ImpulseDirection = (LastDamageDirection + FVector::UpVector * DeathImpulseUpwardBias).GetSafeNormal();
 	if (ImpulseDirection.IsNearlyZero())
 	{
 		return;
 	}
 
-	CharacterMesh->AddImpulseAtLocation(
-		ImpulseDirection * FMath::Clamp(DeathImpulseStrength, 0.0f, 15000.0f),
-		LastDamageLocation,
-		LastDamageBoneName
-	);
+	CharacterMesh->AddImpulseAtLocation(ImpulseDirection * FMath::Clamp(DeathImpulseStrength, 0.0f, 15000.0f), LastDamageLocation,
+										LastDamageBoneName);
+}
+
+// ==================== Animation Sharing 接入桥 ====================
+
+bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
+{
+	if (IsDead() || !bHasRenderSignificancePolicy || bDisableAnimationOptimizationsForBenchmark ||
+		RenderSignificanceTier == EFPEnemyRenderSignificanceTier::Full ||
+		RequiresGameplayAnimationProtection(GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0f,
+											LastRenderSignificancePolicy.CombatPriorityGraceSeconds))
+	{
+		return false;
+	}
+
+	const USkeletalMeshComponent* CharacterMesh = GetMesh();
+	return CharacterMesh != nullptr && !CharacterMesh->IsSimulatingPhysics();
+}
+
+void AfpstrueEnemyCharacter::RefreshAnimationSharingRegistration()
+{
+	if (AnimationSharingCoordinator != nullptr)
+	{
+		AnimationSharingCoordinator->RefreshEnemyRegistration(this);
+	}
+}
+
+void AfpstrueEnemyCharacter::SuspendAnimationSharing()
+{
+	if (AnimationSharingCoordinator != nullptr)
+	{
+		AnimationSharingCoordinator->SuspendEnemy(this);
+	}
 }

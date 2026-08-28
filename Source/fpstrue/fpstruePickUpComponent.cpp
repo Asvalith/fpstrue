@@ -3,32 +3,34 @@
 #include "fpstruePickUpComponent.h"
 #include "fpstrueWeaponComponent.h"
 
-//³õÊ¼»¯UfpstruePickUpComponent×é¼ş£¬ÉèÖÃSphereRadiusÎª32.f
+//åˆå§‹åŒ–UfpstruePickUpComponentç»„ä»¶ï¼Œè®¾ç½®SphereRadiusä¸º32.f
 UfpstruePickUpComponent::UfpstruePickUpComponent()
 {
 	SphereRadius = 32.f;
 }
 
-//ÔÚÓÎÏ·¿ªÊ¼Ê±°ó¶¨ OnSphereBeginOverlap ÊÂ¼ş
+//åœ¨æ¸¸æˆå¼€å§‹æ—¶ç»‘å®š OnSphereBeginOverlap äº‹ä»¶
 void UfpstruePickUpComponent::BeginPlay()
-{	//ÏÈµ÷ÓÃ¸¸ÀàµÄ BeginPlay() ·½·¨£¬È·±£×é¼şµÄ»ù±¾³õÊ¼»¯Âß¼­±»Ö´ĞĞ
+{ //å…ˆè°ƒç”¨çˆ¶ç±»çš„ BeginPlay() æ–¹æ³•ï¼Œç¡®ä¿ç»„ä»¶çš„åŸºæœ¬åˆå§‹åŒ–é€»è¾‘è¢«æ‰§è¡Œ
 	Super::BeginPlay();
-	//OnComponentBeginOverlapÌí¼Ó¶¯Ì¬¹ã²¥OnSphereBeginOverlap·½·¨£¬È·±£µ±·¢ÉúÖØµşÊ±»áÍ¨¹ıthis»Øµ÷OnSphereBeginOverlapº¯Êı
+	//OnComponentBeginOverlapæ·»åŠ åŠ¨æ€å¹¿æ’­OnSphereBeginOverlapæ–¹æ³•ï¼Œç¡®ä¿å½“å‘ç”Ÿé‡å æ—¶ä¼šé€šè¿‡thiså›è°ƒOnSphereBeginOverlapå‡½æ•°
 	OnComponentBeginOverlap.AddUniqueDynamic(this, &UfpstruePickUpComponent::OnSphereBeginOverlap);
 }
 
-//Sphere ÕæÕı·¢ÉúÖØµşÒÔºóµ÷ÓÃ
-void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
+//Sphere çœŸæ­£å‘ç”Ÿé‡å ä»¥åè°ƒç”¨
+void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+												   UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
+												   const FHitResult& SweepResult)
 {
 	if (bConsumed)
 	{
 		return;
 	}
-	//ÕÒµ½Åöµ½µÄ½ÇÉ«£¨Ö®ºóÅĞ¶ÏÊÇ²»ÊÇÍæ¼Ò£©
+	//æ‰¾åˆ°ç¢°åˆ°çš„è§’è‰²ï¼ˆä¹‹ååˆ¤æ–­æ˜¯ä¸æ˜¯ç©å®¶ï¼‰
 	AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(OtherActor);
-	//¹éÊôÍæ¼Ò
+	//å½’å±ç©å®¶
 	AActor* OwnerActor = GetOwner();
-	//¹éÊôÍæ¼Ò¡¢¹éÊôÀà´æÔÚ¼ì²â
+	//å½’å±ç©å®¶ã€å½’å±ç±»å­˜åœ¨æ£€æµ‹
 	UfpstrueWeaponComponent* WeaponComponent =
 		OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 
@@ -43,19 +45,19 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 		bConsumed = false;
 		return;
 	}
-	//Í£Ö¹Ê°È¡×é¼şµÄÅö×²¼ì²â£¬·ÀÖ¹ÖØ¸´´¥·¢
+	//åœæ­¢æ‹¾å–ç»„ä»¶çš„ç¢°æ’æ£€æµ‹ï¼Œé˜²æ­¢é‡å¤è§¦å‘
 	SetGenerateOverlapEvents(false);
-	//½ûÓÃÅö×²£¬·ÀÖ¹Ê°È¡×é¼şÓëÆäËûÎïÌå·¢ÉúÅö×²
+	//ç¦ç”¨ç¢°æ’ï¼Œé˜²æ­¢æ‹¾å–ç»„ä»¶ä¸å…¶ä»–ç‰©ä½“å‘ç”Ÿç¢°æ’
 	SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	//°ó¶¨µ½µ±Ç°¶ÔÏóthisµÄ¼àÌıº¯ÊıÈ«²¿½â³ı
+	//ç»‘å®šåˆ°å½“å‰å¯¹è±¡thisçš„ç›‘å¬å‡½æ•°å…¨éƒ¨è§£é™¤
 	OnComponentBeginOverlap.RemoveAll(this);
-	//¹ã²¥Ê°È¡ÊÂ¼ş£¬Í¨ÖªÆäËûÏµÍ³»òÀ¶Í¼£¬½ÇÉ«ÒÑÊ°È¡¸ÃÎïÆ·
+	//å¹¿æ’­æ‹¾å–äº‹ä»¶ï¼Œé€šçŸ¥å…¶ä»–ç³»ç»Ÿæˆ–è“å›¾ï¼Œè§’è‰²å·²æ‹¾å–è¯¥ç‰©å“
 	OnPickUp.Broadcast(Character);
 
 	if (IsValid(this))
-	{	//×¢Ïú×é¼ş£¬´ÓActorÊı×éÖĞÒÆ³ı£¬±ê¼ÇÎª´ıÏú»Ù¡£UObjectÄÚ´æ»ØÊÕÓÉUEµÄ¶ÔÏóÉúÃüÖÜÆÚ/GC»úÖÆ´¦Àí¡£
+	{ //æ³¨é”€ç»„ä»¶ï¼Œä»Actoræ•°ç»„ä¸­ç§»é™¤ï¼Œæ ‡è®°ä¸ºå¾…é”€æ¯ã€‚UObjectå†…å­˜å›æ”¶ç”±UEçš„å¯¹è±¡ç”Ÿå‘½å‘¨æœŸ/GCæœºåˆ¶å¤„ç†ã€‚
 		DestroyComponent();
 	}
-	////Ïà¹Ø°Ë¹É
-	////UE µÄÊÂ¼ş½â°ó¡¢Component ÉúÃüÖÜÆÚ¡¢UObject Ö¸Õë°²È«¡¢Ò»´ÎĞÔÊÂÎñÉè¼Æ
+	////ç›¸å…³å…«è‚¡
+	////UE çš„äº‹ä»¶è§£ç»‘ã€Component ç”Ÿå‘½å‘¨æœŸã€UObject æŒ‡é’ˆå®‰å…¨ã€ä¸€æ¬¡æ€§äº‹åŠ¡è®¾è®¡
 }

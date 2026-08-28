@@ -7,17 +7,14 @@
 
 namespace
 {
-	AfpstrueEnemyCharacter* GetEnemyOwner(USkeletalMeshComponent* MeshComp)
-	{
-		return MeshComp != nullptr? Cast<AfpstrueEnemyCharacter>(MeshComp->GetOwner()): nullptr;
-	}
+AfpstrueEnemyCharacter* GetEnemyOwner(USkeletalMeshComponent* MeshComp)
+{
+	return MeshComp != nullptr ? Cast<AfpstrueEnemyCharacter>(MeshComp->GetOwner()) : nullptr;
 }
+} // namespace
 
-void UfpstrueAnimNotifyState_AttackWindow::NotifyBegin(
-	USkeletalMeshComponent* MeshComp,
-	UAnimSequenceBase* Animation,
-	float TotalDuration,
-	const FAnimNotifyEventReference& EventReference)
+void UfpstrueAnimNotifyState_AttackWindow::NotifyBegin(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, float TotalDuration,
+													   const FAnimNotifyEventReference& EventReference)
 {
 	Super::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
 
@@ -27,11 +24,8 @@ void UfpstrueAnimNotifyState_AttackWindow::NotifyBegin(
 	}
 }
 
-void UfpstrueAnimNotifyState_AttackWindow::NotifyTick(
-	USkeletalMeshComponent* MeshComp,
-	UAnimSequenceBase* Animation,
-	float FrameDeltaTime,
-	const FAnimNotifyEventReference& EventReference)
+void UfpstrueAnimNotifyState_AttackWindow::NotifyTick(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, float FrameDeltaTime,
+													  const FAnimNotifyEventReference& EventReference)
 {
 	Super::NotifyTick(MeshComp, Animation, FrameDeltaTime, EventReference);
 
@@ -41,10 +35,8 @@ void UfpstrueAnimNotifyState_AttackWindow::NotifyTick(
 	}
 }
 
-void UfpstrueAnimNotifyState_AttackWindow::NotifyEnd(
-	USkeletalMeshComponent* MeshComp,
-	UAnimSequenceBase* Animation,
-	const FAnimNotifyEventReference& EventReference)
+void UfpstrueAnimNotifyState_AttackWindow::NotifyEnd(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+													 const FAnimNotifyEventReference& EventReference)
 {
 	Super::NotifyEnd(MeshComp, Animation, EventReference);
 

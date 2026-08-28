@@ -1,6 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 #include "fpstrueWeaponComponent.h"
 #include "fpstrueCharacter.h"
 #include "GameFramework/PlayerController.h"
@@ -18,7 +17,7 @@ constexpr float DefaultRoundsPerMinute = 600.0f;
 constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
 
-//弹道散布算法
+// 根据高斯分布生成散布方向，供每发 Hitscan 共用。
 FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
 {
 	const FVector AimDirection = Forward.GetSafeNormal();
@@ -40,15 +39,11 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 
 	return (AimDirection + Offset).GetSafeNormal();
 }
-}
-
+} // namespace
 
 // ==================== Construction ====================
 
-UfpstrueWeaponComponent::UfpstrueWeaponComponent()
-{
-}
-
+UfpstrueWeaponComponent::UfpstrueWeaponComponent() {}
 
 // ==================== Equipment ====================
 
@@ -86,17 +81,18 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	return true;
 }
 
-
 // ==================== Fire System ====================
 
 void UfpstrueWeaponComponent::StartFire()
 {
 	if (!CanFire())
 	{
-		if (IsOperational() && CurrentAmmo <= 0)
+		if (!HasAmmo() && RequestReload())
 		{
-			RequestReload();
+			return;
 		}
+
+		StopFire();
 		return;
 	}
 
@@ -112,13 +108,8 @@ void UfpstrueWeaponComponent::StartFire()
 	{
 		if (UWorld* World = GetWorld())
 		{
-			World->GetTimerManager().SetTimer(
-				AutomaticFireTimerHandle,
-				this,
-				&UfpstrueWeaponComponent::Fire,
-				60.0f / DefaultRoundsPerMinute,
-				true
-			);
+			World->GetTimerManager().SetTimer(AutomaticFireTimerHandle, this, &UfpstrueWeaponComponent::Fire,
+											  60.0f / DefaultRoundsPerMinute, true);
 		}
 	}
 }
@@ -129,9 +120,6 @@ void UfpstrueWeaponComponent::StopFire()
 	{
 		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
 	}
-
-	ConsecutiveShotCount = 0;
-	LastShotTimeSeconds = -1.0;
 
 	if (ActionState == EFPWeaponActionState::Firing)
 	{
@@ -154,8 +142,12 @@ void UfpstrueWeaponComponent::Fire()
 
 	if (!CanFire())
 	{
+		if (!HasAmmo() && RequestReload())
+		{
+			return;
+		}
+
 		StopFire();
-		RequestReload();
 		return;
 	}
 
@@ -176,8 +168,10 @@ void UfpstrueWeaponComponent::Fire()
 
 	if (!TryConsumeAmmo())
 	{
-		StopFire();
-		RequestReload();
+		if (!RequestReload())
+		{
+			StopFire();
+		}
 		return;
 	}
 
@@ -189,6 +183,11 @@ void UfpstrueWeaponComponent::Fire()
 		ApplyRecoil(PlayerController);
 	}
 
+	//最后一发完成命中和表现后再退出射击状态，避免Firing残留
+	if (!HasAmmo() && !RequestReload())
+	{
+		StopFire();
+	}
 }
 
 bool UfpstrueWeaponComponent::TryConsumeAmmo()
@@ -232,13 +231,7 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 	QueryParams.AddIgnoredActor(GetOwner());
 	QueryParams.bTraceComplex = true;
 
-	const bool bHit = World->LineTraceSingleByChannel(
-		HitResult,
-		Start,
-		End,
-		ECC_Visibility,
-		QueryParams
-	);
+	const bool bHit = World->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams);
 
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
@@ -251,15 +244,8 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 			const bool bHeadShot = HitBoneName == TEXT("neck_01") || HitBoneName == TEXT("head");
 			const float DamageToApply = bHeadShot ? LineTraceHeadDamage : LineTraceDamage;
 
-			UGameplayStatics::ApplyPointDamage(
-				HitActor,
-				DamageToApply,
-				ShotDirection,
-				HitResult,
-				Character->GetController(),
-				GetOwner(),
-				nullptr
-			);
+			UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, Character->GetController(), GetOwner(),
+											   nullptr);
 
 			if (!HitActor->IsA<ACharacter>())
 			{
@@ -275,7 +261,6 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 	}
 }
 
-
 // ==================== Reload System ====================
 
 bool UfpstrueWeaponComponent::RequestReload()
@@ -287,8 +272,7 @@ bool UfpstrueWeaponComponent::RequestReload()
 
 	StopFire();
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
-	bReloadAmmoCommitted = false;
-	++ActiveReloadSequence;
+	InvalidateReloadTransaction();
 	SetActionState(EFPWeaponActionState::Reloading);
 	const float ReloadDuration = bWasEmptyReload ? DefaultEmptyReloadDuration : DefaultReloadDuration;
 	ScheduleReloadTimeout(FMath::Max(ReloadDuration, ReloadFailSafeDuration));
@@ -325,7 +309,6 @@ void UfpstrueWeaponComponent::FinishReload()
 	{
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 	}
-
 	SetActionState(EFPWeaponActionState::Ready);
 }
 
@@ -340,10 +323,14 @@ void UfpstrueWeaponComponent::CancelReload()
 	{
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 	}
+	InvalidateReloadTransaction();
+	SetActionState(EFPWeaponActionState::Ready);
+}
 
+void UfpstrueWeaponComponent::InvalidateReloadTransaction()
+{
 	++ActiveReloadSequence;
 	bReloadAmmoCommitted = false;
-	SetActionState(EFPWeaponActionState::Ready);
 }
 
 void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
@@ -356,12 +343,8 @@ void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
 
 	FTimerDelegate ReloadDelegate;
 	ReloadDelegate.BindUObject(this, &UfpstrueWeaponComponent::HandleReloadTimeout, ActiveReloadSequence);
-	World->GetTimerManager().SetTimer(
-		ReloadTimerHandle,
-		ReloadDelegate,
-		FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod),
-		false
-	);
+	World->GetTimerManager().SetTimer(ReloadTimerHandle, ReloadDelegate, FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod),
+									  false);
 }
 
 void UfpstrueWeaponComponent::HandleReloadTimeout(int32 ReloadSequence)
@@ -374,48 +357,29 @@ void UfpstrueWeaponComponent::HandleReloadTimeout(int32 ReloadSequence)
 	FinishReload();
 }
 
-
 // ==================== Owner / Component Lifecycle ====================
 
 void UfpstrueWeaponComponent::HandleOwnerDeath()
 {
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
-		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
-		World->GetTimerManager().ClearTimer(RecoilRecoveryTimerHandle);
-	}
-
-	++ActiveReloadSequence;
-	bReloadAmmoCommitted = false;
-	ConsecutiveShotCount = 0;
-	LastShotTimeSeconds = -1.0;
-	AccumulatedRecoilPitch = 0.0f;
-	AccumulatedRecoilYaw = 0.0f;
+	ResetWeaponRuntimeState();
+	InvalidateReloadTransaction();
 	SetActionState(EFPWeaponActionState::Disabled);
 }
 
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
-		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
-		World->GetTimerManager().ClearTimer(RecoilRecoveryTimerHandle);
-	}
+	ResetWeaponRuntimeState();
+	InvalidateReloadTransaction();
 
 	if (Character != nullptr)
 	{
 		Character->ClearEquippedWeaponComponent(this);
 	}
 
-	AccumulatedRecoilPitch = 0.0f;
-	AccumulatedRecoilYaw = 0.0f;
 	SetActionState(EFPWeaponActionState::Disabled);
 	Character = nullptr;
 	Super::EndPlay(EndPlayReason);
 }
-
 
 // ==================== Action State / Rules ====================
 
@@ -444,7 +408,6 @@ bool UfpstrueWeaponComponent::CanReload() const
 	return IsOperational() && ActionState != EFPWeaponActionState::Reloading && CurrentAmmo < MagazineSize && ReserveAmmo > 0;
 }
 
-
 // ==================== Recoil System ====================
 
 void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
@@ -467,22 +430,15 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 
 	if (UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().SetTimer(
-			RecoilRecoveryTimerHandle,
-			this,
-			&UfpstrueWeaponComponent::UpdateRecoilRecovery,
-			RecoilRecoveryTickInterval,
-			true,
-			RecoilRecoveryDelay);
+		World->GetTimerManager().SetTimer(RecoilRecoveryTimerHandle, this, &UfpstrueWeaponComponent::UpdateRecoilRecovery,
+										  RecoilRecoveryTickInterval, true, RecoilRecoveryDelay);
 	}
 }
 
 void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 {
 	UWorld* World = GetWorld();
-	APlayerController* PlayerController = Character != nullptr
-		? Cast<APlayerController>(Character->GetController())
-		: nullptr;
+	APlayerController* PlayerController = Character != nullptr ? Cast<APlayerController>(Character->GetController()) : nullptr;
 	if (World == nullptr || PlayerController == nullptr || Character->IsDead())
 	{
 		ClearRecoilState();
@@ -515,8 +471,22 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 	AccumulatedRecoilYaw = 0.0f;
 }
 
-
 // ==================== Runtime Helpers ====================
+
+void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
+{
+	if (UWorld* World = GetWorld())
+	{
+		FTimerManager& TimerManager = World->GetTimerManager();
+		TimerManager.ClearTimer(AutomaticFireTimerHandle);
+		TimerManager.ClearTimer(ReloadTimerHandle);
+	}
+
+	ClearRecoilState();
+	ConsecutiveShotCount = 0;
+	LastShotTimeSeconds = -1.0;
+	LastAcceptedShotTimeSeconds = -1.0;
+}
 
 void UfpstrueWeaponComponent::InitializeRuntimeState()
 {

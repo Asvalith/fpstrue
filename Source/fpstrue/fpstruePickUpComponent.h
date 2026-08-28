@@ -7,35 +7,34 @@
 #include "fpstrueCharacter.h"
 #include "fpstruePickUpComponent.generated.h"
 
-//ÉùÃ÷Ò»¸öOnpickup¶¯Ì¬¶à²¥Î¯ÍĞ£¬ÓÃÓÚÊ°È¡ºó¹ã²¥
+//å£°æ˜ä¸€ä¸ªOnpickupåŠ¨æ€å¤šæ’­å§”æ‰˜ï¼Œç”¨äºæ‹¾å–åå¹¿æ’­
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPickUp, AfpstrueCharacter*, PickUpCharacter);
-//ÉùÃ÷×é¼şÀà UfpstruePickUpComponent
+//å£°æ˜ç»„ä»¶ç±» UfpstruePickUpComponent
+/** ä¸€æ¬¡æ€§æ‹¾å–è§¦å‘å™¨ï¼šæ£€æµ‹ç©å®¶è¿›å…¥çƒå½¢èŒƒå›´å¹¶å‘è“å›¾å¹¿æ’­æ‹¾å–äº‹ä»¶ã€‚ */
 UCLASS(Blueprintable, BlueprintType, ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 
-//FPSTRUE_APIÄ£¿éµ¼Èëµ¼³öºê£¬½â¾ö²»Í¬ UE Ä£¿é/DLL Ö®¼äµÄ·ûºÅ¿É¼ûĞÔºÍÁ´½ÓÎÊÌâ
+//FPSTRUE_APIæ¨¡å—å¯¼å…¥å¯¼å‡ºå®ï¼Œè§£å†³ä¸åŒ UE æ¨¡å—/DLL ä¹‹é—´çš„ç¬¦å·å¯è§æ€§å’Œé“¾æ¥é—®é¢˜
 class FPSTRUE_API UfpstruePickUpComponent : public USphereComponent
 {
 	GENERATED_BODY()
 
 public:
-
-	//³õÊ¼»¯UfpstruePickUpComponent×é¼ş
+	//åˆå§‹åŒ–UfpstruePickUpComponentç»„ä»¶
 	UfpstruePickUpComponent();
-	//´´½¨Ê°È¡ÊÂ¼ş±©Â¶¸øÀ¶Í¼£¬×÷ÎªÊÂ¼ş·Ö·¢Æ÷
+	//åˆ›å»ºæ‹¾å–äº‹ä»¶æš´éœ²ç»™è“å›¾ï¼Œä½œä¸ºäº‹ä»¶åˆ†å‘å™¨
 	UPROPERTY(BlueprintAssignable, Category = "Interaction")
 	FOnPickUp OnPickUp;
 
-	
 protected:
-
-	//ÖØĞ´»ùÀà
+	// ç»‘å®šçƒå½¢ç¢°æ’çš„é‡å å›è°ƒã€‚
 	virtual void BeginPlay() override;
-	
-	//Sphere ÕæÕı·¢ÉúÖØµşÒÔºóµ÷ÓÃ
+
+	//Sphere çœŸæ­£å‘ç”Ÿé‡å ä»¥åè°ƒç”¨
 	UFUNCTION()
-	void OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+	void OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp,
+							  int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
 
 private:
-	//·ÀÖØ¸´Ê°È¡µÄ±êÖ¾Î»£¬³õÊ¼ÖµÎªfalse£¬±íÊ¾Î´±»Ê°È¡
+	//é˜²é‡å¤æ‹¾å–çš„æ ‡å¿—ä½ï¼Œåˆå§‹å€¼ä¸ºfalseï¼Œè¡¨ç¤ºæœªè¢«æ‹¾å–
 	bool bConsumed = false;
 };

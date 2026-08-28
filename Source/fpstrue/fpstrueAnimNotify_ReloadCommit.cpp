@@ -6,10 +6,8 @@
 #include "fpstrueWeaponComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 
-void UfpstrueAnimNotify_ReloadCommit::Notify(
-	USkeletalMeshComponent* MeshComp,
-	UAnimSequenceBase* Animation,
-	const FAnimNotifyEventReference& EventReference)
+void UfpstrueAnimNotify_ReloadCommit::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+											 const FAnimNotifyEventReference& EventReference)
 {
 	Super::Notify(MeshComp, Animation, EventReference);
 

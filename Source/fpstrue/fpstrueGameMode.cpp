@@ -1,44 +1,44 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "fpstrueGameMode.h"
+#include "fpstrueBenchmarkConfig.h"
+#include "fpstrueBenchmarkRunner.h"
 #include "fpstrueEnemyAIController.h"
+#include "fpstrueEnemyAnimationSharingCoordinator.h"
 #include "fpstrueCharacter.h"
 #include "fpstrueEnemyCharacter.h"
+#include "fpstrueEnemySignificanceCoordinator.h"
 #include "fpstrueHealthComponent.h"
 #include "fpstruePerformanceStats.h"
 #include "fpstrueSurroundManager.h"
-#include "Blueprint/WidgetLayoutLibrary.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/SkeletalMeshComponent.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
-#include "GameFramework/PlayerController.h"
-#include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
-#include "Kismet/KismetSystemLibrary.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Parse.h"
 #include "NavigationSystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-#include "ProfilingDebugging/CsvProfiler.h"
-#include "SignificanceManager.h"
 
 DEFINE_STAT(STAT_fpstrueWaveSpawnTime);
 DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
 
-AfpstrueGameMode::AfpstrueGameMode()
-	: Super()
+// ==================== 生命周期与开局 ====================
+
+AfpstrueGameMode::AfpstrueGameMode() : Super()
 {
 	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
+	BenchmarkRunner = CreateDefaultSubobject<UfpstrueBenchmarkRunner>(TEXT("BenchmarkRunner"));
+	EnemySignificanceCoordinator = CreateDefaultSubobject<UfpstrueEnemySignificanceCoordinator>(TEXT("EnemySignificanceCoordinator"));
+	EnemyAnimationSharingCoordinator =
+		CreateDefaultSubobject<UfpstrueEnemyAnimationSharingCoordinator>(TEXT("EnemyAnimationSharingCoordinator"));
 }
 
 void AfpstrueGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (FParse::Param(FCommandLine::Get(), TEXT("AutoBenchmark")))
+	if (BenchmarkRunner != nullptr)
 	{
-		GetWorldTimerManager().SetTimerForNextTick(this, &AfpstrueGameMode::BeginAutomatedBenchmark);
+		BenchmarkRunner->StartIfRequested(this);
 	}
 }
 
@@ -67,13 +67,8 @@ void AfpstrueGameMode::StartGameMode()
 
 	if (SpawnPoints.Num() < MinimumSpawnPointCount)
 	{
-		UE_LOG(
-			LogTemp,
-			Error,
-			TEXT("StartGameMode failed: found %d spawn points, but at least %d are required."),
-			SpawnPoints.Num(),
-			MinimumSpawnPointCount
-		);
+		UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: found %d spawn points, but at least %d are required."), SpawnPoints.Num(),
+			   MinimumSpawnPointCount);
 		FinishGame(false);
 		return;
 	}
@@ -112,16 +107,18 @@ void AfpstrueGameMode::StartGameMode()
 	OnWaveChanged.Broadcast(CurrentWave, GetConfiguredWaveCount());
 	OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
 
-	GetWorldTimerManager().SetTimer(
-		CountdownTimerHandle,
-		this,
-		&AfpstrueGameMode::UpdateCountdown,
-		1.0f,
-		true
-	);
+	GetWorldTimerManager().SetTimer(CountdownTimerHandle, this, &AfpstrueGameMode::UpdateCountdown, 1.0f, true);
 
+	// 共享管理器必须在首个敌人生成前就绪；敌人实际是否加入仍由 Render Significance 决定。
+	if (EnemyAnimationSharingCoordinator != nullptr)
+	{
+		EnemyAnimationSharingCoordinator->Start(GetEnemyClassForWave(1));
+	}
+	if (EnemySignificanceCoordinator != nullptr)
+	{
+		EnemySignificanceCoordinator->Start(this);
+	}
 	StartNextWave();
-	StartEnemySignificanceUpdates();
 }
 
 void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -140,15 +137,12 @@ void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+// ==================== 波次、生成与共享场景资源 ====================
+
 void AfpstrueGameMode::CacheSpawnPoints()
 {
 	SpawnPoints.Reset();
-	UGameplayStatics::GetAllActorsOfClassWithTag(
-		this,
-		ATargetPoint::StaticClass(),
-		EnemySpawnTag,
-		SpawnPoints
-	);
+	UGameplayStatics::GetAllActorsOfClassWithTag(this, ATargetPoint::StaticClass(), EnemySpawnTag, SpawnPoints);
 }
 
 void AfpstrueGameMode::StartNextWave()
@@ -161,13 +155,7 @@ void AfpstrueGameMode::StartNextWave()
 
 	if (PendingEnemySpawnCount > 0)
 	{
-		GetWorldTimerManager().SetTimer(
-			WaveTimerHandle,
-			this,
-			&AfpstrueGameMode::StartNextWave,
-			FMath::Max(SpawnInterval, 0.01f),
-			false
-		);
+		GetWorldTimerManager().SetTimer(WaveTimerHandle, this, &AfpstrueGameMode::StartNextWave, FMath::Max(SpawnInterval, 0.01f), false);
 		return;
 	}
 
@@ -178,13 +166,7 @@ void AfpstrueGameMode::StartNextWave()
 
 	if (CurrentWave < ConfiguredWaveCount)
 	{
-		GetWorldTimerManager().SetTimer(
-			WaveTimerHandle,
-			this,
-			&AfpstrueGameMode::StartNextWave,
-			WaveInterval,
-			false
-		);
+		GetWorldTimerManager().SetTimer(WaveTimerHandle, this, &AfpstrueGameMode::StartNextWave, WaveInterval, false);
 	}
 }
 
@@ -202,24 +184,22 @@ bool AfpstrueGameMode::CreateSurroundManager()
 		return false;
 	}
 
-	SurroundManager = World->SpawnActor<AfpstrueSurroundManager>(
-		SurroundManagerClass,
-		FVector::ZeroVector,
-		FRotator::ZeroRotator
-	);
+	SurroundManager = World->SpawnActor<AfpstrueSurroundManager>(SurroundManagerClass, FVector::ZeroVector, FRotator::ZeroRotator);
 
 	if (!IsValid(SurroundManager))
 	{
 		return false;
 	}
 
+	// GameMode 负责共享目标的生命周期，避免每个 AIController 重复写入同一状态。
 	SurroundManager->SetTargetCharacter(PlayerCharacter);
 	return true;
 }
 
 int32 AfpstrueGameMode::GetConfiguredWaveCount() const
 {
-	if (GetBenchmarkEnemyCount() > 0)
+	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	if (BenchmarkConfig.HasEnemyCountOverride())
 	{
 		return 1;
 	}
@@ -229,10 +209,10 @@ int32 AfpstrueGameMode::GetConfiguredWaveCount() const
 
 int32 AfpstrueGameMode::GetEnemyCountForWave(int32 WaveNumber) const
 {
-	const int32 BenchmarkEnemyCount = GetBenchmarkEnemyCount();
-	if (BenchmarkEnemyCount > 0)
+	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	if (BenchmarkConfig.HasEnemyCountOverride())
 	{
-		return BenchmarkEnemyCount;
+		return BenchmarkConfig.EnemyCount;
 	}
 
 	const int32 WaveIndex = WaveNumber - 1;
@@ -281,13 +261,8 @@ void AfpstrueGameMode::SpawnCurrentWave()
 	SpawnNextQueuedEnemy();
 	if (PendingEnemySpawnCount > 0)
 	{
-		GetWorldTimerManager().SetTimer(
-			SpawnTimerHandle,
-			this,
-			&AfpstrueGameMode::SpawnNextQueuedEnemy,
-			FMath::Max(SpawnInterval, 0.01f),
-			true
-		);
+		GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy, FMath::Max(SpawnInterval, 0.01f),
+										true);
 	}
 }
 
@@ -296,10 +271,7 @@ void AfpstrueGameMode::SpawnNextQueuedEnemy()
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_SpawnQueuedEnemy);
 	SCOPE_CYCLE_COUNTER(STAT_fpstrueWaveSpawnTime);
 
-	if (!bGameRunning
-		|| PendingEnemySpawnCount <= 0
-		|| QueuedSpawnPoints.IsEmpty()
-		|| !QueuedEnemyClass)
+	if (!bGameRunning || PendingEnemySpawnCount <= 0 || QueuedSpawnPoints.IsEmpty() || !QueuedEnemyClass)
 	{
 		ClearSpawnQueue();
 		return;
@@ -308,11 +280,7 @@ void AfpstrueGameMode::SpawnNextQueuedEnemy()
 	const int32 SpawnPointCount = QueuedSpawnPoints.Num();
 	const int32 SpawnPointIndex = NextQueuedSpawnIndex % SpawnPointCount;
 	const int32 SpawnPointReuseCount = NextQueuedSpawnIndex / SpawnPointCount;
-	const bool bSpawnSucceeded = SpawnEnemyAtPoint(
-		QueuedSpawnPoints[SpawnPointIndex],
-		SpawnPointReuseCount,
-		QueuedEnemyClass
-	);
+	const bool bSpawnSucceeded = SpawnEnemyAtPoint(QueuedSpawnPoints[SpawnPointIndex], SpawnPointReuseCount, QueuedEnemyClass);
 
 	++NextQueuedSpawnIndex;
 	if (bSpawnSucceeded)
@@ -326,13 +294,8 @@ void AfpstrueGameMode::SpawnNextQueuedEnemy()
 		const int32 FailureLimit = FMath::Max(SpawnPointCount * 4, 8);
 		if (ConsecutiveSpawnFailureCount >= FailureLimit)
 		{
-			UE_LOG(
-				LogTemp,
-				Error,
-				TEXT("Enemy spawn queue stopped after %d consecutive failures with %d enemies remaining."),
-				ConsecutiveSpawnFailureCount,
-				PendingEnemySpawnCount
-			);
+			UE_LOG(LogTemp, Error, TEXT("Enemy spawn queue stopped after %d consecutive failures with %d enemies remaining."),
+				   ConsecutiveSpawnFailureCount, PendingEnemySpawnCount);
 			ClearSpawnQueue();
 			return;
 		}
@@ -354,11 +317,7 @@ void AfpstrueGameMode::ClearSpawnQueue()
 	ConsecutiveSpawnFailureCount = 0;
 }
 
-bool AfpstrueGameMode::SpawnEnemyAtPoint(
-	AActor* SpawnPoint,
-	int32 SpawnPointReuseCount,
-	TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass
-)
+bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReuseCount, TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass)
 {
 	if (!IsValid(SpawnPoint))
 	{
@@ -380,21 +339,14 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(
 	}
 
 	const AfpstrueEnemyCharacter* EnemyDefaults = WaveEnemyClass.GetDefaultObject();
-	const UCapsuleComponent* DefaultCapsule = EnemyDefaults != nullptr
-		? EnemyDefaults->GetCapsuleComponent()
-		: nullptr;
-	const float CapsuleHalfHeight = DefaultCapsule != nullptr
-		? DefaultCapsule->GetScaledCapsuleHalfHeight()
-		: 96.0f;
+	const UCapsuleComponent* DefaultCapsule = EnemyDefaults != nullptr ? EnemyDefaults->GetCapsuleComponent() : nullptr;
+	const float CapsuleHalfHeight = DefaultCapsule != nullptr ? DefaultCapsule->GetScaledCapsuleHalfHeight() : 96.0f;
 	const FVector SpawnOrigin = SpawnPoint->GetActorLocation();
 	const FVector ProjectionExtent(150.0f, 150.0f, 500.0f);
-	const bool bAutomatedBenchmark = GetBenchmarkEnemyCount() > 0;
+	const bool bAutomatedBenchmark = FFPBenchmarkConfig::Get().HasEnemyCountOverride();
 	const float ReuseScale = FMath::Sqrt(static_cast<float>(FMath::Max(SpawnPointReuseCount + 1, 1)));
-	const float RetryRadius = FMath::Clamp(
-		FMath::Max(ReusedSpawnPointRadius, 300.0f) * ReuseScale,
-		300.0f,
-		FMath::Max(MaxReusedSpawnPointRadius, 300.0f)
-	);
+	const float RetryRadius =
+		FMath::Clamp(FMath::Max(ReusedSpawnPointRadius, 300.0f) * ReuseScale, 300.0f, FMath::Max(MaxReusedSpawnPointRadius, 300.0f));
 	constexpr int32 MaxSpawnAttempts = 8;
 
 	AfpstrueEnemyCharacter* SpawnedEnemy = nullptr;
@@ -404,10 +356,7 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(
 		if ((SpawnPointReuseCount > 0 || Attempt > 0) && RetryRadius > 0.0f)
 		{
 			FNavLocation NearbyLocation;
-			if (!NavSystem->GetRandomReachablePointInRadius(
-				SpawnOrigin,
-				RetryRadius,
-				NearbyLocation))
+			if (!NavSystem->GetRandomReachablePointInRadius(SpawnOrigin, RetryRadius, NearbyLocation))
 			{
 				continue;
 			}
@@ -415,16 +364,12 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(
 		}
 
 		FNavLocation ProjectedLocation;
-		if (!NavSystem->ProjectPointToNavigation(
-			CandidateLocation,
-			ProjectedLocation,
-			ProjectionExtent))
+		if (!NavSystem->ProjectPointToNavigation(CandidateLocation, ProjectedLocation, ProjectionExtent))
 		{
 			continue;
 		}
 
-		const FVector SpawnLocation = ProjectedLocation.Location
-			+ FVector::UpVector * (CapsuleHalfHeight + 2.0f);
+		const FVector SpawnLocation = ProjectedLocation.Location + FVector::UpVector * (CapsuleHalfHeight + 2.0f);
 		FRotator SpawnRotation = SpawnPoint->GetActorRotation();
 		if (PlayerCharacter)
 		{
@@ -434,15 +379,11 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(
 
 		const FTransform SpawnTransform(SpawnRotation, SpawnLocation, FVector::OneVector);
 		FActorSpawnParameters SpawnParameters;
-		SpawnParameters.SpawnCollisionHandlingOverride =
-			bAutomatedBenchmark
-			? ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn
-			: ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
+		SpawnParameters.SpawnCollisionHandlingOverride = bAutomatedBenchmark
+															 ? ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn
+															 : ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 
-		SpawnedEnemy = World->SpawnActor<AfpstrueEnemyCharacter>(
-			WaveEnemyClass,
-			SpawnTransform,
-			SpawnParameters);
+		SpawnedEnemy = World->SpawnActor<AfpstrueEnemyCharacter>(WaveEnemyClass, SpawnTransform, SpawnParameters);
 	}
 
 	if (SpawnedEnemy)
@@ -454,41 +395,27 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(
 			SpawnedEnemy->SpawnDefaultController();
 		}
 
-		AfpstrueEnemyAIController* EnemyController =
-			Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController());
+		AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController());
 		if (EnemyController != nullptr)
 		{
-			EnemyController->InitializeCombatContext(
-				PlayerCharacter,
-				SurroundManager
-			);
+			EnemyController->InitializeCombatContext(PlayerCharacter, SurroundManager);
 		}
 		else
 		{
-			UE_LOG(
-				LogTemp,
-				Error,
-				TEXT("Enemy %s has controller %s; expected fpstrueEnemyAIController."),
-				*GetNameSafe(SpawnedEnemy),
-				*GetNameSafe(SpawnedEnemy->GetController())
-			);
+			UE_LOG(LogTemp, Error, TEXT("Enemy %s has controller %s; expected fpstrueEnemyAIController."), *GetNameSafe(SpawnedEnemy),
+				   *GetNameSafe(SpawnedEnemy->GetController()));
 		}
 
 		RegisterEnemy(SpawnedEnemy);
 		return true;
 	}
 
-	UE_LOG(
-		LogTemp,
-		Error,
-		TEXT("SpawnActor failed for enemy class %s at %s after %d reuse(s), sample radius %.0f."),
-		*GetNameSafe(WaveEnemyClass.Get()),
-		*GetNameSafe(SpawnPoint),
-		SpawnPointReuseCount,
-		RetryRadius
-	);
+	UE_LOG(LogTemp, Error, TEXT("SpawnActor failed for enemy class %s at %s after %d reuse(s), sample radius %.0f."),
+		   *GetNameSafe(WaveEnemyClass.Get()), *GetNameSafe(SpawnPoint), SpawnPointReuseCount, RetryRadius);
 	return false;
 }
+
+// ==================== 敌人注册表与协调器连接 ====================
 
 bool AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
@@ -504,6 +431,7 @@ bool AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 	}
 
 	RegisteredEnemies.Add(EnemyKey);
+	Enemy->AnimationSharingCoordinator = EnemyAnimationSharingCoordinator;
 	Enemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
 	Enemy->OnDestroyed.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
 	AliveEnemyCount = RegisteredEnemies.Num();
@@ -524,6 +452,11 @@ bool AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroa
 
 	Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
 	Enemy->OnDestroyed.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
+	if (EnemyAnimationSharingCoordinator != nullptr)
+	{
+		EnemyAnimationSharingCoordinator->SuspendEnemy(Enemy);
+	}
+	Enemy->AnimationSharingCoordinator = nullptr;
 
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	if (RegisteredEnemies.Remove(EnemyKey) == 0)
@@ -545,8 +478,7 @@ void AfpstrueGameMode::StopActiveEnemies()
 	{
 		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
 		{
-			if (AfpstrueEnemyAIController* EnemyController =
-				Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+			if (AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
 			{
 				EnemyController->StopAI();
 			}
@@ -560,6 +492,11 @@ void AfpstrueGameMode::ClearEnemyRegistrations()
 	{
 		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
 		{
+			if (EnemyAnimationSharingCoordinator != nullptr)
+			{
+				EnemyAnimationSharingCoordinator->SuspendEnemy(Enemy);
+			}
+			Enemy->AnimationSharingCoordinator = nullptr;
 			Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
 			Enemy->OnDestroyed.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
 		}
@@ -569,6 +506,8 @@ void AfpstrueGameMode::ClearEnemyRegistrations()
 	AliveEnemyCount = 0;
 }
 
+// ==================== 游戏状态、事件与计时器 ====================
+
 bool AfpstrueGameMode::IsPlayerAlive() const
 {
 	if (!IsValid(PlayerCharacter))
@@ -576,21 +515,14 @@ bool AfpstrueGameMode::IsPlayerAlive() const
 		return false;
 	}
 
-	const UfpstrueHealthComponent* HealthComponent = PlayerCharacter->GetHealthComponent();
-	return IsValid(HealthComponent)
-		&& HealthComponent->GetHealth() > 0.0f
-		&& !HealthComponent->IsDead()
-		&& !PlayerCharacter->IsDead();
+	return !PlayerCharacter->IsDead();
 }
 
 void AfpstrueGameMode::BindPlayerDeathEvent()
 {
 	if (IsValid(PlayerCharacter))
 	{
-		PlayerCharacter->OnPlayerDeathReported.AddUniqueDynamic(
-			this,
-			&AfpstrueGameMode::HandlePlayerDied
-		);
+		PlayerCharacter->OnPlayerDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
 	}
 }
 
@@ -598,10 +530,7 @@ void AfpstrueGameMode::UnbindPlayerDeathEvent()
 {
 	if (IsValid(PlayerCharacter))
 	{
-		PlayerCharacter->OnPlayerDeathReported.RemoveDynamic(
-			this,
-			&AfpstrueGameMode::HandlePlayerDied
-		);
+		PlayerCharacter->OnPlayerDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
 	}
 }
 
@@ -655,14 +584,8 @@ void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 	{
 		SurroundManager->ResetManager();
 	}
-	UE_LOG(
-		LogTemp,
-		Log,
-		TEXT("Game finished: %s. Remaining time: %d. Player health: %.1f"),
-		bPlayerWon ? TEXT("Victory") : TEXT("Defeat"),
-		RemainingTime,
-		IsValid(PlayerCharacter) ? PlayerCharacter->GetCurrentHealth() : 0.0f
-	);
+	UE_LOG(LogTemp, Log, TEXT("Game finished: %s. Remaining time: %d. Player health: %.1f"), bPlayerWon ? TEXT("Victory") : TEXT("Defeat"),
+		   RemainingTime, IsValid(PlayerCharacter) ? PlayerCharacter->GetCurrentHealth() : 0.0f);
 	OnGameResult.Broadcast(bPlayerWon);
 }
 
@@ -670,334 +593,17 @@ void AfpstrueGameMode::ClearGameplayTimers()
 {
 	GetWorldTimerManager().ClearTimer(CountdownTimerHandle);
 	GetWorldTimerManager().ClearTimer(WaveTimerHandle);
-	GetWorldTimerManager().ClearTimer(EnemySignificanceTimerHandle);
 	ClearSpawnQueue();
-	GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
-	GetWorldTimerManager().ClearTimer(BenchmarkStartTimerHandle);
-	GetWorldTimerManager().ClearTimer(BenchmarkStopTimerHandle);
-	GetWorldTimerManager().ClearTimer(BenchmarkExitTimerHandle);
-}
-
-void AfpstrueGameMode::StartEnemySignificanceUpdates()
-{
-	const bool bDisabledForBenchmark =
-		FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemySignificance"))
-		|| FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemyUpdateBudget"));
-	if (!bEnableEnemySignificance || bDisabledForBenchmark)
+	if (EnemySignificanceCoordinator != nullptr)
 	{
-		return;
+		EnemySignificanceCoordinator->Stop();
 	}
-
-	GetWorldTimerManager().SetTimer(
-		EnemySignificanceTimerHandle,
-		this,
-		&AfpstrueGameMode::UpdateEnemySignificance,
-		FMath::Max(EnemySignificanceUpdateInterval, 0.1f),
-		true,
-		0.1f
-	);
-}
-
-void AfpstrueGameMode::UpdateEnemySignificance()
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_UpdateEnemySignificance);
-	if (!IsValid(PlayerCharacter))
+	if (EnemyAnimationSharingCoordinator != nullptr)
 	{
-		return;
+		EnemyAnimationSharingCoordinator->Stop();
 	}
-
-	USignificanceManager* Manager = USignificanceManager::Get(GetWorld());
-	if (Manager == nullptr)
+	if (BenchmarkRunner != nullptr)
 	{
-		return;
+		BenchmarkRunner->Cancel();
 	}
-
-	TArray<FTransform> Viewpoints;
-	Viewpoints.Reserve(1);
-	Viewpoints.Add(PlayerCharacter->GetActorTransform());
-	Manager->Update(Viewpoints);
-}
-
-void AfpstrueGameMode::BeginAutomatedBenchmark()
-{
-	int32 BenchmarkSeed = 1337;
-	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkSeed="), BenchmarkSeed);
-	FMath::RandInit(BenchmarkSeed);
-	UE_LOG(LogTemp, Display, TEXT("Automated benchmark random seed: %d"), BenchmarkSeed);
-
-	StartGameMode();
-	if (!bGameRunning)
-	{
-		return;
-	}
-
-	if (APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0))
-	{
-		PlayerController->SetViewTarget(PlayerCharacter);
-	}
-	PlayerCharacter->SetCanBeDamaged(false);
-	UWidgetLayoutLibrary::RemoveAllWidgets(this);
-
-	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkWarmup="), AutomatedBenchmarkWarmup);
-	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkDuration="), AutomatedBenchmarkDuration);
-	AutomatedBenchmarkWarmup = FMath::Max(AutomatedBenchmarkWarmup, 0.0f);
-	AutomatedBenchmarkDuration = FMath::Max(AutomatedBenchmarkDuration, 1.0f);
-
-	GetWorldTimerManager().SetTimer(
-		BenchmarkReadyTimerHandle,
-		this,
-		&AfpstrueGameMode::WaitForAutomatedBenchmarkReady,
-		0.25f,
-		true,
-		0.0f
-	);
-}
-
-void AfpstrueGameMode::WaitForAutomatedBenchmarkReady()
-{
-	if (!bGameRunning)
-	{
-		GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
-		return;
-	}
-
-	if (PendingEnemySpawnCount > 0)
-	{
-		return;
-	}
-
-	GetWorldTimerManager().ClearTimer(BenchmarkReadyTimerHandle);
-	UE_LOG(
-		LogTemp,
-		Display,
-		TEXT("Automated benchmark ready: requested=%d alive=%d warmup=%.1fs"),
-		GetBenchmarkEnemyCount(),
-		AliveEnemyCount,
-		AutomatedBenchmarkWarmup
-	);
-
-	GetWorldTimerManager().SetTimer(
-		BenchmarkStartTimerHandle,
-		this,
-		&AfpstrueGameMode::StartAutomatedBenchmarkCapture,
-		AutomatedBenchmarkWarmup,
-		false
-	);
-}
-
-void AfpstrueGameMode::StartAutomatedBenchmarkCapture()
-{
-	ApplyAutomatedBenchmarkDiagnosticOverrides();
-
-	FString BenchmarkTraceFile;
-	if (FParse::Value(FCommandLine::Get(), TEXT("BenchmarkTraceFile="), BenchmarkTraceFile) &&
-		!BenchmarkTraceFile.IsEmpty())
-	{
-		BenchmarkTraceFile.TrimQuotesInline();
-		const FString TraceCommand = FString::Printf(
-			TEXT("Trace.File %s cpu,frame,bookmark,task,stats"),
-			*BenchmarkTraceFile
-		);
-		UKismetSystemLibrary::ExecuteConsoleCommand(this, TraceCommand);
-		UKismetSystemLibrary::ExecuteConsoleCommand(
-			this,
-			TEXT("Trace.RegionBegin AutomatedBenchmarkCapture")
-		);
-		bAutomatedBenchmarkTraceActive = true;
-		UE_LOG(
-			LogTemp,
-			Display,
-			TEXT("Automated benchmark Insights trace started: %s"),
-			*BenchmarkTraceFile
-		);
-	}
-
-	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkTextureStats")))
-	{
-		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("DumpTextureStreamingStats"));
-		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("ListStreamingTextures"));
-		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("MemReport -full"));
-	}
-
-	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkScreenshot")))
-	{
-		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("Shot"));
-	}
-
-	UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("csvprofile start"));
-	UE_LOG(
-		LogTemp,
-		Display,
-		TEXT("Automated benchmark capture started: requested=%d alive=%d duration=%.1fs"),
-		GetBenchmarkEnemyCount(),
-		AliveEnemyCount,
-		AutomatedBenchmarkDuration
-	);
-
-	GetWorldTimerManager().SetTimer(
-		BenchmarkStopTimerHandle,
-		this,
-		&AfpstrueGameMode::StopAutomatedBenchmarkCapture,
-		AutomatedBenchmarkDuration,
-		false
-	);
-}
-
-void AfpstrueGameMode::ApplyAutomatedBenchmarkDiagnosticOverrides()
-{
-	const bool bDisableAttackSweep = FParse::Param(
-		FCommandLine::Get(),
-		TEXT("BenchmarkDisableAttackSweep")
-	);
-	const bool bDisablePawnCollision = FParse::Param(
-		FCommandLine::Get(),
-		TEXT("BenchmarkDisableEnemyPawnCollision")
-	);
-	const bool bDisablePathFollowingTick = FParse::Param(
-		FCommandLine::Get(),
-		TEXT("BenchmarkDisablePathFollowingTick")
-	);
-	const bool bDisableCharacterMovementTick = FParse::Param(
-		FCommandLine::Get(),
-		TEXT("BenchmarkDisableCharacterMovementTick")
-	);
-	const bool bDisableSkeletalMeshTick = FParse::Param(
-		FCommandLine::Get(),
-		TEXT("BenchmarkDisableSkeletalMeshTick")
-	);
-	const bool bDisableEnemySignificance =
-		FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemySignificance"))
-		|| FParse::Param(FCommandLine::Get(), TEXT("BenchmarkDisableEnemyUpdateBudget"));
-
-	int32 AppliedEnemyCount = 0;
-	int32 FullRateMovementCount = 0;
-	int32 MidRateMovementCount = 0;
-	int32 FarRateMovementCount = 0;
-	int32 AttackingEnemyCount = 0;
-	int32 ShadowCastingEnemyCount = 0;
-	int32 MovementTickEnabledCount = 0;
-	int32 SkeletalMeshTickEnabledCount = 0;
-
-	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
-	{
-		AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get();
-		if (Enemy == nullptr)
-		{
-			continue;
-		}
-
-		Enemy->ApplyBenchmarkDiagnosticOverrides(
-			bDisableAttackSweep,
-			bDisablePawnCollision,
-			bDisableCharacterMovementTick
-		);
-
-		if (AfpstrueEnemyAIController* EnemyController =
-			Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
-		{
-			EnemyController->ApplyBenchmarkPathFollowingTickOverride(
-				bDisablePathFollowingTick
-			);
-		}
-
-		if (const UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement())
-		{
-			MovementTickEnabledCount += Movement->IsComponentTickEnabled() ? 1 : 0;
-			const float TickInterval = Movement->GetComponentTickInterval();
-			if (TickInterval <= KINDA_SMALL_NUMBER)
-			{
-				++FullRateMovementCount;
-			}
-			else if (TickInterval <= 0.075f)
-			{
-				++MidRateMovementCount;
-			}
-			else
-			{
-				++FarRateMovementCount;
-			}
-		}
-
-		AttackingEnemyCount += Enemy->IsAttacking() ? 1 : 0;
-		if (USkeletalMeshComponent* CharacterMesh = Enemy->GetMesh())
-		{
-			if (bDisableSkeletalMeshTick)
-			{
-				CharacterMesh->SetComponentTickEnabled(false);
-			}
-			SkeletalMeshTickEnabledCount +=
-				CharacterMesh->IsComponentTickEnabled() ? 1 : 0;
-			ShadowCastingEnemyCount += CharacterMesh->CastShadow ? 1 : 0;
-		}
-		++AppliedEnemyCount;
-	}
-
-	UE_LOG(
-		LogTemp,
-		Display,
-		TEXT("Benchmark diagnostics applied: enemies=%d attackSweepOff=%d pawnCollisionOff=%d pathFollowingTickOff=%d characterMovementTickOff=%d skeletalMeshTickOff=%d significanceOff=%d"),
-		AppliedEnemyCount,
-		bDisableAttackSweep ? 1 : 0,
-		bDisablePawnCollision ? 1 : 0,
-		bDisablePathFollowingTick ? 1 : 0,
-		bDisableCharacterMovementTick ? 1 : 0,
-		bDisableSkeletalMeshTick ? 1 : 0,
-		bDisableEnemySignificance ? 1 : 0
-	);
-	UE_LOG(
-		LogTemp,
-		Display,
-		TEXT("Benchmark enemy snapshot: movementFull=%d movementMid=%d movementFar=%d movementTickEnabled=%d skeletalMeshTickEnabled=%d attacking=%d castingShadow=%d"),
-		FullRateMovementCount,
-		MidRateMovementCount,
-		FarRateMovementCount,
-		MovementTickEnabledCount,
-		SkeletalMeshTickEnabledCount,
-		AttackingEnemyCount,
-		ShadowCastingEnemyCount
-	);
-}
-
-void AfpstrueGameMode::StopAutomatedBenchmarkCapture()
-{
-	UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("csvprofile stop"));
-	if (bAutomatedBenchmarkTraceActive)
-	{
-		UKismetSystemLibrary::ExecuteConsoleCommand(
-			this,
-			TEXT("Trace.RegionEnd AutomatedBenchmarkCapture")
-		);
-		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("Trace.Stop"));
-		bAutomatedBenchmarkTraceActive = false;
-		UE_LOG(LogTemp, Display, TEXT("Automated benchmark Insights trace stopped."));
-	}
-	UE_LOG(LogTemp, Display, TEXT("Automated benchmark capture stopped."));
-
-	if (FParse::Param(FCommandLine::Get(), TEXT("BenchmarkAutoQuit")))
-	{
-		GetWorldTimerManager().SetTimer(
-			BenchmarkExitTimerHandle,
-			this,
-			&AfpstrueGameMode::ExitAutomatedBenchmark,
-			1.0f,
-			false
-		);
-	}
-}
-
-void AfpstrueGameMode::ExitAutomatedBenchmark()
-{
-	UKismetSystemLibrary::QuitGame(
-		this,
-		UGameplayStatics::GetPlayerController(this, 0),
-		EQuitPreference::Quit,
-		false
-	);
-}
-
-int32 AfpstrueGameMode::GetBenchmarkEnemyCount() const
-{
-	int32 BenchmarkEnemyCount = 0;
-	FParse::Value(FCommandLine::Get(), TEXT("BenchmarkEnemies="), BenchmarkEnemyCount);
-	return FMath::Max(BenchmarkEnemyCount, 0);
 }

@@ -16,33 +16,31 @@
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
-// ÉúÃüÖÜÆÚ
+// ç”Ÿå‘½å‘¨æœŸ
 AfpstrueCharacter::AfpstrueCharacter()
-{	//½ºÄÒÌå
+{ //èƒ¶å›Šä½“
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
-
-	//µ¯»É±Û´´½¨¡¢¹ÒÔØ¡¢Î»ÖÃ¡¢³¤¶È
+	//å¼¹ç°§è‡‚åˆ›å»ºã€æŒ‚è½½ã€ä½ç½®ã€é•¿åº¦
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(GetCapsuleComponent());
 	CameraBoom->SetRelativeLocation(FVector(-10.f, 0.f, 60.f));
-	//µ¯»ÉÉìËõÅö×²¼ì²â£¿
-	//CameraBoom->TargetArmLength = 300.0f; bCameraBoom->TargetArmLength = 0.0f;
+	// ç¬¬ä¸€äººç§°ç›¸æœºè‡‚é•¿ä¸º 0ï¼Œä¸éœ€è¦å¼¹ç°§è‡‚ç¢°æ’å›ç¼©ã€‚
 	CameraBoom->TargetArmLength = 0.0f;
-	//Ğı×ª¸úËæ
+	//æ—‹è½¬è·Ÿéš
 	CameraBoom->bUsePawnControlRotation = true;
-	//Æ½»¬ÑÓ³ÙĞ§¹û£¨Î»ÖÃ¡¢Ğı×ªÑÓ³Ù¸úËæ£©
+	//å¹³æ»‘å»¶è¿Ÿæ•ˆæœï¼ˆä½ç½®ã€æ—‹è½¬å»¶è¿Ÿè·Ÿéšï¼‰
 	CameraBoom->bEnableCameraLag = true;
 	CameraBoom->CameraLagSpeed = 3.0f;
 	CameraBoom->bEnableCameraRotationLag = true;
 	CameraBoom->CameraRotationLagSpeed = 3.0f;
 
-	//Ïà»ú´´½¨¡¢¹ÒÔØ¡¢**¹Ø±Õ×ÔÉí¿ØÖÆ**
+	//ç›¸æœºåˆ›å»ºã€æŒ‚è½½ã€**å…³é—­è‡ªèº«æ§åˆ¶**
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
 	FirstPersonCameraComponent->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FirstPersonCameraComponent->bUsePawnControlRotation = false;
 
-	//Íø¸ñÌå´´½¨¡¢¿É¼ûĞÔ¡¢¹ÒÔØ¡¢¹Ø±Õ¶¯¾²Ì¬ÒõÓ°Í¶Éä¡¢
+	//ç½‘æ ¼ä½“åˆ›å»ºã€å¯è§æ€§ã€æŒ‚è½½ã€å…³é—­åŠ¨é™æ€é˜´å½±æŠ•å°„ã€
 	Mesh1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("CharacterMesh1P"));
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
 	Mesh1P->SetOnlyOwnerSee(true);
@@ -50,92 +48,89 @@ AfpstrueCharacter::AfpstrueCharacter()
 	Mesh1P->bCastDynamicShadow = false;
 	Mesh1P->CastShadow = false;
 
-	//½ûÓÃtick£¨Âß¼­ÍêÈ«ÓÉÊÂ¼şÇı¶¯£¨ÊäÈë¡¢Åö×²¡¢¶¯»­Í¨ÖªµÈ£©£©
+	//ç¦ç”¨tickï¼ˆé€»è¾‘å®Œå…¨ç”±äº‹ä»¶é©±åŠ¨ï¼ˆè¾“å…¥ã€ç¢°æ’ã€åŠ¨ç”»é€šçŸ¥ç­‰ï¼‰ï¼‰
 	PrimaryActorTick.bCanEverTick = false;
-	//×Ô¶¨Òå½¡¿µ×é¼ş
+	//è‡ªå®šä¹‰å¥åº·ç»„ä»¶
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
-
 }
 
 void AfpstrueCharacter::BeginPlay()
 {
-	//¿ªÊ¼ÓÎÏ·Ê±»ùº¯Êıµ÷ÓÃ
+	//å¼€å§‹æ¸¸æˆæ—¶åŸºå‡½æ•°è°ƒç”¨
 	Super::BeginPlay();
 
 	if (HealthComponent != nullptr)
 	{
-		//¶©ÔÄÊÂ¼ş£¨ÊÜ¹¥»÷¡¢µôÑª¡¢ËÀÍö£©
+		//è®¢é˜…äº‹ä»¶ï¼ˆå—æ”»å‡»ã€æ‰è¡€ã€æ­»äº¡ï¼‰
 		HealthComponent->OnHealthChanged.AddUniqueDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
 		HealthComponent->OnDamageReceived.AddUniqueDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueCharacter::HandleDeath);
+		// Component çš„ BeginPlay æ—©äº Ownerï¼›ç»‘å®šåä¸»åŠ¨åŒæ­¥ä¸€æ¬¡åˆå§‹å¿«ç…§ï¼Œé¿å… HUD é”™è¿‡é¦–æ¬¡å¹¿æ’­ã€‚
+		HandleHealthChanged(HealthComponent->GetHealth());
 	}
 
-
-	//**¿ª¾ÖÃ»ÓĞ¼ñµ½Ç¹µÄÊ±ºòÏÈÒş²Ømesh1P
+	//**å¼€å±€æ²¡æœ‰æ¡åˆ°æªçš„æ—¶å€™å…ˆéšè—mesh1P
 	const bool bHasWeapon = EquippedWeaponComponent != nullptr;
 	Mesh1P->SetHiddenInGame(!bHasWeapon, true);
-	//»ñÈ¡ËÙ¶È£¨ÕâÀïĞèÒªÃ¿Ö¡¸üĞÂÂğ£¿£©
+	// åˆå§‹åŒ–åŸºç¡€ç§»åŠ¨é€Ÿåº¦ï¼›åç»­åªåœ¨å†²åˆºå’Œç„å‡†çŠ¶æ€åˆ‡æ¢æ—¶ä¿®æ”¹ã€‚
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
 void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-
-	//ÓÎÏ·½áÊøÊ±£¬½ûÓÃ¿ª»ğ¡¢½ûÖ¹ÊäÈë£¨ÖØ¸´Âğ£¿£©
+	// EndPlay ç»Ÿä¸€ç»ˆæ­¢æŒç»­è¾“å…¥ï¼Œå¹¶ç§»é™¤æœ¬è§’è‰²æ·»åŠ çš„ Mapping Contextã€‚
 	StopWeaponFire();
 	RemoveInputMappingContexts();
 
 	if (HealthComponent != nullptr)
 	{
-		//ÒÆ³ı¶©ÔÄ£¨²»ÒÆ³ı»áÔõÃ´Ñù£¿£©
-		//¾ÙÀı£ºHealthComponent·¢²¼£¬AfpstrueCharacter¶©ÔÄ£¬&HandleHealthChanged»ñÈ¡µØÖ·
-		//ÎªÊ²Ã´ÄÜ¶©ÔÄ£¿±£´æÁËUobjectptr of HealthComponent
+		// æ˜¾å¼è§£ç»‘ï¼Œé¿å…ç»„ä»¶é”€æ¯é¡ºåºå˜åŒ–æ—¶ç»§ç»­å›è°ƒæ­£åœ¨é€€å‡ºçš„è§’è‰²ã€‚
 		HealthComponent->OnHealthChanged.RemoveDynamic(this, &AfpstrueCharacter::HandleHealthChanged);
 		HealthComponent->OnDamageReceived.RemoveDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
-	//×îºóµ÷ÓÃ»ùÀà
+	//æœ€åè°ƒç”¨åŸºç±»
 	Super::EndPlay(EndPlayReason);
 }
 
-
-//Íæ¼Ò¿ØÖÆ±ä¸ü£¨ÓÎÏ·¿ªÊ¼¡¢½ÇÉ«ÇĞ»»£©
+//ç©å®¶æ§åˆ¶å˜æ›´ï¼ˆæ¸¸æˆå¼€å§‹ã€è§’è‰²åˆ‡æ¢ï¼‰
 void AfpstrueCharacter::NotifyControllerChanged()
-{	//Í£»ğ¡¢½ûÊäÈë
+{
+	// Controller å˜åŒ–æ—¶å…ˆæ¸…ç†æ—§æ§åˆ¶å™¨ç•™ä¸‹çš„æŒç»­è¾“å…¥çŠ¶æ€ã€‚
 	StopWeaponFire();
-	//ÒÆ³ı¾ÉÊäÈëÓ³Éä£¨°²È«Âğ£©
 	RemoveInputMappingContexts();
-	//Ö´ĞĞ»ùÀà
+	//æ‰§è¡ŒåŸºç±»
 	Super::NotifyControllerChanged();
 
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
-		//Í¨¹ıµ±Ç°Íæ¼ÒµÄ PlayerController »ñÈ¡¶ÔÓ¦µÄLocalPlayer£¬ÔÙ´ÓLocalPlayerÖĞÕÒµ½ Enhanced Input×ÓÏµÍ³£¬ÓÃÀ´¹ÜÀí¸ÃÍæ¼ÒµÄÊäÈëÓ³Éä
-		//Ä¿µÄÊÇ£ºController±ä»¯ºóÖØĞÂ»ñÈ¡µ±Ç°Íæ¼Ò¶ÔÓ¦µÄEnhanced Input¹ÜÀíÆ÷
-		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
+		//é€šè¿‡å½“å‰ç©å®¶çš„ PlayerController è·å–å¯¹åº”çš„LocalPlayerï¼Œå†ä»LocalPlayerä¸­æ‰¾åˆ° Enhanced Inputå­ç³»ç»Ÿï¼Œç”¨æ¥ç®¡ç†è¯¥ç©å®¶çš„è¾“å…¥æ˜ å°„
+		//ç›®çš„æ˜¯ï¼šControllerå˜åŒ–åé‡æ–°è·å–å½“å‰ç©å®¶å¯¹åº”çš„Enhanced Inputç®¡ç†å™¨
+		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
+				ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
 		{
-			//±£´æÊäÈë¹ÜÀíÆ÷ÒıÓÃ£¬°ÑÊäÈëÅäÖÃ¼ÓÔØ½øÈ¥
-			//×¢ÒâBoundInputSubsystemÊÇÈõÖ¸Õë
+			//ä¿å­˜è¾“å…¥ç®¡ç†å™¨å¼•ç”¨ï¼ŒæŠŠè¾“å…¥é…ç½®åŠ è½½è¿›å»
+			//æ³¨æ„BoundInputSubsystemæ˜¯å¼±æŒ‡é’ˆ
 			BoundInputSubsystem = Subsystem;
 			ApplyInputMappingContexts();
 		}
 	}
 }
 
-//ÊäÈë°ó¶¨×¢²á
+//è¾“å…¥ç»‘å®šæ³¨å†Œ
 void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
-	//È·¶¨ÊÇĞÂ°æµÄ×¢²áÏµÍ³
+	//ç¡®å®šæ˜¯æ–°ç‰ˆçš„æ³¨å†Œç³»ç»Ÿ
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
 
-		//°ó¶¨»ù´¡ÒÆ¶¯
+		//ç»‘å®šåŸºç¡€ç§»åŠ¨
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
 
-		//Ìõ¼ş°ó¶¨£º¼ì²é¿ª»ğÇ°Ìá£¬°ó¶¨¿ª»ğ£¨Èı¸öÊÂ¼ş£©
+		//æ¡ä»¶ç»‘å®šï¼šæ£€æŸ¥å¼€ç«å‰æï¼Œç»‘å®šå¼€ç«ï¼ˆä¸‰ä¸ªäº‹ä»¶ï¼‰
 		if (FireAction)
 		{
 			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartWeaponFire);
@@ -144,16 +139,10 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		}
 		else
 		{
-			UE_LOG(
-				LogTemplateCharacter,
-				Error,
-				TEXT("%s (%s): FireAction is NULL."),
-				*GetName(),
-				*GetClass()->GetPathName());
+			UE_LOG(LogTemplateCharacter, Error, TEXT("%s (%s): FireAction is NULL."), *GetName(), *GetClass()->GetPathName());
 		}
 
-
-		//Ìõ¼ş°ó¶¨£º¼ì²é³å´ÌÇ°Ìá£¬°ó¶¨³å´Ì£¨Ãé×¼¡¢»»µ¯¡¢ËÀÍöÊ±Ç¿ÖÆ¹Ø±Õ£©
+		//æ¡ä»¶ç»‘å®šï¼šæ£€æŸ¥å†²åˆºå‰æï¼Œç»‘å®šå†²åˆºï¼ˆç„å‡†ã€æ¢å¼¹ã€æ­»äº¡æ—¶å¼ºåˆ¶å…³é—­ï¼‰
 		if (RunAction)
 		{
 			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartSprint);
@@ -163,7 +152,7 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			UE_LOG(LogTemplateCharacter, Error, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
 		}
 
-		//Ìõ¼ş°ó¶¨£º¼ì²éÃé×¼Ç°Ìá£¬°ó¶¨¿ª»ğ£¨Èı¸öÊÂ¼ş£©
+		//æ¡ä»¶ç»‘å®šï¼šæ£€æŸ¥ç„å‡†å‰æï¼Œç»‘å®šå¼€ç«ï¼ˆä¸‰ä¸ªäº‹ä»¶ï¼‰
 		if (AimAction)
 		{
 			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
@@ -175,15 +164,10 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			UE_LOG(LogTemplateCharacter, Error, TEXT("AimAction is NULL. Assign IA_Aim in BP_FirstPersonCharacter."));
 		}
 
-		//Ìõ¼ş°ó¶¨£º¼ì²é»»µ¯Ç°Ìá£¬°ó¶¨¿ª»ğ£¨½ö°ó¶¨started£¬²»ĞèÒªCompleted¡¢Canceled£©
+		//æ¡ä»¶ç»‘å®šï¼šæ£€æŸ¥æ¢å¼¹å‰æï¼Œç»‘å®šå¼€ç«ï¼ˆä»…ç»‘å®šstartedï¼Œä¸éœ€è¦Completedã€Canceledï¼‰
 		if (ReloadAction)
 		{
-			EnhancedInputComponent->BindAction(
-				ReloadAction,
-				ETriggerEvent::Started,
-				this,
-				&AfpstrueCharacter::StartReload
-			);
+			EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartReload);
 		}
 		else
 		{
@@ -192,20 +176,23 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	}
 	else
 	{
-		UE_LOG(LogTemplateCharacter, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
+		UE_LOG(LogTemplateCharacter, Error,
+			   TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you "
+					"intend to use the legacy system, then you will need to update this C++ file."),
+			   *GetNameSafe(this));
 	}
 }
 
 void AfpstrueCharacter::ApplyInputMappingContexts()
 {
-	//ÎªÊ²Ã´ÊÇ.Get()£¿µÃµ½ÈõÖ¸ÕëÄÚ²¿ÕæÕıµÄÖ¸Õë
+	// TWeakObjectPtr ä¸æ‹¥æœ‰å­ç³»ç»Ÿï¼Œä½¿ç”¨ Get() è¯»å–å½“å‰ä»æœ‰æ•ˆçš„å¯¹è±¡ã€‚
 	UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get();
 	if (Subsystem == nullptr)
 	{
 		return;
 	}
-	//´Ó±£´æµÄ Enhanced Input ×ÓÏµÍ³ÖĞÈ¡³öÊäÈë¹ÜÀíÆ÷£¬
-	// Èç¹ûÓĞĞ§£¬¾Í°ÑÄ¬ÈÏÊäÈëÓ³Éä DefaultMappingContext ¼ÓÔØ½øÈ¥£¬ÈÃÍæ¼ÒµÄ°´¼üÖØĞÂÉúĞ§¡£
+	//ä»ä¿å­˜çš„ Enhanced Input å­ç³»ç»Ÿä¸­å–å‡ºè¾“å…¥ç®¡ç†å™¨ï¼Œ
+	// å¦‚æœæœ‰æ•ˆï¼Œå°±æŠŠé»˜è®¤è¾“å…¥æ˜ å°„ DefaultMappingContext åŠ è½½è¿›å»ï¼Œè®©ç©å®¶çš„æŒ‰é”®é‡æ–°ç”Ÿæ•ˆã€‚
 	if (DefaultMappingContext != nullptr)
 	{
 		Subsystem->AddMappingContext(DefaultMappingContext, 0);
@@ -221,21 +208,21 @@ void AfpstrueCharacter::RemoveInputMappingContexts()
 			Subsystem->RemoveMappingContext(DefaultMappingContext);
 		}
 	}
-	//Ê¹ÓÃreset½øÒ»²½±ÜÃâ²ÛÎ»¸´ÓÃ
+	// æ¸…ç©ºå¼±å¼•ç”¨ï¼Œé˜²æ­¢ä¸‹ä¸€æ¬¡ Controller åˆ‡æ¢è¯¯ç”¨æ—§å­ç³»ç»Ÿã€‚
 	BoundInputSubsystem.Reset();
 }
 
+// ==================== ç§»åŠ¨ä¸è§†è§’è¾“å…¥ ====================
 
-////Íæ¼Ò×´Ì¬Ïà¹Ø£º×´Ì¬ÓÅÏÈ¼¶Á´£ºDeath > Reload > Aim > Sprint > Walk¡£
 void AfpstrueCharacter::Move(const FInputActionValue& Value)
 {
-	//»ñµÃÏòÁ¿
+	//è·å¾—å‘é‡
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
-		// ÓĞController£¬½»¸øÒÆ¶¯×é¼şÒÆ¶¯;
-		//X:×óÓÒ£¬Y:Ç°ºó
+		// æœ‰Controllerï¼Œäº¤ç»™ç§»åŠ¨ç»„ä»¶ç§»åŠ¨;
+		//X:å·¦å³ï¼ŒY:å‰å
 		AddMovementInput(GetActorForwardVector(), MovementVector.Y);
 		AddMovementInput(GetActorRightVector(), MovementVector.X);
 	}
@@ -243,13 +230,13 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 
 void AfpstrueCharacter::Look(const FInputActionValue& Value)
 {
-	//»ñµÃÏòÁ¿
+	//è·å¾—å‘é‡
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
-		//ÓĞController£¬½»¸øĞŞ¸ÄĞı×ª;
-		//X£ºÒ¡Í·  Y£ºµãÍ·
+		//æœ‰Controllerï¼Œäº¤ç»™ä¿®æ”¹æ—‹è½¬;
+		//Xï¼šæ‘‡å¤´  Yï¼šç‚¹å¤´
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
 	}
@@ -257,38 +244,36 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 
 void AfpstrueCharacter::StartSprint()
 {
-	//¼ì²â×´Ì¬Ô¼ÊøĞĞÎª¡£ÈçºÎÓÅ»¯£¿£¿£¿
-	const bool bWeaponReloading = EquippedWeaponComponent != nullptr
-		&& EquippedWeaponComponent->IsReloading();
+	// æ­»äº¡ã€æ¢å¼¹å’Œç„å‡†æœŸé—´ç¦æ­¢è¿›å…¥å†²åˆºã€‚
+	const bool bWeaponReloading = EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
 	if (IsDead() || bWeaponReloading || bIsAiming)
 	{
 		return;
 	}
-	//±ê¼Ç×´Ì¬ÊµÏÖsprint¡¢speedµÄÓÅ»¯
+	//æ ‡è®°çŠ¶æ€å®ç°sprintã€speedçš„ä¼˜åŒ–
 	bIsSprinting = !bIsSprinting;
 	GetCharacterMovement()->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
 }
 
 void AfpstrueCharacter::StopSprint()
 {
-	//Í£Ö¹³å´Ì
+	//åœæ­¢å†²åˆº
 	bIsSprinting = false;
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
+// ==================== ç„å‡† ====================
 
-//
 void AfpstrueCharacter::StartAim()
 {
-	//¼ì²é×´Ì¬±ÜÃâ×´Ì¬³åÍ»
-	const bool bWeaponReloading = EquippedWeaponComponent != nullptr
-		&& EquippedWeaponComponent->IsReloading();
+	//æ£€æŸ¥çŠ¶æ€é¿å…çŠ¶æ€å†²çª
+	const bool bWeaponReloading = EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
 	if (EquippedWeaponComponent == nullptr || IsDead() || bWeaponReloading || bIsAiming)
 	{
 		return;
 	}
 
-	//¼ì²éÃé×¼Ç°ÖÃÌõ¼ş
+	//æ£€æŸ¥ç„å‡†å‰ç½®æ¡ä»¶
 	bIsAiming = true;
 	bIsSprinting = false;
 	GetCharacterMovement()->MaxWalkSpeed = AimWalkSpeed;
@@ -297,13 +282,12 @@ void AfpstrueCharacter::StartAim()
 
 void AfpstrueCharacter::StopAim()
 {
-	//*****
-	//±£ÁôÔ­À´×´Ì¬
+	//ä¿ç•™åŸæ¥çŠ¶æ€
 	const bool bWasAiming = bIsAiming;
-	//ÎŞÌõ¼ş¸´Î»
+	//æ— æ¡ä»¶å¤ä½
 	bIsAiming = false;
 
-	//Ô­À´ÊÇÔÚÃé×¼µÄ»°£¬ĞŞ¸Ä×´Ì¬
+	//åŸæ¥æ˜¯åœ¨ç„å‡†çš„è¯ï¼Œä¿®æ”¹çŠ¶æ€
 	if (bWasAiming)
 	{
 		OnAimChanged(false);
@@ -311,32 +295,29 @@ void AfpstrueCharacter::StopAim()
 	}
 }
 
-// ÎäÆ÷½»»¥
+// æ­¦å™¨äº¤äº’
 void AfpstrueCharacter::StartWeaponFire()
 {
-	//¿ª»ğ¼ì²éÍæ¼Ò×´Ì¬£¬ÓĞÇ¹£¿»òÕß£¿
+	// Character åªæ ¡éªŒè£…å¤‡ä¸ç”Ÿå­˜çŠ¶æ€ï¼Œå¼¹è¯å’Œæ­¦å™¨åŠ¨ä½œäº’æ–¥ç”± WeaponComponent è´Ÿè´£ã€‚
 	if (EquippedWeaponComponent != nullptr && !IsDead())
 	{
-		//×ªÈëweapon
+		//è½¬å…¥weapon
 		EquippedWeaponComponent->StartFire();
 	}
 }
-
 
 void AfpstrueCharacter::StopWeaponFire()
 {
 	if (EquippedWeaponComponent != nullptr)
 	{
-		//×ªÈëweapon
+		//è½¬å…¥weapon
 		EquippedWeaponComponent->StopFire();
 	}
 }
 
 void AfpstrueCharacter::StartReload()
 {
-	if (EquippedWeaponComponent == nullptr
-		|| IsDead()
-		|| !EquippedWeaponComponent->CanReload())
+	if (EquippedWeaponComponent == nullptr || IsDead() || !EquippedWeaponComponent->CanReload())
 	{
 		return;
 	}
@@ -346,8 +327,7 @@ void AfpstrueCharacter::StartReload()
 	EquippedWeaponComponent->RequestReload();
 }
 
-
-//×°±¸Ç¹Ö§£¬¿É¼ûĞÔÉèÖÃ
+//è£…å¤‡æªæ”¯ï¼Œå¯è§æ€§è®¾ç½®
 void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
 {
 	if (WeaponComponent == nullptr || EquippedWeaponComponent == WeaponComponent)
@@ -361,7 +341,7 @@ void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* Weap
 	OnWeaponEquipped(WeaponComponent);
 }
 
-//Çå³ıÇ¹Ö§¡¢½ûÖ¹¿ª»ğ¡¢¿É¼ûĞÔÉèÖÃ
+//æ¸…é™¤æªæ”¯ã€ç¦æ­¢å¼€ç«ã€å¯è§æ€§è®¾ç½®
 void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent)
 {
 	if (EquippedWeaponComponent == nullptr || EquippedWeaponComponent != WeaponComponent)
@@ -375,8 +355,8 @@ void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponCompone
 	OnEquippedWeaponChanged.Broadcast(nullptr);
 }
 
-// ÉúÃüÓëÉËº¦
-//ÉúÃü×é¼şÄÚ²¿ÊÂ¼ş×ª·¢¸øCharacterµÄÀ¶Í¼±íÏÖ²ã£¬ÓÃÓÚUIºÍ¶¯»­µÄ¸üĞÂ
+// ç”Ÿå‘½ä¸ä¼¤å®³
+//ç”Ÿå‘½ç»„ä»¶å†…éƒ¨äº‹ä»¶è½¬å‘ç»™Characterçš„è“å›¾è¡¨ç°å±‚ï¼Œç”¨äºUIå’ŒåŠ¨ç”»çš„æ›´æ–°
 void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 {
 	OnPlayerHealthChanged(NewHealth);
@@ -394,12 +374,12 @@ void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageC
 
 void AfpstrueCharacter::HandleDeath()
 {
-	if (bDeathHandled)
+	if (bDeathEffectsApplied)
 	{
 		return;
 	}
 
-	bDeathHandled = true;
+	bDeathEffectsApplied = true;
 	bIsSprinting = false;
 
 	const bool bWasAiming = bIsAiming;
@@ -426,7 +406,7 @@ void AfpstrueCharacter::HandleDeath()
 
 bool AfpstrueCharacter::IsDead() const
 {
-	return bDeathHandled || (HealthComponent != nullptr && HealthComponent->IsDead());
+	return HealthComponent != nullptr && HealthComponent->IsDead();
 }
 
 float AfpstrueCharacter::GetCurrentHealth() const
@@ -442,17 +422,4 @@ float AfpstrueCharacter::GetMaxHealth() const
 float AfpstrueCharacter::GetHealthNormalized() const
 {
 	return HealthComponent != nullptr ? HealthComponent->GetHealthNormalized() : 0.0f;
-}
-
-// ½ÇÉ«×´Ì¬
-EFPCharacterState AfpstrueCharacter::GetCharacterState() const
-{
-	if (IsDead())
-	{
-		return EFPCharacterState::Dead;
-	}
-
-	return GetVelocity().SizeSquared2D() > 1.0f
-		? EFPCharacterState::Moving
-		: EFPCharacterState::Idle;
 }
