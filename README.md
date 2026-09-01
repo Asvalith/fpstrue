@@ -38,17 +38,7 @@
 - 敌人分帧生成，死亡后延迟回收，避免集中生成和长期尸体累积。
 - 使用固定地图、分辨率、随机种子、预热时间和采样时间运行自动矩阵及单变量消融。
 
-当前版本的 `20 / 80 / 160` 敌人热缓存矩阵中，Game Thread 平均耗时分别为 `4.532 / 6.273 / 7.707 ms`。160 敌人相对早期版本的局部指标变化如下：
-
-| 指标 | 早期版本 | 当前版本 | 变化 |
-| --- | ---: | ---: | ---: |
-| Game Thread | 27.899 ms | 7.707 ms | -72.4% |
-| Character Movement | 6.188 ms | 1.636 ms | -73.6% |
-| Animation | 4.448 ms | 0.814 ms | -81.7% |
-| AI Decision | 0.201 ms | 0.039 ms | -80.6% |
-| MoveTo 提交/帧 | 14.565 | 0.109 | -99.3% |
-
-这些数字证明敌人 CPU 成本的扩展得到控制，但不等于整体稳定 60 FPS：当前 160 敌人测试仍受 Render Thread / RHI Thread 波动限制。严格口径、消融结论和原始截图见 [性能基线](Docs/PERFORMANCE_BASELINE.md) 与 [性能证据](Docs/PerformanceEvidence)。
+在 Development Editor、`Demonstration` 地图、1600×900、关闭 VSync、固定随机种子并完成预热的当前样本中，160 个敌人的 Game Thread 平均耗时为 `7.707 ms`。该数值只描述当前测试环境下的游戏线程开销，不代表整帧已经稳定达到 60 FPS。
 
 ## 环境与运行
 
@@ -87,7 +77,7 @@ git lfs pull
 .\Tools\RunEnemyOptimizationAblation.ps1 -EnemyCount 80 -RunsPerGroup 3 -UnverifiedConsumersOnly
 ```
 
-脚本默认使用本机 UE 与项目绝对路径；换机器运行前需要修改脚本顶部的 `$ProjectRoot` 和 `$Editor`。运行结果写入 `Saved/Profiling/`，该目录不提交到 Git；已筛选的长期证据保存在 `Docs/PerformanceEvidence/`。
+脚本默认使用本机 UE 与项目绝对路径；换机器运行前需要修改脚本顶部的 `$ProjectRoot` 和 `$Editor`。运行结果写入 `Saved/Profiling/`，该目录不提交到 Git。
 
 ## 仓库目录
 
@@ -96,13 +86,4 @@ Config/                         项目、输入和默认地图配置
 Content/                        地图、蓝图、动画、UI 和其他资产
 Source/fpstrue/                 C++ Runtime 模块
 Tools/                          性能采集、消融和资产审计脚本
-Docs/PERFORMANCE_BASELINE.md    性能方法、结论和已知边界
-Docs/PerformanceEvidence/       纳入版本管理的截图与表格证据
 ```
-
-## 已知边界
-
-- 当前为单机项目，不包含联网同步、GAS、行为树或 EQS。
-- 骨骼 LOD 与动画频率分级已经接入，但尚未证明独立净收益，不能作为确定的性能成果。
-- 阴影参与限制、骨骼光追参与限制、移动分级和 Animation Sharing 已有局部消融证据；具体阈值和预算仍需按目标画质与硬件继续标定。
-- 性能脚本中的本机绝对路径尚未改造成自动发现配置。

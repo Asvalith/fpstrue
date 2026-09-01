@@ -1,4 +1,0 @@
-"Group","Runs","AverageFps","FrameAverageMs","FrameP95Ms","GameThreadMs","RenderThreadMs","GpuMs","EndPhysicsWaitMs","WorkerPhysicsMs","TickActorsMs","SyncBodiesMs","CharacterMovementMs","AnimationMs","AttackSweepMs","AttackSweepsPerFrame","SweepHitsPerFrame","PathFollowingTicks","CharacterMovementTicks","SkeletalMeshTicks"
-"Baseline","2","26.36","38.057","45.392","30.809","36.885","13.978","13.176","13.265","4.267","1.031","5.552","3.496","0.006","0.613","0.823","160","145.66","162"
-"CharacterMovementTickOff","2","30.35","32.963","41.646","16.192","32.489","12.458","7.393","7.525","2.7","0.678","0.074","2.602","0.008","0.826","1.3","160","1","162"
-"SkeletalMeshTickOff","2","36.42","27.491","35.889","21.375","26.632","11.172","10.061","10.183","2.732","0.845","5.117","0.244","0","0","0","160","135.62","2"

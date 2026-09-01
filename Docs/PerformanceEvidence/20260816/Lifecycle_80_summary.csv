@@ -1,3 +1,0 @@
-﻿"State","Samples","AverageFps","FrameAverageMs","GameThreadMs","RenderThreadMs","GpuMs","CharacterMovementMs","AnimationMs","TickActorsMs","PhysicalMemoryMB","GpuMemoryMB","WantedMipsMB","EnemyActors","UObjectCount","MemReportPhysicalMB","MemReportTextureMB"
-"Alive","469","44.96","22.242","18.11","19.392","10.528","3.705","2.915","2.771","3614","2778","105.9","80","50763","3616","182.766"
-"PostCleanup","317","68.51","14.596","5.444","14.082","7.843","0.106","0.266","0.157","3672","3011","98.9","0","49876","3676.34","195.047"
