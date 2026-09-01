@@ -10,7 +10,7 @@ class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
 class AfpstrueSurroundManager;
 
-// 敌人玩法状态机；GameMode、CombatComponent 和 Animation Sharing 都读取这份唯一状态。
+// 敌人玩法状态机；Controller 独占写入，Animation Sharing 只读消费。
 UENUM(BlueprintType)
 enum class EFPEnemyAIState : uint8
 {
@@ -34,6 +34,8 @@ public:
 	virtual void OnPossess(APawn* InPawn) override;
 	// 失去 Pawn 前停止决策、移动并释放共享资源。
 	virtual void OnUnPossess() override;
+	// PathFollowing 失败时安排一次简单退避，避免立即重复提交。
+	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
 	// 世界退出时清理 Timer 和管理器引用。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -79,7 +81,10 @@ protected:
 	float CombatMoveAcceptanceRadius = 15.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "25.0"))
-	float PathRefreshDistance = 150.0f;
+	float PathRefreshDistance = 75.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.1"))
+	float FailedMoveRetryDelay = 0.5f;
 
 private:
 	struct FDecisionContext
@@ -108,15 +113,17 @@ private:
 	// 尝试获取攻击位或包围槽，并向共享位置移动。
 	bool HandleSurroundMovement();
 	// 没有专属槽位时，使用共享目标快照进行低成本追击。
-	bool HandleSharedPursuit();
-	// 近战状态下让敌人朝向玩家目标。
+	void HandleSharedPursuit();
+	// 攻击状态下更新 Controller 朝向，由 CharacterMovement 平滑写入角色旋转。
 	void UpdateFacingTarget();
 	// 修改唯一 AI 状态，供决策和动画共享读取。
 	void SetAIState(EFPEnemyAIState NewState);
+	// 状态切换时选择“面向移动”或“面向目标”，保证只有 CharacterMovement 写角色旋转。
+	void ApplyRotationPolicy(EFPEnemyAIState NewState);
 	// 在目标变化足够大且通过预算时提交 MoveTo 请求。
 	void MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority);
-	// 仅在确实移动时调用 StopMovement，避免重复请求。
-	void StopMovementIfNeeded();
+	// 仅在确实移动时调用 StopMovement；攻击可保留已经提交的目标缓存。
+	void StopMovementIfNeeded(bool bPreserveMoveGoal = false);
 	// 归还当前敌人在 SurroundManager 中占用的槽位。
 	void ReleaseSurroundSlot();
 	// 向 SurroundManager 申请并发攻击名额。
@@ -128,19 +135,22 @@ private:
 	// 判断目标是否有效、存活且可作为当前战斗对象。
 	bool IsTargetUsable(const AfpstrueCharacter* Target) const;
 
-	UPROPERTY()
-	AfpstrueEnemyCharacter* ControlledEnemy = nullptr;
+	// 语法复习：Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
+	// 让 GC 识别引用，并由 OnUnPossess 主动清空，不依赖 C++ 析构函数处理 Gameplay 状态。
+	UPROPERTY(Transient)
+	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;
 
-	UPROPERTY()
-	AfpstrueCharacter* TargetCharacter = nullptr;
+	UPROPERTY(Transient)
+	TObjectPtr<AfpstrueCharacter> TargetCharacter;
 
-	UPROPERTY()
-	AfpstrueSurroundManager* SurroundManager = nullptr;
+	UPROPERTY(Transient)
+	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
 
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
 	FVector LastMoveGoal = FVector::ZeroVector;
-	uint32 LastSharedTargetGeneration = 0;
+	float NextMoveRetryTime = 0.0f;
 	bool bHasMoveGoal = false;
+	bool bLastMoveGoalWasCombatPriority = false;
 	bool bDisableDecisionThrottlingForBenchmark = false;
 	float SignificanceDecisionMultiplier = 1.0f;
 	FTimerHandle DecisionTimerHandle;

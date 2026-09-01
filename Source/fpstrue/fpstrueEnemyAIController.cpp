@@ -8,9 +8,9 @@
 #include "fpstrueSurroundManager.h"
 #include "AITypes.h"
 #include "Engine/World.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Navigation/PathFollowingComponent.h"
-#include "NavigationSystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 
@@ -38,15 +38,19 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 		return;
 	}
 
+	AIState = EFPEnemyAIState::Idle;
+	bHasMoveGoal = false;
+	NextMoveRetryTime = 0.0f;
+	bLastMoveGoalWasCombatPriority = false;
+	ApplyRotationPolicy(AIState);
+
 	if (ControlledEnemy->IsDead())
 	{
-		SetAIState(EFPEnemyAIState::Dead);
 		StopAI();
 		return;
 	}
 
 	SurroundManager = ResolveSurroundManager();
-	bHasMoveGoal = false;
 	StartDecisionTimer();
 }
 
@@ -58,14 +62,31 @@ void AfpstrueEnemyAIController::OnUnPossess()
 	TargetCharacter = nullptr;
 	SurroundManager = nullptr;
 	bHasMoveGoal = false;
-	LastSharedTargetGeneration = 0;
+	NextMoveRetryTime = 0.0f;
+	bLastMoveGoalWasCombatPriority = false;
 
 	Super::OnUnPossess();
+}
+
+void AfpstrueEnemyAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result)
+{
+	// 主动 StopMovement 和新 MoveTo 都会产生 Aborted；只有真实寻路失败才进入退避。
+	if (Result.IsFailure() && Result.Code != EPathFollowingResult::Aborted)
+	{
+		bHasMoveGoal = false;
+		if (const UWorld* World = GetWorld())
+		{
+			NextMoveRetryTime = World->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
+		}
+	}
+
+	Super::OnMoveCompleted(RequestID, Result);
 }
 
 void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ClearDecisionTimer();
+	bHasMoveGoal = false;
 	ReleaseSurroundSlot();
 	Super::EndPlay(EndPlayReason);
 }
@@ -75,7 +96,6 @@ void AfpstrueEnemyAIController::StopAI()
 	StopMovementIfNeeded();
 	ClearDecisionTimer();
 	TargetCharacter = nullptr;
-	LastSharedTargetGeneration = 0;
 	ReleaseSurroundSlot();
 
 	if (ControlledEnemy != nullptr)
@@ -153,6 +173,11 @@ void AfpstrueEnemyAIController::UpdateAI()
 
 	if (!Context.bInChaseRange)
 	{
+		if (AIState != EFPEnemyAIState::Idle)
+		{
+			// 退出追击范围后立即归还槽位，避免远处 Idle 敌人长期占用共享资源。
+			ReleaseSurroundSlot();
+		}
 		SetAIState(EFPEnemyAIState::Idle);
 		StopMovementIfNeeded();
 		return;
@@ -160,6 +185,17 @@ void AfpstrueEnemyAIController::UpdateAI()
 
 	if (Context.bInAttackRange)
 	{
+		// 冷却中的敌人继续维持包围位置，不申请并立即释放攻击名额。
+		if (!ControlledEnemy->CanStartAttack())
+		{
+			SetAIState(EFPEnemyAIState::Chase);
+			if (!HandleSurroundMovement())
+			{
+				StopMovementIfNeeded();
+			}
+			return;
+		}
+
 		if (!TryAcquireAttackPermission())
 		{
 			INC_DWORD_STAT(STAT_fpstrueAIAttackBudgetRejectedCount);
@@ -169,11 +205,12 @@ void AfpstrueEnemyAIController::UpdateAI()
 		}
 
 		SetAIState(EFPEnemyAIState::Attack);
-		StopMovementIfNeeded();
-		ControlledEnemy->FaceTarget();
+		StopMovementIfNeeded(true);
+		UpdateFacingTarget();
 		if (!ControlledEnemy->TryAttackTarget())
 		{
 			ReleaseAttackPermission();
+			SetAIState(EFPEnemyAIState::Chase);
 		}
 		return;
 	}
@@ -190,11 +227,7 @@ void AfpstrueEnemyAIController::UpdateAI()
 AfpstrueEnemyAIController::FDecisionContext AfpstrueEnemyAIController::BuildDecisionContext() const
 {
 	FDecisionContext Context;
-	if (ControlledEnemy == nullptr || !IsTargetUsable(TargetCharacter))
-	{
-		return Context;
-	}
-
+	// UpdateAI 只会在 PrepareDecisionContext 成功后调用，避免同一轮重复校验敌人和目标。
 	Context.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), TargetCharacter->GetActorLocation());
 	Context.bInAttackRange = Context.DistanceSquared <= FMath::Square(ControlledEnemy->GetEffectiveAttackRange());
 	Context.bInChaseRange = Context.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
@@ -208,11 +241,6 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext&
 		return AttackDecisionInterval;
 	}
 
-	if (ControlledEnemy == nullptr || ControlledEnemy->IsDead() || !IsTargetUsable(TargetCharacter))
-	{
-		return IdleDecisionInterval * SignificanceDecisionMultiplier;
-	}
-
 	const bool bNeedsCombatResponse = ControlledEnemy->IsAttacking() || AIState == EFPEnemyAIState::Attack ||
 									  Context.DistanceSquared <= FMath::Square(ControlledEnemy->GetEffectiveAttackRange() * 1.5f);
 	if (bNeedsCombatResponse)
@@ -220,7 +248,7 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext&
 		return AttackDecisionInterval;
 	}
 
-	if (AIState == EFPEnemyAIState::Idle || !Context.bInChaseRange)
+	if (!Context.bInChaseRange)
 	{
 		return IdleDecisionInterval * SignificanceDecisionMultiplier;
 	}
@@ -243,7 +271,6 @@ bool AfpstrueEnemyAIController::PrepareDecisionContext()
 
 	if (ControlledEnemy->IsDead())
 	{
-		SetAIState(EFPEnemyAIState::Dead);
 		StopAI();
 		return false;
 	}
@@ -280,8 +307,8 @@ bool AfpstrueEnemyAIController::HandleActiveAttack()
 	}
 
 	SetAIState(EFPEnemyAIState::Attack);
-	StopMovementIfNeeded();
-	ControlledEnemy->FaceTarget();
+	StopMovementIfNeeded(true);
+	UpdateFacingTarget();
 	return true;
 }
 
@@ -299,32 +326,21 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 	}
 
 	SetAIState(EFPEnemyAIState::Chase);
-	UpdateFacingTarget();
 	MoveToGoal(AttackGoal, CombatMoveAcceptanceRadius, true);
 	return true;
 }
 
-bool AfpstrueEnemyAIController::HandleSharedPursuit()
+void AfpstrueEnemyAIController::HandleSharedPursuit()
 {
-	UpdateFacingTarget();
-
 	FVector SharedGoal;
-	uint32 TargetGeneration = 0;
-	if (SurroundManager != nullptr && SurroundManager->GetSharedTargetSnapshot(SharedGoal, TargetGeneration))
+	if (SurroundManager != nullptr && SurroundManager->GetSharedTargetSnapshot(SharedGoal))
 	{
-		const bool bTargetChanged = TargetGeneration != LastSharedTargetGeneration;
-		const bool bPathIdle = GetMoveStatus() == EPathFollowingStatus::Idle;
-		if (bTargetChanged || !bHasMoveGoal || bPathIdle)
-		{
-			const float PursuitAcceptanceRadius = FMath::Max(MoveAcceptanceRadius, ControlledEnemy->GetAttackRange() * 0.8f);
-			MoveToGoal(SharedGoal, PursuitAcceptanceRadius, false);
-			LastSharedTargetGeneration = TargetGeneration;
-		}
-		return true;
+		const float PursuitAcceptanceRadius = FMath::Max(MoveAcceptanceRadius, ControlledEnemy->GetAttackRange() * 0.8f);
+		MoveToGoal(SharedGoal, PursuitAcceptanceRadius, false);
+		return;
 	}
 
 	MoveToGoal(TargetCharacter->GetActorLocation(), MoveAcceptanceRadius, false);
-	return true;
 }
 
 void AfpstrueEnemyAIController::UpdateFacingTarget()
@@ -349,36 +365,41 @@ void AfpstrueEnemyAIController::UpdateFacingTarget()
 
 void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority)
 {
-	const bool bAtGoal = ControlledEnemy != nullptr && FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), GoalLocation) <=
-														   FMath::Square(FMath::Max(AcceptanceRadius, 1.0f));
-	if (bAtGoal)
+	const bool bSameGoal = bCombatPriority == bLastMoveGoalWasCombatPriority &&
+		FVector::DistSquared2D(GoalLocation, LastMoveGoal) < FMath::Square(PathRefreshDistance);
+	if (bSameGoal && bHasMoveGoal)
 	{
-		StopMovementIfNeeded();
-		LastMoveGoal = GoalLocation;
 		return;
 	}
 
-	const bool bNeedsNewPath = bDisableDecisionThrottlingForBenchmark || !bHasMoveGoal ||
-							   FVector::DistSquared2D(GoalLocation, LastMoveGoal) >= FMath::Square(PathRefreshDistance) ||
-							   (GetMoveStatus() == EPathFollowingStatus::Idle && !bAtGoal);
-
-	if (bNeedsNewPath)
+	const UWorld* World = GetWorld();
+	if (bSameGoal && World != nullptr && World->GetTimeSeconds() < NextMoveRetryTime)
 	{
-		if (SurroundManager != nullptr && !SurroundManager->TryConsumeMoveRequestBudget(bCombatPriority))
-		{
-			// 保留旧路径但标记待刷新，让下一次分散后的 AI 决策继续重试。
-			bHasMoveGoal = false;
-			INC_DWORD_STAT(STAT_fpstrueAIMoveBudgetRejectedCount);
-			CSV_CUSTOM_STAT(fpstrueAI, MoveBudgetRejectedCount, 1, ECsvCustomStatOp::Accumulate);
-			return;
-		}
+		return;
+	}
 
-		INC_DWORD_STAT(STAT_fpstrueAIMoveRequestCount);
-		CSV_CUSTOM_STAT(fpstrueAI, MoveRequestCount, 1, ECsvCustomStatOp::Accumulate);
-		const EPathFollowingRequestResult::Type MoveResult =
-			MoveToLocation(GoalLocation, AcceptanceRadius, true, true, true, false, nullptr, true);
-		LastMoveGoal = GoalLocation;
-		bHasMoveGoal = MoveResult == EPathFollowingRequestResult::RequestSuccessful;
+	if (SurroundManager != nullptr && !SurroundManager->TryConsumeMoveRequestBudget(bCombatPriority))
+	{
+		// 预算拒绝时继续沿旧路径移动；LastMoveGoal 不更新，下一轮仍会识别到待刷新的目标。
+		INC_DWORD_STAT(STAT_fpstrueAIMoveBudgetRejectedCount);
+		CSV_CUSTOM_STAT(fpstrueAI, MoveBudgetRejectedCount, 1, ECsvCustomStatOp::Accumulate);
+		return;
+	}
+
+	INC_DWORD_STAT(STAT_fpstrueAIMoveRequestCount);
+	CSV_CUSTOM_STAT(fpstrueAI, MoveRequestCount, 1, ECsvCustomStatOp::Accumulate);
+	const EPathFollowingRequestResult::Type MoveResult =
+		MoveToLocation(GoalLocation, AcceptanceRadius, true, true, !bCombatPriority, false, nullptr, true);
+	LastMoveGoal = GoalLocation;
+	bLastMoveGoalWasCombatPriority = bCombatPriority;
+	bHasMoveGoal = MoveResult != EPathFollowingRequestResult::Failed;
+	if (bHasMoveGoal)
+	{
+		NextMoveRetryTime = 0.0f;
+	}
+	else if (World != nullptr)
+	{
+		NextMoveRetryTime = World->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
 	}
 }
 
@@ -395,13 +416,19 @@ void AfpstrueEnemyAIController::ReleaseAttackPermission()
 	}
 }
 
-void AfpstrueEnemyAIController::StopMovementIfNeeded()
+void AfpstrueEnemyAIController::StopMovementIfNeeded(bool bPreserveMoveGoal)
 {
-	if (bHasMoveGoal || GetMoveStatus() != EPathFollowingStatus::Idle)
+	const bool bShouldStop = GetMoveStatus() != EPathFollowingStatus::Idle;
+	if (!bPreserveMoveGoal || bShouldStop)
+	{
+		bHasMoveGoal = false;
+		NextMoveRetryTime = 0.0f;
+		bLastMoveGoalWasCombatPriority = false;
+	}
+	if (bShouldStop)
 	{
 		StopMovement();
 	}
-	bHasMoveGoal = false;
 }
 
 void AfpstrueEnemyAIController::ReleaseSurroundSlot()
@@ -420,6 +447,22 @@ void AfpstrueEnemyAIController::SetAIState(EFPEnemyAIState NewState)
 	}
 
 	AIState = NewState;
+	ApplyRotationPolicy(NewState);
+}
+
+void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState)
+{
+	if (ControlledEnemy == nullptr)
+	{
+		return;
+	}
+
+	if (UCharacterMovementComponent* Movement = ControlledEnemy->GetCharacterMovement())
+	{
+		// Chase 只读取路径速度；Attack 只读取 Controller 朝向；Idle/Dead 不再继续改写朝向。
+		Movement->bOrientRotationToMovement = NewState == EFPEnemyAIState::Chase;
+		Movement->bUseControllerDesiredRotation = NewState == EFPEnemyAIState::Attack;
+	}
 }
 
 AfpstrueCharacter* AfpstrueEnemyAIController::ResolveTarget() const

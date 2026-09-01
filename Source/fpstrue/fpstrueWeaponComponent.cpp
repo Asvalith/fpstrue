@@ -16,6 +16,10 @@ constexpr float DefaultEmptyReloadDuration = 1.2f;
 constexpr float DefaultRoundsPerMinute = 600.0f;
 constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
+// 语法复习：FName 适合反复比较的标识符；集中构造可避免每次命中都创建临时 FString 并执行 ToLower。
+const FName GripPointSocketName(TEXT("GripPoint"));
+const FName NeckBoneName(TEXT("neck_01"));
+const FName HeadBoneName(TEXT("head"));
 
 // 根据高斯分布生成散布方向，供每发 Hitscan 共用。
 FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
@@ -41,10 +45,6 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 }
 } // namespace
 
-// ==================== Construction ====================
-
-UfpstrueWeaponComponent::UfpstrueWeaponComponent() {}
-
 // ==================== Equipment ====================
 
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
@@ -54,9 +54,9 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		return false;
 	}
 
-	if (Character != nullptr)
+	if (AfpstrueCharacter* ExistingCharacter = Character.Get())
 	{
-		return Character == TargetCharacter;
+		return ExistingCharacter == TargetCharacter;
 	}
 
 	if (TargetCharacter->HasEquippedWeapon())
@@ -67,15 +67,18 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	Character = TargetCharacter;
 
 	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
-	if (!AttachToComponent(Character->GetMesh1P(), AttachmentRules, FName(TEXT("GripPoint"))))
+	if (!AttachToComponent(TargetCharacter->GetMesh1P(), AttachmentRules, GripPointSocketName))
 	{
-		Character = nullptr;
+		Character.Reset();
 		return false;
 	}
 
-	InitializeRuntimeState();
-	SetActionState(EFPWeaponActionState::Ready);
-	Character->SetEquippedWeaponComponent(this);
+	// 成功挂接只会发生一次，直接初始化本实例的运行时弹药。
+	MagazineSize = FMath::Max(1, MagazineSize);
+	CurrentAmmo = MagazineSize;
+	ReserveAmmo = FMath::Max(0, StartingReserveAmmo);
+	ActionState = EFPWeaponActionState::Ready;
+	TargetCharacter->SetEquippedWeaponComponent(this);
 	BroadcastAmmoChanged();
 
 	return true;
@@ -101,7 +104,7 @@ void UfpstrueWeaponComponent::StartFire()
 		return;
 	}
 
-	SetActionState(EFPWeaponActionState::Firing);
+	ActionState = EFPWeaponActionState::Firing;
 	Fire();
 
 	if (ActionState == EFPWeaponActionState::Firing && HasAmmo())
@@ -123,7 +126,7 @@ void UfpstrueWeaponComponent::StopFire()
 
 	if (ActionState == EFPWeaponActionState::Firing)
 	{
-		SetActionState(EFPWeaponActionState::Ready);
+		ActionState = EFPWeaponActionState::Ready;
 	}
 }
 
@@ -151,7 +154,15 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	UCameraComponent* Camera = Character->GetFirstPersonCameraComponent();
+	// 语法复习：弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
+	AfpstrueCharacter* OwningCharacter = Character.Get();
+	if (OwningCharacter == nullptr)
+	{
+		StopFire();
+		return;
+	}
+
+	UCameraComponent* Camera = OwningCharacter->GetFirstPersonCameraComponent();
 	if (Camera == nullptr)
 	{
 		StopFire();
@@ -178,7 +189,7 @@ void UfpstrueWeaponComponent::Fire()
 	OnWeaponFirePerformed.Broadcast();
 	FireLineTrace(World, Camera);
 
-	if (APlayerController* PlayerController = Cast<APlayerController>(Character->GetController()))
+	if (APlayerController* PlayerController = Cast<APlayerController>(OwningCharacter->GetController()))
 	{
 		ApplyRecoil(PlayerController);
 	}
@@ -204,6 +215,12 @@ bool UfpstrueWeaponComponent::TryConsumeAmmo()
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
 {
+	const AfpstrueCharacter* OwningCharacter = Character.Get();
+	if (OwningCharacter == nullptr)
+	{
+		return;
+	}
+
 	const double CurrentTimeSeconds = World->GetTimeSeconds();
 	if (LastShotTimeSeconds < 0.0 || CurrentTimeSeconds - LastShotTimeSeconds > SpreadResetDelay)
 	{
@@ -211,7 +228,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 	}
 
 	const float ContinuousSpreadAngle = FMath::Clamp(ConsecutiveShotCount * ContinuousFireSpreadStep, 0.0f, MaxContinuousFireSpreadAngle);
-	const float SpreadAngle = (Character->IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle) + ContinuousSpreadAngle;
+	const float SpreadAngle = (OwningCharacter->IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle) + ContinuousSpreadAngle;
 	LastShotTimeSeconds = CurrentTimeSeconds;
 	++ConsecutiveShotCount;
 
@@ -220,6 +237,12 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 
 void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle)
 {
+	AfpstrueCharacter* OwningCharacter = Character.Get();
+	if (OwningCharacter == nullptr)
+	{
+		return;
+	}
+
 	const FVector Start = Camera->GetComponentLocation();
 	const FVector Forward = Camera->GetForwardVector();
 	const FVector ShotDirection = SpreadAngle > 0.0f ? MakeGaussianSpreadDirection(Forward, SpreadAngle) : Forward;
@@ -227,7 +250,7 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 
 	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(Character);
+	QueryParams.AddIgnoredActor(OwningCharacter);
 	QueryParams.AddIgnoredActor(GetOwner());
 	QueryParams.bTraceComplex = true;
 
@@ -240,11 +263,11 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 	{
 		if (AActor* HitActor = HitResult.GetActor())
 		{
-			const FString HitBoneName = HitResult.BoneName.ToString().ToLower();
-			const bool bHeadShot = HitBoneName == TEXT("neck_01") || HitBoneName == TEXT("head");
+			const FName HitBoneName = HitResult.BoneName;
+			const bool bHeadShot = HitBoneName == NeckBoneName || HitBoneName == HeadBoneName;
 			const float DamageToApply = bHeadShot ? LineTraceHeadDamage : LineTraceDamage;
 
-			UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, Character->GetController(), GetOwner(),
+			UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, OwningCharacter->GetController(), GetOwner(),
 											   nullptr);
 
 			if (!HitActor->IsA<ACharacter>())
@@ -272,8 +295,8 @@ bool UfpstrueWeaponComponent::RequestReload()
 
 	StopFire();
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
-	InvalidateReloadTransaction();
-	SetActionState(EFPWeaponActionState::Reloading);
+	bReloadAmmoCommitted = false;
+	ActionState = EFPWeaponActionState::Reloading;
 	const float ReloadDuration = bWasEmptyReload ? DefaultEmptyReloadDuration : DefaultReloadDuration;
 	ScheduleReloadTimeout(FMath::Max(ReloadDuration, ReloadFailSafeDuration));
 	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
@@ -309,7 +332,7 @@ void UfpstrueWeaponComponent::FinishReload()
 	{
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 	}
-	SetActionState(EFPWeaponActionState::Ready);
+	ActionState = EFPWeaponActionState::Ready;
 }
 
 void UfpstrueWeaponComponent::CancelReload()
@@ -323,14 +346,8 @@ void UfpstrueWeaponComponent::CancelReload()
 	{
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 	}
-	InvalidateReloadTransaction();
-	SetActionState(EFPWeaponActionState::Ready);
-}
-
-void UfpstrueWeaponComponent::InvalidateReloadTransaction()
-{
-	++ActiveReloadSequence;
 	bReloadAmmoCommitted = false;
+	ActionState = EFPWeaponActionState::Ready;
 }
 
 void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
@@ -341,20 +358,8 @@ void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
 		return;
 	}
 
-	FTimerDelegate ReloadDelegate;
-	ReloadDelegate.BindUObject(this, &UfpstrueWeaponComponent::HandleReloadTimeout, ActiveReloadSequence);
-	World->GetTimerManager().SetTimer(ReloadTimerHandle, ReloadDelegate, FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod),
-									  false);
-}
-
-void UfpstrueWeaponComponent::HandleReloadTimeout(int32 ReloadSequence)
-{
-	if (ReloadSequence != ActiveReloadSequence || ActionState != EFPWeaponActionState::Reloading)
-	{
-		return;
-	}
-
-	FinishReload();
+	World->GetTimerManager().SetTimer(ReloadTimerHandle, this, &UfpstrueWeaponComponent::FinishReload,
+									  FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod), false);
 }
 
 // ==================== Owner / Component Lifecycle ====================
@@ -362,45 +367,34 @@ void UfpstrueWeaponComponent::HandleReloadTimeout(int32 ReloadSequence)
 void UfpstrueWeaponComponent::HandleOwnerDeath()
 {
 	ResetWeaponRuntimeState();
-	InvalidateReloadTransaction();
-	SetActionState(EFPWeaponActionState::Disabled);
+	ActionState = EFPWeaponActionState::Disabled;
 }
 
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ResetWeaponRuntimeState();
-	InvalidateReloadTransaction();
 
-	if (Character != nullptr)
+	if (AfpstrueCharacter* OwningCharacter = Character.Get())
 	{
-		Character->ClearEquippedWeaponComponent(this);
+		OwningCharacter->ClearEquippedWeaponComponent(this);
 	}
 
-	SetActionState(EFPWeaponActionState::Disabled);
-	Character = nullptr;
+	ActionState = EFPWeaponActionState::Disabled;
+	Character.Reset();
 	Super::EndPlay(EndPlayReason);
-}
-
-// ==================== Action State / Rules ====================
-
-void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
-{
-	if (ActionState == NewState)
-	{
-		return;
-	}
-
-	ActionState = NewState;
 }
 
 bool UfpstrueWeaponComponent::IsOperational() const
 {
-	return IsValid(Character) && ActionState != EFPWeaponActionState::Disabled && !Character->IsDead();
+	const AfpstrueCharacter* OwningCharacter = Character.Get();
+	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead();
 }
 
 bool UfpstrueWeaponComponent::CanFire() const
 {
-	return IsOperational() && Character->GetController() != nullptr && ActionState != EFPWeaponActionState::Reloading && CurrentAmmo > 0;
+	const AfpstrueCharacter* OwningCharacter = Character.Get();
+	return IsOperational() && OwningCharacter != nullptr && OwningCharacter->GetController() != nullptr &&
+		   ActionState != EFPWeaponActionState::Reloading && CurrentAmmo > 0;
 }
 
 bool UfpstrueWeaponComponent::CanReload() const
@@ -417,7 +411,8 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 		return;
 	}
 
-	const float RecoilMultiplier = Character != nullptr && Character->IsAiming() ? AimRecoilMultiplier : 1.0f;
+	const AfpstrueCharacter* OwningCharacter = Character.Get();
+	const float RecoilMultiplier = OwningCharacter != nullptr && OwningCharacter->IsAiming() ? AimRecoilMultiplier : 1.0f;
 	const float PitchKick = -RecoilPitch * RecoilMultiplier;
 	const float YawKick = FMath::FRandRange(-RecoilYaw, RecoilYaw) * RecoilMultiplier;
 	const float NewPitch = FMath::Clamp(AccumulatedRecoilPitch + PitchKick, -MaxAccumulatedRecoilPitch, 0.0f);
@@ -438,16 +433,17 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 {
 	UWorld* World = GetWorld();
-	APlayerController* PlayerController = Character != nullptr ? Cast<APlayerController>(Character->GetController()) : nullptr;
-	if (World == nullptr || PlayerController == nullptr || Character->IsDead())
+	AfpstrueCharacter* OwningCharacter = Character.Get();
+	APlayerController* PlayerController =
+		OwningCharacter != nullptr ? Cast<APlayerController>(OwningCharacter->GetController()) : nullptr;
+	if (World == nullptr || PlayerController == nullptr || OwningCharacter->IsDead())
 	{
 		ClearRecoilState();
 		return;
 	}
 
-	const float RecoverySpeed = RecoilRecoverySpeed;
-	const float NewPitch = FMath::FInterpConstantTo(AccumulatedRecoilPitch, 0.0f, RecoilRecoveryTickInterval, RecoverySpeed);
-	const float NewYaw = FMath::FInterpConstantTo(AccumulatedRecoilYaw, 0.0f, RecoilRecoveryTickInterval, RecoverySpeed);
+	const float NewPitch = FMath::FInterpConstantTo(AccumulatedRecoilPitch, 0.0f, RecoilRecoveryTickInterval, RecoilRecoverySpeed);
+	const float NewYaw = FMath::FInterpConstantTo(AccumulatedRecoilYaw, 0.0f, RecoilRecoveryTickInterval, RecoilRecoverySpeed);
 
 	PlayerController->AddPitchInput(NewPitch - AccumulatedRecoilPitch);
 	PlayerController->AddYawInput(NewYaw - AccumulatedRecoilYaw);
@@ -483,22 +479,10 @@ void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
 	}
 
 	ClearRecoilState();
+	bReloadAmmoCommitted = false;
 	ConsecutiveShotCount = 0;
 	LastShotTimeSeconds = -1.0;
 	LastAcceptedShotTimeSeconds = -1.0;
-}
-
-void UfpstrueWeaponComponent::InitializeRuntimeState()
-{
-	if (bRuntimeStateInitialized)
-	{
-		return;
-	}
-
-	MagazineSize = FMath::Max(1, MagazineSize);
-	CurrentAmmo = MagazineSize;
-	ReserveAmmo = FMath::Max(0, StartingReserveAmmo);
-	bRuntimeStateInitialized = true;
 }
 
 void UfpstrueWeaponComponent::BroadcastAmmoChanged()

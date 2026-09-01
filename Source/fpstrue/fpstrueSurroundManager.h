@@ -21,7 +21,6 @@ struct FfpstrueSurroundSlot
 	TWeakObjectPtr<AfpstrueEnemyCharacter> Occupant;
 	FVector ProjectedSlotLocation = FVector::ZeroVector;
 	FVector ProjectedApproachLocation = FVector::ZeroVector;
-	uint32 ProjectionGeneration = 0;
 	bool bHasProjectedSlotLocation = false;
 	bool bHasProjectedApproachLocation = false;
 };
@@ -49,7 +48,7 @@ public:
 	// 为敌人分配槽位，并返回更靠近玩家的攻击接近点。
 	bool GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation);
 	// 远距离追击读取共享玩家位置，避免每个 AI 重复采样目标。
-	bool GetSharedTargetSnapshot(FVector& OutLocation, uint32& OutTargetGeneration) const;
+	bool GetSharedTargetSnapshot(FVector& OutLocation) const;
 
 	// 清空槽位、攻击者、预算和目标缓存，供 GameMode 结束时调用。
 	void ResetManager();
@@ -82,7 +81,7 @@ protected:
 	bool bEnableActiveAttackerBudget = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Budget", meta = (ClampMin = "1", ClampMax = "16"))
-	int32 MaxActiveAttackers = 4;
+	int32 MaxActiveAttackers = 8;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Budget")
 	bool bEnableMoveRequestBudget = true;
@@ -113,10 +112,8 @@ private:
 	void BuildSlots();
 	// Timer 回调：按阈值刷新共享目标位置。
 	void RefreshSharedTargetSnapshot();
-	// 更新缓存位置和版本号，供所有 AI 判断目标是否移动。
+	// 更新缓存位置，并同步重建全部槽位的 NavMesh 投影。
 	void UpdateSharedTargetSnapshot(bool bForce);
-	// 在 AI 请求槽位前确保当前 NavMesh 投影缓存有效。
-	void EnsureProjectedSlotCache();
 	// 批量把原始槽位和接近点投影到 NavMesh。
 	void RebuildProjectedSlotCache();
 	// 为尚未占槽的敌人选择并记录一个可用槽位。
@@ -129,19 +126,19 @@ private:
 	void PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex);
 	// 根据玩家位置、槽位角度和半径计算未投影位置。
 	FVector CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride = -1.0f) const;
-	// 把候选位置投影到可行走 NavMesh。
-	bool ProjectToNavigation(const FVector& RawLocation, FVector& OutLocation) const;
 	// 调试模式下绘制槽位、占用关系和攻击接近点。
 	void DrawDebugSlots();
 
-	UPROPERTY()
-	AfpstrueCharacter* TargetCharacter = nullptr;
+	// 语法复习：跨 Actor 的长期引用需要进入反射系统；Transient 表明缓存不会被序列化到资产或存档。
+	UPROPERTY(Transient)
+	TObjectPtr<AfpstrueCharacter> TargetCharacter;
 
 	FVector CachedTargetLocation = FVector::ZeroVector;
-	uint32 SharedTargetGeneration = 0;
 	bool bHasSharedTargetSnapshot = false;
 
+	// 语法复习：TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
+	// 语法复习：弱指针作为键时可能留下失效键，因此 CleanupInvalidEntries 必须负责清理。
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
 	uint64 MoveRequestBudgetFrame = MAX_uint64;

@@ -131,13 +131,42 @@ Score = 0.45 * Frustum
 | Reduced | 1/30 s | 1 | 不限 |
 | Background | 0.05 s | 2 | 不限 |
 
+这张表描述当前实现值，不代表三个数值已经调到最佳。2026-08-31 的 80 敌人独立消融显示：骨骼 LOD 档位确实从关闭组的 `80/0/0` 变为默认组约 `19/29/32`，但 Animation 和动态 BLAS 都没有测到独立收益；动画频率分级的局部 Animation 差异只有约 `0.03 ms`，关闭后 Frame/RT/RHI 反而更低，因此两项暂不写成性能成果。Gameplay Movement 分级则有稳定证据：关闭后 Movement Tick 从约 `65.1` 增至 `81.0`，CharacterMovement 从 `1.056 ms` 增至 `1.245 ms`，说明机制有效，但 `15/50 m` 和 `30/20 Hz` 仍只是待标定初值。
+
 实际 LOD 会按该 Skeletal Mesh 的 LOD 数量 Clamp；当前敌人骨骼资源有 4 个 LOD，因此默认 `0 / 1 / 2` 都可用。攻击中、攻击窗口开启、目标进入攻击范围或 0.75 秒内发生战斗事件时，会通过独立的 Gameplay Animation Protection 立即恢复每帧动画和 LOD0；它不改写 RenderScore、Render 档位、阴影名额或骨骼 RT 名额。攻击 Socket Sweep、受伤、死亡和碰撞结果不因 Render 档位改变。
 
-阴影从固定距离开关改为全局优先队列：只有扩张视锥内、50 m 内且不是 Background 的高分敌人竞争默认 5 个投影名额。硬优先级保证动画和 LOD，不保证镜头外仍投影；这样把近战正确性和阴影画质预算分开。`-BenchmarkEnemyShadowsOff` 仍可完全关闭敌人阴影，`-BenchmarkDisableShadowTiering` 则关闭预算并恢复全部敌人投影。
+阴影从固定距离开关改为全局优先队列：只有扩张视锥内、50 m 内且不是 Background 的高分敌人竞争投影名额。当前源码默认 5 个名额；2026-08-29 确定的下一版目标是 `Top 8 Shadow`，尚未实现和 A/B，不能把目标值写成当前收益。玩法保护保证动画和 LOD，不保证镜头外仍投影；这样把近战正确性和阴影画质预算分开。`-BenchmarkEnemyShadowsOff` 仍可完全关闭敌人阴影，`-BenchmarkDisableShadowTiering` 则关闭预算并恢复全部敌人投影。
+
+80 敌人三次消融已证明“限制敌人投影参与”有效：默认 5 个投影敌人，关闭预算后为 80 个；ShadowDepths 从 `1.052 ms` 增至 `1.773 ms`，Shadow Draw Calls 从约 `637` 增至 `1013`。这只能证明预算机制有用，不能证明 5 是最佳名额。
 
 骨骼硬件光追已经接入 Render Significance。默认只有 Render `Full`、100 m 内并位于优先队列前 12 名的敌人保留 `Visible in Ray Tracing`；候选排序只使用主视锥、扩张视锥和 Render 分数。玩法交互保护只恢复动画与骨骼 LOD，不参与阴影或 RT 排名。关闭 RT 只移除硬件光追场景/动态 BLAS 参与，不改变普通光栅可见性。`-BenchmarkDisableEnemyRayTracingTiering` 可关闭分级并恢复全部敌人骨骼 RT，`-BenchmarkEnemyRayTracingOff` 仍用于完全关闭敌人 RT 的对象级消融。
 
+80 敌人三次消融中，默认 RT Visible 为 12，关闭分级后为 80；Skinned Geometry BLAS 从 `0.199 ms` 增至 `0.495 ms`，说明限制骨骼 RT 参与有效。但默认组 `RayTracingBudgetRejected=0`：RT 候选先被 Full Render 限制到最多 12 个，随后再进入同样为 12 的 RT 上限，因此独立 `MaxRayTracingEnemies=12` 尚未产生二次筛选，不能写成已验证参数。
+
 Animation Sharing 插件已经启用，并由 `EnemyAnimationSharingCoordinator` 在运行时创建同骨架共享池。共享状态处理器不再维护第二套枚举，而是直接读取敌人 AI FSM：`Idle` 对应共享待机，`Chase` 且实际存在移动速度时对应共享跑步；已经到达包围槽位的静止 `Chase` 映射回待机。两个状态各有 4 个随机相位 Leader。只有 Render `Reduced / Background`、不在攻击范围、未攻击/受击且不在战斗保护期的敌人可以成为 Follower。攻击、受击、死亡和布娃娃前立即注销并恢复原 AnimBP/Montage/Notify 路径。插件的 Leader Tick 使用 RenderScore，默认阈值 0.20；GameplayScore 不传入插件。`-BenchmarkDisableEnemyAnimationSharing` 可做独立消融。Animation Sharing 优化动画评估和骨骼更新，不会自动合并 Skeletal Mesh Draw Call。
+
+80 敌人三次消融中，默认平均约 61 个 Follower，关闭后为 0；Animation 从 `0.818 ms` 增至 `1.226 ms`，三次方向一致。因此共享机制可以写成已验证的局部 CPU 优化，但不能把受 RT/RHI 运行漂移影响的整帧 FPS 差值归给它。
+
+#### 统一时钟、同代快照与四类 Top-N 预算（2026-08-29 目标方案，待实现/验证）
+
+本轮确定的目标不是让所有玩法数据等待 Significance，而是把 Significance 重构为统一时钟下的派生策略与资源预算系统。血量、位置、目标、攻击、受击、死亡、攻击令牌授予/释放和 AI FSM 转换仍由事件立即更新；Coordinator 只读取这些权威事实，生成更新频率、LOD、动画、阴影、骨骼 RT 和共享策略。紧急升级不等待周期，常规校准和降级才进入统一调度。
+
+四类全局预算的目标口径为：
+
+| 预算 | 目标数量 | 所属层 | 排序输入与所有权 | 当前实现边界 |
+| --- | ---: | --- | --- | --- |
+| 进攻候选 | Top 8 | 逻辑 | Gameplay 距离、交互状态、可达性与等待时长；令牌和槽位仍由 `SurroundManager` 拥有 | 本轮运行与验收口径固定为 8 |
+| Full Render | Top 12 | 渲染 | 视锥、屏占比、最近可见、观察距离；由 Significance Coordinator 排序 | 当前预算已经是 12 |
+| Shadow | Top 8 | 渲染 | 独立 Shadow 候选与稳定 Tie-break，不由攻击状态直接抢占 | 当前默认 5，待改为 8 |
+| Skeletal RT | Top 12 | 渲染 | 当前先要求进入 Full，再按 RT 条件控制动态骨骼 BLAS 参与 | 当前上限是 12，但未产生独立预算拒绝 |
+
+`Full Render` 与 `Shadow` 当前可以独立筛选；`Skeletal RT` 在现有代码里是 Full 候选的子集，还不是完全独立预算。进入 Full Render 不保证获得阴影，但在 Full 与 RT 上限都为 12 时，RT 上限本身不会继续淘汰对象。玩法攻击权不能使用相机视锥或 RenderScore。攻击、近战和受击只触发 Gameplay Animation Protection，立即恢复动画更新与 LOD0 以保证 Montage/Notify/Sweep 正确性，但不改写 Render 排名。
+
+Coordinator 提供唯一的 `SampleTime / FrameNumber / PolicyGeneration`。调度基准取所有已启用周期的最小值，其他通道使用绝对 `NextDueTime` 或 Dirty 标记按需运行；更理想的实现是每轮直接安排到“下一项最早截止时间”，避免 0.10 秒基准量化 0.25 秒任务时产生 0.20/0.30 秒抖动。建议初始节奏为 Render Sample 0.10 秒、Gameplay Maintenance 0.25 秒、全局预算重排 0.25 秒、统计输出 1.00 秒；生成/传送到近处、进入攻击范围、受击、获得攻击令牌和目标变化走事件式 Urgent Promotion。
+
+同一 `PolicyGeneration` 内必须使用同一代不可变 Snapshot：先在同一时间戳采集全部候选，再计算逻辑/渲染期望状态并稳定排序，最后统一 Diff Commit。采集和排序阶段不修改组件，提交阶段仅在 Desired 与 Applied 不同时调用 TickInterval、`OverrideMinLOD`、`SetCastShadow`、`SetVisibleInRayTracing` 和 Animation Sharing 注册接口。这样既消除遍历顺序偏差，也避免把 Coordinator 提高到更快周期后反复触发 Render State 更新。Benchmark 启动日志必须输出最终生效的 `8 / 12 / 8 / 12`，不能只读取 C++ 声明默认值，防止蓝图或运行配置覆盖造成实验口径漂移。
+
+攻击侧使用“环形槽位 + 8 个进攻令牌 + 等待时间优先队列 + 攻击后轮换”。未获令牌者停留在等待环，获权者才进入攻击接近点；攻击结束者回到队尾，释放时立即唤醒下一名候选，不等待旧 AI Timer。`Top 8` 表示最多 8 个已投入进攻者，不等于 8 个敌人同一帧进入伤害窗口；攻击开始需要错峰，并单独验证同时伤害和动画/Sweep 峰值。
 
 #### 架构与代码体积复查（2026-08-29）
 
@@ -373,7 +402,7 @@ UE 5.5 本地源码中 `r.MeshDrawCommands.DynamicInstancing` 默认开启，它
 
 ### 3.5 Significance A/B 验收方案
 
-使用同版本、同地图、同机位、同随机种子和相同敌人数各运行至少两次：
+使用同版本、同地图、同机位、同随机种子和相同敌人数各运行三次，并采用 AB/BA 交错顺序：
 
 ```text
 候选组：默认启用 Significance Manager
@@ -391,11 +420,13 @@ Animation Sharing Off：-BenchmarkDisableEnemyAnimationSharing
 Render 三档 Off：-BenchmarkDisableEnemyRenderTiering
 ```
 
-CSV 的 `fpstrueSignificance` 分类记录 `GameplayFull/Reduced/Background`、`RenderFull/Reduced/Background`、`LOD0/1/2Plus`、`ShadowCasters`、`RayTracingVisible`、`AnimationSharingFollowers`、各类预算拒绝数，以及 `MeanFrustum/Screen/Recent/DistanceFactor`。这些计数先证明开关确实改变了目标对象，再比较 FPS、Frame/GT/RT/GPU 的平均值与 P95/P99、Movement、Animation、AI Decision、ShadowDepths、动态 BLAS 和 Draws。若消费者计数没有变化，该轮性能差异不能归因于对应策略。
+CSV 的 `fpstrueSignificance` 分类记录 `GameplayFull/Reduced/Background`、`RenderFull/Reduced/Background`、`LOD0/1/2Plus`、`ShadowCasters`、`RayTracingVisible`、`AnimationSharingFollowers`、各类预算拒绝数，以及 `MeanFrustum/Screen/Recent/DistanceFactor`。统一时钟版本还必须记录 `SampleTime / PolicyGeneration`、Top 8 进攻候选、Top 12 Full Render、Top 8 Shadow、Top 12 RT 的占用/换手、策略实际执行间隔、晋升/降级次数、Diff Apply 次数、攻击队列长度与等待 P50/P95/P99。只有先证明同一代快照和对应消费者确实发生变化，才能比较 FPS、Frame/GT/RT/GPU 的平均值与 P95/P99、Movement、Animation、AI Decision、ShadowDepths、动态 BLAS 和 Draws。
 
 权重和阈值可通过命令行单变量覆盖，无需修改资产：`EnemySigFrustumWeight`、`EnemySigScreenWeight`、`EnemySigRecentWeight`、`EnemySigDistanceWeight`、`EnemySigFullEnter/Exit`、`EnemySigReducedEnter/Exit`、`EnemySigFullBudget`、`EnemySigShadowBudget` 等。每轮只改变一个权重或阈值，并同时记录四个因子均值、三档人数、视觉错误和端到端 P95/P99；不能只按平均 FPS 反向拟合权重。
 
 性能之外必须回归：镜头外近战敌人仍寻路和攻击，快速转身时 LOD/动画不突变，攻击窗口不漏判，武器 Socket Sweep 正常，阴影切换无明显闪烁，死亡后能注销并按 30 秒回收。只有候选组尾帧改善且行为无回退，才保留该方案。
+
+统一时钟先做功能验收，再做性能 A/B：事件触发的攻击、受击、令牌接棒必须立即生效；周期策略在同一 `PolicyGeneration` 内使用同代 Snapshot；状态不变时组件写入计数应接近 0。随后以相同权重和四类固定预算比较初版单一 0.25 秒方案与统一调度方案，并单独比较 0.25 / 0.10 秒，不允许在周期实验中同时调整预算或权重。
 
 ### 3.6 出生和死亡生命周期
 
@@ -534,7 +565,7 @@ r.Shadow.Virtual.Enable=1
 
 只保留与当前瓶颈直接相关的候选项：
 
-- 当前第一优先级是完成 Draw/RHI 专项：重复静态物实例化、材质 Section 审计、HLOD 小范围合并和骨骼硬件光追 A/B。未得到同条件平均、P95/P99 前，不写成已完成收益。
+- 2026-08-30 决定暂缓环境 Draw Call 合批，不再把 ISM/HISM、全场景合并或 HLOD 资产改造作为当前主线。Draw Calls 仍保留为诊断指标，但下一阶段优先验证现有 Significance、骨骼 LOD、动画分级、Animation Sharing、阴影和骨骼 RT 预算在多敌人下的净收益与稳定性。
 - 当 Spawn/Destroy 成为实测尖峰时，再评估对象池；当前未实现。
 - 骨骼最低 LOD 已接入 Render Significance，但收益尚待独立 A/B；更高敌人数仍可继续评估骨骼裁剪、Animation Budget Allocator 或 Animation Sharing，不能用 ISM/HISM 替代仍需蒙太奇和骨骼命中的活体敌人。
 - VSM 继续采用逐资产治理，不把全局 CVar 调参包装成架构优化。
@@ -556,7 +587,11 @@ r.Shadow.Virtual.Enable=1
 | 2026-08-27 | 全局骨骼光追消融 | 20 敌人下执行 Baseline 与 `r.RayTracing.Geometry.SkeletalMeshes 0`，每组两次 | Frame/GT/RT/GPU、Visibility、RenderOther、RayTracing Dynamic Geometry/Scene、RHI Draw Calls | Frame 均值 `24.953 -> 24.155 ms`，约节省 `0.798 ms`；GPU 约节省 `0.154 ms`，但运行间波动较大，只作为方向性证据 | `Saved/Profiling/SkeletalRayTracingAB_20260827` |
 | 2026-08-27 至 08-28 | 敌人对象级光追/阴影消融 | 单独关闭敌人 `Visible in Ray Tracing` 与敌人投影，并验证快照状态 | Frame/GT/RT/GPU、RT Dynamic Geometry/Scene、ShadowDepths/Projection、Shadow Draw Calls、RHI Draw Calls/Primitives | 对象开关已证明生效；短采样出现明显运行漂移，现有 FPS 差值不作为最终收益，需严格复测 | `Saved/Profiling/EnemyRenderOffGroups_20260828` |
 | 2026-08-28 | 分层 Significance 初版 | 完成 Gameplay/Render 双层评分、骨骼最低 LOD、动画 Tick 分级、阴影名额和 CSV 统计，并通过 Game/Editor 构建 | 三档人数、LOD 人数、Shadow Casters、四项因子、预算拒绝数、UpdateTime、Frame/GT/RT/GPU、Movement、Animation、Draw/Shadow | 实现和生效已验证；20 敌人为 `12/4/4`、LOD `12/4/4`、阴影 3。Frame `24.953 -> 25.427 ms`，P95/P99略改善，均值近似中性，净收益未建立 | `Saved/Profiling/SignificanceLayeredLOD_20260828/Matched20_analysis.md` |
-| 2026-08-28 | 骨骼 RT 与 Animation Sharing 接入 | RT 名额接入纯 RenderScore；Reduced/Background 非战斗敌人接入 Idle/Moving 共享；补充独立消融和状态计数 | `RayTracingVisible`、`RayTracingBudgetRejected`、`AnimationSharingFollowers`、`GameplayAnimationProtection`、动态 BLAS、Animation、Frame/GT/RT/RHIT/GPU | UHT、C++ 编译、Development Game 链接已通过；真实渲染运行和性能 A/B 待编辑器完全关闭后执行 | `Source/fpstrue/fpstrueEnemySignificanceCoordinator.cpp`、`Source/fpstrue/fpstrueEnemyAnimationSharingCoordinator.cpp` |
+| 2026-08-28 | 骨骼 RT 与 Animation Sharing 接入 | RT 名额接入纯 RenderScore；Reduced/Background 非战斗敌人接入 Idle/Moving 共享；补充独立消融和状态计数 | `RayTracingVisible`、`RayTracingBudgetRejected`、`AnimationSharingFollowers`、`GameplayAnimationProtection`、动态 BLAS、Animation、Frame/GT/RT/RHIT/GPU | UHT、C++ 编译、Development Game 链接和真实渲染运行已通过；160 敌人快照有 140 个 Sharing Follower，独立性能结果见 2026-08-31 消融行 | `Source/fpstrue/fpstrueEnemySignificanceCoordinator.cpp`、`Source/fpstrue/fpstrueEnemyAnimationSharingCoordinator.cpp`、`Saved/Profiling/CurrentScaleMatrix_Warm_20260830` |
+| 2026-08-29 | 统一时钟与 Top-N 策略设计 | 确定逻辑/渲染分层、同代 Snapshot、两阶段 Diff Commit，以及 Top 8 进攻、Top 12 Full Render、Top 8 Shadow、Top 12 RT；攻击等待环和即时接棒纳入同一方案 | `PolicyGeneration`、四类预算占用/换手、实际更新间隔、Diff Apply、攻击等待 P95/P99、Frame/GT/RT/RHIT/GPU | 进攻名额已改为 8，20/80/160 快照中的实际攻击数为 3/7/8；统一时钟和 Top 8 Shadow 尚未完成，当前运行 Shadow 预算仍为 5 | 本节、复习手册 4.8.10-4.8.13 与 `Saved/Profiling/CurrentScaleMatrix_Warm_20260830` |
+| 2026-08-29 | 当前构建 0/20 敌人快速复核 | 重编译 Editor Target；先跑 `0 -> 20`，发现首进程冷启动污染，再补跑 `20 -> 0` 反序热缓存组 | Frame/GT/RT/RHIT/GPU、Draw Calls、Primitives、Visibility、Shadow、动态 RT、Movement、Animation、策略快照和告警 | 反序热缓存组方向合理，可作快速归因；只有一组有效配对，不能替代三次 AB/BA 正式验收 | `Saved/Profiling/EnemyContributionAB_20260829_OnePair`、`Saved/Profiling/EnemyContributionAB_20260829_ReversePair` |
+| 2026-08-30 | 当前版本多敌人规模复核 | 冷启动诊断后，以热缓存、固定种子和相同机位执行 `20/80/160` 敌人矩阵 | Frame P95/P99、GT、RT、RHIT、GPU、Movement、Animation、Draw Calls、三档/LOD/阴影/RT/Sharing 人数 | 消费者封顶和 CPU 次线性增长已验证；20/80/160 分别为 49.12/71.31/32.36 FPS，但 RT/RHIT 非单调漂移明显，单次矩阵不能作为精确规模曲线或 Significance 净收益 | `Saved/Profiling/CurrentScaleMatrix_Warm_20260830` |
+| 2026-08-31 | 80 敌人消费者消融 | 默认与 Movement、骨骼 LOD、动画分级、Animation Sharing、阴影、骨骼 RT 单变量关闭组各三次；动画分级另做四次紧配对 | 目标消费者计数、Movement、Animation、ShadowDepths/Draw、Skinned BLAS、Frame/GT/RT/RHI/GPU P95/P99 | Movement、Sharing、限制阴影参与、限制骨骼 RT 参与有稳定局部证据；骨骼 LOD 无独立收益；动画分级存在负收益风险；具体阈值与 Top-N 未证明最优 | `Saved/Profiling/UnverifiedConsumers80_20260831/analysis.md` |
 
 ### 8.2 当前比较基线
 
@@ -576,7 +611,7 @@ r.Shadow.Virtual.Enable=1
 | RHI Draw Calls | 1899.4 | 1894.3 | -5.1 / -0.27% |
 | RHI Primitives | 1.224 M | 1.260 M | +2.96% |
 
-这组数据说明当前 39 FPS 主要受 RT/RHI 提交链限制，而不是 GT、GPU 或 Significance 评分本身。Significance 更新平均约 `0.0435 ms/次`，且每 0.25 秒更新一次；在没有拆清各消费者收益前，不降低 Full 名额、不调整权重，也不以牺牲近战和可见敌人质量换取平均 FPS。
+这组数据说明当前 39 FPS 主要受 RT/RHI 提交链限制，而不是 GT、GPU 或 Significance 评分本身。2026-08-28 初版 Significance 更新平均约 `0.0435 ms/次`，当时采用单一 0.25 秒周期；该数值早于统一时钟、Top 8 Shadow 和攻击队列目标方案，只能作为历史成本参考。在没有拆清各消费者收益前，不降低 Full 名额、不调整权重，也不以牺牲近战和可见敌人质量换取平均 FPS。
 
 ### 8.3 下一轮执行顺序
 
@@ -586,11 +621,12 @@ r.Shadow.Virtual.Enable=1
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-08-28 | P0 | 冻结当前口径 | 记录构建、地图、分辨率、画质、种子、预热、采样、命令行 | 元数据、敌人 Alive、VSync、目标帧率、告警 | 所有后续组使用同一二进制和配置；不改权重与预算 | 已完成 |
 | 2026-08-28 | E1 | 分离环境固定成本与 20 个敌人的增量 | `0 Enemy`、`20 Enemy`，各三次 | Frame/GT/RT/RHIT/GPU 平均与 P95/P99；Draw Calls、Primitives、Visibility Wait、RenderOther、Shadow、RT Dynamic Geometry/Scene；Movement、Animation | 三个有效配对完成；原 Run3 整对因环境进程级异常排除并补跑。输出 `20-0` 增量，没有修改画质 | 已完成 |
-| 策略调整后 | E2 | 拆分 Render Significance 各消费者的净收益 | Default、Skeletal LOD Off、Animation Tiering Off、Shadow Tiering Off、Skeletal RT Tiering Off、Animation Sharing Off，固定 20 敌人，各三次 | E1 全部指标；三档/LOD/阴影/RT/Sharing 人数、UpdateTime、Movement、Animation、Shadow Draws、动态 BLAS | 每个开关必须改变对应消费者计数；逐项记录净收益与画质/动作回退，不以降低预算代替策略验证 | 待执行 |
+| 策略实现后 | E2A | 验证统一时钟、同代快照和四类 Top-N 预算 | 当前新策略 Default、`-BenchmarkDisableEnemySignificance`；固定 Top 8/12/8/12、固定 20 敌人，各三次 | E1 全部指标；`PolicyGeneration`、实际周期、四类预算占用/换手、Diff Apply、攻击等待与接棒延迟 | 事件即时生效；同轮数据同代；无变化不写组件；总策略净收益超过噪声且无玩法/画质回退 | 待实现/待执行 |
+| E2A 通过后 | E2B | 拆分 Render Significance 各消费者的净收益 | Default、Skeletal LOD Off、Animation Tiering Off、Shadow Tiering Off、Skeletal RT Tiering Off、Animation Sharing Off，固定 20 敌人，各三次 | E1 全部指标；三档/LOD/阴影/RT/Sharing 人数、UpdateTime、Movement、Animation、Shadow Draws、动态 BLAS | 每个开关必须改变对应消费者计数；逐项记录净收益与画质/动作回退，不以降低预算代替策略验证 | 待执行 |
 | 2026-08-30 | E3 | 检查档位抖动和任务等待 | 当前默认 20 敌人录制稳定区间 Insights；补充档位升降、LOD 改变、阴影切换、动画间隔改变计数 | RT/RHI Critical Path、Task Graph、`WaitForGatherDynamicMeshElements`、四类状态切换次数及 P95/P99 | 区分稳定成本与频繁状态切换；若发生抖动，先修滞回/状态写入，再调权重 | 待执行 |
-| 2026-08-29 | E4 | 审计环境 Draw Call 来源 | 0 敌人固定机位；Primitive Stats、Mesh Draw Command 动态实例化统计、资产/组件/材质 Section 清单 | 按 Static Mesh 的实例数、组件数、材质 Section、Mobility、阴影、Cull Distance、Draw Calls | 选择一个“重复多、状态一致、不独立交互”的局部候选，不直接合并整个建筑或全地图 | 下一步 |
-| 2026-09-01 | E5 | 验证一次真实环境合批 | E4 Baseline 与一个局部 HISM/ISM 或小范围 HLOD 候选，各三次 | RHI Draw Calls、BasePass/Prepass/Shadow Draws、RT/RHIT、Visibility P95/P99、Primitives、Bounds、显存、视觉/碰撞 | 必须同时看到 Draw Calls 和 RT/RHIT 关键指标下降，且剔除、LOD、阴影、碰撞无回退；只看到日志合并数不算通过 | 待执行 |
-| 2026-09-02 | E6 | 产品级回归与规模斜率 | 保留方案下 `20/40/80 Enemy`，固定镜头与战斗回归 | FPS、Frame/GT/RT/RHIT/GPU P95/P99、内存、UObject、Significance 档位、动画/攻击/阴影质量 | 收益跨至少两个规模档存在，近战响应、Socket Sweep、快速转身、LOD/阴影切换和死亡回收全部正常 | 待执行 |
+| 2026-08-29 | E4 | 审计环境 Draw Call 来源 | 0 敌人固定机位；Primitive Stats、Mesh Draw Command 动态实例化统计、资产/组件/材质 Section 清单 | 按 Static Mesh 的实例数、组件数、材质 Section、Mobility、阴影、Cull Distance、Draw Calls | 保留历史证据和诊断口径，不再为当前版本修改资产或实施合批 | 已暂缓 |
+| 2026-09-01 | E5 | 验证一次真实环境合批 | E4 Baseline 与一个局部 HISM/ISM 或小范围 HLOD 候选，各三次 | RHI Draw Calls、BasePass/Prepass/Shadow Draws、RT/RHIT、Visibility P95/P99、Primitives、Bounds、显存、视觉/碰撞 | 仅在以后恢复 Draw Call 专项时执行 | 已暂缓 |
+| 2026-08-30 | E6 | 当前策略规模复核 | 当前默认策略下 `20/80/160 Enemy`，固定镜头、种子、分辨率和采样时长 | FPS、Frame/GT/RT/RHIT/GPU P95/P99、Movement、Animation、Draw Calls、Significance 消费者人数 | 验证消费者封顶与 CPU 规模趋势；运行级 RT/RHIT 非单调，后续正式曲线需每档三次随机顺序 | 已完成一轮 |
 
 **E1 完成结果（2026-08-28）**
 
@@ -608,7 +644,32 @@ r.Shadow.Virtual.Enable=1
 
 `0 Enemy` 仍包含环境、玩家、武器、灯光和游戏框架，它不是“只有静态网格”。但 0 敌人 RT 已为 `19.42 ms`，有效 Draw Call 仍占 20 敌人组的约 88.7%，证明固定渲染底座已经超过 60 FPS 预算；20 敌人再增加约 `3.01 ms` Frame、`211` Draw Call 和 `707.5 K` Primitives。当前必须并行治理环境提交和敌人消费者，不能把低 FPS 全归因于敌人，也不能只降低敌人质量预算。完整质检、异常样本说明和计数口径见 `Saved/Profiling/EnemyContributionAB_20260828_CurrentSignificance/analysis.md`。
 
-当前先执行 E4/E5，治理 0 敌人仍存在的 RT/RHI 固定提交成本。E2 延后到 Significance 策略准备调整时再做，用于验证调整后的净收益；权重调优仍必须一次只改一个值，并保留四项因子均值和三档人数，防止仅对某次 FPS 样本过拟合。
+**E1 当前构建快速复核（2026-08-29，仅一组有效配对）**
+
+当前源码重新编译 Editor Target 后先执行 `0 Enemy -> 20 Enemy`。首个 0 敌人进程的 Frame Mean 为 `23.032 ms`，第二个 20 敌人进程反而为 `14.078 ms`，RT/RHIT 也整体反向；同机位截图一致，因此该对判定为首次进程的 PSO/DDC/资源预热顺序污染，不用于敌人收益结论。保留原始目录，不能挑选其“更好看”的一侧参与平均。
+
+随后执行反序 `20 Enemy -> 0 Enemy`，两组都在前一对完成后运行，可作为本轮热缓存快速归因：
+
+| 指标 | 0 Enemy | 20 Enemy | `20 - 0` |
+| --- | ---: | ---: | ---: |
+| 等效 FPS（`1000 / Frame Mean`） | 91.47 | 85.47 | -6.01 |
+| Frame Mean / P95 / P99 | 10.932 / 13.488 / 13.996 ms | 11.701 / 14.510 / 15.419 ms | +0.768 / +1.023 / +1.423 ms |
+| GT Mean | 2.042 ms | 3.413 ms | +1.372 ms |
+| RT Mean | 10.666 ms | 11.423 ms | +0.757 ms |
+| RHIT Mean | 7.435 ms | 7.873 ms | +0.438 ms |
+| GPU Mean / P95 / P99 | 7.226 / 7.395 / 7.481 ms | 8.317 / 9.517 / 9.952 ms | +1.090 / +2.122 / +2.471 ms |
+| Visibility Wait Mean | 3.212 ms | 3.716 ms | +0.504 ms |
+| RHI Draw Calls | 1593.7 | 1818.4 | +224.7 / +14.1% |
+| RHI Primitives | 627.4 K | 1321.4 K | +694.0 K / +110.6% |
+| GPU ShadowDepths | 0.717 ms | 0.975 ms | +0.258 ms |
+| GPU RT Dynamic Geometry | 0.1600 ms | 0.1640 ms | +0.0039 ms |
+| CharacterMovement / Animation | 0.082 / 0.208 ms | 0.401 / 0.603 ms | +0.319 / +0.396 ms |
+
+20 敌人组最终 `alive=20`，初始生成有 4 次可恢复重试，VSM 队列溢出和纹理池告警均为 0。采样开始快照为 Movement `4/16/0`、Render `12/3/5`、LOD `13/3/4`、活动攻击者 `4`、Shadow `5`、RT Visible `11`、Animation Sharing Followers `7`。启动日志确认当前渲染预算仍为 `12/5/12`；日志没有输出配置的攻击预算，因此 `attacking=4` 只能证明该时刻有 4 个活动攻击者，不能证明目标 Top 8 已实现。结合源码默认 `MaxActiveAttackers=4`，下一版必须先实现并记录有效预算 `8/12/8/12`，再进入 E2A。
+
+这组快速复核说明当前 20 敌人的稳定增量同时落在 GT 的 Movement/Animation、RT 的 Visibility/提交以及 GPU 阴影上；平均动态 RT 增量在这一次配对中很小，但它不是 RT 单变量消融，不能推翻既有骨骼 RT A/B。由于本轮只有一组有效热缓存配对，只用于检查当前构建方向和策略是否生效，不替代三次 AB/BA 的正式结论。
+
+环境 Draw Call 合批已经暂缓。80 敌人 E2B 首轮已经完成：保留有稳定局部证据的 Movement、Animation Sharing、阴影参与限制和骨骼 RT 参与限制；骨骼 LOD、动画频率分级、独立 RT Top 12 和具体权重/阈值不写成已验证优化。下一步先用 Insights 解释动画 TickInterval 与 RT/RHI 快慢运行状态的关系，再决定回退还是重做动画分级；只有机制通过后才对距离、频率和 Top-N 做三点扫描。
 
 ### 8.4 每组固定采集指标
 
@@ -620,7 +681,8 @@ r.Shadow.Virtual.Enable=1
 | Insights 深挖 | InitViews、VisibilityCommands、`WaitForGatherDynamicMeshElements`、Task Graph、RHI 提交 | CSV 只能分类时，用调用链确定被等待任务和关键路径 |
 | 硬件光追 | RayTracing Dynamic Geometry/Scene、动态实例收集、Bottom-Level AS Build | 区分普通光栅提交与动态骨骼 BLAS 成本 |
 | 敌人 CPU | CharacterMovement、Animation、AI Decision、EndPhysics、SyncBodies、移动/骨骼 Tick 数 | 判断敌人增量和分级消费者的真实 CPU 收益 |
-| Significance 状态 | Gameplay/Render 三档人数、LOD0/1/2+、Shadow Casters、四项因子均值、预算拒绝、UpdateTime、状态切换次数 | 先证明策略改变了谁，再把性能差值归因给策略 |
+| Significance 状态 | `SampleTime/PolicyGeneration`、Gameplay/Render 三档、Top 8 进攻、Top 12 Full Render、Top 8 Shadow、Top 12 RT、LOD0/1/2+、Sharing、预算占用/换手、UpdateTime、实际周期、Diff Apply 与状态切换次数 | 证明同轮数据同代、策略改变了谁，并确认没有重复写组件 |
+| 攻击调度 | QueueLength、TokenUtilization、Wait P50/P95/P99/Max、GrantToAttack、AttackStarts/100ms、有效伤害窗口并发、令牌超时/泄漏 | 验证 8 个进攻者没有造成贴脸站桩、饥饿、同时爆发或 AI 接棒长尾 |
 | 资源与异常 | Working Set、GPU/Texture Memory、UObject、Spawn Failures、VSM/Texture Pool 告警 | 防止用内存、对象泄漏或异常状态换取表面帧率 |
 | 功能与画质 | 同机位截图、LOD Pop、阴影闪烁、反射缺失、近战响应、Socket Sweep、死亡/布娃娃/回收 | 性能通过但玩法或画质回退时必须撤销 |
 
@@ -657,6 +719,9 @@ Saved/Profiling/EnemyRenderOffGroups_20260828
 Saved/Profiling/SignificanceLayeredLOD_20260828
 Saved/Profiling/EnemyContributionAB_20260828_CurrentSignificance
 Saved/Profiling/EnemyContributionAB_20260828_Replacement
+Saved/Profiling/EnemyContributionAB_20260829_OnePair
+Saved/Profiling/EnemyContributionAB_20260829_ReversePair
+Saved/Profiling/CurrentScaleMatrix_Warm_20260830
 Docs/PerformanceEvidence/20260816
 Docs/PerformanceEvidence/20260824
 Docs/PerformanceEvidence/20260825/SmallEnemyUI

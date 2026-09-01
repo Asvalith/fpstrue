@@ -38,7 +38,6 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 void AfpstrueEnemyCharacter::BeginPlay()
 {
 	Super::BeginPlay();
-	SetActorTickEnabled(false);
 
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
 	if (BenchmarkConfig.bDisableMovementTiering)
@@ -79,7 +78,7 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	{
 		Movement->MaxWalkSpeed = MoveSpeed;
 		Movement->bOrientRotationToMovement = false;
-		Movement->bUseControllerDesiredRotation = true;
+		Movement->bUseControllerDesiredRotation = false;
 		Movement->RotationRate = FRotator(0.0f, 540.0f, 0.0f);
 	}
 	bUseControllerRotationYaw = false;
@@ -91,10 +90,6 @@ void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	SuspendAnimationSharing();
 	UnregisterFromSignificanceManager();
-	if (CombatComponent != nullptr)
-	{
-		CombatComponent->ResetCombat();
-	}
 	if (HealthComponent != nullptr)
 	{
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
@@ -146,20 +141,10 @@ bool AfpstrueEnemyCharacter::IsAttacking() const
 	return CombatComponent != nullptr && CombatComponent->IsAttacking();
 }
 
-bool AfpstrueEnemyCharacter::IsCombatActive() const
-{
-	return CombatComponent != nullptr && CombatComponent->IsCombatActive();
-}
-
 bool AfpstrueEnemyCharacter::RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const
 {
 	const bool bRecentlyInteracted = CurrentTime - LastCombatRelevantTime <= FMath::Max(GraceSeconds, 0.0f);
-	return IsCombatActive() || IsTargetInAttackRange() || bRecentlyInteracted;
-}
-
-float AfpstrueEnemyCharacter::GetDistanceToTarget2D() const
-{
-	return CombatComponent != nullptr ? CombatComponent->GetDistanceToTarget2D() : MAX_flt;
+	return IsAttacking() || IsTargetInAttackRange() || bRecentlyInteracted;
 }
 
 float AfpstrueEnemyCharacter::GetAttackRange() const
@@ -170,14 +155,6 @@ float AfpstrueEnemyCharacter::GetAttackRange() const
 float AfpstrueEnemyCharacter::GetEffectiveAttackRange() const
 {
 	return CombatComponent != nullptr ? CombatComponent->GetEffectiveAttackRange() : 0.0f;
-}
-
-void AfpstrueEnemyCharacter::FaceTarget()
-{
-	if (CombatComponent != nullptr)
-	{
-		CombatComponent->FaceTarget();
-	}
 }
 
 // ==================== Gameplay Significance：目标距离与交互状态 ====================
@@ -245,7 +222,7 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 	}
 	const float FullRateThreshold = 1.0f / (1.0f + FullRateMovementDistance);
 	const float MidRateThreshold = 1.0f / (1.0f + MidRateMovementDistance);
-	const bool bRequiresFullRate = IsCombatActive() || IsTargetInAttackRange();
+	const bool bRequiresFullRate = IsAttacking() || IsTargetInAttackRange();
 
 	EFPEnemySignificanceTier NewTier = EFPEnemySignificanceTier::Background;
 	if (bRequiresFullRate || Significance >= FullRateThreshold)
@@ -628,6 +605,11 @@ void AfpstrueEnemyCharacter::ApplyBenchmarkDiagnosticOverrides(bool bDisableAtta
 
 // ==================== 战斗接口与动画优先级桥接 ====================
 
+bool AfpstrueEnemyCharacter::CanStartAttack() const
+{
+	return CombatComponent != nullptr && CombatComponent->CanStartAttack();
+}
+
 bool AfpstrueEnemyCharacter::TryAttackTarget()
 {
 	return CombatComponent != nullptr && CombatComponent->TryAttackTarget();
@@ -726,10 +708,6 @@ AfpstrueCharacter* AfpstrueEnemyCharacter::GetCombatTarget() const
 
 void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
-	if (HealthComponent != nullptr && HealthComponent->IsDead())
-	{
-		return;
-	}
 	if (const UWorld* World = GetWorld())
 	{
 		LastCombatRelevantTime = World->GetTimeSeconds();
@@ -851,16 +829,23 @@ bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
 
 void AfpstrueEnemyCharacter::RefreshAnimationSharingRegistration()
 {
-	if (AnimationSharingCoordinator != nullptr)
+	// 语法复习：弱指针可能在不通知观察者的情况下失效，先 Get() 成局部裸指针再使用。
+	if (UfpstrueEnemyAnimationSharingCoordinator* Coordinator = AnimationSharingCoordinator.Get())
 	{
-		AnimationSharingCoordinator->RefreshEnemyRegistration(this);
+		Coordinator->RefreshEnemyRegistration(this);
 	}
+}
+
+void AfpstrueEnemyCharacter::SetAnimationSharingCoordinator(UfpstrueEnemyAnimationSharingCoordinator* InCoordinator)
+{
+	// 此处已 include 协调器完整类型，编译器可以验证它能安全转换为 UObject 弱引用。
+	AnimationSharingCoordinator = InCoordinator;
 }
 
 void AfpstrueEnemyCharacter::SuspendAnimationSharing()
 {
-	if (AnimationSharingCoordinator != nullptr)
+	if (UfpstrueEnemyAnimationSharingCoordinator* Coordinator = AnimationSharingCoordinator.Get())
 	{
-		AnimationSharingCoordinator->SuspendEnemy(this);
+		Coordinator->SuspendEnemy(this);
 	}
 }

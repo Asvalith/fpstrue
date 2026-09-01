@@ -10,7 +10,6 @@
 class AfpstrueCharacter;
 class AfpstrueEnemyAIController;
 class AfpstrueEnemyCharacter;
-class AfpstrueGameMode;
 class UfpstrueEnemyAnimationSharingCoordinator;
 class UfpstrueEnemyCombatComponent;
 class UfpstrueHealthComponent;
@@ -54,8 +53,6 @@ public:
 
 	// AI FSM 判断攻击事务是否仍在进行。
 	bool IsAttacking() const;
-	// Significance 判断攻击或攻击窗口是否需要动画保护。
-	bool IsCombatActive() const;
 
 	// AI 与动画保护判断玩家是否已经进入有效攻击范围。
 	bool IsTargetInAttackRange() const;
@@ -67,12 +64,6 @@ public:
 	float GetAttackRange() const;
 	// CombatComponent 和 AI 使用包含碰撞体修正的实际攻击范围。
 	float GetEffectiveAttackRange() const;
-
-	// Gameplay Significance 和 AI 读取敌人到玩法目标的二维距离。
-	float GetDistanceToTarget2D() const;
-
-	// CombatComponent 让敌人朝向当前玩家目标。
-	void FaceTarget();
 
 	// ==================== Benchmark 诊断接口 ====================
 
@@ -101,6 +92,9 @@ public:
 	int32 GetAppliedMinimumLOD() const { return AppliedMinimumLOD; }
 	// Coordinator 和共享系统检查攻击、范围及最近受击保护期。
 	bool RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const;
+	// GameMode 注入同一 World 的共享协调器；弱引用只表达协作关系，不取得所有权。
+	// 语法复习：前置声明足以声明指针和函数，但 TWeakObjectPtr 赋值需要看到完整 UObject 继承关系，实现在 .cpp。
+	void SetAnimationSharingCoordinator(UfpstrueEnemyAnimationSharingCoordinator* InCoordinator);
 
 	// ==================== 对外事件 ====================
 
@@ -129,7 +123,8 @@ protected:
 	// ==================== 组件 ====================
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health")
-	UfpstrueHealthComponent* HealthComponent;
+	// 语法复习：UPROPERTY + TObjectPtr 是 UE5 的强 GC 引用；组件内存仍由 UObject 生命周期管理。
+	TObjectPtr<UfpstrueHealthComponent> HealthComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<UfpstrueEnemyCombatComponent> CombatComponent;
@@ -203,7 +198,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	friend class AfpstrueGameMode;
+	// 语法复习：friend 只开放 private 访问权，不改变对象所有权；这里只保留真正需要内部桥接的三个协作者。
 	friend class AfpstrueEnemyAIController;
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemyCombatComponent;
@@ -212,6 +207,8 @@ private:
 
 	// AIController 通过角色入口请求 CombatComponent 开始攻击。
 	bool TryAttackTarget();
+	// AIController 在申请攻击名额前检查距离、冷却和事务状态。
+	bool CanStartAttack() const;
 	// 从 AIController 读取唯一玩家目标，供战斗和距离判断使用。
 	AfpstrueCharacter* GetCombatTarget() const;
 	// 攻击前恢复全速动画/LOD，结束后重新应用性能档位。
@@ -263,8 +260,9 @@ private:
 	int32 AppliedMinimumLOD = INDEX_NONE;
 	FFPEnemyRenderSignificancePolicy LastRenderSignificancePolicy;
 
+	// 语法复习：TWeakObjectPtr 不延长协调器生命周期；使用前通过 Get()/IsValid() 解析。
 	UPROPERTY(Transient)
-	TObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
+	TWeakObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
 
 	FVector LastDamageDirection = FVector::ForwardVector;
 	FVector LastDamageLocation = FVector::ZeroVector;

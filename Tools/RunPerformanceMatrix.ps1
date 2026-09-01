@@ -1,12 +1,18 @@
+param(
+    [int[]]$Counts = @(20, 80, 160),
+    [double]$WarmupSeconds = 10,
+    [double]$DurationSeconds = 30,
+    [int]$BenchmarkSeed = 1337,
+    [string]$RunName = "CurrentScaleMatrix_20260830"
+)
+
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = "E:\ueprojrct\fpstrue_safe2"
 $Editor = "E:\program\ue554\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe"
 $Project = Join-Path $ProjectRoot "fpstrue.uproject"
 $Map = "/Game/FactoryDistrict/Maps/Demonstration"
-$DdcPath = "E:\ueprojrct\ddc"
-$Counts = @(10, 20, 40, 80, 160)
-$RunName = "FPS_FinalLOD_20260816"
+$DdcPath = Join-Path $ProjectRoot "Saved\DerivedDataCache"
 $EvidenceRoot = Join-Path $ProjectRoot "Saved\Profiling\$RunName"
 $CsvOutput = Join-Path $EvidenceRoot "CSV"
 $ScreenshotOutput = Join-Path $EvidenceRoot "Screenshots"
@@ -24,7 +30,7 @@ $Results = @()
 foreach ($Count in $Counts) {
     Write-Output "Starting benchmark: $Count enemies"
     $StartedAt = Get-Date
-    $LogName = "Benchmark_FinalLOD_$Count.log"
+    $LogName = "Benchmark_${RunName}_$Count.log"
     $Arguments = @(
         $Project,
         $Map,
@@ -40,15 +46,17 @@ foreach ($Count in $Counts) {
         "-RenderOffscreen",
         "-AutoBenchmark",
         "-BenchmarkEnemies=$Count",
-        "-BenchmarkWarmup=10",
-        "-BenchmarkDuration=30",
+        "-BenchmarkWarmup=$WarmupSeconds",
+        "-BenchmarkDuration=$DurationSeconds",
+        "-BenchmarkSeed=$BenchmarkSeed",
         "-BenchmarkScreenshot",
         "-BenchmarkAutoQuit",
         "-csvGpuStats",
         '-ExecCmds="stat unit,stat streaming"',
         "-log=$LogName",
-        "-ddc=InstalledNoZenLocalFallback",
-        "-LocalDataCachePath=$DdcPath"
+        "-ddc=NoZenLocalFallback",
+        "-LocalDataCachePath=$DdcPath",
+        "-ShaderWorkingDir=Saved/ShaderWorkingDir"
     )
 
     $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
@@ -103,3 +111,4 @@ foreach ($Count in $Counts) {
 $Manifest = Join-Path $EvidenceRoot "manifest.csv"
 $Results | Export-Csv -LiteralPath $Manifest -NoTypeInformation -Encoding UTF8
 $Results | Format-Table -AutoSize
+& (Join-Path $ProjectRoot "Tools\SummarizePerformanceMatrix.ps1") -EvidenceRoot $EvidenceRoot

@@ -28,7 +28,6 @@ void AfpstrueSurroundManager::BeginPlay()
 void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(DebugDrawTimerHandle);
-	GetWorldTimerManager().ClearTimer(SharedTargetTimerHandle);
 	ResetManager();
 	Super::EndPlay(EndPlayReason);
 }
@@ -75,7 +74,6 @@ void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 
 	CachedTargetLocation = CurrentTargetLocation;
 	bHasSharedTargetSnapshot = true;
-	++SharedTargetGeneration;
 	RebuildProjectedSlotCache();
 }
 
@@ -97,19 +95,7 @@ void AfpstrueSurroundManager::BuildSlots()
 
 	AddRing(0, InnerSlotCount, InnerRadius);
 	AddRing(1, OuterSlotCount, OuterRadius);
-	EnsureProjectedSlotCache();
-}
-
-void AfpstrueSurroundManager::EnsureProjectedSlotCache()
-{
-	if (!bHasSharedTargetSnapshot)
-	{
-		return;
-	}
-
-	const bool bNeedsRebuild = SurroundSlots.ContainsByPredicate([this](const FfpstrueSurroundSlot& Slot)
-																 { return Slot.ProjectionGeneration != SharedTargetGeneration; });
-	if (bNeedsRebuild)
+	if (bHasSharedTargetSnapshot)
 	{
 		RebuildProjectedSlotCache();
 	}
@@ -122,15 +108,34 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 		return;
 	}
 
-	// 每个 TargetGeneration 只投影一次全部槽位，AI 决策阶段只读取缓存结果。
+	const UWorld* World = GetWorld();
+	const UNavigationSystemV1* NavigationSystem =
+		World != nullptr ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
+	const auto ProjectLocation = [this, NavigationSystem](const FVector& RawLocation, FVector& OutLocation)
+	{
+		if (NavigationSystem == nullptr)
+		{
+			return false;
+		}
+
+		FNavLocation ProjectedLocation;
+		if (!NavigationSystem->ProjectPointToNavigation(RawLocation, ProjectedLocation, NavigationProjectionExtent))
+		{
+			return false;
+		}
+
+		OutLocation = ProjectedLocation.Location;
+		return true;
+	};
+
+	// 目标移动超过阈值时集中投影一次；AI 决策阶段只读取缓存结果。
 	for (FfpstrueSurroundSlot& Slot : SurroundSlots)
 	{
-		Slot.bHasProjectedSlotLocation = ProjectToNavigation(CalculateRawSlotLocation(Slot), Slot.ProjectedSlotLocation);
+		Slot.bHasProjectedSlotLocation = ProjectLocation(CalculateRawSlotLocation(Slot), Slot.ProjectedSlotLocation);
 
 		const float ApproachRadius = Slot.RingIndex == 0 ? AttackApproachRadius : OuterAttackApproachRadius;
 		Slot.bHasProjectedApproachLocation =
-			ProjectToNavigation(CalculateRawSlotLocation(Slot, ApproachRadius), Slot.ProjectedApproachLocation);
-		Slot.ProjectionGeneration = SharedTargetGeneration;
+			ProjectLocation(CalculateRawSlotLocation(Slot, ApproachRadius), Slot.ProjectedApproachLocation);
 	}
 }
 
@@ -210,16 +215,21 @@ bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter*
 		return true;
 	}
 
-	CleanupInvalidEntries();
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	if (ActiveAttackers.Contains(EnemyKey))
 	{
 		return true;
 	}
 
-	if (ActiveAttackers.Num() >= FMath::Max(MaxActiveAttackers, 1))
+	const int32 AttackLimit = FMath::Max(MaxActiveAttackers, 1);
+	if (ActiveAttackers.Num() >= AttackLimit)
 	{
-		return false;
+		// 只有预算确实满时才扫描弱引用，避免每次攻击申请都遍历两张表。
+		CleanupInvalidEntries();
+		if (ActiveAttackers.Num() >= AttackLimit)
+		{
+			return false;
+		}
 	}
 
 	// 预算只保护“攻击事务”，没有拿到名额的敌人仍保留槽位并继续追踪。
@@ -272,8 +282,6 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 	{
 		return false;
 	}
-	EnsureProjectedSlotCache();
-
 	const int32* SlotIndexPtr = EnemyToSlot.Find(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
 	if (SlotIndexPtr == nullptr || !SurroundSlots.IsValidIndex(*SlotIndexPtr))
 	{
@@ -291,35 +299,28 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 	return true;
 }
 
-bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation, uint32& OutTargetGeneration) const
+bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
 {
 	if (!bHasSharedTargetSnapshot)
 	{
 		return false;
 	}
 
-	OutTargetGeneration = SharedTargetGeneration;
 	OutLocation = CachedTargetLocation;
 	return true;
 }
 
 void AfpstrueSurroundManager::ResetManager()
 {
-	for (FfpstrueSurroundSlot& Slot : SurroundSlots)
-	{
-		Slot.Occupant.Reset();
-	}
-
 	EnemyToSlot.Reset();
 	ActiveAttackers.Reset();
 	MoveRequestBudgetFrame = MAX_uint64;
 	MoveRequestsConsumedThisFrame = 0;
 	TargetCharacter = nullptr;
 	bHasSharedTargetSnapshot = false;
-	SharedTargetGeneration = 0;
 	for (FfpstrueSurroundSlot& Slot : SurroundSlots)
 	{
-		Slot.ProjectionGeneration = 0;
+		Slot.Occupant.Reset();
 		Slot.bHasProjectedSlotLocation = false;
 		Slot.bHasProjectedApproachLocation = false;
 	}
@@ -355,7 +356,6 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 
 int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 {
-	EnsureProjectedSlotCache();
 	for (int32 RingIndex = 0; RingIndex <= 1; ++RingIndex)
 	{
 		int32 BestSlotIndex = INDEX_NONE;
@@ -399,7 +399,6 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 		return;
 	}
 
-	EnsureProjectedSlotCache();
 	const FfpstrueSurroundSlot& InnerSlot = SurroundSlots[InnerSlotIndex];
 	const FVector InnerLocation =
 		InnerSlot.bHasProjectedSlotLocation ? InnerSlot.ProjectedSlotLocation : CalculateRawSlotLocation(InnerSlot);
@@ -445,30 +444,6 @@ FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurround
 	return CachedTargetLocation + Direction * Radius;
 }
 
-bool AfpstrueSurroundManager::ProjectToNavigation(const FVector& RawLocation, FVector& OutLocation) const
-{
-	const UWorld* World = GetWorld();
-	if (World == nullptr)
-	{
-		return false;
-	}
-
-	const UNavigationSystemV1* NavigationSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-	if (NavigationSystem == nullptr)
-	{
-		return false;
-	}
-
-	FNavLocation ProjectedLocation;
-	if (!NavigationSystem->ProjectPointToNavigation(RawLocation, ProjectedLocation, NavigationProjectionExtent))
-	{
-		return false;
-	}
-
-	OutLocation = ProjectedLocation.Location;
-	return true;
-}
-
 void AfpstrueSurroundManager::DrawDebugSlots()
 {
 	if (!bDrawDebugSlots || !IsValid(TargetCharacter))
@@ -477,7 +452,6 @@ void AfpstrueSurroundManager::DrawDebugSlots()
 	}
 
 	CleanupInvalidEntries();
-	EnsureProjectedSlotCache();
 
 	for (const FfpstrueSurroundSlot& Slot : SurroundSlots)
 	{

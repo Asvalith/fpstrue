@@ -189,7 +189,6 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		if (!OwnerGameMode->EnemyRenderSignificancePolicy.bEnableRenderTiering)
 		{
 			Candidate.AssignedTier = EFPEnemyRenderSignificanceTier::Full;
-			++AssignedFullCount;
 			continue;
 		}
 

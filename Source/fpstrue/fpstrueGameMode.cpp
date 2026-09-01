@@ -8,7 +8,6 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueEnemyCharacter.h"
 #include "fpstrueEnemySignificanceCoordinator.h"
-#include "fpstrueHealthComponent.h"
 #include "fpstruePerformanceStats.h"
 #include "fpstrueSurroundManager.h"
 #include "Components/CapsuleComponent.h"
@@ -23,7 +22,7 @@ DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
 
 // ==================== 生命周期与开局 ====================
 
-AfpstrueGameMode::AfpstrueGameMode() : Super()
+AfpstrueGameMode::AfpstrueGameMode()
 {
 	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
 	BenchmarkRunner = CreateDefaultSubobject<UfpstrueBenchmarkRunner>(TEXT("BenchmarkRunner"));
@@ -97,15 +96,13 @@ void AfpstrueGameMode::StartGameMode()
 		return;
 	}
 
-	ClearEnemyRegistrations();
 	bGameRunning = true;
 	CurrentWave = 0;
-	AliveEnemyCount = 0;
 	RemainingTime = GameDuration;
 
 	OnRemainingTimeChanged.Broadcast(RemainingTime);
 	OnWaveChanged.Broadcast(CurrentWave, GetConfiguredWaveCount());
-	OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+	OnAliveEnemyCountChanged.Broadcast(RegisteredEnemies.Num());
 
 	GetWorldTimerManager().SetTimer(CountdownTimerHandle, this, &AfpstrueGameMode::UpdateCountdown, 1.0f, true);
 
@@ -352,19 +349,16 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 	AfpstrueEnemyCharacter* SpawnedEnemy = nullptr;
 	for (int32 Attempt = 0; Attempt < MaxSpawnAttempts && SpawnedEnemy == nullptr; ++Attempt)
 	{
-		FVector CandidateLocation = SpawnOrigin;
+		FNavLocation ProjectedLocation;
 		if ((SpawnPointReuseCount > 0 || Attempt > 0) && RetryRadius > 0.0f)
 		{
-			FNavLocation NearbyLocation;
-			if (!NavSystem->GetRandomReachablePointInRadius(SpawnOrigin, RetryRadius, NearbyLocation))
+			// 随机可达点已经携带有效 NavMesh Poly，不再重复 ProjectPointToNavigation。
+			if (!NavSystem->GetRandomReachablePointInRadius(SpawnOrigin, RetryRadius, ProjectedLocation))
 			{
 				continue;
 			}
-			CandidateLocation = NearbyLocation.Location;
 		}
-
-		FNavLocation ProjectedLocation;
-		if (!NavSystem->ProjectPointToNavigation(CandidateLocation, ProjectedLocation, ProjectionExtent))
+		else if (!NavSystem->ProjectPointToNavigation(SpawnOrigin, ProjectedLocation, ProjectionExtent))
 		{
 			continue;
 		}
@@ -417,37 +411,41 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 
 // ==================== 敌人注册表与协调器连接 ====================
 
-bool AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
+void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	if (!IsValid(Enemy))
 	{
-		return false;
+		return;
 	}
 
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	if (RegisteredEnemies.Contains(EnemyKey))
 	{
-		return false;
+		return;
 	}
 
 	RegisteredEnemies.Add(EnemyKey);
-	Enemy->AnimationSharingCoordinator = EnemyAnimationSharingCoordinator;
+	Enemy->SetAnimationSharingCoordinator(EnemyAnimationSharingCoordinator);
 	Enemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
 	Enemy->OnDestroyed.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
-	AliveEnemyCount = RegisteredEnemies.Num();
 
 	if (bGameRunning)
 	{
-		OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+		OnAliveEnemyCountChanged.Broadcast(RegisteredEnemies.Num());
 	}
-	return true;
 }
 
-bool AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount)
+void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount)
 {
 	if (Enemy == nullptr)
 	{
-		return false;
+		return;
+	}
+
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
+	if (RegisteredEnemies.Remove(EnemyKey) == 0)
+	{
+		return;
 	}
 
 	Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
@@ -456,20 +454,12 @@ bool AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroa
 	{
 		EnemyAnimationSharingCoordinator->SuspendEnemy(Enemy);
 	}
-	Enemy->AnimationSharingCoordinator = nullptr;
+	Enemy->SetAnimationSharingCoordinator(nullptr);
 
-	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	if (RegisteredEnemies.Remove(EnemyKey) == 0)
-	{
-		return false;
-	}
-
-	AliveEnemyCount = RegisteredEnemies.Num();
 	if (bBroadcastCount && bGameRunning)
 	{
-		OnAliveEnemyCountChanged.Broadcast(AliveEnemyCount);
+		OnAliveEnemyCountChanged.Broadcast(RegisteredEnemies.Num());
 	}
-	return true;
 }
 
 void AfpstrueGameMode::StopActiveEnemies()
@@ -496,14 +486,13 @@ void AfpstrueGameMode::ClearEnemyRegistrations()
 			{
 				EnemyAnimationSharingCoordinator->SuspendEnemy(Enemy);
 			}
-			Enemy->AnimationSharingCoordinator = nullptr;
+			Enemy->SetAnimationSharingCoordinator(nullptr);
 			Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
 			Enemy->OnDestroyed.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
 		}
 	}
 
 	RegisteredEnemies.Reset();
-	AliveEnemyCount = 0;
 }
 
 // ==================== 游戏状态、事件与计时器 ====================

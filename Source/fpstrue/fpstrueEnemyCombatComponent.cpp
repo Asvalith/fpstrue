@@ -4,7 +4,6 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueEnemyAIController.h"
 #include "fpstrueEnemyCharacter.h"
-#include "fpstrueHealthComponent.h"
 #include "fpstruePerformanceStats.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -29,9 +28,9 @@ UfpstrueEnemyCombatComponent::UfpstrueEnemyCombatComponent()
 void UfpstrueEnemyCombatComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	if (const AfpstrueEnemyCharacter* Enemy = GetEnemy())
+	if (const UWorld* World = GetWorld())
 	{
-		LastAttackTime = GetWorld()->GetTimeSeconds() - AttackInterval;
+		LastAttackTime = World->GetTimeSeconds() - AttackInterval;
 	}
 }
 
@@ -44,18 +43,6 @@ void UfpstrueEnemyCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayRea
 AfpstrueEnemyCharacter* UfpstrueEnemyCombatComponent::GetEnemy() const
 {
 	return Cast<AfpstrueEnemyCharacter>(GetOwner());
-}
-
-float UfpstrueEnemyCombatComponent::GetDistanceToTarget2D() const
-{
-	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	const AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
-	if (Enemy == nullptr || TargetCharacter == nullptr)
-	{
-		return MAX_flt;
-	}
-
-	return FVector::Dist2D(Enemy->GetActorLocation(), TargetCharacter->GetActorLocation());
 }
 
 float UfpstrueEnemyCombatComponent::GetEffectiveAttackRange() const
@@ -86,33 +73,15 @@ bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
 		   FMath::Square(GetEffectiveAttackRange());
 }
 
-void UfpstrueEnemyCombatComponent::FaceTarget()
-{
-	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	const AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
-	if (Enemy == nullptr || TargetCharacter == nullptr)
-	{
-		return;
-	}
-
-	const FVector ToTarget = TargetCharacter->GetActorLocation() - Enemy->GetActorLocation();
-	const FVector HorizontalToTarget(ToTarget.X, ToTarget.Y, 0.0f);
-	if (!HorizontalToTarget.IsNearlyZero())
-	{
-		Enemy->SetActorRotation(HorizontalToTarget.GetSafeNormal().Rotation());
-	}
-}
-
 bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 {
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || !CanAttack())
+	if (Enemy == nullptr || !CanStartAttack())
 	{
 		return false;
 	}
 
 	CancelAttackWindow();
-	HitActorsThisAttack.Reset();
 	bIsAttacking = true;
 	bHitTargetThisAttack = false;
 	if (const UWorld* World = GetWorld())
@@ -120,7 +89,6 @@ bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 		Enemy->LastCombatRelevantTime = World->GetTimeSeconds();
 	}
 	Enemy->SetAttackAnimationPriority(true);
-	FaceTarget();
 
 	if (UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement())
 	{
@@ -134,10 +102,8 @@ bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 
 void UfpstrueEnemyCombatComponent::HandleAttackFinishedNotify()
 {
-	if (bIsAttacking)
-	{
-		FinishAttack();
-	}
+	// FinishAttack 统一校验事务状态，Notify 和保护 Timer 共用同一出口。
+	FinishAttack();
 }
 
 void UfpstrueEnemyCombatComponent::BeginAttackWindow()
@@ -206,6 +172,11 @@ void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 		const FVector PreviousSample = FMath::Lerp(PreviousWeaponBase, PreviousWeaponTip, Alpha);
 		const FVector CurrentSample = FMath::Lerp(CurrentWeaponBase, CurrentWeaponTip, Alpha);
 		SweepWeaponSegment(PreviousSample, CurrentSample);
+		if (!bAttackWindowActive)
+		{
+			// 当前攻击已经命中唯一玩家目标，无需继续提交本帧剩余 Sweep。
+			return;
+		}
 	}
 
 	SweepWeaponSegment(CurrentWeaponBase, CurrentWeaponTip);
@@ -215,10 +186,7 @@ void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 
 void UfpstrueEnemyCombatComponent::EndAttackWindow()
 {
-	if (bAttackWindowActive)
-	{
-		CancelAttackWindow();
-	}
+	CancelAttackWindow();
 }
 
 void UfpstrueEnemyCombatComponent::SetAttackSweepDisabledForBenchmark(bool bDisabled)
@@ -231,7 +199,6 @@ void UfpstrueEnemyCombatComponent::ResetCombat()
 	CancelAttackWindow();
 	bIsAttacking = false;
 	bHitTargetThisAttack = false;
-	HitActorsThisAttack.Reset();
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(AttackFinishTimerHandle);
@@ -245,7 +212,7 @@ void UfpstrueEnemyCombatComponent::ResetCombat()
 	}
 }
 
-bool UfpstrueEnemyCombatComponent::CanAttack() const
+bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 {
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const UWorld* World = GetWorld();
@@ -255,8 +222,7 @@ bool UfpstrueEnemyCombatComponent::CanAttack() const
 	}
 
 	const AfpstrueCharacter* TargetCharacter = Enemy->GetCombatTarget();
-	return TargetCharacter != nullptr && TargetCharacter->GetHealthComponent() != nullptr &&
-		   !TargetCharacter->GetHealthComponent()->IsDead() && !Enemy->IsDead() && !bIsAttacking && IsTargetInAttackRange() &&
+	return TargetCharacter != nullptr && !TargetCharacter->IsDead() && !Enemy->IsDead() && !bIsAttacking && IsTargetInAttackRange() &&
 		   World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
 }
 
@@ -293,7 +259,6 @@ void UfpstrueEnemyCombatComponent::SweepWeaponSegment(const FVector& TraceStart,
 	FCollisionObjectQueryParams ObjectQueryParams;
 	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyWeaponTrace), false, Enemy);
-	QueryParams.AddIgnoredActor(Enemy);
 
 	TArray<FHitResult> HitResults;
 	const bool bHitAnyPawn = World->SweepMultiByObjectType(HitResults, TraceStart, TraceEnd, FQuat::Identity, ObjectQueryParams,
@@ -317,7 +282,12 @@ void UfpstrueEnemyCombatComponent::SweepWeaponSegment(const FVector& TraceStart,
 
 	for (const FHitResult& HitResult : HitResults)
 	{
-		TryApplyAttackDamage(HitResult.GetActor());
+		if (TryApplyAttackDamage(HitResult.GetActor()))
+		{
+			// 当前玩法只允许命中唯一玩家目标；成功后关闭窗口，后续帧不再做无效 Sweep。
+			CancelAttackWindow();
+			break;
+		}
 	}
 }
 
@@ -331,19 +301,12 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 		return false;
 	}
 
-	const TWeakObjectPtr<AActor> WeakHitActor(HitActor);
-	if (HitActorsThisAttack.Contains(WeakHitActor))
-	{
-		return false;
-	}
-
 	const float AppliedDamage = UGameplayStatics::ApplyDamage(HitActor, AttackDamage, Enemy->GetController(), Enemy, nullptr);
 	if (AppliedDamage <= 0.0f)
 	{
 		return false;
 	}
 
-	HitActorsThisAttack.Add(WeakHitActor);
 	bHitTargetThisAttack = true;
 	return true;
 }
@@ -352,8 +315,6 @@ void UfpstrueEnemyCombatComponent::CancelAttackWindow()
 {
 	bAttackWindowActive = false;
 	bHasPreviousWeaponSample = false;
-	PreviousWeaponBase = FVector::ZeroVector;
-	PreviousWeaponTip = FVector::ZeroVector;
 }
 
 void UfpstrueEnemyCombatComponent::ScheduleAttackFinish(float DurationSeconds)
@@ -384,7 +345,6 @@ void UfpstrueEnemyCombatComponent::FinishAttack()
 	{
 		LastAttackTime = World->GetTimeSeconds();
 	}
-	HitActorsThisAttack.Reset();
 	if (AfpstrueEnemyAIController* AIController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
 	{
 		// 动画 Notify 和失败保护计时器最终都汇入这里，统一归还攻击预算。

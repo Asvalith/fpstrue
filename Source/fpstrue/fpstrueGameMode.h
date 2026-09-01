@@ -85,8 +85,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|AI")
 	TSubclassOf<AfpstrueSurroundManager> SurroundManagerClass;
 
-	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Game|AI")
-	AfpstrueSurroundManager* SurroundManager = nullptr;
+	// 语法复习：Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Game|AI")
+	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|Spawn", meta = (ClampMin = "1"))
 	int32 MinimumSpawnPointCount = 4;
@@ -132,6 +133,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
+	// 语法复习：friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
 	friend class UfpstrueBenchmarkRunner;
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemySignificanceCoordinator;
@@ -162,9 +164,9 @@ private:
 	// ==================== 敌人注册表 ====================
 
 	// 把新敌人加入唯一注册表，并连接死亡事件和动画共享协调器。
-	bool RegisterEnemy(AfpstrueEnemyCharacter* Enemy);
+	void RegisterEnemy(AfpstrueEnemyCharacter* Enemy);
 	// 从注册表和共享系统移除敌人，并按需通知 HUD 数量变化。
-	bool UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount);
+	void UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount);
 	// 游戏结束时停止所有仍存活敌人的 AI。
 	void StopActiveEnemies();
 	// 解除全部敌人事件、共享引用并清空注册表。
@@ -199,16 +201,18 @@ private:
 
 	// ==================== 运行时引用与状态 ====================
 
-	UPROPERTY()
+	// 语法复习：这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
+	// UPROPERTY 仍会让 GC 扫描数组，Transient 则明确它们只在本局运行时有效。
+	UPROPERTY(Transient)
 	TArray<AActor*> SpawnPoints;
 
-	UPROPERTY()
-	AfpstrueCharacter* PlayerCharacter = nullptr;
+	UPROPERTY(Transient)
+	TObjectPtr<AfpstrueCharacter> PlayerCharacter;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TArray<AActor*> QueuedSpawnPoints;
 
-	UPROPERTY()
+	UPROPERTY(Transient)
 	TSubclassOf<AfpstrueEnemyCharacter> QueuedEnemyClass;
 
 	UPROPERTY(VisibleAnywhere, Category = "Performance|Benchmark")
@@ -220,10 +224,10 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Performance|Animation Sharing")
 	TObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> EnemyAnimationSharingCoordinator;
 
+	// 语法复习：TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
 	int32 CurrentWave = 0;
-	int32 AliveEnemyCount = 0;
 	int32 RemainingTime = 0;
 	int32 PendingEnemySpawnCount = 0;
 	int32 NextQueuedSpawnIndex = 0;

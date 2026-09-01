@@ -42,10 +42,6 @@ class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 	GENERATED_BODY()
 
 public:
-	// ==================== Construction ====================
-	//构造
-	UfpstrueWeaponComponent();
-
 	// ==================== Equipment ====================
 	//装备是否成功
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
@@ -131,10 +127,7 @@ protected:
 
 private:
 	// ==================== Action State / Rules ====================
-	// 第一层：Action State
-	//武器状态修改统一入口
-	void SetActionState(EFPWeaponActionState NewState);
-
+	// 第一层：Action State；状态只由本组件内部直接写入。
 	// 第二层：Rules
 	//状态边界
 	//统一检查武器已装备、未禁用且角色存活
@@ -155,14 +148,10 @@ private:
 	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle);
 
 	// ==================== Reload System ====================
-	// 第三层：Transaction 由 Request/Commit/Finish/Cancel Reload 维护
-	//使旧换弹回调失效，并清空本次换弹的提交标记
-	void InvalidateReloadTransaction();
+	// 第三层：Transaction 由 Request/Commit/Finish/Cancel Reload 维护。
 	// 第四层：Recovery
 	//设置换弹保护Timer（换弹没有完成则自动恢复）
 	void ScheduleReloadTimeout(float DurationSeconds);
-	//reload timer回调
-	void HandleReloadTimeout(int32 ReloadSequence);
 
 	// ==================== Recoil System ====================
 	// 射击成功后把随机水平/垂直后坐力应用到 PlayerController。
@@ -175,8 +164,6 @@ private:
 	// ==================== Runtime Helpers ====================
 	//死亡或组件结束时统一清理Timer和临时状态
 	void ResetWeaponRuntimeState();
-	//**第一次装备或运行时启动时初始化弹药等运行时数据
-	void InitializeRuntimeState();
 	//弹药改变后统一广播给UI
 	void BroadcastAmmoChanged();
 
@@ -263,10 +250,9 @@ private:
 	// Owner
 	//运行时状态
 	//当前持有该武器的角色，EndPlay时置空
+	// 语法复习：这是从武器指回角色的反向观察关系；TWeakObjectPtr 避免双方互相形成强引用。
 	UPROPERTY(Transient)
-	TObjectPtr<AfpstrueCharacter> Character;
-	//防止重复初始化弹药
-	bool bRuntimeStateInitialized = false;
+	TWeakObjectPtr<AfpstrueCharacter> Character;
 
 	// 第一层 Action State
 	//Ready、Firing、Reloading、Disabled四种互斥动作状态
@@ -284,8 +270,6 @@ private:
 	//换弹事务状态
 	//防止一次换弹被多个Notify重复提交
 	bool bReloadAmmoCommitted = false;
-	//区分前后两次换弹，旧Timer不能结束新的换弹
-	int32 ActiveReloadSequence = 0;
 
 	// Fire / Spread
 	//连续射击和后坐力状态

@@ -20,21 +20,14 @@ public:
 
 	// AIController 判断攻击事务是否尚未结束。
 	bool IsAttacking() const { return bIsAttacking; }
-	// Animation/Significance 判断武器伤害窗口是否正在执行。
-	bool IsAttackWindowActive() const { return bAttackWindowActive; }
-	// Significance 用它判断是否需要完整动画和 LOD 保护。
-	bool IsCombatActive() const { return bIsAttacking || bAttackWindowActive; }
-
-	// 返回敌人与当前玩家目标之间的二维距离。
-	float GetDistanceToTarget2D() const;
 	// 结合配置和胶囊尺寸返回实际近战距离。
 	float GetEffectiveAttackRange() const;
 	// AIController 通过 EnemyCharacter 转发读取基础攻击范围。
 	float GetConfiguredAttackRange() const { return AttackRange; }
 	// 判断当前目标是否进入可攻击范围。
 	bool IsTargetInAttackRange() const;
-	// 让 Owner 朝向当前战斗目标。
-	void FaceTarget();
+	// AI 在申请攻击名额前检查冷却、目标、距离和事务状态。
+	bool CanStartAttack() const;
 
 	// 由 AI FSM 请求开始一次攻击事务和动画表现。
 	bool TryAttackTarget();
@@ -95,8 +88,6 @@ protected:
 private:
 	// 返回强类型 Owner，供内部战斗逻辑使用。
 	AfpstrueEnemyCharacter* GetEnemy() const;
-	// 检查冷却、目标、距离和死亡状态是否允许开攻。
-	bool CanAttack() const;
 	// 从骨骼 Socket 读取本帧武器根部和尖端位置。
 	bool GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const;
 	// 对武器移动线段执行分段 Sweep，结果交给伤害去重。
@@ -119,6 +110,5 @@ private:
 	bool bDisableAttackSweepForBenchmark = false;
 	FVector PreviousWeaponBase = FVector::ZeroVector;
 	FVector PreviousWeaponTip = FVector::ZeroVector;
-	TSet<TWeakObjectPtr<AActor>> HitActorsThisAttack;
 	FTimerHandle AttackFinishTimerHandle;
 };

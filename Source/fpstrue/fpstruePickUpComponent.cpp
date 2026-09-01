@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "fpstruePickUpComponent.h"
+#include "fpstrueCharacter.h"
 #include "fpstrueWeaponComponent.h"
 
 //初始化UfpstruePickUpComponent组件，设置SphereRadius为32.f

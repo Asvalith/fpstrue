@@ -5,7 +5,10 @@ param(
     [double]$DurationSeconds = 30,
     [int]$BenchmarkSeed = 1337,
     [string]$RunName = "EnemyOptimizationAblation_20260824",
-    [switch]$AllEnabledOnly
+    [switch]$AllEnabledOnly,
+    [switch]$SignificanceOnly,
+    [switch]$UnverifiedConsumersOnly,
+    [string[]]$SelectedGroups = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +17,7 @@ $ProjectRoot = "E:\ueprojrct\fpstrue_safe2"
 $Editor = "E:\program\ue554\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe"
 $Project = Join-Path $ProjectRoot "fpstrue.uproject"
 $Map = "/Game/FactoryDistrict/Maps/Demonstration"
-$DdcPath = "E:\ueprojrct\ddc"
+$DdcPath = Join-Path $ProjectRoot "Saved\DerivedDataCache"
 $EvidenceRoot = Join-Path $ProjectRoot "Saved\Profiling\$RunName"
 $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
@@ -22,13 +25,41 @@ $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
 
 $Groups = @(
     [PSCustomObject]@{ Name = "AllEnabled"; Flag = "" },
+    [PSCustomObject]@{ Name = "NoSignificance"; Flag = "-BenchmarkDisableEnemySignificance" },
     [PSCustomObject]@{ Name = "NoAIThrottling"; Flag = "-BenchmarkDisableAIThrottling" },
     [PSCustomObject]@{ Name = "NoAnimationOptimization"; Flag = "-BenchmarkDisableAnimationOptimizations" },
     [PSCustomObject]@{ Name = "NoMovementTiering"; Flag = "-BenchmarkDisableMovementTiering" },
-    [PSCustomObject]@{ Name = "NoShadowTiering"; Flag = "-BenchmarkDisableShadowTiering" }
+    [PSCustomObject]@{ Name = "NoSkeletalLOD"; Flag = "-BenchmarkDisableEnemySkeletalLOD" },
+    [PSCustomObject]@{ Name = "NoAnimationTiering"; Flag = "-BenchmarkDisableEnemyAnimationTiering" },
+    [PSCustomObject]@{ Name = "NoAnimationSharing"; Flag = "-BenchmarkDisableEnemyAnimationSharing" },
+    [PSCustomObject]@{ Name = "NoShadowTiering"; Flag = "-BenchmarkDisableShadowTiering" },
+    [PSCustomObject]@{ Name = "NoRayTracingTiering"; Flag = "-BenchmarkDisableEnemyRayTracingTiering" }
 )
 
-if ($AllEnabledOnly) {
+if ($SelectedGroups.Count -gt 0) {
+    $UnknownGroups = @($SelectedGroups | Where-Object { $_ -notin $Groups.Name })
+    if ($UnknownGroups.Count -gt 0) {
+        throw "Unknown ablation groups: $($UnknownGroups -join ', ')"
+    }
+    $Groups = @($Groups | Where-Object { $_.Name -in $SelectedGroups })
+}
+elseif ($UnverifiedConsumersOnly) {
+    $Groups = @($Groups | Where-Object {
+        $_.Name -in @(
+            "AllEnabled",
+            "NoMovementTiering",
+            "NoSkeletalLOD",
+            "NoAnimationTiering",
+            "NoAnimationSharing",
+            "NoShadowTiering",
+            "NoRayTracingTiering"
+        )
+    })
+}
+elseif ($SignificanceOnly) {
+    $Groups = @($Groups | Where-Object { $_.Name -in @("AllEnabled", "NoSignificance") })
+}
+elseif ($AllEnabledOnly) {
     $Groups = @($Groups | Where-Object { $_.Name -eq "AllEnabled" })
 }
 
@@ -67,8 +98,9 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             "-csvGpuStats",
             '-ExecCmds="stat unit,stat streaming"',
             "-log=$LogName",
-            "-ddc=InstalledNoZenLocalFallback",
-            "-LocalDataCachePath=$DdcPath"
+            "-ddc=NoZenLocalFallback",
+            "-LocalDataCachePath=$DdcPath",
+            "-ShaderWorkingDir=Saved/ShaderWorkingDir"
         )
         if ($Group.Flag) {
             $Arguments += $Group.Flag

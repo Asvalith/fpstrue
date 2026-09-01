@@ -3,7 +3,6 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueHealthComponent.h"
 #include "fpstrueWeaponComponent.h"
-#include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -364,11 +363,6 @@ void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 
 void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
-	if (HealthComponent != nullptr && HealthComponent->IsDead())
-	{
-		return;
-	}
-
 	OnPlayerDamaged(DamageAmount, DamageCauser, InstigatedBy);
 }
 

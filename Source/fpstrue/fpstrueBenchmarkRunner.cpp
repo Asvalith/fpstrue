@@ -104,7 +104,7 @@ void UfpstrueBenchmarkRunner::WaitForBenchmarkReady()
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
 	GetWorld()->GetTimerManager().ClearTimer(ReadyTimerHandle);
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark ready: requested=%d alive=%d warmup=%.1fs"), BenchmarkConfig.EnemyCount,
-		   OwnerGameMode->AliveEnemyCount, BenchmarkConfig.WarmupSeconds);
+		   OwnerGameMode->RegisteredEnemies.Num(), BenchmarkConfig.WarmupSeconds);
 
 	GetWorld()->GetTimerManager().SetTimer(StartTimerHandle, this, &UfpstrueBenchmarkRunner::StartCapture, BenchmarkConfig.WarmupSeconds,
 										   false);
@@ -144,7 +144,7 @@ void UfpstrueBenchmarkRunner::StartCapture()
 
 	UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("csvprofile start"));
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark capture started: requested=%d alive=%d duration=%.1fs"), BenchmarkConfig.EnemyCount,
-		   OwnerGameMode->AliveEnemyCount, BenchmarkConfig.DurationSeconds);
+		   OwnerGameMode->RegisteredEnemies.Num(), BenchmarkConfig.DurationSeconds);
 
 	GetWorld()->GetTimerManager().SetTimer(StopTimerHandle, this, &UfpstrueBenchmarkRunner::StopCapture, BenchmarkConfig.DurationSeconds,
 										   false);
@@ -199,7 +199,7 @@ void UfpstrueBenchmarkRunner::ApplyDiagnosticOverrides()
 			{
 				++FullRateMovementCount;
 			}
-			else if (TickInterval <= 0.075f)
+			else if (Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Reduced)
 			{
 				++MidRateMovementCount;
 			}
