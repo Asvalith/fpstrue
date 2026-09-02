@@ -382,6 +382,9 @@ DerivedDataCache/
 Intermediate/
 Saved/
 
+# Public source repository: binary project/third-party assets stay local and are not redistributed.
+Content/
+
 # IDE folders
 .vs/
 .vscode/

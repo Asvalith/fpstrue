@@ -2,6 +2,9 @@
 
 基于 Unreal Engine 5.5 和 C++ 开发的单机 PvE FPS Demo。项目已经形成角色控制、武器战斗、敌人 AI、群体围攻、波次结算和 HUD 的完整玩法闭环，并围绕多敌人场景建立了可重复的性能测试与消融流程。
 
+> 本仓库用于源码与性能分析展示，不包含地图、模型、动画、音频等二进制或第三方 `Content` 资产。
+> 因此可以直接阅读和编译 C++ 模块，但若要还原完整画面与关卡，需要自行提供具有合法授权的对应资源。
+
 ## 项目内容
 
 - 第一人称移动、跳跃、冲刺、瞄准和武器拾取。
@@ -91,26 +94,18 @@
 
 ## 环境与运行
 
-要求：
+源码编译要求：
 
 - Unreal Engine 5.5。
 - Visual Studio 2022，并安装“使用 C++ 的游戏开发”和对应 Windows SDK。
-- Git LFS，用于获取 `.uasset` 和 `.umap`。
 
-首次获取项目：
-
-```powershell
-git lfs install
-git lfs pull
-```
-
-双击 `fpstrue.uproject`，或先生成 Visual Studio 项目文件并编译 `fpstrueEditor` 的 Development Editor 配置。编辑器与游戏默认地图均为：
+可先生成 Visual Studio 项目文件并编译 `fpstrueEditor` 的 Development Editor 配置。完整开发环境中的编辑器与游戏默认地图为：
 
 ```text
 /Game/FactoryDistrict/Maps/Demonstration
 ```
 
-进入地图后由关卡或 UI 调用 `Start GameMode` 启动正式波次流程。
+公开仓库未分发该地图及其依赖资产；上述路径仅用于说明源码与配置的原始运行入口。完整开发环境进入地图后，由关卡或 UI 调用 `Start GameMode` 启动正式波次流程。
 
 ## 性能测试
 
@@ -134,7 +129,7 @@ git lfs pull
 
 ```text
 Config/                         项目、输入和默认地图配置
-Content/                        地图、蓝图、动画、UI 和其他资产
 Source/fpstrue/                 C++ Runtime 模块
 Tools/                          性能采集、消融和资产审计脚本
+PerformanceEvidence/            可公开的性能截图
 ```
