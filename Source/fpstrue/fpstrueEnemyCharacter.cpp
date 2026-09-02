@@ -851,7 +851,7 @@ bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
 
 void AfpstrueEnemyCharacter::RefreshAnimationSharingRegistration()
 {
-	// 弱指针可能在不通知观察者的情况下失效，先 Get() 成局部裸指针再使用。
+	// 语法复习：弱指针可能在不通知观察者的情况下失效，先 Get() 成局部裸指针再使用。
 	if (UfpstrueEnemyAnimationSharingCoordinator* Coordinator = AnimationSharingCoordinator.Get())
 	{
 		Coordinator->RefreshEnemyRegistration(this);

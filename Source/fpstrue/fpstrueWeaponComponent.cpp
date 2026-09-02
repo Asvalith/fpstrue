@@ -16,7 +16,7 @@ constexpr float DefaultEmptyReloadDuration = 1.2f;
 constexpr float DefaultRoundsPerMinute = 600.0f;
 constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
-// FName 适合反复比较的标识符；集中构造可避免每次命中都创建临时 FString 并执行 ToLower。
+// 语法复习：FName 适合反复比较的标识符；集中构造可避免每次命中都创建临时 FString 并执行 ToLower。
 const FName GripPointSocketName(TEXT("GripPoint"));
 const FName NeckBoneName(TEXT("neck_01"));
 const FName HeadBoneName(TEXT("head"));
@@ -171,7 +171,7 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	// 弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
+	// 语法复习：弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	if (OwningCharacter == nullptr)
 	{

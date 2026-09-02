@@ -9,7 +9,7 @@
 class AfpstrueCharacter;
 
 //声明一个Onpickup动态多播委托，用于拾取后广播
-// 声明指针类型只需要前置声明；只有访问成员或需要完整布局时才 include 对应头文件。
+// 语法复习：声明指针类型只需要前置声明；只有访问成员或需要完整布局时才 include 对应头文件。
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPickUp, AfpstrueCharacter*, PickUpCharacter);
 //声明组件类 UfpstruePickUpComponent
 /** 一次性拾取触发器：检测玩家进入球形范围并向蓝图广播拾取事件。 */

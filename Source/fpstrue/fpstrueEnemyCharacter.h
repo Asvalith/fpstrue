@@ -98,7 +98,7 @@ public:
 	// Coordinator 和共享系统检查攻击、范围及最近受击保护期。
 	bool RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const;
 	// GameMode 注入同一 World 的共享协调器；弱引用只表达协作关系，不取得所有权。
-	// 前置声明足以声明指针和函数，但 TWeakObjectPtr 赋值需要看到完整 UObject 继承关系，实现在 .cpp。
+	// 语法复习：前置声明足以声明指针和函数，但 TWeakObjectPtr 赋值需要看到完整 UObject 继承关系，实现在 .cpp。
 	void SetAnimationSharingCoordinator(UfpstrueEnemyAnimationSharingCoordinator* InCoordinator);
 
 	// ==================== 对外事件 ====================
@@ -128,7 +128,7 @@ protected:
 	// ==================== 组件 ====================
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health")
-	// UPROPERTY + TObjectPtr 是 UE5 的强 GC 引用；组件内存仍由 UObject 生命周期管理。
+	// 语法复习：UPROPERTY + TObjectPtr 是 UE5 的强 GC 引用；组件内存仍由 UObject 生命周期管理。
 	TObjectPtr<UfpstrueHealthComponent> HealthComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
@@ -203,7 +203,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// friend 只开放 private 访问权，不改变对象所有权；这里只保留真正需要内部桥接的三个协作者。
+	// 语法复习：friend 只开放 private 访问权，不改变对象所有权；这里只保留真正需要内部桥接的三个协作者。
 	friend class AfpstrueEnemyAIController;
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemyCombatComponent;
@@ -265,7 +265,7 @@ private:
 	int32 AppliedMinimumLOD = INDEX_NONE;
 	FFPEnemyRenderSignificancePolicy LastRenderSignificancePolicy;
 
-	// TWeakObjectPtr 不延长协调器生命周期；使用前通过 Get()/IsValid() 解析。
+	// 语法复习：TWeakObjectPtr 不延长协调器生命周期；使用前通过 Get()/IsValid() 解析。
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
 
