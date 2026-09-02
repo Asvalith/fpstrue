@@ -20,6 +20,17 @@
 DEFINE_STAT(STAT_fpstrueWaveSpawnTime);
 DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
 
+/*
+ * 单机对局的流程总协调器。
+ * 本类只拥有玩家引用、波次/倒计时和敌人注册表；单敌人决策交给 AIController，群体资源交给
+ * SurroundManager，性能分级与动画共享分别交给两个 Coordinator，避免 GameMode 变成万能类。
+ *
+ * 开局装配链：校验玩家/出生点 -> 创建 SurroundManager -> 启动 Significance 与 Animation Sharing
+ *          -> 绑定玩家死亡 -> 开倒计时 -> 分帧生成第一波。
+ * 敌人链：Spawn -> 注入目标/群体 Manager -> RegisterEnemy 绑定死亡与销毁 -> Death/Destroyed 统一注销。
+ * GameMode 只协调模块和对局状态，不直接执行射击、近战、寻路、动画评分或组件级性能设置。
+ */
+
 // ==================== 生命周期与开局 ====================
 
 AfpstrueGameMode::AfpstrueGameMode()
@@ -43,6 +54,7 @@ void AfpstrueGameMode::BeginPlay()
 
 void AfpstrueGameMode::StartGameMode()
 {
+	// 所有不可恢复的配置错误都在创建 Timer/敌人前失败，避免只启动了一半的对局状态。
 	if (bGameRunning || bGameEnded)
 	{
 		return;
@@ -120,6 +132,7 @@ void AfpstrueGameMode::StartGameMode()
 
 void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 先停止会继续产生回调的 Timer/AI，再解除 Delegate 和共享系统，最后交给 AGameModeBase。
 	ClearGameplayTimers();
 	StopActiveEnemies();
 	ClearEnemyRegistrations();
@@ -144,6 +157,7 @@ void AfpstrueGameMode::CacheSpawnPoints()
 
 void AfpstrueGameMode::StartNextWave()
 {
+	// 波次状态先提交并广播，再建立生成队列；HUD 看到的波次编号始终与即将生成的配置一致。
 	const int32 ConfiguredWaveCount = GetConfiguredWaveCount();
 	if (!bGameRunning || CurrentWave >= ConfiguredWaveCount)
 	{
@@ -234,6 +248,7 @@ TSubclassOf<AfpstrueEnemyCharacter> AfpstrueGameMode::GetEnemyClassForWave(int32
 
 void AfpstrueGameMode::SpawnCurrentWave()
 {
+	// 这里只准备队列，不集中 Spawn；SpawnNextQueuedEnemy 由 Timer 每次消费一个，平滑创建尖峰。
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_SpawnCurrentWave);
 	SCOPE_CYCLE_COUNTER(STAT_fpstrueWaveSpawnTime);
 
@@ -316,6 +331,7 @@ void AfpstrueGameMode::ClearSpawnQueue()
 
 bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReuseCount, TSubclassOf<AfpstrueEnemyCharacter> WaveEnemyClass)
 {
+	// 单次 Spawn 成功后才注入目标、Benchmark 开关并注册；任一步失败都不增加 Alive 计数。
 	if (!IsValid(SpawnPoint))
 	{
 		UE_LOG(LogTemp, Error, TEXT("Enemy spawn point is invalid."));
@@ -413,6 +429,7 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 
 void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
+	// 注册表是 GameMode 对“当前存活参与者”的唯一视图；Add 返回 false 时不重复绑定事件或累计数量。
 	if (!IsValid(Enemy))
 	{
 		return;
@@ -437,6 +454,7 @@ void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 
 void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy, bool bBroadcastCount)
 {
+	// Death 和 Destroyed 可能先后到达；TSet::Remove 的返回值让注销与数量广播保持幂等。
 	if (Enemy == nullptr)
 	{
 		return;
@@ -559,6 +577,7 @@ void AfpstrueGameMode::HandlePlayerDied(AfpstrueCharacter* DeadPlayer)
 
 void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 {
+	// 结算只允许一次：先冻结生成、计时与 AI，再广播最终结果，避免 UI 收到结果后世界状态仍继续变化。
 	if (bGameEnded)
 	{
 		return;

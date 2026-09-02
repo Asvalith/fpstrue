@@ -15,12 +15,23 @@
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
+/*
+ * 玩家角色是“输入与表现协调层”，不拥有武器弹药和生命值这两类业务状态：
+ *
+ *   Enhanced Input -> Character 做角色级前置校验 -> WeaponComponent 执行射击/换弹事务
+ *   ApplyDamage -> HealthComponent 修改生命值 -> Delegate 回到 Character -> 蓝图/HUD 表现
+ *
+ * 这样角色只保存瞄准、冲刺和当前装备关系；武器状态归 WeaponComponent，生命状态归 HealthComponent。
+ * 本类不启用逐帧 Tick，持续开火、换弹超时和后坐力恢复由武器自己的 Timer 管理。
+ */
+
 // 生命周期
 AfpstrueCharacter::AfpstrueCharacter()
 { //胶囊体
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
 	//弹簧臂创建、挂载、位置、长度
+	//**构造函数中创建Actor默认组件
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(GetCapsuleComponent());
 	CameraBoom->SetRelativeLocation(FVector(-10.f, 0.f, 60.f));
@@ -75,6 +86,7 @@ void AfpstrueCharacter::BeginPlay()
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
+// 退出关卡、切换地图或 Actor 被销毁都会进入这里；先停止外部回调，再交给基类释放 Actor。
 void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// EndPlay 统一终止持续输入，并移除本角色添加的 Mapping Context。
@@ -182,6 +194,7 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	}
 }
 
+// Mapping Context 归 LocalPlayer 子系统所有；角色只记录自己添加过的上下文，便于换 Controller 时成对移除。
 void AfpstrueCharacter::ApplyInputMappingContexts()
 {
 	// TWeakObjectPtr 不拥有子系统，使用 Get() 读取当前仍有效的对象。
@@ -295,6 +308,7 @@ void AfpstrueCharacter::StopAim()
 }
 
 // 武器交互
+// 这里是输入边界：Character 不直接扣弹、射线检测或改变武器动作状态，只把请求交给当前装备组件。
 void AfpstrueCharacter::StartWeaponFire()
 {
 	// Character 只校验装备与生存状态，弹药和武器动作互斥由 WeaponComponent 负责。
@@ -327,6 +341,7 @@ void AfpstrueCharacter::StartReload()
 }
 
 //装备枪支，可见性设置
+// 装备成功后由 WeaponComponent 回调本函数；这里仅登记关系并广播，避免角色与武器各维护一份弹药状态。
 void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
 {
 	if (WeaponComponent == nullptr || EquippedWeaponComponent == WeaponComponent)
@@ -356,6 +371,7 @@ void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponCompone
 
 // 生命与伤害
 //生命组件内部事件转发给Character的蓝图表现层，用于UI和动画的更新
+// HealthComponent 是生命值唯一写入者，Character 只做 C++ Gameplay -> 蓝图表现层的事件桥接。
 void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 {
 	OnPlayerHealthChanged(NewHealth);
@@ -368,6 +384,7 @@ void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageC
 
 void AfpstrueCharacter::HandleDeath()
 {
+	// HealthComponent 已保证 OnDeath 只广播一次；本地标志再保护角色侧移动、武器和蓝图表现不被重复执行。
 	if (bDeathEffectsApplied)
 	{
 		return;

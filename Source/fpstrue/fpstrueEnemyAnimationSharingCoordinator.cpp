@@ -16,11 +16,22 @@ namespace
 constexpr float SharedMovingSpeedThreshold = 10.0f;
 }
 
+/*
+ * Animation Sharing 插件的项目适配层。
+ * 它把现有 AI 的 Idle/Chase 状态映射为共享动画状态，并只让满足渲染分级且不处于战斗保护期的普通敌人
+ * 成为 Follower；攻击 Montage、Notify 和死亡表现仍使用敌人自己的骨骼动画实例。
+ *
+ * 共享的只是 Idle/Moving 姿态计算，不共享 Actor Transform、AIController、CharacterMovement、生命值或攻击状态。
+ * Coordinator 统一拥有 World 级 Manager、运行时 Setup 和 Actor Handle；EnemyCharacter 只通过加入/退出接口参与，
+ * 避免每个敌人各自创建一套 Sharing 配置。
+ */
+
 // ==================== 状态适配：复用现有 AI FSM ====================
 
 void UfpstrueEnemyAnimationSharingStateProcessor::ProcessActorState_Implementation(int32& OutState, AActor* InActor, uint8 CurrentState,
 																				   uint8 OnDemandState, bool& bShouldProcess)
 {
+	// AIState 给出玩法意图，实际速度修正表现：已到槽位的 Chase 敌人应共享 Idle，而不是原地播放跑步。
 	bShouldProcess = IsValid(InActor);
 	if (!bShouldProcess)
 	{
@@ -57,6 +68,7 @@ UfpstrueEnemyAnimationSharingCoordinator::UfpstrueEnemyAnimationSharingCoordinat
 
 void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCharacter> InEnemyClass)
 {
+	// 一个 World 只允许本项目创建一个 Manager；任一资产或骨架校验失败都保持原有 AnimBP，不留下半初始化状态。
 	if (bRunning)
 	{
 		return;
@@ -130,6 +142,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::EndPlay(const EEndPlayReason::Typ
 
 bool UfpstrueEnemyAnimationSharingCoordinator::BuildRuntimeSetup(TSubclassOf<AfpstrueEnemyCharacter> InEnemyClass)
 {
+	// Setup 在运行时从敌人 CDO 的 SkeletalMesh/Skeleton 构建，确保共享动画和实际敌人使用同一骨架。
 	const AfpstrueEnemyCharacter* EnemyDefaults = InEnemyClass ? InEnemyClass->GetDefaultObject<AfpstrueEnemyCharacter>() : nullptr;
 	const USkeletalMeshComponent* DefaultMeshComponent = EnemyDefaults != nullptr ? EnemyDefaults->GetMesh() : nullptr;
 	USkeletalMesh* SkeletalMesh = DefaultMeshComponent != nullptr ? DefaultMeshComponent->GetSkeletalMeshAsset() : nullptr;
@@ -182,6 +195,7 @@ bool UfpstrueEnemyAnimationSharingCoordinator::BuildRuntimeSetup(TSubclassOf<Afp
 
 void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(AfpstrueEnemyCharacter* Enemy)
 {
+	// 该函数是幂等的：资格不变时只更新 Significance；资格改变时才真正注册或注销 Actor。
 	if (!bRunning || SharingManager == nullptr || !IsValid(Enemy))
 	{
 		return;
@@ -222,6 +236,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 
 void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharacter* Enemy)
 {
+	// 战斗/死亡退出共享后把 LOD 控制权还给 EnemyCharacter，避免插件残留标志覆盖项目自己的骨骼 LOD 策略。
 	if (SharingManager == nullptr || Enemy == nullptr)
 	{
 		return;

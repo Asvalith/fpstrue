@@ -5,6 +5,12 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 
+/*
+ * 自动测试的只读命令行快照。
+ * 运行期间所有模块读取同一份静态配置，避免不同敌人在不同时间重复解析命令行，
+ * TOptional 则区分“没有传参”和“显式传入 0/false”两种情况。
+ */
+
 namespace
 {
 // 从命令行读取一个可选数值；未提供时保持为空，避免覆盖编辑器配置。

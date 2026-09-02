@@ -35,7 +35,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FWeaponTraceEvent, bool, bHit, FVe
 											  FHitResult, HitResult);
 
 //BlueprintSpawnableComponent：可在蓝图Actor的Components面板
-/** 玩家武器模块：独占装备、动作状态、弹药事务、Hitscan、散布和后坐力，并通过事件驱动 HUD/蓝图。 */
+/**
+ * 玩家武器模块：独占装备、动作状态、弹药事务、Hitscan、散布和后坐力，并通过事件驱动 HUD/蓝图。
+ *
+ * Character 只提交输入请求；本组件用 ActionState 约束开火/换弹互斥，用 Notify 提交换弹数值，
+ * 并用 Timer 为连续射击、后坐力恢复和 Notify 丢失提供独立生命周期。
+ */
 UCLASS(Blueprintable, BlueprintType, ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 {
@@ -250,7 +255,7 @@ private:
 	// Owner
 	//运行时状态
 	//当前持有该武器的角色，EndPlay时置空
-	// 语法复习：这是从武器指回角色的反向观察关系；TWeakObjectPtr 避免双方互相形成强引用。
+	// 这是从武器指回角色的反向观察关系；TWeakObjectPtr 避免双方互相形成强引用。
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AfpstrueCharacter> Character;
 

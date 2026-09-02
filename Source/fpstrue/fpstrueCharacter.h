@@ -24,7 +24,12 @@ DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerDeathReported, AfpstrueCharacter*, DeadPlayer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEquippedWeaponChanged, UfpstrueWeaponComponent*, WeaponComponent);
 
-/** 玩家角色模块：连接输入、移动、武器和通用 HealthComponent，并把状态变化转发给蓝图表现层。 */
+/**
+ * 玩家角色模块：连接输入、移动、武器和通用 HealthComponent，并把状态变化转发给蓝图表现层。
+ *
+ * 状态边界：本类只拥有冲刺、瞄准和当前装备关系；弹药/换弹归 WeaponComponent，生命值归 HealthComponent。
+ * 通信边界：输入使用直接调用，Gameplay 状态变化使用 Delegate，动画和界面表现使用 BlueprintImplementableEvent。
+ */
 UCLASS(config = Game)
 class FPSTRUE_API AfpstrueCharacter : public ACharacter
 {

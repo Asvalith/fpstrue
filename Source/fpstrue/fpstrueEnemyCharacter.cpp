@@ -15,6 +15,16 @@
 #include "Math/RotationMatrix.h"
 #include "SignificanceManager.h"
 
+/*
+ * 敌人 Pawn 与各子系统之间的桥接层。
+ * HealthComponent/CombatComponent 分别拥有生命和攻击事务，AIController 拥有目标与状态机；本类负责组件装配、
+ * 受击死亡表现，以及把 Gameplay/Render Significance 结果转换成移动、骨骼、阴影和 RT 组件设置。
+ *
+ * 本类刻意不保存第二份 AI、血量或攻击状态：对外查询都转发到真正所有者，跨模块操作通过窄接口完成。
+ * Gameplay Significance 只影响决策/移动节奏；Render Significance 只影响骨骼、动画、阴影、RT 和动画共享。
+ * 攻击与近期战斗通过 GameplayAnimationProtection 临时恢复完整动画，防止性能策略破坏 Notify 和 Socket 判定。
+ */
+
 // ==================== 组件初始化与生命周期 ====================
 
 AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
@@ -37,6 +47,7 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 
 void AfpstrueEnemyCharacter::BeginPlay()
 {
+	// 初始化顺序：读取 Benchmark 覆盖 -> 配置 Mesh/Movement -> 绑定 Health -> 注册 Gameplay Significance。
 	Super::BeginPlay();
 
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
@@ -88,6 +99,7 @@ void AfpstrueEnemyCharacter::BeginPlay()
 
 void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 退出时先断开外部管理器和委托；组件自身的 Timer/攻击事务由各组件 EndPlay 继续清理。
 	SuspendAnimationSharing();
 	UnregisterFromSignificanceManager();
 	if (HealthComponent != nullptr)
@@ -102,6 +114,7 @@ void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 float AfpstrueEnemyCharacter::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator,
 										 AActor* DamageCauser)
 {
+	// AActor 伤害入口只补充命中方向/骨骼信息；实际血量写入仍由通用 HealthComponent 通过 OnTakeAnyDamage 完成。
 	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
 	{
 		const FPointDamageEvent* PointDamageEvent = static_cast<const FPointDamageEvent*>(&DamageEvent);
@@ -161,6 +174,7 @@ float AfpstrueEnemyCharacter::GetEffectiveAttackRange() const
 
 void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 {
+	// 每个敌人只注册一个轻量距离函数；集中 Coordinator 调用 Manager::Update，敌人本身没有 Significance Tick。
 	if (bRegisteredWithSignificanceManager || GetWorld() == nullptr)
 	{
 		return;
@@ -216,6 +230,7 @@ void AfpstrueEnemyCharacter::UnregisterFromSignificanceManager()
 
 void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 {
+	// 距离决定自然档位，但攻击中或已进入攻击范围必须保持 Full，保证近战响应不被后台档降频。
 	if (IsDead())
 	{
 		return;
@@ -239,6 +254,7 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 
 void AfpstrueEnemyCharacter::ApplySignificanceTier(EFPEnemySignificanceTier NewTier)
 {
+	// 档位未变化立即返回；变化时一次性下发 Movement Tick 间隔和 AI 决策倍率。
 	if (IsDead())
 	{
 		return;
@@ -309,6 +325,7 @@ void AfpstrueEnemyCharacter::ApplyGameplaySignificanceIntervals()
 FFPEnemyRenderSignificanceSample AfpstrueEnemyCharacter::EvaluateRenderSignificance(const FFPEnemyRenderViewContext& ViewContext,
 																					const FFPEnemyRenderSignificancePolicy& Policy)
 {
+	// 这里只采样并返回纯渲染数据，不改 AI 状态；预算排序与最终应用由 Coordinator 在全体候选收集后完成。
 	FFPEnemyRenderSignificanceSample Sample;
 	if (IsDead())
 	{
@@ -389,6 +406,7 @@ FFPEnemyRenderSignificanceSample AfpstrueEnemyCharacter::EvaluateRenderSignifica
 EFPEnemyRenderSignificanceTier AfpstrueEnemyCharacter::ResolveNaturalRenderSignificanceTier(const FFPEnemyRenderSignificanceSample& Sample,
 																							const FFPEnemyRenderSignificancePolicy& Policy)
 {
+	// 升档立即响应，降档需要满足退出阈值、最短保持时间和延迟，避免视锥边缘反复切 LOD/阴影。
 	const UWorld* World = GetWorld();
 	const float CurrentTime = World != nullptr ? World->GetTimeSeconds() : 0.0f;
 	if (!Policy.bEnableRenderTiering)
@@ -499,6 +517,7 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceTier(EFPEnemyRenderSignifica
 														 bool bShouldBeVisibleInRayTracing, bool bInForceFullAnimationAndLOD,
 														 const FFPEnemyRenderSignificancePolicy& Policy)
 {
+	// Coordinator 在同一轮排序后统一提交结果；本对象只把策略转换成 SkeletalMeshComponent 的实际设置。
 	if (IsDead())
 	{
 		return;
@@ -516,6 +535,7 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceTier(EFPEnemyRenderSignifica
 
 void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 {
+	// 攻击和战斗保护优先于性能档：此时动画 Tick 与 LOD 恢复完整，阴影/RT 仍遵循各自独立预算。
 	if (IsDead() || !bHasRenderSignificancePolicy)
 	{
 		return;
@@ -738,6 +758,7 @@ void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
 
 void AfpstrueEnemyCharacter::HandleDeath()
 {
+	// 死亡顺序先停止会继续回调的系统，再关闭移动/碰撞，最后进入 Ragdoll 并广播给 GameMode/蓝图。
 	if (bDeathEffectsApplied)
 	{
 		return;
@@ -815,6 +836,7 @@ void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 
 bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
 {
+	// 只有低渲染档、非战斗保护、非死亡且未模拟物理的敌人才可成为 Follower；攻击/布娃娃必须使用独立姿态。
 	if (IsDead() || !bHasRenderSignificancePolicy || bDisableAnimationOptimizationsForBenchmark ||
 		RenderSignificanceTier == EFPEnemyRenderSignificanceTier::Full ||
 		RequiresGameplayAnimationProtection(GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0f,
@@ -829,7 +851,7 @@ bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
 
 void AfpstrueEnemyCharacter::RefreshAnimationSharingRegistration()
 {
-	// 语法复习：弱指针可能在不通知观察者的情况下失效，先 Get() 成局部裸指针再使用。
+	// 弱指针可能在不通知观察者的情况下失效，先 Get() 成局部裸指针再使用。
 	if (UfpstrueEnemyAnimationSharingCoordinator* Coordinator = AnimationSharingCoordinator.Get())
 	{
 		Coordinator->RefreshEnemyRegistration(this);

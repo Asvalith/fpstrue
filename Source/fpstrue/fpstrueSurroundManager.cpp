@@ -9,6 +9,19 @@
 #include "Engine/World.h"
 #include "NavigationSystem.h"
 
+/*
+ * 多敌人共享的群体协调器。
+ * 它不替代单个 AIController 的状态机，只集中维护必须全局一致的资源：玩家位置快照、稳定槽位、
+ * 并发攻击名额和每帧 MoveTo 提交预算，从而减少围攻拥堵和重复导航请求。
+ *
+ * 数据结构职责：
+ *   TArray<Slot> 保存固定内外环布局；TMap<Enemy, Index> 保存稳定占位；TSet<Enemy> 保存攻击许可。
+ * 敌人键使用 TWeakObjectPtr，Manager 不拥有敌人生命周期；死亡/销毁由主动释放和失效项清理双重兜底。
+ * 玩家位置与槽位 NavMesh 投影按 Timer/位移阈值批量刷新，单个 AIController 只读取缓存结果。
+ */
+
+// ==================== 生命周期与目标注入 ====================
+
 AfpstrueSurroundManager::AfpstrueSurroundManager()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -34,6 +47,7 @@ void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
 {
+	// GameMode 在开局注入唯一玩家；目标变化时重建快照并重新启动共享刷新 Timer。
 	if (TargetCharacter == NewTargetCharacter && bHasSharedTargetSnapshot)
 	{
 		return;
@@ -52,6 +66,8 @@ void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCha
 									FMath::Max(SharedTargetRefreshInterval, 0.05f), true);
 }
 
+// ==================== 共享目标与 NavMesh 投影缓存 ====================
+
 void AfpstrueSurroundManager::RefreshSharedTargetSnapshot()
 {
 	UpdateSharedTargetSnapshot(false);
@@ -59,6 +75,7 @@ void AfpstrueSurroundManager::RefreshSharedTargetSnapshot()
 
 void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 {
+	// 位移未达到阈值时复用旧目标和旧投影，避免每个敌人每次决策都查询 NavMesh。
 	if (!IsValid(TargetCharacter))
 	{
 		return;
@@ -79,6 +96,7 @@ void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 
 void AfpstrueSurroundManager::BuildSlots()
 {
+	// 槽位只保存相对角度和半径；世界位置基于最新玩家快照统一计算，保证所有敌人使用同一参考系。
 	SurroundSlots.Reset();
 
 	const auto AddRing = [this](int32 RingIndex, int32 SlotCount, float Radius)
@@ -103,6 +121,7 @@ void AfpstrueSurroundManager::BuildSlots()
 
 void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 {
+	// 同时缓存“站位点”和更靠近玩家的“攻击接近点”，AI 决策阶段不再重复 ProjectPointToNavigation。
 	if (!bHasSharedTargetSnapshot)
 	{
 		return;
@@ -139,8 +158,11 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 	}
 }
 
+// ==================== 稳定槽位的申请与释放 ====================
+
 bool AfpstrueSurroundManager::RequestSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 {
+	// 已分配的敌人直接复用原槽位；只有首次申请才寻找空位，避免每轮决策改变目标导致来回晃动。
 	if (!IsValid(Enemy) || !IsValid(TargetCharacter))
 	{
 		return false;
@@ -202,8 +224,11 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	}
 }
 
+// ==================== 攻击与 MoveTo 全局预算 ====================
+
 bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
+	// 当前是容量限制而非 Top-N 排名：名额未满时先申请先获得，攻击结束后由 Controller/CombatComponent 归还。
 	if (!IsValid(Enemy) || Enemy->IsDead())
 	{
 		return false;
@@ -247,6 +272,7 @@ void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* En
 
 bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 {
+	// GFrameCounter 形成无额外 Tick 的帧级计数器；战斗请求可使用预留额度，普通追击不能挤占全部预算。
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
 	if (!bEnableMoveRequestBudget || BenchmarkConfig.bDisableMoveToRequestBudget)
 	{
@@ -272,6 +298,7 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 	return true;
 }
 
+// 槽位位置和攻击接近点都来自同一缓存，避免 AIController 在每次决策中重复导航投影。
 bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation)
 {
 	if (!IsValid(Enemy) || !IsValid(TargetCharacter))
@@ -310,6 +337,8 @@ bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) cons
 	return true;
 }
 
+// ==================== 清理、槽位选择与调试 ====================
+
 void AfpstrueSurroundManager::ResetManager()
 {
 	EnemyToSlot.Reset();
@@ -329,6 +358,7 @@ void AfpstrueSurroundManager::ResetManager()
 
 void AfpstrueSurroundManager::CleanupInvalidEntries()
 {
+	// 弱引用不会阻止 Actor 销毁；本函数只清掉已失效键，并同步清空对应槽位占用。
 	for (auto Iterator = EnemyToSlot.CreateIterator(); Iterator; ++Iterator)
 	{
 		if (Iterator.Key().IsValid() && !Iterator.Key()->IsDead())

@@ -25,7 +25,12 @@ struct FfpstrueSurroundSlot
 	bool bHasProjectedApproachLocation = false;
 };
 
-/** 群体 AI 协调模块：共享玩家位置、分配包围槽，并限制并发攻击和每帧 MoveTo 请求。 */
+/**
+ * 群体 AI 协调模块：共享玩家位置、分配稳定包围槽，并限制并发攻击和每帧 MoveTo 请求。
+ *
+ * 只保存跨敌人资源，不接管单敌人FSM。敌人使用弱引用参与槽位和预算；玩家位置及NavMesh投影集中缓存，
+ * AIController 通过窄接口申请/释放资源，避免各敌人独立维护互相冲突的群体状态。
+ */
 UCLASS()
 class FPSTRUE_API AfpstrueSurroundManager : public AActor
 {
@@ -129,16 +134,16 @@ private:
 	// 调试模式下绘制槽位、占用关系和攻击接近点。
 	void DrawDebugSlots();
 
-	// 语法复习：跨 Actor 的长期引用需要进入反射系统；Transient 表明缓存不会被序列化到资产或存档。
+	// 跨 Actor 的长期引用需要进入反射系统；Transient 表明缓存不会被序列化到资产或存档。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueCharacter> TargetCharacter;
 
 	FVector CachedTargetLocation = FVector::ZeroVector;
 	bool bHasSharedTargetSnapshot = false;
 
-	// 语法复习：TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
+	// TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
-	// 语法复习：弱指针作为键时可能留下失效键，因此 CleanupInvalidEntries 必须负责清理。
+	// 弱指针作为键时可能留下失效键，因此 CleanupInvalidEntries 必须负责清理。
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
 	uint64 MoveRequestBudgetFrame = MAX_uint64;

@@ -14,7 +14,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDamageReceived, float, DamageA
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHealthChanged, float, NewHealth);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
 
-/** 通用生命值模块：统一接收 UE 伤害、维护血量并广播受伤、血量变化和死亡事件。 */
+/**
+ * 通用生命值模块：统一接收 UE 伤害、维护血量并广播受伤、血量变化和死亡事件。
+ *
+ * 它是 CurrentHealth 的唯一写入者，不依赖玩家或敌人类型；Owner 订阅事件后自行处理 HUD、停止 AI、
+ * Ragdoll 等差异化副作用，因此生命数值与角色表现可以分别复用和测试。
+ */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueHealthComponent : public UActorComponent
 {

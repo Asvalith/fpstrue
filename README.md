@@ -26,6 +26,33 @@
 | `AfpstrueGameMode` | 波次、分帧生成、敌人注册、倒计时和胜负 |
 | Significance / Animation Sharing Coordinator | 集中计算敌人等级并向移动、动画、阴影和骨骼光追消费者下发策略 |
 
+### 源码快速导航
+
+以下链接可以直接打开核心实现，避免在 `Source/fpstrue/` 中逐个查找：
+
+| 功能 | 头文件 | 实现文件 | 重点入口 |
+| --- | --- | --- | --- |
+| 玩家输入、移动与组件协调 | [fpstrueCharacter.h](Source/fpstrue/fpstrueCharacter.h) | [fpstrueCharacter.cpp](Source/fpstrue/fpstrueCharacter.cpp) | `SetupPlayerInputComponent`、`StartWeaponFire`、`StartReload`、`HandleDeath` |
+| 玩家武器、射击与换弹 | [fpstrueWeaponComponent.h](Source/fpstrue/fpstrueWeaponComponent.h) | [fpstrueWeaponComponent.cpp](Source/fpstrue/fpstrueWeaponComponent.cpp) | `StartFire`、`FireLineTrace`、`RequestReload`、`CommitReload` |
+| 玩家与敌人复用生命组件 | [fpstrueHealthComponent.h](Source/fpstrue/fpstrueHealthComponent.h) | [fpstrueHealthComponent.cpp](Source/fpstrue/fpstrueHealthComponent.cpp) | `HandleOwnerTakeAnyDamage`、`ApplyDamageInternal` |
+| 单敌人状态决策与寻路 | [fpstrueEnemyAIController.h](Source/fpstrue/fpstrueEnemyAIController.h) | [fpstrueEnemyAIController.cpp](Source/fpstrue/fpstrueEnemyAIController.cpp) | `UpdateAI`、`GetNextDecisionInterval`、`MoveToGoal` |
+| 敌人攻击事务与刀刃检测 | [fpstrueEnemyCombatComponent.h](Source/fpstrue/fpstrueEnemyCombatComponent.h) | [fpstrueEnemyCombatComponent.cpp](Source/fpstrue/fpstrueEnemyCombatComponent.cpp) | `TryAttackTarget`、`UpdateAttackWindow`、`SweepWeaponSegment`、`FinishAttack` |
+| 攻击动画有效窗口 | [fpstrueAnimNotifyState_AttackWindow.h](Source/fpstrue/fpstrueAnimNotifyState_AttackWindow.h) | [fpstrueAnimNotifyState_AttackWindow.cpp](Source/fpstrue/fpstrueAnimNotifyState_AttackWindow.cpp) | `NotifyBegin`、`NotifyTick`、`NotifyEnd` |
+| 群体槽位与全局请求预算 | [fpstrueSurroundManager.h](Source/fpstrue/fpstrueSurroundManager.h) | [fpstrueSurroundManager.cpp](Source/fpstrue/fpstrueSurroundManager.cpp) | `RequestSurroundSlot`、`TryAcquireAttackPermission`、`TryConsumeMoveRequestBudget` |
+| 敌人角色、LOD与渲染策略落地 | [fpstrueEnemyCharacter.h](Source/fpstrue/fpstrueEnemyCharacter.h) | [fpstrueEnemyCharacter.cpp](Source/fpstrue/fpstrueEnemyCharacter.cpp) | `ApplySignificance`、`EvaluateRenderSignificance`、`ApplyRenderSignificanceSettings`、`HandleDeath` |
+| Significance集中采样和预算分配 | [fpstrueEnemySignificanceCoordinator.h](Source/fpstrue/fpstrueEnemySignificanceCoordinator.h) | [fpstrueEnemySignificanceCoordinator.cpp](Source/fpstrue/fpstrueEnemySignificanceCoordinator.cpp) | `Update`、候选排序、Full/Shadow/RT预算下发 |
+| Animation Sharing适配 | [fpstrueEnemyAnimationSharingCoordinator.h](Source/fpstrue/fpstrueEnemyAnimationSharingCoordinator.h) | [fpstrueEnemyAnimationSharingCoordinator.cpp](Source/fpstrue/fpstrueEnemyAnimationSharingCoordinator.cpp) | `BuildRuntimeSetup`、`RefreshEnemyRegistration`、`SuspendEnemy` |
+| 波次、注册表与模块装配 | [fpstrueGameMode.h](Source/fpstrue/fpstrueGameMode.h) | [fpstrueGameMode.cpp](Source/fpstrue/fpstrueGameMode.cpp) | `StartGame`、`SpawnNextQueuedEnemy`、`RegisterEnemy`、`FinishGame` |
+| Benchmark命令行配置 | [fpstrueBenchmarkConfig.h](Source/fpstrue/fpstrueBenchmarkConfig.h) | [fpstrueBenchmarkConfig.cpp](Source/fpstrue/fpstrueBenchmarkConfig.cpp) | 消融参数解析与策略覆盖 |
+| Benchmark执行和消费者计数 | [fpstrueBenchmarkRunner.h](Source/fpstrue/fpstrueBenchmarkRunner.h) | [fpstrueBenchmarkRunner.cpp](Source/fpstrue/fpstrueBenchmarkRunner.cpp) | `BeginBenchmark`、`StartCapture`、`ApplyDiagnosticOverrides` |
+| 项目性能埋点 | [fpstruePerformanceStats.h](Source/fpstrue/fpstruePerformanceStats.h) | — | AI、生成、攻击Sweep的Stat与CSV指标声明 |
+
+性能结论和截图入口：
+
+- [完整实验与消融证据](PERFORMANCE_EVIDENCE.md)
+- [160敌人Unreal Insights截图](PerformanceEvidence/UnrealInsights_160Enemies.png)
+- [性能测试脚本目录](Tools/)
+
 核心玩法状态由 C++ 维护；蓝图和 UMG 通过委托、Blueprint 事件及只读查询完成动画、音效、特效和界面表现。
 
 ## 多敌人性能策略
@@ -60,7 +87,7 @@
 | MoveTo 提交/帧 | 14.565 | 0.109 | -99.3% |
 | Draw Calls | 3458 | 1786 | -48.4% |
 
-这组对照支持的结论是：敌人移动、动画、AI 和提交频率的 CPU 扩展成本明显下降；但整体 Frame 没有同步改善，当前关键路径转移到了 Render Thread / RHI Thread。精确评估单项收益仍需要在同一提交上执行随机顺序、多次重复的开关消融。
+这组对照支持的结论是：敌人移动、动画、AI 和提交频率的 CPU 扩展成本明显下降；但整体 Frame 没有同步改善，当前关键路径转移到了 Render Thread / RHI Thread。
 
 ## 环境与运行
 
@@ -86,6 +113,8 @@ git lfs pull
 进入地图后由关卡或 UI 调用 `Start GameMode` 启动正式波次流程。
 
 ## 性能测试
+
+完整的实验分层、原始证据对应关系、有效参数与未验证参数见 [PERFORMANCE_EVIDENCE.md](PERFORMANCE_EVIDENCE.md)。
 
 规模矩阵：
 

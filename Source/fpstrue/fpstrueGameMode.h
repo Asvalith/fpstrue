@@ -32,7 +32,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWaveChanged, int32, CurrentWave,
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAliveEnemyCountChanged, int32, AliveEnemyCount);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGameResult, bool, bPlayerWon);
 
-/** 游戏流程总协调器：管理波次、敌人注册表、倒计时，并持有 AI/性能共享模块。 */
+/**
+ * 游戏流程总协调器：管理波次、敌人注册表、倒计时，并装配群体AI与性能共享模块。
+ *
+ * GameMode 只拥有对局级状态；具体寻路、战斗、生命、显著性评分和动画共享均委托给独立对象。
+ * 对局开始时负责连接这些模块，对局结束时按相反顺序停止 Timer、解除 Delegate 并清空运行时引用。
+ */
 UCLASS()
 class FPSTRUE_API AfpstrueGameMode : public AGameModeBase
 {
@@ -85,7 +90,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|AI")
 	TSubclassOf<AfpstrueSurroundManager> SurroundManagerClass;
 
-	// 语法复习：Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
+	// Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Game|AI")
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
 
@@ -133,7 +138,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// 语法复习：friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
+	// friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
 	friend class UfpstrueBenchmarkRunner;
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemySignificanceCoordinator;
@@ -201,7 +206,7 @@ private:
 
 	// ==================== 运行时引用与状态 ====================
 
-	// 语法复习：这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
+	// 这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
 	// UPROPERTY 仍会让 GC 扫描数组，Transient 则明确它们只在本局运行时有效。
 	UPROPERTY(Transient)
 	TArray<AActor*> SpawnPoints;
@@ -224,7 +229,7 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Performance|Animation Sharing")
 	TObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> EnemyAnimationSharingCoordinator;
 
-	// 语法复习：TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
+	// TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
 	int32 CurrentWave = 0;

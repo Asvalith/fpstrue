@@ -4,6 +4,12 @@
 #include "fpstrueCharacter.h"
 #include "fpstrueWeaponComponent.h"
 
+/*
+ * 一次性武器拾取入口。
+ * Sphere 只负责发现候选玩家，真正的装备规则由 WeaponComponent::AttachWeapon 决定；成功后立即关闭重叠、
+ * 广播表现事件并销毁本组件。bConsumed 同时保护同帧多次 Overlap，避免一把武器重复提交装备事务。
+ */
+
 //初始化UfpstruePickUpComponent组件，设置SphereRadius为32.f
 UfpstruePickUpComponent::UfpstruePickUpComponent()
 {

@@ -20,6 +20,20 @@ DEFINE_STAT(STAT_fpstrueSweepReturnedHitCount);
 DEFINE_STAT(STAT_fpstrueAttackWindowUpdateCount);
 CSV_DEFINE_CATEGORY(fpstrueCombat, true);
 
+/*
+ * 单个敌人的近战事务组件。
+ * AIController 只负责“何时攻击”，本组件负责一次攻击从开始、动画窗口、连续轨迹检测到结束的完整生命周期，
+ * 并集中处理重复命中、Notify 丢失和死亡中断，避免 Character 与 Controller 各维护一份攻击状态。
+ *
+ * 攻击链：AI 获得攻击名额 -> TryAttackTarget 建立事务 -> 蓝图播放 Montage
+ *       -> AnimNotifyState Begin/Tick/End 驱动有效窗口 -> Sweep 命中后 ApplyDamage
+ *       -> 结束 Notify 或保护 Timer 汇入 FinishAttack -> 归还攻击名额。
+ * bIsAttacking、bAttackWindowActive 和 bHitTargetThisAttack 都只由本组件写入，分别表示事务、有效判定窗口和
+ * 单次命中提交状态，避免把“动画正在播放”和“本帧可以造成伤害”混成一个布尔值。
+ */
+
+// ==================== 生命周期与攻击范围 ====================
+
 UfpstrueEnemyCombatComponent::UfpstrueEnemyCombatComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -73,8 +87,11 @@ bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
 		   FMath::Square(GetEffectiveAttackRange());
 }
 
+// ==================== 攻击事务与动画窗口 ====================
+
 bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 {
+	// 只有冷却、目标和事务状态均满足才开始；成功后先建立 C++ 状态，再通知蓝图播放动画。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr || !CanStartAttack())
 	{
@@ -108,6 +125,7 @@ void UfpstrueEnemyCombatComponent::HandleAttackFinishedNotify()
 
 void UfpstrueEnemyCombatComponent::BeginAttackWindow()
 {
+	// NotifyState Begin 记录刀刃首个采样位置；后续 Tick 才能用上一帧到当前帧的轨迹补足快速运动区域。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr || Enemy->IsDead() || !bIsAttacking)
 	{
@@ -133,6 +151,7 @@ void UfpstrueEnemyCombatComponent::BeginAttackWindow()
 
 void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 {
+	// 只在动画有效帧执行连续 Sweep；已命中唯一玩家后会立即关闭窗口，避免后续帧重复扣血和无效查询。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr || !bAttackWindowActive || Enemy->IsDead() || !bIsAttacking)
 	{
@@ -189,6 +208,7 @@ void UfpstrueEnemyCombatComponent::EndAttackWindow()
 	CancelAttackWindow();
 }
 
+// Benchmark 开关只跳过 Sweep；攻击动画、状态和 Timer 仍正常运行，保证消融只改变一个消费者。
 void UfpstrueEnemyCombatComponent::SetAttackSweepDisabledForBenchmark(bool bDisabled)
 {
 	bDisableAttackSweepForBenchmark = bDisabled;
@@ -214,6 +234,7 @@ void UfpstrueEnemyCombatComponent::ResetCombat()
 
 bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 {
+	// 该查询不修改状态，AIController 可在申请全局攻击名额前先排除冷却、死亡和距离不满足的敌人。
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const UWorld* World = GetWorld();
 	if (Enemy == nullptr || World == nullptr)
@@ -225,6 +246,8 @@ bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 	return TargetCharacter != nullptr && !TargetCharacter->IsDead() && !Enemy->IsDead() && !bIsAttacking && IsTargetInAttackRange() &&
 		   World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
 }
+
+// ==================== 武器轨迹、碰撞查询与伤害去重 ====================
 
 bool UfpstrueEnemyCombatComponent::GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const
 {
@@ -243,6 +266,7 @@ bool UfpstrueEnemyCombatComponent::GetWeaponBladeSegment(FVector& OutBladeBase, 
 
 void UfpstrueEnemyCombatComponent::SweepWeaponSegment(const FVector& TraceStart, const FVector& TraceEnd)
 {
+	// Sweep 使用刀刃上一帧到当前帧的连续路径，而不是只依赖当前帧 Overlap，降低快速挥砍和低帧率下的漏判。
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemy_AttackSweep);
 	CSV_SCOPED_TIMING_STAT(fpstrueCombat, AttackSweepTime);
 	SCOPE_CYCLE_COUNTER(STAT_fpstrueAttackSweepTime);
@@ -311,6 +335,8 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 	return true;
 }
 
+// ==================== 中断清理与超时兜底 ====================
+
 void UfpstrueEnemyCombatComponent::CancelAttackWindow()
 {
 	bAttackWindowActive = false;
@@ -331,6 +357,7 @@ void UfpstrueEnemyCombatComponent::ScheduleAttackFinish(float DurationSeconds)
 
 void UfpstrueEnemyCombatComponent::FinishAttack()
 {
+	// 动画 Notify 与失败保护 Timer 共用该幂等出口：结束窗口、更新时间、恢复渲染策略并归还全局攻击名额。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr || !bIsAttacking)
 	{

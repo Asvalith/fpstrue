@@ -17,6 +17,17 @@
 
 CSV_DEFINE_CATEGORY(fpstrueSignificance, true);
 
+/*
+ * 多敌人的重要性集中采样与预算分配器。
+ * 每轮先用同一个玩家/相机快照收集全部候选，再统一排序并分配 Full Render、阴影和 RT 名额，
+ * 最后才把结果写回组件，避免敌人按注册顺序边计算边抢预算造成不稳定。
+ *
+ * 同一 Timer 只统一“采样时刻”，不同消费者仍保持独立语义：
+ *   Gameplay：玩家距离 + 战斗保护 -> AI 决策倍率、CharacterMovement Tick 间隔。
+ *   Render：视锥、屏占比、最近可见和相机距离 -> Render Tier、LOD、动画、阴影、RT、Animation Sharing。
+ * 相机可见性绝不参与 Gameplay 评分，因此玩家身后的敌人仍能正常追击。
+ */
+
 // ==================== 生命周期与策略初始化 ====================
 
 UfpstrueEnemySignificanceCoordinator::UfpstrueEnemySignificanceCoordinator()
@@ -26,6 +37,7 @@ UfpstrueEnemySignificanceCoordinator::UfpstrueEnemySignificanceCoordinator()
 
 void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 {
+	// GameMode 只提供策略配置和敌人注册表；本组件拥有校验、集中更新、排序及预算应用流程。
 	GameMode = InGameMode;
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
 	if (OwnerGameMode == nullptr)
@@ -86,6 +98,14 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 
 void UfpstrueEnemySignificanceCoordinator::Update()
 {
+	/*
+	 * 单轮固定阶段：
+	 * 1. 用玩家 Transform 更新 UE Significance Manager，先下发 Gameplay 档位；
+	 * 2. 从 PlayerCameraManager 创建唯一 Render ViewContext；
+	 * 3. 收集全部存活敌人样本，完成排序后再分配 Full/Shadow/RT 名额；
+	 * 4. 统一写回组件，并记录“消费者数量 + 局部耗时”所需的 CSV 指标。
+	 * 阶段之间不边遍历边抢预算，保证结果只由本轮快照和稳定排序决定。
+	 */
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
 	if (OwnerGameMode == nullptr)
 	{
@@ -140,7 +160,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		bool bShouldBeVisibleInRayTracing = false;
 	};
 
-	// 采样阶段不改组件状态，确保所有敌人使用同一帧的观察条件。
+	// 采样阶段不改组件状态，确保所有敌人使用同一帧的观察条件；这也是“统一时钟”的含义。
 	TArray<FEnemyRenderCandidate> Candidates;
 	Candidates.Reserve(OwnerGameMode->RegisteredEnemies.Num());
 	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : OwnerGameMode->RegisteredEnemies)
@@ -259,6 +279,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	}
 
 	// 统一应用结果并在同一位置记录消融所需的 CSV 指标。
+	// 注意：统一采样不等于所有消费者必须无条件重写；组件内部仍应通过状态比较避免重复修改渲染状态。
 	int32 GameplayFullCount = 0;
 	int32 GameplayReducedCount = 0;
 	int32 GameplayBackgroundCount = 0;
@@ -373,6 +394,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 
 void UfpstrueEnemySignificanceCoordinator::SanitizePolicy()
 {
+	// 配置可能来自 CDO、蓝图或 Benchmark 命令行；进入热路径前集中修正，Update 中不再重复做防御性分支。
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
 	if (OwnerGameMode == nullptr)
 	{

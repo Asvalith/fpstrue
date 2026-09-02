@@ -15,6 +15,14 @@
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 
+/*
+ * 自动性能测试执行器。
+ * GameMode 只负责持有本组件；这里按“启动场景 -> 等待生成 -> 预热 -> 采集 -> 保存/退出”推进一次测试，
+ * 并把命令行中的消融开关统一应用到敌人，避免测试逻辑散落进正常 Gameplay 流程。
+ */
+
+// ==================== 生命周期与测试入口 ====================
+
 UfpstrueBenchmarkRunner::UfpstrueBenchmarkRunner()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -58,6 +66,8 @@ void UfpstrueBenchmarkRunner::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Cancel();
 	Super::EndPlay(EndPlayReason);
 }
+
+// ==================== 场景准备与预热 ====================
 
 void UfpstrueBenchmarkRunner::BeginBenchmark()
 {
@@ -110,6 +120,8 @@ void UfpstrueBenchmarkRunner::WaitForBenchmarkReady()
 										   false);
 }
 
+// ==================== 正式采集与消融快照 ====================
+
 void UfpstrueBenchmarkRunner::StartCapture()
 {
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
@@ -139,6 +151,8 @@ void UfpstrueBenchmarkRunner::StartCapture()
 
 	if (BenchmarkConfig.bTakeScreenshot)
 	{
+		// Shot 用于证明场景和敌人数正确，不作为逐像素 A/B。
+		// 冷缓存时它可能触发 Shader/资源收口，因此解释 Trace 时要排除采集开头的异常帧。
 		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("Shot"));
 	}
 
@@ -150,6 +164,7 @@ void UfpstrueBenchmarkRunner::StartCapture()
 										   false);
 }
 
+// 将同一组命令行开关下发给所有存活敌人，并记录消费者数量，证明消融确实生效。
 void UfpstrueBenchmarkRunner::ApplyDiagnosticOverrides()
 {
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
@@ -273,6 +288,8 @@ void UfpstrueBenchmarkRunner::ApplyDiagnosticOverrides()
 		   OwnerGameMode->EnemyRenderSignificancePolicy.MaxShadowCastingEnemies,
 		   OwnerGameMode->EnemyRenderSignificancePolicy.MaxRayTracingEnemies);
 }
+
+// ==================== 采集结束与进程退出 ====================
 
 void UfpstrueBenchmarkRunner::StopCapture()
 {

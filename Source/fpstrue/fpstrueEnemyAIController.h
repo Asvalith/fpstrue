@@ -20,7 +20,12 @@ enum class EFPEnemyAIState : uint8
 	Dead UMETA(DisplayName = "Dead")
 };
 
-/** 敌人决策模块：用低频 Timer 驱动 Idle/Chase/Attack/Dead，并协调寻路、包围槽和攻击名额。 */
+/**
+ * 敌人决策模块：用一次性 Timer 驱动 Idle/Chase/Attack/Dead，并协调寻路、包围槽和攻击名额。
+ *
+ * 本类拥有单个敌人的目标、AIState、移动目标缓存和失败退避；跨敌人的槽位/预算归 SurroundManager，
+ * 攻击窗口与伤害事务归 EnemyCombatComponent。Controller 不启用 Actor Tick，Timer 仍运行在 Game Thread。
+ */
 UCLASS()
 class FPSTRUE_API AfpstrueEnemyAIController : public AAIController
 {
@@ -135,7 +140,7 @@ private:
 	// 判断目标是否有效、存活且可作为当前战斗对象。
 	bool IsTargetUsable(const AfpstrueCharacter* Target) const;
 
-	// 语法复习：Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
+	// Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
 	// 让 GC 识别引用，并由 OnUnPossess 主动清空，不依赖 C++ 析构函数处理 Gameplay 状态。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;

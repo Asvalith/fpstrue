@@ -8,7 +8,12 @@
 
 class AfpstrueEnemyCharacter;
 
-/** 敌人近战模块：独占攻击事务、动画窗口、武器轨迹采样和一次攻击内的去重伤害。 */
+/**
+ * 敌人近战模块：独占攻击事务、动画窗口、武器轨迹采样和一次攻击内的去重伤害。
+ *
+ * AIController 只请求开始攻击；AnimNotifyState 只报告动画窗口；本组件统一决定能否攻击、何时造成伤害、
+ * 如何处理中断/重复 Notify，并在事务结束时通知 Controller 归还攻击名额。
+ */
 UCLASS(ClassGroup = (Combat))
 class FPSTRUE_API UfpstrueEnemyCombatComponent : public UActorComponent
 {

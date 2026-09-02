@@ -16,10 +16,24 @@ constexpr float DefaultEmptyReloadDuration = 1.2f;
 constexpr float DefaultRoundsPerMinute = 600.0f;
 constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
-// 语法复习：FName 适合反复比较的标识符；集中构造可避免每次命中都创建临时 FString 并执行 ToLower。
+// FName 适合反复比较的标识符；集中构造可避免每次命中都创建临时 FString 并执行 ToLower。
 const FName GripPointSocketName(TEXT("GripPoint"));
 const FName NeckBoneName(TEXT("neck_01"));
 const FName HeadBoneName(TEXT("head"));
+
+/*
+ * 玩家武器的核心状态与射击实现。
+ * 组件拥有弹药、开火/换弹互斥状态和后坐力恢复；角色只转发输入，动画通过 Notify 提交换弹，
+ * 蓝图事件负责枪口、音效等表现，因此 Gameplay 结算不依赖某个蓝图节点是否执行。
+ *
+ * 主要调用链：
+ *   输入 -> Character::StartWeaponFire -> StartFire -> Fire -> Hitscan -> ApplyPointDamage
+ *   输入 -> Character::StartReload -> RequestReload -> 动画 Notify::CommitReload -> FinishReload
+ *   Notify 丢失 -> ReloadTimeout -> FinishReload；主动中断 -> CancelReload，确保武器不会永久卡在 Reloading。
+ *
+ * ActionState、CurrentAmmo、ReserveAmmo 和后坐力累计量都只由本组件写入；Character/HUD 通过只读接口和
+ * Delegate 观察结果，从结构上避免蓝图、角色和武器各保存一份可变状态。
+ */
 
 // 根据高斯分布生成散布方向，供每发 Hitscan 共用。
 FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
@@ -49,6 +63,7 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 {
+	// 装备是一次性事务：任何前置条件失败都不修改双方状态，挂接成功后才提交角色引用和运行时弹药。
 	if (TargetCharacter == nullptr || TargetCharacter->IsDead())
 	{
 		return false;
@@ -88,6 +103,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 
 void UfpstrueWeaponComponent::StartFire()
 {
+	// StartFire 只负责进入持续开火流程；每发是否允许执行仍由 Fire/CanFire 再次检查，处理期间状态变化。
 	if (!CanFire())
 	{
 		if (!HasAmmo() && RequestReload())
@@ -132,6 +148,7 @@ void UfpstrueWeaponComponent::StopFire()
 
 void UfpstrueWeaponComponent::Fire()
 {
+	// 每发射击的提交顺序固定为“校验 -> 扣弹 -> 射线/伤害 -> 表现事件”，保证一次请求最多结算一次弹药。
 	if (ActionState != EFPWeaponActionState::Firing)
 	{
 		return;
@@ -154,7 +171,7 @@ void UfpstrueWeaponComponent::Fire()
 		return;
 	}
 
-	// 语法复习：弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
+	// 弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	if (OwningCharacter == nullptr)
 	{
@@ -288,6 +305,7 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 
 bool UfpstrueWeaponComponent::RequestReload()
 {
+	// Request 只开启换弹事务，不立刻搬运弹药；真正提交点由动画 Notify 决定，使数值变化与装填动作对齐。
 	if (!CanReload())
 	{
 		return false;
@@ -306,6 +324,7 @@ bool UfpstrueWeaponComponent::RequestReload()
 
 bool UfpstrueWeaponComponent::CommitReload()
 {
+	// bReloadAmmoCommitted 是单次提交保护：同一轮换弹的重复 Notify 只会第一次搬运弹药。
 	if (ActionState != EFPWeaponActionState::Reloading || bReloadAmmoCommitted)
 	{
 		return false;
@@ -337,6 +356,7 @@ void UfpstrueWeaponComponent::FinishReload()
 
 void UfpstrueWeaponComponent::CancelReload()
 {
+	// 所有中断路径统一恢复 Ready/Disabled 并清 Timer，防止换弹动画中断后留下不可开火状态。
 	if (ActionState != EFPWeaponActionState::Reloading)
 	{
 		return;
@@ -366,6 +386,7 @@ void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
 
 void UfpstrueWeaponComponent::HandleOwnerDeath()
 {
+	// 玩家死亡属于强制中断：停止连射、取消换弹和后坐力恢复，再把武器置为 Disabled。
 	ResetWeaponRuntimeState();
 	ActionState = EFPWeaponActionState::Disabled;
 }
@@ -471,6 +492,7 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 
 void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
 {
+	// EndPlay 和异常收口复用同一重置入口，Timer 与运行时弱引用在这里成对清理。
 	if (UWorld* World = GetWorld())
 	{
 		FTimerManager& TimerManager = World->GetTimerManager();

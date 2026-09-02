@@ -21,6 +21,21 @@ DEFINE_STAT(STAT_fpstrueAIMoveBudgetRejectedCount);
 DEFINE_STAT(STAT_fpstrueAIAttackBudgetRejectedCount);
 CSV_DEFINE_CATEGORY(fpstrueAI, true);
 
+/*
+ * 单个敌人的决策与寻路所有者。
+ * Controller 用一次性 Timer 驱动低频状态机，不启用 Actor Tick；角色只执行移动、动画和伤害表现，
+ * SurroundManager 则提供跨敌人的槽位与预算，三者职责互不重叠。
+ *
+ * 单轮决策链：
+ *   校验 Pawn/目标 -> 生成距离上下文 -> 先安排下一次 Timer -> 按 Idle/Chase/Attack 优先级处理
+ *   -> 需要移动时先做目标去重 -> 申请全局 MoveTo 预算 -> 提交给 PathFollowing。
+ *
+ * 状态所有权：AIState、目标、上次移动目标和失败退避属于 Controller；攻击事务属于 CombatComponent；
+ * 槽位、攻击名额和帧级 MoveTo 预算属于 SurroundManager。Timer 仍在 Game Thread 执行，降频不是多线程。
+ */
+
+// ==================== Possess 生命周期与外部上下文 ====================
+
 AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -28,6 +43,7 @@ AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 
 void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 {
+	// Possess 是 AI 生命周期入口：解析受控敌人、清空上一个 Pawn 的移动缓存，再启动错峰的一次性决策 Timer。
 	Super::OnPossess(InPawn);
 	bDisableDecisionThrottlingForBenchmark = FFPBenchmarkConfig::Get().bDisableAIThrottling;
 
@@ -56,6 +72,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 
 void AfpstrueEnemyAIController::OnUnPossess()
 {
+	// 先归还 Timer、槽位和攻击权限，再清空裸指针；避免 Manager 中残留一个已经失去 Pawn 的参与者。
 	ClearDecisionTimer();
 	ReleaseSurroundSlot();
 	ControlledEnemy = nullptr;
@@ -93,6 +110,7 @@ void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason
 
 void AfpstrueEnemyAIController::StopAI()
 {
+	// 死亡、玩家失效和对局结束都走同一收口，确保路径、Timer、槽位和攻击名额不会只清理一部分。
 	StopMovementIfNeeded();
 	ClearDecisionTimer();
 	TargetCharacter = nullptr;
@@ -124,8 +142,11 @@ void AfpstrueEnemyAIController::SetSignificanceDecisionMultiplier(float NewMulti
 	SignificanceDecisionMultiplier = FMath::Max(1.0f, NewMultiplier);
 }
 
+// ==================== Timer 驱动的决策调度 ====================
+
 void AfpstrueEnemyAIController::StartDecisionTimer()
 {
+	// 随机首帧延迟把批量生成的敌人错开，避免所有 Controller 在同一帧同时第一次决策。
 	const float FirstDelay = FMath::FRandRange(0.01f, FMath::Max(0.01f, ChaseDecisionInterval * SignificanceDecisionMultiplier));
 	ScheduleNextDecision(FirstDelay);
 }
@@ -148,6 +169,7 @@ void AfpstrueEnemyAIController::ClearDecisionTimer()
 
 void AfpstrueEnemyAIController::UpdateAI()
 {
+	// 这里是唯一决策入口；先安排下一轮可保证任一行为分支提前 return 时仍能继续运行状态机。
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyAI_UpdateAI);
 	CSV_SCOPED_TIMING_STAT(fpstrueAI, DecisionTime);
 	CSV_CUSTOM_STAT(fpstrueAI, DecisionCount, 1, ECsvCustomStatOp::Accumulate);
@@ -173,6 +195,7 @@ void AfpstrueEnemyAIController::UpdateAI()
 
 	if (!Context.bInChaseRange)
 	{
+		// 超出追击范围才真正进入 Idle 并停路；远距离但仍在追击范围内的敌人仍可沿共享目标追踪。
 		if (AIState != EFPEnemyAIState::Idle)
 		{
 			// 退出追击范围后立即归还槽位，避免远处 Idle 敌人长期占用共享资源。
@@ -198,6 +221,7 @@ void AfpstrueEnemyAIController::UpdateAI()
 
 		if (!TryAcquireAttackPermission())
 		{
+			// 攻击预算只限制攻击事务，拒绝者仍保持 Chase 并维持包围槽位，不能误解为关闭该敌人的 AI。
 			INC_DWORD_STAT(STAT_fpstrueAIAttackBudgetRejectedCount);
 			CSV_CUSTOM_STAT(fpstrueAI, AttackBudgetRejectedCount, 1, ECsvCustomStatOp::Accumulate);
 			HandleSurroundMovement();
@@ -224,6 +248,8 @@ void AfpstrueEnemyAIController::UpdateAI()
 	HandleSharedPursuit();
 }
 
+// ==================== 单轮决策上下文与优先级分支 ====================
+
 AfpstrueEnemyAIController::FDecisionContext AfpstrueEnemyAIController::BuildDecisionContext() const
 {
 	FDecisionContext Context;
@@ -236,6 +262,7 @@ AfpstrueEnemyAIController::FDecisionContext AfpstrueEnemyAIController::BuildDeci
 
 float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext& Context) const
 {
+	// 战斗响应优先于 Significance 降频；Reduced/Background 倍率只放大追击、远距和 Idle 间隔。
 	if (bDisableDecisionThrottlingForBenchmark)
 	{
 		return AttackDecisionInterval;
@@ -314,6 +341,7 @@ bool AfpstrueEnemyAIController::HandleActiveAttack()
 
 bool AfpstrueEnemyAIController::HandleSurroundMovement()
 {
+	// Controller 不计算全局站位，只消费 SurroundManager 已缓存并投影到 NavMesh 的接近点。
 	if (SurroundManager == nullptr)
 	{
 		return false;
@@ -363,8 +391,11 @@ void AfpstrueEnemyAIController::UpdateFacingTarget()
 	SetControlRotation(TargetRotation);
 }
 
+// ==================== MoveTo 去重、限流与失败退避 ====================
+
 void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority)
 {
+	// 去重和预算都发生在提交 PathFollowing 之前；被限流时保留旧路径，下轮仍可重试，不会让角色原地急停。
 	const bool bSameGoal = bCombatPriority == bLastMoveGoalWasCombatPriority &&
 		FVector::DistSquared2D(GoalLocation, LastMoveGoal) < FMath::Square(PathRefreshDistance);
 	if (bSameGoal && bHasMoveGoal)
@@ -402,6 +433,8 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float Ac
 		NextMoveRetryTime = World->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
 	}
 }
+
+// ==================== 共享资源回收与状态切换 ====================
 
 bool AfpstrueEnemyAIController::TryAcquireAttackPermission()
 {
@@ -441,6 +474,7 @@ void AfpstrueEnemyAIController::ReleaseSurroundSlot()
 
 void AfpstrueEnemyAIController::SetAIState(EFPEnemyAIState NewState)
 {
+	// 状态变化只在 Controller 内提交，并在同一位置更新旋转策略，避免决策分支各自修改朝向产生抖动。
 	if (AIState == NewState)
 	{
 		return;
