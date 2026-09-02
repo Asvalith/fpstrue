@@ -255,7 +255,7 @@ private:
 	// Owner
 	//运行时状态
 	//当前持有该武器的角色，EndPlay时置空
-	// 这是从武器指回角色的反向观察关系；TWeakObjectPtr 避免双方互相形成强引用。
+	// 语法复习：这是从武器指回角色的反向观察关系；TWeakObjectPtr 避免双方互相形成强引用。
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AfpstrueCharacter> Character;
 

@@ -140,7 +140,7 @@ private:
 	// 判断目标是否有效、存活且可作为当前战斗对象。
 	bool IsTargetUsable(const AfpstrueCharacter* Target) const;
 
-	// Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
+	// 语法复习：Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
 	// 让 GC 识别引用，并由 OnUnPossess 主动清空，不依赖 C++ 析构函数处理 Gameplay 状态。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;

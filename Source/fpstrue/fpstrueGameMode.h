@@ -90,7 +90,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|AI")
 	TSubclassOf<AfpstrueSurroundManager> SurroundManagerClass;
 
-	// Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
+	// 语法复习：Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Game|AI")
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
 
@@ -138,7 +138,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
+	// 语法复习：friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
 	friend class UfpstrueBenchmarkRunner;
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemySignificanceCoordinator;
@@ -206,7 +206,7 @@ private:
 
 	// ==================== 运行时引用与状态 ====================
 
-	// 这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
+	// 语法复习：这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
 	// UPROPERTY 仍会让 GC 扫描数组，Transient 则明确它们只在本局运行时有效。
 	UPROPERTY(Transient)
 	TArray<AActor*> SpawnPoints;
@@ -229,7 +229,7 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Performance|Animation Sharing")
 	TObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> EnemyAnimationSharingCoordinator;
 
-	// TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
+	// 语法复习：TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
 	int32 CurrentWave = 0;
