@@ -128,69 +128,66 @@ void AfpstrueCharacter::NotifyControllerChanged()
 	}
 }
 
-//输入绑定注册
+// 输入绑定注册：连续轴使用 Triggered，普通按住动作成对处理 Started/Completed，切换和命令只响应 Started。
 void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
-	//确定是新版的注册系统
-	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
-	{
-
-		//绑定基础移动
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
-		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
-
-		//条件绑定：检查开火前提，绑定开火（三个事件）
-		if (FireAction)
-		{
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartWeaponFire);
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopWeaponFire);
-			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Canceled, this, &AfpstrueCharacter::StopWeaponFire);
-		}
-		else
-		{
-			UE_LOG(LogTemplateCharacter, Error, TEXT("%s (%s): FireAction is NULL."), *GetName(), *GetClass()->GetPathName());
-		}
-
-		//条件绑定：检查冲刺前提，绑定冲刺（瞄准、换弹、死亡时强制关闭）
-		if (RunAction)
-		{
-			EnhancedInputComponent->BindAction(RunAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartSprint);
-		}
-		else
-		{
-			UE_LOG(LogTemplateCharacter, Error, TEXT("RunAction is NULL. Assign IA_Run in BP_FirstPersonCharacter."));
-		}
-
-		//条件绑定：检查瞄准前提，绑定开火（三个事件）
-		if (AimAction)
-		{
-			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
-			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopAim);
-			EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Canceled, this, &AfpstrueCharacter::StopAim);
-		}
-		else
-		{
-			UE_LOG(LogTemplateCharacter, Error, TEXT("AimAction is NULL. Assign IA_Aim in BP_FirstPersonCharacter."));
-		}
-
-		//条件绑定：检查换弹前提，绑定开火（仅绑定started，不需要Completed、Canceled）
-		if (ReloadAction)
-		{
-			EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartReload);
-		}
-		else
-		{
-			UE_LOG(LogTemplateCharacter, Error, TEXT("ReloadAction is NULL. Assign IA_reload in BP_FirstPersonCharacter."));
-		}
-	}
-	else
+	UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent);
+	if (EnhancedInputComponent == nullptr)
 	{
 		UE_LOG(LogTemplateCharacter, Error,
-			   TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you "
-					"intend to use the legacy system, then you will need to update this C++ file."),
-			   *GetNameSafe(this));
+			   TEXT("%s (%s): Enhanced Input Component is required by this character."), *GetName(), *GetClass()->GetPathName());
+		return;
+	}
+
+	// 所有可配置 InputAction 使用同一校验和日志格式；单个资产缺失不会阻止其他动作完成绑定。
+	const auto IsActionAssigned = [this](const UInputAction* Action, const TCHAR* PropertyName)
+	{
+		if (Action != nullptr)
+		{
+			return true;
+		}
+
+		UE_LOG(LogTemplateCharacter, Error, TEXT("%s (%s): %s is not assigned."), *GetName(), *GetClass()->GetPathName(), PropertyName);
+		return false;
+	};
+
+	// 连续轴输入：只有输入值持续变化时才需要反复调用。
+	if (IsActionAssigned(MoveAction, TEXT("MoveAction")))
+	{
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
+	}
+	if (IsActionAssigned(LookAction, TEXT("LookAction")))
+	{
+		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
+	}
+
+	// 按住型输入：当前均为普通 Boolean Action，Started 开启、Completed 松开，不配置未使用的 Canceled 分支。
+	if (IsActionAssigned(JumpAction, TEXT("JumpAction")))
+	{
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
+	}
+	if (IsActionAssigned(FireAction, TEXT("FireAction")))
+	{
+		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartWeaponFire);
+		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopWeaponFire);
+	}
+	if (IsActionAssigned(AimAction, TEXT("AimAction")))
+	{
+		EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
+		EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopAim);
+	}
+
+	// 切换型输入：SprintAction 每次按下切换一次，不在松开时自动停止。
+	if (IsActionAssigned(SprintAction, TEXT("SprintAction")))
+	{
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AfpstrueCharacter::ToggleSprint);
+	}
+
+	// 单次命令：换弹只提交请求，完成时机由武器状态和动画 Notify 决定。
+	if (IsActionAssigned(ReloadAction, TEXT("ReloadAction")))
+	{
+		EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AfpstrueCharacter::RequestWeaponReload);
 	}
 }
 
@@ -254,9 +251,9 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 	}
 }
 
-void AfpstrueCharacter::StartSprint()
+void AfpstrueCharacter::ToggleSprint()
 {
-	// 死亡、换弹和瞄准期间禁止进入冲刺。
+	// 死亡、换弹和瞄准期间不能切换冲刺；其他强制中断统一调用 StopSprint。
 	const bool bWeaponReloading = EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
 	if (IsDead() || bWeaponReloading || bIsAiming)
 	{
@@ -328,7 +325,7 @@ void AfpstrueCharacter::StopWeaponFire()
 	}
 }
 
-void AfpstrueCharacter::StartReload()
+void AfpstrueCharacter::RequestWeaponReload()
 {
 	if (EquippedWeaponComponent == nullptr || IsDead() || !EquippedWeaponComponent->CanReload())
 	{

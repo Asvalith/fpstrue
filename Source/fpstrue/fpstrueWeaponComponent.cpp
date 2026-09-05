@@ -11,15 +11,8 @@
 
 namespace
 {
-constexpr float DefaultReloadDuration = 0.8f;
-constexpr float DefaultEmptyReloadDuration = 1.2f;
-constexpr float DefaultRoundsPerMinute = 600.0f;
 constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
-// 语法复习：FName 适合反复比较的标识符；集中构造可避免每次命中都创建临时 FString 并执行 ToLower。
-const FName GripPointSocketName(TEXT("GripPoint"));
-const FName NeckBoneName(TEXT("neck_01"));
-const FName HeadBoneName(TEXT("head"));
 
 /*
  * 玩家武器的核心状态与射击实现。
@@ -28,7 +21,7 @@ const FName HeadBoneName(TEXT("head"));
  *
  * 主要调用链：
  *   输入 -> Character::StartWeaponFire -> StartFire -> Fire -> Hitscan -> ApplyPointDamage
- *   输入 -> Character::StartReload -> RequestReload -> 动画 Notify::CommitReload -> FinishReload
+ *   输入 -> Character::RequestWeaponReload -> RequestReload -> 动画 Notify::CommitReload -> FinishReload
  *   Notify 丢失 -> ReloadTimeout -> FinishReload；主动中断 -> CancelReload，确保武器不会永久卡在 Reloading。
  *
  * ActionState、CurrentAmmo、ReserveAmmo 和后坐力累计量都只由本组件写入；Character/HUD 通过只读接口和
@@ -59,6 +52,12 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 }
 } // namespace
 
+UfpstrueWeaponComponent::UfpstrueWeaponComponent()
+{
+	// 这里只提供当前 Mannequin 的默认骨骼约定；武器蓝图可针对其他目标骨架覆盖名单。
+	CriticalHitBones = {FName(TEXT("neck_01")), FName(TEXT("head"))};
+}
+
 // ==================== Equipment ====================
 
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
@@ -79,16 +78,22 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		return false;
 	}
 
-	Character = TargetCharacter;
-
-	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
-	if (!AttachToComponent(TargetCharacter->GetMesh1P(), AttachmentRules, GripPointSocketName))
+	USkeletalMeshComponent* TargetMesh = TargetCharacter->GetMesh1P();
+	if (TargetMesh == nullptr || GripSocketName.IsNone() || !TargetMesh->DoesSocketExist(GripSocketName))
 	{
-		Character.Reset();
+		UE_LOG(LogTemp, Error, TEXT("AttachWeapon failed: character %s does not provide socket/bone %s."), *GetNameSafe(TargetCharacter),
+			   *GripSocketName.ToString());
 		return false;
 	}
 
-	// 成功挂接只会发生一次，直接初始化本实例的运行时弹药。
+	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
+	if (!AttachToComponent(TargetMesh, AttachmentRules, GripSocketName))
+	{
+		return false;
+	}
+
+	// 所有外部操作成功后才提交角色引用和运行时状态，失败路径不会留下半装备状态。
+	Character = TargetCharacter;
 	MagazineSize = FMath::Max(1, MagazineSize);
 	CurrentAmmo = MagazineSize;
 	ReserveAmmo = FMath::Max(0, StartingReserveAmmo);
@@ -103,19 +108,8 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 
 void UfpstrueWeaponComponent::StartFire()
 {
-	// StartFire 只负责进入持续开火流程；每发是否允许执行仍由 Fire/CanFire 再次检查，处理期间状态变化。
-	if (!CanFire())
-	{
-		if (!HasAmmo() && RequestReload())
-		{
-			return;
-		}
-
-		StopFire();
-		return;
-	}
-
-	if (ActionState == EFPWeaponActionState::Firing)
+	// StartFire 只提交 Ready -> Firing；首次和后续每一发的有效性统一由 Fire 校验。
+	if (ActionState != EFPWeaponActionState::Ready)
 	{
 		return;
 	}
@@ -128,7 +122,7 @@ void UfpstrueWeaponComponent::StartFire()
 		if (UWorld* World = GetWorld())
 		{
 			World->GetTimerManager().SetTimer(AutomaticFireTimerHandle, this, &UfpstrueWeaponComponent::Fire,
-											  60.0f / DefaultRoundsPerMinute, true);
+											  60.0f / FMath::Max(RoundsPerMinute, 1.0f), true);
 		}
 	}
 }
@@ -148,7 +142,7 @@ void UfpstrueWeaponComponent::StopFire()
 
 void UfpstrueWeaponComponent::Fire()
 {
-	// 每发射击的提交顺序固定为“校验 -> 扣弹 -> 射线/伤害 -> 表现事件”，保证一次请求最多结算一次弹药。
+	// 每发射击的提交顺序固定为“校验 -> 扣弹 -> 表现/伤害”，保证一次请求最多结算一次弹药。
 	if (ActionState != EFPWeaponActionState::Firing)
 	{
 		return;
@@ -157,23 +151,23 @@ void UfpstrueWeaponComponent::Fire()
 	UWorld* const World = GetWorld();
 	if (World == nullptr)
 	{
-		return;
-	}
-
-	if (!CanFire())
-	{
-		if (!HasAmmo() && RequestReload())
-		{
-			return;
-		}
-
 		StopFire();
 		return;
 	}
 
-	// 语法复习：弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
+	// 空弹匣在解析射击依赖前直接转入统一换弹入口；无备弹时停止连射。
+	if (!HasAmmo())
+	{
+		if (!RequestReload())
+		{
+			StopFire();
+		}
+		return;
+	}
+
+	// 语法复习：弱指针只解析一次；局部裸指针仅在当前 Game Thread 调用栈内使用，不保存到下一帧。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
-	if (OwningCharacter == nullptr)
+	if (!IsValid(OwningCharacter) || OwningCharacter->IsDead() || OwningCharacter->GetController() == nullptr)
 	{
 		StopFire();
 		return;
@@ -187,21 +181,14 @@ void UfpstrueWeaponComponent::Fire()
 	}
 
 	const double CurrentTimeSeconds = World->GetTimeSeconds();
-	const double FireInterval = 60.0 / DefaultRoundsPerMinute;
+	const double FireInterval = 60.0 / FMath::Max(static_cast<double>(RoundsPerMinute), 1.0);
 	if (LastAcceptedShotTimeSeconds >= 0.0 && CurrentTimeSeconds - LastAcceptedShotTimeSeconds + KINDA_SMALL_NUMBER < FireInterval)
 	{
 		return;
 	}
 	LastAcceptedShotTimeSeconds = CurrentTimeSeconds;
 
-	if (!TryConsumeAmmo())
-	{
-		if (!RequestReload())
-		{
-			StopFire();
-		}
-		return;
-	}
+	ConsumeAmmo();
 
 	OnWeaponFirePerformed.Broadcast();
 	FireLineTrace(World, Camera);
@@ -218,16 +205,10 @@ void UfpstrueWeaponComponent::Fire()
 	}
 }
 
-bool UfpstrueWeaponComponent::TryConsumeAmmo()
+void UfpstrueWeaponComponent::ConsumeAmmo()
 {
-	if (CurrentAmmo <= 0)
-	{
-		return false;
-	}
-
 	--CurrentAmmo;
 	BroadcastAmmoChanged();
-	return true;
 }
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
@@ -276,13 +257,14 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
 
+	// 只有查询真正命中后才读取目标、骨骼和物理组件；未命中只广播弹道终点供表现层使用。
 	if (bHit)
 	{
 		if (AActor* HitActor = HitResult.GetActor())
 		{
 			const FName HitBoneName = HitResult.BoneName;
-			const bool bHeadShot = HitBoneName == NeckBoneName || HitBoneName == HeadBoneName;
-			const float DamageToApply = bHeadShot ? LineTraceHeadDamage : LineTraceDamage;
+			const bool bCriticalHit = CriticalHitBones.Contains(HitBoneName);
+			const float DamageToApply = bCriticalHit ? LineTraceHeadDamage : LineTraceDamage;
 
 			UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, OwningCharacter->GetController(), GetOwner(),
 											   nullptr);
@@ -315,8 +297,8 @@ bool UfpstrueWeaponComponent::RequestReload()
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
 	bReloadAmmoCommitted = false;
 	ActionState = EFPWeaponActionState::Reloading;
-	const float ReloadDuration = bWasEmptyReload ? DefaultEmptyReloadDuration : DefaultReloadDuration;
-	ScheduleReloadTimeout(FMath::Max(ReloadDuration, ReloadFailSafeDuration));
+	const float SelectedReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
+	ScheduleReloadTimeout(FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration));
 	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 
 	return true;
@@ -409,13 +391,6 @@ bool UfpstrueWeaponComponent::IsOperational() const
 {
 	const AfpstrueCharacter* OwningCharacter = Character.Get();
 	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead();
-}
-
-bool UfpstrueWeaponComponent::CanFire() const
-{
-	const AfpstrueCharacter* OwningCharacter = Character.Get();
-	return IsOperational() && OwningCharacter != nullptr && OwningCharacter->GetController() != nullptr &&
-		   ActionState != EFPWeaponActionState::Reloading && CurrentAmmo > 0;
 }
 
 bool UfpstrueWeaponComponent::CanReload() const

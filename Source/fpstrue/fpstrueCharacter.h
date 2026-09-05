@@ -108,13 +108,13 @@ protected:
 	// 把增强输入 Action 绑定到移动、瞄准、开火和换弹接口。
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 
-	//处理输入的函数，绑定到增强输入组件的动作上
+	// 输入处理函数按“连续轴、按住、切换、单次请求”区分语义，避免函数名与触发方式不一致。
 	// 把二维移动输入转换为前后/左右移动。
 	void Move(const FInputActionValue& Value);
 	// 把二维视角输入转换为 Yaw/Pitch。
 	void Look(const FInputActionValue& Value);
-	// 输入开始时检查死亡、换弹和瞄准约束，再进入冲刺。
-	void StartSprint();
+	// 每次按下切换冲刺状态；瞄准、换弹和死亡仍可强制停止冲刺。
+	void ToggleSprint();
 	// 退出冲刺并恢复正常步速。
 	void StopSprint();
 	// 检查武器与角色状态后进入瞄准，并通知蓝图表现。
@@ -125,8 +125,8 @@ protected:
 	void StartWeaponFire();
 	// 把停止开火输入转交当前 WeaponComponent。
 	void StopWeaponFire();
-	// 结束瞄准/冲刺后向 WeaponComponent 请求换弹。
-	void StartReload();
+	// 结束瞄准/冲刺后向 WeaponComponent 提交换弹请求。
+	void RequestWeaponReload();
 
 	//绑定到 HealthComponent 的血量变化委托。
 	// 把通用血量变化转发给玩家蓝图和 HUD。
@@ -195,7 +195,7 @@ private:
 	TObjectPtr<UInputAction> ReloadAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<UInputAction> RunAction;
+	TObjectPtr<UInputAction> SprintAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UInputAction> AimAction;

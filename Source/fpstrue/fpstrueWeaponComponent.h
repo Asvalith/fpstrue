@@ -47,6 +47,9 @@ class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 	GENERATED_BODY()
 
 public:
+	// 设置默认关键骨骼名单；其余素材相关参数使用 UPROPERTY 默认值，可由武器蓝图覆盖。
+	UfpstrueWeaponComponent();
+
 	// ==================== Equipment ====================
 	//装备是否成功
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
@@ -137,16 +140,14 @@ private:
 	//状态边界
 	//统一检查武器已装备、未禁用且角色存活
 	bool IsOperational() const;
-	// 检查当前动作、控制器和弹药是否允许射击。
-	bool CanFire() const;
 	// 射击和换弹规则读取弹匣是否还有弹药。
 	bool HasAmmo() const { return CurrentAmmo > 0; }
 
 	// ==================== Fire System ====================
 	// 自动射击 Timer 和首次按下输入共用的单次射击入口。
 	void Fire();
-	// 原子地扣除一发弹药并广播 HUD 更新。
-	bool TryConsumeAmmo();
+	// Fire 已确认弹药充足后，在同一 Game Thread 调用栈内提交扣弹并广播 HUD 更新。
+	void ConsumeAmmo();
 	// 根据相机、瞄准状态和连续射击次数计算本发 Hitscan。
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
 	// 执行一条带散布的射线，处理伤害、冲量和命中事件。
@@ -173,6 +174,16 @@ private:
 	void BroadcastAmmoChanged();
 
 	// ==================== Configuration ====================
+	// Attachment
+	// 玩家手臂骨架上的武器挂点。更换骨架时可在武器蓝图中覆盖，并在装备时校验是否存在。
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Attachment")
+	FName GripSocketName = TEXT("GripPoint");
+
+	// Fire
+	// 每分钟射击数；用于自动射击 Timer 和单发提交节流，保证两条路径使用同一射速。
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Fire", meta = (ClampMin = "1.0"))
+	float RoundsPerMinute = 600.0f;
+
 	// Trace
 	// Hitscan 射击参数
 	// 最大射线距离
@@ -190,6 +201,10 @@ private:
 	//头部伤害
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Damage", meta = (ClampMin = "0.0"))
 	float LineTraceHeadDamage = 100.0f;
+	// 当前目标骨架中视为关键命中的骨骼。数组很小，线性查询便于在蓝图中直接配置。
+	// 语法复习：FName 适合反复比较的标识符，比较时无需每发射击创建 FString 或进行大小写转换。
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Damage")
+	TArray<FName> CriticalHitBones;
 
 	// Ammo
 	//弹药参数
@@ -244,6 +259,12 @@ private:
 
 	// Reload Recovery
 	//reload容错参数
+	// 普通换弹和空仓换弹的预期时长；用于 Notify 丢失时安排恢复 Timer，可按动画素材覆盖。
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
+	float ReloadDuration = 0.8f;
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
+	float EmptyReloadDuration = 1.2f;
+
 	//如果超时仍未完成 Reload，进入 FailSafe 处理，防止动画缺失导致而永久卡在Reloading 状态
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float ReloadFailSafeDuration = 5.0f;
