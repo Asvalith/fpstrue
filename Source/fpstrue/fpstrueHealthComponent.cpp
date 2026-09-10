@@ -14,6 +14,7 @@
 
 // ==================== 生命周期与伤害入口 ====================
 
+// 生命组件不需要 Tick，血量只在伤害、重置和生命周期事件发生时变化。
 UfpstrueHealthComponent::UfpstrueHealthComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -34,6 +35,7 @@ void UfpstrueHealthComponent::BeginPlay()
 
 void UfpstrueHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// Owner 生命周期结束前成对解除伤害委托，防止退出阶段再次进入组件逻辑。
 	if (AActor* Owner = GetOwner())
 	{
 		Owner->OnTakeAnyDamage.RemoveDynamic(this, &UfpstrueHealthComponent::HandleOwnerTakeAnyDamage);
@@ -67,8 +69,16 @@ void UfpstrueHealthComponent::ApplyDamageInternal(float DamageAmount, AActor* Da
 
 // ==================== 状态重置与只读查询 ====================
 
+void UfpstrueHealthComponent::SetMaxHealthAndReset(float NewMaxHealth)
+{
+	// 只通过组件修改生命上限，避免测试器绕过生命值唯一写入者直接改成员。
+	MaxHealth = FMath::Max(NewMaxHealth, 1.0f);
+	ResetHealth();
+}
+
 void UfpstrueHealthComponent::ResetHealth()
 {
+	// 把配置值修正到合法范围，并重建“存活”状态；可供对象复用或新一局初始化。
 	MaxHealth = FMath::Max(1.0f, MaxHealth);
 	CurrentHealth = MaxHealth;
 	bDeathBroadcast = false;
@@ -77,6 +87,7 @@ void UfpstrueHealthComponent::ResetHealth()
 
 float UfpstrueHealthComponent::GetHealthNormalized() const
 {
+	// HUD 读取的比例在组件内统一计算，MaxHealth 异常时安全返回 0。
 	return MaxHealth > 0.0f ? CurrentHealth / MaxHealth : 0.0f;
 }
 

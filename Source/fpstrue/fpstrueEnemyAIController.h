@@ -32,14 +32,14 @@ class FPSTRUE_API AfpstrueEnemyAIController : public AAIController
 	GENERATED_BODY()
 
 public:
-	// 创建无 Actor Tick 的 AIController。
+	// 高层决策不使用 Actor Tick；移动沿用 AAIController 的默认 PathFollowing，由角色 Movement 执行 RVO 避让。
 	AfpstrueEnemyAIController();
 
 	// 接管敌人 Pawn，缓存组件并启动决策循环。
 	virtual void OnPossess(APawn* InPawn) override;
 	// 失去 Pawn 前停止决策、移动并释放共享资源。
 	virtual void OnUnPossess() override;
-	// PathFollowing 失败时安排一次简单退避，避免立即重复提交。
+	// PathFollowing 失败时安排退避；成功到位后的朝向由下一次决策结合到达检测更新。
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
 	// 世界退出时清理 Timer 和管理器引用。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -64,6 +64,10 @@ public:
 	void ReleaseAttackPermission();
 
 protected:
+	// 角色实际 Yaw 与目标方位的最大误差（度）；不是 Controller 的期望角度。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Rotation", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float AttackFacingToleranceDegrees = 15.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
 	float AttackDecisionInterval = 0.1f;
 
@@ -119,13 +123,17 @@ private:
 	bool HandleSurroundMovement();
 	// 没有专属槽位时，使用共享目标快照进行低成本追击。
 	void HandleSharedPursuit();
-	// 攻击状态下更新 Controller 朝向，由 CharacterMovement 平滑写入角色旋转。
-	void UpdateFacingTarget();
+	// 冷却或未获攻击名额时共用：有槽位则继续走，无槽位则站定面向目标。
+	void MaintainCombatPosition();
+	// 停止路径及地面残余移动，再切换到目标朝向；返回角色是否已转入攻击角度容差。
+	bool FaceTargetAtRest();
+	// 更新 Controller 的期望 Yaw；由 Movement 平滑旋转，并返回真实 Actor Yaw 是否对齐。
+	bool UpdateFacingTarget();
 	// 修改唯一 AI 状态，供决策和动画共享读取。
 	void SetAIState(EFPEnemyAIState NewState);
-	// 状态切换时选择“面向移动”或“面向目标”，保证只有 CharacterMovement 写角色旋转。
-	void ApplyRotationPolicy(EFPEnemyAIState NewState);
-	// 在目标变化足够大且通过预算时提交 MoveTo 请求。
+	// Chase 行进时面向路径，到位后面向目标；到位不是新攻击事务，不新增一份 AI 状态。
+	void ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget = false);
+	// 复用有效路径/到位缓存；需要刷新时先预算校验，再提交显式 MoveTo 请求并缓存投影结果。
 	void MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority);
 	// 仅在确实移动时调用 StopMovement；攻击可保留已经提交的目标缓存。
 	void StopMovementIfNeeded(bool bPreserveMoveGoal = false);
@@ -152,7 +160,9 @@ private:
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
 
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
+	// 原始业务目标只用于请求去重；实际导航目标用于到达检查，避免导航投影偏移造成反复重寻路。
 	FVector LastMoveGoal = FVector::ZeroVector;
+	FVector LastResolvedMoveGoal = FVector::ZeroVector;
 	float NextMoveRetryTime = 0.0f;
 	bool bHasMoveGoal = false;
 	bool bLastMoveGoalWasCombatPriority = false;

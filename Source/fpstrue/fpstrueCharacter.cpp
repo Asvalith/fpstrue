@@ -25,7 +25,9 @@ DEFINE_LOG_CATEGORY(LogTemplateCharacter);
  * 本类不启用逐帧 Tick，持续开火、换弹超时和后坐力恢复由武器自己的 Timer 管理。
  */
 
-// 生命周期
+// ==================== 默认组件与生命周期 ====================
+
+// 构造角色的胶囊体、第一人称相机、手臂网格和可复用生命组件；构造阶段不访问运行时世界。
 AfpstrueCharacter::AfpstrueCharacter()
 { //胶囊体
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
@@ -210,6 +212,7 @@ void AfpstrueCharacter::ApplyInputMappingContexts()
 
 void AfpstrueCharacter::RemoveInputMappingContexts()
 {
+	// Controller 更换或角色退出时成对移除本角色添加的映射，并清空不拥有对象生命周期的弱引用。
 	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get())
 	{
 		if (DefaultMappingContext != nullptr)
@@ -225,6 +228,7 @@ void AfpstrueCharacter::RemoveInputMappingContexts()
 
 void AfpstrueCharacter::Move(const FInputActionValue& Value)
 {
+	// 将 Enhanced Input 的二维值映射到角色本地前向和右向，实际位移由 CharacterMovement 完成。
 	//获得向量
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
@@ -239,6 +243,7 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 
 void AfpstrueCharacter::Look(const FInputActionValue& Value)
 {
+	// 将二维视角输入写入 Controller 的 Yaw/Pitch，角色与相机最终读取控制旋转。
 	//获得向量
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
 
@@ -266,6 +271,7 @@ void AfpstrueCharacter::ToggleSprint()
 
 void AfpstrueCharacter::StopSprint()
 {
+	// 所有强制中断路径复用这里，保证冲刺标志与 CharacterMovement 速度同步恢复。
 	//停止冲刺
 	bIsSprinting = false;
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
@@ -291,6 +297,7 @@ void AfpstrueCharacter::StartAim()
 
 void AfpstrueCharacter::StopAim()
 {
+	// 无条件清除瞄准状态；只有确实发生状态变化时才通知蓝图并恢复移动速度。
 	//保留原来状态
 	const bool bWasAiming = bIsAiming;
 	//无条件复位
@@ -318,6 +325,7 @@ void AfpstrueCharacter::StartWeaponFire()
 
 void AfpstrueCharacter::StopWeaponFire()
 {
+	// 松开输入、死亡、换 Controller 和 EndPlay 都可安全调用，武器组件负责内部幂等收口。
 	if (EquippedWeaponComponent != nullptr)
 	{
 		//转入weapon
@@ -327,6 +335,7 @@ void AfpstrueCharacter::StopWeaponFire()
 
 void AfpstrueCharacter::RequestWeaponReload()
 {
+	// 角色只处理瞄准/冲刺互斥，再把弹药事务交给 WeaponComponent，避免角色重复维护弹药状态。
 	if (EquippedWeaponComponent == nullptr || IsDead() || !EquippedWeaponComponent->CanReload())
 	{
 		return;
@@ -414,20 +423,24 @@ void AfpstrueCharacter::HandleDeath()
 
 bool AfpstrueCharacter::IsDead() const
 {
+	// 玩家不保存第二份死亡状态，始终读取可复用 HealthComponent 的唯一事实。
 	return HealthComponent != nullptr && HealthComponent->IsDead();
 }
 
 float AfpstrueCharacter::GetCurrentHealth() const
 {
+	// 为蓝图和其他模块提供空安全只读查询，不允许外部直接修改 HealthComponent 内部数值。
 	return HealthComponent != nullptr ? HealthComponent->GetHealth() : 0.0f;
 }
 
 float AfpstrueCharacter::GetMaxHealth() const
 {
+	// 最大生命值同样通过组件只读接口暴露，保持生命数据所有权集中。
 	return HealthComponent != nullptr ? HealthComponent->GetMaxHealth() : 0.0f;
 }
 
 float AfpstrueCharacter::GetHealthNormalized() const
 {
+	// 返回组件计算后的 0~1 比例，HUD 无需自行重复处理除零和范围钳制。
 	return HealthComponent != nullptr ? HealthComponent->GetHealthNormalized() : 0.0f;
 }

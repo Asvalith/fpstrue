@@ -11,6 +11,82 @@
 
 ## 一、最终结论
 
+### 0. 完整玩法基线迁移验证
+
+新版 Runner 已删除 `RemoveAllWidgets`、玩家无敌、静音/离屏运行和基准专用强制重叠生成。160 个敌人全部生成后，静止玩家会在约 3.7–5.4 秒内死亡，因此 15 秒预热、30 秒采集会被正确判为无效；不能通过关闭伤害来获得一份表面完整的数据。
+
+为验证“生成完成 -> CSV/截图 -> 正常停止”的链路，在所有 `BenchmarkDisable*` 均为 0 的条件下完成了三次零预热、2 秒短采集，共 315 个有效帧：
+
+| 指标 | 三次运行级平均 | 最小值 | 最大值 |
+| --- | ---: | ---: | ---: |
+| Frame | 15.473 ms | 14.762 ms | 16.114 ms |
+| Frame P95 | 17.277 ms | 16.766 ms | 18.076 ms |
+| Frame P99 | 17.603 ms | 16.917 ms | 18.476 ms |
+| Game Thread | 9.305 ms | 8.748 ms | 10.380 ms |
+| Render Thread | 15.464 ms | 14.786 ms | 16.120 ms |
+| RHI Thread | 10.026 ms | 9.524 ms | 10.982 ms |
+| GPU | 13.964 ms | 13.635 ms | 14.581 ms |
+
+这组数据证明新版完整玩法采集链可以工作，并提示当前关键路径仍偏向 Render Thread；但每次只有约 2 秒、101–110 帧，且紧邻全部敌人生成完成，不能替代 30 秒稳态基线，也不能与旧版 `7.707 ms` 做严格单变量比较。下一步应通过确定性的玩家移动/战斗回放延长存活和采样时间，而不是关闭任何玩法系统。
+
+#### 当前版本0敌人长采样
+
+为观察不包含敌人时的固定渲染底座，使用当前源码在相同地图、1600×900、VSync Off、正常UI/声音/伤害和全部渲染功能开启的条件下，执行了一次0敌人测试：种子1337、预热15秒、采集30秒，共1312帧。日志确认`requested=0 alive=0`、所有破坏性`BenchmarkDisable*`开关均为0，采集正常停止。
+
+| 指标 | Mean | P95 | P99 |
+| --- | ---: | ---: | ---: |
+| Frame | 22.606 ms | 33.540 ms | 35.769 ms |
+| Game Thread | 6.179 ms | 9.134 ms | 12.940 ms |
+| Render Thread | 22.107 ms | 34.143 ms | 37.964 ms |
+| RHI Thread | 15.006 ms | 23.659 ms | 27.303 ms |
+| GPU | 12.047 ms | 13.076 ms | 13.957 ms |
+
+该次运行还有`Visibility Wait`平均5.238 ms、`RenderOther`平均5.573 ms、约1111个Draw Call。它证明“即使没有敌人，本轮Render Thread仍可能成为关键路径”，但这只是一次独立进程样本，并且落入此前观察到的RT/RHI慢模式。它不能直接与前面的160敌人2秒短采样相减：两者预热、采集长度和进程状态不同，0敌人反而出现更高RT，已经违反正常的单变量归因预期。为缩小这些差异，下面补充当前提交上的三轮0/160配对测试。
+
+原始证据：
+
+```text
+Saved/Profiling/PerformanceBaseline0_FullGameplay_20260905/
+```
+
+#### 当前版本0/160敌人三轮配对补测
+
+为了缩小上述单次长采样与160敌人短采样之间的口径差异，又在当前版本补做了三轮0/160敌人交错测试。两组均使用`Demonstration`地图、1600×900、VSync Off、种子1337、完整HUD/声音/伤害和全部正常玩法消费者，且显式设置`t.IdleWhenNotForeground=0`。每次采集2秒；0敌人组预热10秒，160敌人组使用分帧生成完成前约10秒作为自然预热，生成完成后立即采集。这样能够大致对齐两组从地图加载到采集开始的时间，但两组经历的Gameplay过程仍不相同，因此属于配对贡献测试，不是严格实验室A/B。
+
+每组保留3次有效结果，每次约50–55帧。另有1次160敌人运行因为玩家在采集结束前死亡，被Runner明确标记为`Automated benchmark aborted`并排除；没有为补齐样本关闭伤害或修改敌人行为。
+
+| 指标 | 0敌人 | 160敌人 | 160 - 0 |
+| --- | ---: | ---: | ---: |
+| Frame Mean | 31.593 ms | 32.631 ms | +1.038 ms |
+| Frame P95 | 34.231 ms | 34.259 ms | +0.028 ms |
+| Game Thread | 9.618 ms | 19.014 ms | +9.396 ms |
+| Render Thread | 32.045 ms | 32.748 ms | +0.703 ms |
+| RHI Thread | 11.337 ms | 15.653 ms | +4.316 ms |
+| GPU | 14.608 ms | 15.645 ms | +1.037 ms |
+| CharacterMovement | 0.100 ms | 3.590 ms | +3.490 ms |
+| Animation | 0.285 ms | 1.413 ms | +1.128 ms |
+| TickActors | 0.185 ms | 1.175 ms | +0.990 ms |
+| Significance更新 | 0.014 ms | 0.870 ms | +0.856 ms |
+| ShadowDepths | 1.014 ms | 1.503 ms | +0.489 ms |
+| Skinned BLAS | 0.055 ms | 0.251 ms | +0.196 ms |
+| RHI Draw Calls | 1793 | 2837 | +1044 |
+| GPU本地显存 | 3286.7 MB | 3506.0 MB | +219.3 MB |
+
+这组数据支持以下判断：
+
+- 敌人对GT有明确贡献，当前三轮运行级均值增加约9.396 ms。可见局部增量主要包括Movement 3.490 ms、Animation 1.128 ms、TickActors 0.990 ms和Significance集中更新0.856 ms；其余还包含物理等待、组件Tick和Gameplay调用链，不能把GT增量全部归因给AI决策本身。
+- 敌人也增加了RHI提交、GPU和资源成本：RHI约增加4.316 ms、Draw Call约增加1044、GPU约增加1.037 ms、显存约增加219 MB。只有5个敌人投射阴影、12个敌人参与骨骼RT时，ShadowDepths和Skinned BLAS仍分别增加约0.489 ms和0.196 ms。
+- 总Render Thread只增加约0.703 ms，不表示敌人“没有渲染成本”。0敌人组自身已有约32.045 ms RT底座，当前整帧仍落在RT约32 ms的慢状态；固定场景与线程同步/帧节奏掩盖了部分敌人增量。此时应该同时看RHI、GPU、Draw Call和目标局部事件，而不能只看RT总值。
+- 两组Frame Mean和P95几乎相同，说明当前Frame主要被RT慢状态限制，不能据此声称加入160个敌人没有性能影响。0敌人Run 1还出现过一次约451 ms的采集起始异常帧，因此本组P99不用于归因。
+
+即使显式关闭后台Idle和VSync，本批独立进程仍复现了RT约32 ms的慢状态，原因尚未由现有CSV确定。后续若要解释这一慢状态，应对0/160各采一份时间对齐的Insights，检查RT等待、Present/帧节奏、可见性任务和场景提交；不能把它直接归因给敌人或场景建筑。
+
+原始证据：
+
+```text
+Saved/Profiling/FullGameplayEnemyContributionAligned_20260905/
+```
+
 ### 1. 当前已经建立机制证据的策略
 
 当前最可靠的单变量证据来自：
@@ -19,7 +95,7 @@
 Saved/Profiling/UnverifiedConsumers80_20260831/
 ```
 
-统一条件为 `Demonstration`、80 个敌人、1600×900、关闭 VSync、种子 1337、预热 10 秒、采集 30 秒；每组独立进程运行三次，组别随机顺序。日志均确认 `requested=80 alive=80`，采集正常停止，VSM 队列溢出和纹理池告警为 0。
+统一条件为 `Demonstration`、80 个敌人、1600×900、关闭 VSync、种子 1337、预热 10 秒、采集 30 秒；每组独立进程运行三次，组别随机顺序。日志均确认 `requested=80 alive=80`，采集正常停止，VSM 队列溢出和纹理池告警为 0。该组数据由旧版诊断 Runner 采集，当时 HUD、声音和玩家受伤不参与，因此只用于同一旧测试口径下的消费者消融，不作为完整玩法基线。
 
 | 机制 | 开启时 | 关闭时 | 对应局部成本变化 | 三次方向 | 结论 |
 | --- | ---: | ---: | ---: | --- | --- |
@@ -297,7 +373,7 @@ Saved/Profiling/CurrentScaleMatrix_Warm_20260830/
 
 20、80、160 的 Frame 和 RT 不呈单调关系，说明存在进程级渲染波动。该矩阵每档只有一次，因此主要证明“当前策略的消费者数量受控”和“GT 没有随敌人数线性爆炸”，不能用来证明 80 敌人比 20 敌人更快。
 
-为确认当前 160 敌人的稳态限制，随后使用相同地图、分辨率、敌人数和随机种子，预热 15 秒后另采集 10 秒 Trace：
+为确认当时 160 敌人的稳态限制，随后使用相同地图、分辨率、敌人数和随机种子，预热 15 秒后另采集 10 秒 Trace。它同样属于旧版诊断口径，不是新版完整玩法基线：
 
 ```text
 Saved/Profiling/Current160Insights_20260901/Baseline.utrace
@@ -324,7 +400,7 @@ PerformanceEvidence/UnrealInsights_160Enemies.png
 
 ### HUD 事件驱动
 
-Benchmark 在开始时调用 `RemoveAllWidgets`，因此多敌人 CSV 明确排除了 HUD。HUD 从函数绑定改为委托/事件更新是合理实现，但当前性能矩阵不能证明它节省了多少 GT。若需要定量证据，应单独运行 HUD Binding 与 Event Driven 两组，并记录 `Exclusive/GameThread/UI`、Slate Prepass/Paint 和属性读取次数。
+已有多敌人 CSV 来自旧版 Benchmark Runner：它在采集前移除了 HUD，因此这些历史数据不能证明 HUD 事件驱动节省了多少 GT。当前 Runner 已禁止移除 Widget，并在正式基线中保留声音、玩家受伤/死亡和全部正常消费者；完整玩法基线需重新采集后才能替换历史数据。若要单独量化 HUD 改造，仍应在不影响其他玩法的前提下比较 Binding 与 Event Driven 两组，并记录 `Exclusive/GameThread/UI`、Slate Prepass/Paint 和属性读取次数。
 
 ### 分帧生成
 

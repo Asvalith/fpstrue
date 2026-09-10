@@ -34,6 +34,7 @@ CSV_DEFINE_CATEGORY(fpstrueCombat, true);
 
 // ==================== 生命周期与攻击范围 ====================
 
+// 近战判定只在 AnimNotifyState 有效窗口内更新，因此组件本身不需要常驻 Tick。
 UfpstrueEnemyCombatComponent::UfpstrueEnemyCombatComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -41,6 +42,7 @@ UfpstrueEnemyCombatComponent::UfpstrueEnemyCombatComponent()
 
 void UfpstrueEnemyCombatComponent::BeginPlay()
 {
+	// 把上次攻击时间向前偏移一个冷却周期，使敌人开局满足其他条件时可以立即攻击。
 	Super::BeginPlay();
 	if (const UWorld* World = GetWorld())
 	{
@@ -50,17 +52,20 @@ void UfpstrueEnemyCombatComponent::BeginPlay()
 
 void UfpstrueEnemyCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 退出前终止攻击窗口、保护 Timer 和攻击名额，避免 Notify 在对象销毁阶段继续回调。
 	ResetCombat();
 	Super::EndPlay(EndPlayReason);
 }
 
 AfpstrueEnemyCharacter* UfpstrueEnemyCombatComponent::GetEnemy() const
 {
+	// CombatComponent 只允许挂在敌人角色上；集中 Cast 后供其他规则函数复用。
 	return Cast<AfpstrueEnemyCharacter>(GetOwner());
 }
 
 float UfpstrueEnemyCombatComponent::GetEffectiveAttackRange() const
 {
+	// 攻击距离至少覆盖双方胶囊半径之和，避免角色碰撞已经相贴却永远达不到配置半径。
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr)
 	{
@@ -76,6 +81,7 @@ float UfpstrueEnemyCombatComponent::GetEffectiveAttackRange() const
 
 bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
 {
+	// 使用二维距离平方判断地面近战范围，忽略台阶和胶囊中心高度差并避免开方。
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
 	if (Enemy == nullptr || TargetCharacter == nullptr)
@@ -205,6 +211,7 @@ void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 
 void UfpstrueEnemyCombatComponent::EndAttackWindow()
 {
+	// NotifyState 结束只关闭伤害有效窗口，不直接结束完整攻击事务或冷却。
 	CancelAttackWindow();
 }
 
@@ -216,6 +223,7 @@ void UfpstrueEnemyCombatComponent::SetAttackSweepDisabledForBenchmark(bool bDisa
 
 void UfpstrueEnemyCombatComponent::ResetCombat()
 {
+	// 死亡、停止 AI 和 EndPlay 共用该幂等收口，确保状态、Timer 与全局名额同时释放。
 	CancelAttackWindow();
 	bIsAttacking = false;
 	bHitTargetThisAttack = false;
@@ -251,6 +259,7 @@ bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 
 bool UfpstrueEnemyCombatComponent::GetWeaponBladeSegment(FVector& OutBladeBase, FVector& OutBladeTip) const
 {
+	// 从当前动画姿态读取刀根和刀尖 Socket 世界坐标，构造这一帧的实际刀刃线段。
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const USkeletalMeshComponent* CharacterMesh = Enemy != nullptr ? Enemy->GetMesh() : nullptr;
 	if (CharacterMesh == nullptr || !CharacterMesh->DoesSocketExist(WeaponTraceStartSocketName) ||
@@ -317,6 +326,7 @@ void UfpstrueEnemyCombatComponent::SweepWeaponSegment(const FVector& TraceStart,
 
 bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 {
+	// Sweep 可命中多个 Pawn，但当前事务只接受指定玩家且每次攻击最多成功扣血一次。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
 	if (Enemy == nullptr || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
@@ -339,12 +349,14 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 
 void UfpstrueEnemyCombatComponent::CancelAttackWindow()
 {
+	// 清除连续轨迹所需的上一帧样本；下一次 Begin 必须重新建立起始位置。
 	bAttackWindowActive = false;
 	bHasPreviousWeaponSample = false;
 }
 
 void UfpstrueEnemyCombatComponent::ScheduleAttackFinish(float DurationSeconds)
 {
+	// 在动画预计时长之后设置一次性保护 Timer，Notify 丢失或 Montage 中断也不会永久占用攻击名额。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr)
 	{

@@ -30,6 +30,7 @@ CSV_DEFINE_CATEGORY(fpstrueSignificance, true);
 
 // ==================== 生命周期与策略初始化 ====================
 
+// Coordinator 不参与逐帧 Tick，只在统一低频时钟上采样并下发各消费者档位。
 UfpstrueEnemySignificanceCoordinator::UfpstrueEnemySignificanceCoordinator()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -82,6 +83,7 @@ void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 
 void UfpstrueEnemySignificanceCoordinator::Stop()
 {
+	// 对局结束时停止下一轮集中采样；敌人自己的死亡/组件清理由各自生命周期负责。
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(UpdateTimerHandle);
@@ -90,6 +92,7 @@ void UfpstrueEnemySignificanceCoordinator::Stop()
 
 void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 组件退出前复用 Stop，保证关卡切换时 Timer 不再访问旧 GameMode。
 	Stop();
 	Super::EndPlay(EndPlayReason);
 }
@@ -362,6 +365,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 
 	const float CandidateCount = static_cast<float>(Candidates.Num());
 	const float InverseCandidateCount = CandidateCount > 0.0f ? 1.0f / CandidateCount : 0.0f;
+	CSV_CUSTOM_STAT(fpstrueSignificance, AliveEnemies, Candidates.Num(), ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayFull, GameplayFullCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayReduced, GameplayReducedCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayBackground, GameplayBackgroundCount, ECsvCustomStatOp::Set);

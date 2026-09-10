@@ -61,11 +61,8 @@ public:
 	void StopFire();
 
 	// ==================== Reload ====================
-	// 换弹
-	// BlueprintCallable：
-	// 蓝图可以主动调用该函数。
-	// RequestReload 只负责“请求进入换弹状态”，
-	// 不代表弹药一定已经完成转移。
+	// 换弹分为请求、弹药提交、结束三个阶段；取消只结束流程，不撤销已经提交的弹药。
+	// 请求成功后先建立 Reloading 状态和兜底 Timer，再广播事件供蓝图启动动画。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool RequestReload();
 
@@ -73,11 +70,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool CommitReload();
 
-	// 换弹动画结束时调用：退出 Reloading 并恢复 Ready。
+	// 动画正常结束或兜底超时时调用：补交尚未提交的弹药，再退出本次 Reloading。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void FinishReload();
 
-	// 动画中断、死亡或卸载时调用：取消换弹事务并恢复安全状态。
+	// 动画中断时调用：清理换弹并恢复 Ready；提交前取消不装弹，提交后取消不退弹。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReload();
 
@@ -154,10 +151,10 @@ private:
 	void FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle);
 
 	// ==================== Reload System ====================
-	// 第三层：Transaction 由 Request/Commit/Finish/Cancel Reload 维护。
-	// 第四层：Recovery
-	//设置换弹保护Timer（换弹没有完成则自动恢复）
+	// 为本次换弹设置唯一的兜底 Timer；超时通过 FinishReload 补交弹药并结束流程。
 	void ScheduleReloadTimeout(float DurationSeconds);
+	// Finish、Cancel、死亡和 EndPlay 共用的清理；不改弹药或 ActionState，由调用者决定最终状态。
+	void ResetReloadState();
 
 	// ==================== Recoil System ====================
 	// 射击成功后把随机水平/垂直后坐力应用到 PlayerController。
@@ -258,17 +255,17 @@ private:
 	float MaxAccumulatedRecoilYaw = 2.0f;
 
 	// Reload Recovery
-	//reload容错参数
-	// 普通换弹和空仓换弹的预期时长；用于 Notify 丢失时安排恢复 Timer，可按动画素材覆盖。
+	// 预计动画时长只用于兜底截止点：max(普通/空仓时长, FailSafeDuration) + GracePeriod。
+	// 正常装填/结束仍由 CommitReload / FinishReload 驱动，可按动画素材覆盖时长。
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float ReloadDuration = 0.8f;
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float EmptyReloadDuration = 1.2f;
 
-	//如果超时仍未完成 Reload，进入 FailSafe 处理，防止动画缺失导致而永久卡在Reloading 状态
+	// 兜底等待时间的下限；比预计动画长时优先使用此值，避免提前结束正常动画。
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float ReloadFailSafeDuration = 5.0f;
-	//装弹后，给 FinishReload 留一点容错时间
+	// 额外加在兜底截止点上的宽限时间；不是 CommitReload 后另起的倒计时。
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.0"))
 	float ReloadCompletionGracePeriod = 0.1f;
 
@@ -292,10 +289,12 @@ private:
 	UPROPERTY(VisibleInstanceOnly, Category = "Weapon|Ammo")
 	int32 ReserveAmmo = 0;
 
-	// 第三层 Transaction
-	//换弹事务状态
-	//防止一次换弹被多个Notify重复提交
+	// Reload Transaction
+	// 同一次换弹中，多个 Notify / FinishReload 最多只转移一次弹药。
 	bool bReloadAmmoCommitted = false;
+	// 每次成功请求递增；同步委托可能取消并重新请求，旧 Finish 调用不得结束新的一次换弹。
+	// 这只是同调用栈的重入保护；现有无参动画 Notify 不携带序号，不能据此识别旧动画事件。
+	uint32 ReloadSequence = 0;
 
 	// Fire / Spread
 	//连续射击和后坐力状态

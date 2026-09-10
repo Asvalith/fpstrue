@@ -22,6 +22,7 @@
 
 // ==================== 生命周期与目标注入 ====================
 
+// Manager 不需要逐帧 Tick；目标快照和调试绘制分别由低频 Timer 驱动。
 AfpstrueSurroundManager::AfpstrueSurroundManager()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -29,6 +30,7 @@ AfpstrueSurroundManager::AfpstrueSurroundManager()
 
 void AfpstrueSurroundManager::BeginPlay()
 {
+	// 关卡开始时建立固定槽位拓扑；调试绘制只有显式开启后才产生 Timer 成本。
 	Super::BeginPlay();
 	BuildSlots();
 
@@ -40,6 +42,7 @@ void AfpstrueSurroundManager::BeginPlay()
 
 void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 清理两个 Timer、弱引用容器和槽位占用，避免关卡切换后保留旧玩家或敌人。
 	GetWorldTimerManager().ClearTimer(DebugDrawTimerHandle);
 	ResetManager();
 	Super::EndPlay(EndPlayReason);
@@ -70,6 +73,7 @@ void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCha
 
 void AfpstrueSurroundManager::RefreshSharedTargetSnapshot()
 {
+	// Timer 回调只负责触发带位移阈值的刷新，具体缓存更新集中在下层函数。
 	UpdateSharedTargetSnapshot(false);
 }
 
@@ -196,6 +200,7 @@ bool AfpstrueSurroundManager::RequestSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 
 void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 {
+	// 释放槽位时同时归还攻击许可；若释放的是内环，再尝试从外环稳定补位。
 	if (!IsValid(Enemy))
 	{
 		return;
@@ -264,6 +269,7 @@ bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter*
 
 void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
+	// TSet::Remove 使重复归还天然幂等，不需要另外维护“已经释放”标志。
 	if (Enemy != nullptr)
 	{
 		ActiveAttackers.Remove(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
@@ -328,6 +334,7 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 
 bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
 {
+	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
 	if (!bHasSharedTargetSnapshot)
 	{
 		return false;
@@ -341,6 +348,7 @@ bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) cons
 
 void AfpstrueSurroundManager::ResetManager()
 {
+	// 对局结束时一次性归零槽位、攻击名额、帧预算和目标缓存，Manager 可安全退出或重新初始化。
 	EnemyToSlot.Reset();
 	ActiveAttackers.Reset();
 	MoveRequestBudgetFrame = MAX_uint64;
@@ -386,6 +394,7 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 
 int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 {
+	// 先扫描内环再扫描外环，并选择与敌人二维距离最近的可导航空位；槽位数固定，线性扫描成本可控。
 	for (int32 RingIndex = 0; RingIndex <= 1; ++RingIndex)
 	{
 		int32 BestSlotIndex = INDEX_NONE;
@@ -423,6 +432,7 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 
 void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex)
 {
+	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
 	if (!SurroundSlots.IsValidIndex(InnerSlotIndex) || SurroundSlots[InnerSlotIndex].RingIndex != 0 ||
 		SurroundSlots[InnerSlotIndex].Occupant.IsValid())
 	{
@@ -464,6 +474,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 
 FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride) const
 {
+	// 使用缓存玩家位置、槽位极角和半径计算二维世界坐标；随后由批量 NavMesh 投影修正可达性。
 	if (!bHasSharedTargetSnapshot)
 	{
 		return GetActorLocation();
@@ -476,6 +487,7 @@ FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurround
 
 void AfpstrueSurroundManager::DrawDebugSlots()
 {
+	// 仅开发调试使用：绿色为空位、青色为占用位，不参与正式站位决策。
 	if (!bDrawDebugSlots || !IsValid(TargetCharacter))
 	{
 		return;

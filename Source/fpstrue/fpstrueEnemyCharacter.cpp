@@ -3,6 +3,7 @@
 #include "fpstrueEnemyCharacter.h"
 #include "fpstrueBenchmarkConfig.h"
 #include "fpstrueCharacter.h"
+#include "fpstrueCollisionChannels.h"
 #include "fpstrueEnemyAIController.h"
 #include "fpstrueEnemyAnimationSharingCoordinator.h"
 #include "fpstrueEnemyCombatComponent.h"
@@ -27,6 +28,7 @@
 
 // ==================== 组件初始化与生命周期 ====================
 
+// 构造默认 Mesh/Movement 行为以及可复用生命、战斗组件；高层决策由自动生成的 AIController 承担。
 AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -34,6 +36,9 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
 
 	GetCapsuleComponent()->InitCapsuleSize(42.0f, 96.0f);
+	// 每个敌人的 CharacterMovement 使用 RVO 做局部避让；AIController 仍负责路径请求和高层状态。
+	// OnPossess 会再次显式开启，避免已保存蓝图中的旧默认值让同一构建出现混合模式。
+	GetCharacterMovement()->bUseRVOAvoidance = true;
 
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
@@ -77,7 +82,10 @@ void AfpstrueEnemyCharacter::BeginPlay()
 		CharacterMesh->SetSimulatePhysics(false);
 		CharacterMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		CharacterMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		// 射击绕过移动胶囊并命中 Physics Asset，HitResult 才能携带用于部位伤害的 BoneName。
+		CharacterMesh->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Block);
 	}
+	GetCapsuleComponent()->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Ignore);
 
 	if (HealthComponent != nullptr)
 	{
@@ -146,27 +154,32 @@ float AfpstrueEnemyCharacter::TakeDamage(float DamageAmount, FDamageEvent const&
 
 bool AfpstrueEnemyCharacter::IsDead() const
 {
+	// 死亡状态始终转发到 HealthComponent，EnemyCharacter 不保存第二份生命事实。
 	return HealthComponent != nullptr && HealthComponent->IsDead();
 }
 
 bool AfpstrueEnemyCharacter::IsAttacking() const
 {
+	// 攻击事务状态属于 CombatComponent，角色只提供给 AI 和显著性系统读取。
 	return CombatComponent != nullptr && CombatComponent->IsAttacking();
 }
 
 bool AfpstrueEnemyCharacter::RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const
 {
+	// 攻击中、已贴近目标或刚发生交互时禁止动画降级，保护 Montage、Notify 和刀刃 Socket 更新。
 	const bool bRecentlyInteracted = CurrentTime - LastCombatRelevantTime <= FMath::Max(GraceSeconds, 0.0f);
 	return IsAttacking() || IsTargetInAttackRange() || bRecentlyInteracted;
 }
 
 float AfpstrueEnemyCharacter::GetAttackRange() const
 {
+	// 返回设计配置的基础攻击半径，供追击接受距离等非碰撞规则参考。
 	return CombatComponent != nullptr ? CombatComponent->GetConfiguredAttackRange() : 0.0f;
 }
 
 float AfpstrueEnemyCharacter::GetEffectiveAttackRange() const
 {
+	// 返回 CombatComponent 结合双方胶囊体修正后的实际可达攻击距离。
 	return CombatComponent != nullptr ? CombatComponent->GetEffectiveAttackRange() : 0.0f;
 }
 
@@ -213,6 +226,7 @@ void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 
 void AfpstrueEnemyCharacter::UnregisterFromSignificanceManager()
 {
+	// EndPlay 和死亡共用的幂等注销入口，阻止 Manager 后续再回调本对象。
 	if (!bRegisteredWithSignificanceManager)
 	{
 		return;
@@ -290,6 +304,7 @@ void AfpstrueEnemyCharacter::ApplySignificanceTier(EFPEnemySignificanceTier NewT
 
 void AfpstrueEnemyCharacter::ApplyGameplaySignificanceIntervals()
 {
+	// Gameplay 档位只改变 CharacterMovement 的更新间隔；攻击状态始终恢复为逐帧移动更新。
 	if (IsDead())
 	{
 		return;
@@ -607,6 +622,7 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 void AfpstrueEnemyCharacter::ApplyBenchmarkDiagnosticOverrides(bool bDisableAttackSweep, bool bDisablePawnCollision,
 															   bool bDisableCharacterMovementTick)
 {
+	// 破坏性关闭只用于定位消费者成本上界；正式160敌人基线不会传入这些参数。
 	if (CombatComponent != nullptr)
 	{
 		CombatComponent->SetAttackSweepDisabledForBenchmark(bDisableAttackSweep);
@@ -627,16 +643,19 @@ void AfpstrueEnemyCharacter::ApplyBenchmarkDiagnosticOverrides(bool bDisableAtta
 
 bool AfpstrueEnemyCharacter::CanStartAttack() const
 {
+	// 将只读攻击条件查询转发给事务所有者，AI 可在申请全局名额前排除不合格对象。
 	return CombatComponent != nullptr && CombatComponent->CanStartAttack();
 }
 
 bool AfpstrueEnemyCharacter::TryAttackTarget()
 {
+	// AIController 通过窄接口启动攻击，不直接操作 CombatComponent 的内部状态和 Timer。
 	return CombatComponent != nullptr && CombatComponent->TryAttackTarget();
 }
 
 void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
 {
+	// 蓝图动画结束 Notify 进入 C++ 统一收口；重复或迟到回调由 CombatComponent 幂等处理。
 	if (CombatComponent != nullptr)
 	{
 		CombatComponent->HandleAttackFinishedNotify();
@@ -645,6 +664,7 @@ void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
 
 void AfpstrueEnemyCharacter::BeginAttackWindow()
 {
+	// AnimNotifyState Begin 经角色桥接到 CombatComponent，开始记录刀刃连续轨迹。
 	if (CombatComponent != nullptr)
 	{
 		CombatComponent->BeginAttackWindow();
@@ -653,6 +673,7 @@ void AfpstrueEnemyCharacter::BeginAttackWindow()
 
 void AfpstrueEnemyCharacter::UpdateAttackWindow()
 {
+	// AnimNotifyState Tick 只在有效动画区间调用，角色本身不为近战检测开启常驻 Tick。
 	if (CombatComponent != nullptr)
 	{
 		CombatComponent->UpdateAttackWindow();
@@ -661,6 +682,7 @@ void AfpstrueEnemyCharacter::UpdateAttackWindow()
 
 void AfpstrueEnemyCharacter::EndAttackWindow()
 {
+	// AnimNotifyState End 关闭伤害窗口，但完整攻击事务仍由结束 Notify 或保护 Timer 完成。
 	if (CombatComponent != nullptr)
 	{
 		CombatComponent->EndAttackWindow();
@@ -668,6 +690,7 @@ void AfpstrueEnemyCharacter::EndAttackWindow()
 }
 void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 {
+	// 攻击前退出动画共享并恢复完整动画/移动更新，结束后再按当前 Significance 重新应用策略。
 	if (bHighPriority)
 	{
 		// 独立 Montage/Notify 开始前先解除 LeaderPose，攻击逻辑不依赖共享动画。
@@ -676,15 +699,9 @@ void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
-		if (bDisableAnimationOptimizationsForBenchmark)
-		{
-			CharacterMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-		}
-		else
-		{
-			CharacterMesh->VisibilityBasedAnimTickOption = bHighPriority ? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
-																		 : EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
-		}
+		CharacterMesh->VisibilityBasedAnimTickOption = (bDisableAnimationOptimizationsForBenchmark || bHighPriority)
+			? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
+			: EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 
 		if (bHighPriority)
 		{
@@ -714,6 +731,7 @@ void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 
 bool AfpstrueEnemyCharacter::IsTargetInAttackRange() const
 {
+	// 统一复用 CombatComponent 的二维距离规则，避免 AI、角色和显著性各写一套阈值判断。
 	return CombatComponent != nullptr && CombatComponent->IsTargetInAttackRange();
 }
 
@@ -728,6 +746,7 @@ AfpstrueCharacter* AfpstrueEnemyCharacter::GetCombatTarget() const
 
 void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
+	// 受击会刷新战斗保护时间、退出动画共享并触发表现事件；生命扣减已由 HealthComponent 完成。
 	if (const UWorld* World = GetWorld())
 	{
 		LastCombatRelevantTime = World->GetTimeSeconds();
@@ -741,6 +760,7 @@ void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* Da
 
 void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
 {
+	// 活着时通过 CharacterMovement 施加水平冲量，不直接切换物理模拟，保持导航移动仍可继续。
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	if (Movement == nullptr || HitReactionImpulseStrength <= 0.0f || Movement->MovementMode == MOVE_None)
 	{
@@ -813,6 +833,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 
 void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 {
+	// 延迟到下一帧，确保 Ragdoll 刚体已经创建并唤醒后再向实际命中位置施加死亡冲量。
 	USkeletalMeshComponent* CharacterMesh = GetMesh();
 	if (CharacterMesh == nullptr || !CharacterMesh->IsSimulatingPhysics())
 	{
@@ -866,6 +887,7 @@ void AfpstrueEnemyCharacter::SetAnimationSharingCoordinator(UfpstrueEnemyAnimati
 
 void AfpstrueEnemyCharacter::SuspendAnimationSharing()
 {
+	// 攻击、受击、死亡或退出时强制解除 Follower；Coordinator 负责实际注销句柄。
 	if (UfpstrueEnemyAnimationSharingCoordinator* Coordinator = AnimationSharingCoordinator.Get())
 	{
 		Coordinator->SuspendEnemy(this);

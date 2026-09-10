@@ -2,6 +2,7 @@
 
 #include "fpstrueWeaponComponent.h"
 #include "fpstrueCharacter.h"
+#include "fpstrueCollisionChannels.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/CameraComponent.h"
 #include "Components/PrimitiveComponent.h"
@@ -52,6 +53,7 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 }
 } // namespace
 
+// 构造默认的关键骨骼集合；可随具体武器蓝图和目标骨架覆盖，不把素材名称写死在射击流程中。
 UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 {
 	// 这里只提供当前 Mannequin 的默认骨骼约定；武器蓝图可针对其他目标骨架覆盖名单。
@@ -129,6 +131,7 @@ void UfpstrueWeaponComponent::StartFire()
 
 void UfpstrueWeaponComponent::StopFire()
 {
+	// 停止自动射击 Timer，并且只把正在开火的状态恢复为 Ready，避免覆盖 Reloading/Disabled。
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
@@ -207,12 +210,14 @@ void UfpstrueWeaponComponent::Fire()
 
 void UfpstrueWeaponComponent::ConsumeAmmo()
 {
+	// 该函数只在 Fire 完成弹药校验后调用，统一完成扣弹和 HUD 事件广播。
 	--CurrentAmmo;
 	BroadcastAmmoChanged();
 }
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
 {
+	// 根据瞄准状态和连续射击次数计算散布，再把一次命中查询交给单射线函数。
 	const AfpstrueCharacter* OwningCharacter = Character.Get();
 	if (OwningCharacter == nullptr)
 	{
@@ -235,6 +240,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 
 void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponent* Camera, float SpreadAngle)
 {
+	// 从相机发出射击专用射线，返回第一个阻挡命中，并据骨骼名称结算点伤害。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	if (OwningCharacter == nullptr)
 	{
@@ -252,7 +258,8 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 	QueryParams.AddIgnoredActor(GetOwner());
 	QueryParams.bTraceComplex = true;
 
-	const bool bHit = World->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams);
+	// WeaponTrace 与相机可见性解耦：透明表现、交互射线和玩家子弹可以分别配置响应。
+	const bool bHit = World->LineTraceSingleByChannel(HitResult, Start, End, FpstrueCollisionChannels::WeaponTrace, QueryParams);
 
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
@@ -285,6 +292,21 @@ void UfpstrueWeaponComponent::FireSingleLineTrace(UWorld* World, UCameraComponen
 
 // ==================== Reload System ====================
 
+/*
+ * Request 负责进入 Reloading 并通知蓝图播放动画；Commit 在装填帧转移弹药，但仍保持 Reloading。
+ * 动画正常结束调用 Finish，中断调用 Cancel：Finish 会补交缺失的 Commit，Cancel 不会补交或回滚。
+ * 两个动画出口都未触发时，唯一的兜底 Timer 调用 Finish，防止状态永久卡住。
+ *
+ * Delegate 在当前调用栈同步执行，监听者可能取消换弹、死亡或开始下一次换弹。
+ * 因此开始事件之前必须先设置状态和 Timer；Finish 在提交事件返回后还要确认事务序号未变。
+ */
+
+bool UfpstrueWeaponComponent::CanReload() const
+{
+	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
+	return IsOperational() && ActionState != EFPWeaponActionState::Reloading && CurrentAmmo < MagazineSize && ReserveAmmo > 0;
+}
+
 bool UfpstrueWeaponComponent::RequestReload()
 {
 	// Request 只开启换弹事务，不立刻搬运弹药；真正提交点由动画 Notify 决定，使数值变化与装填动作对齐。
@@ -295,12 +317,15 @@ bool UfpstrueWeaponComponent::RequestReload()
 
 	StopFire();
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
+	++ReloadSequence;
 	bReloadAmmoCommitted = false;
 	ActionState = EFPWeaponActionState::Reloading;
+	// 先建立本次兜底，再广播；监听者同步 Finish/Cancel 时才能一并清除正确的 Timer。
 	const float SelectedReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
 	ScheduleReloadTimeout(FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration));
 	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 
+	// true 表示请求曾被接纳；监听者可能已同步结束换弹，广播之后不再写回状态或重设计时器。
 	return true;
 }
 
@@ -316,6 +341,7 @@ bool UfpstrueWeaponComponent::CommitReload()
 	const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
 	CurrentAmmo += AmmoToLoad;
 	ReserveAmmo -= AmmoToLoad;
+	// 先标记已提交再通知 HUD，防止监听者重入 CommitReload 导致重复装弹。
 	bReloadAmmoCommitted = true;
 	BroadcastAmmoChanged();
 	return true;
@@ -323,37 +349,39 @@ bool UfpstrueWeaponComponent::CommitReload()
 
 void UfpstrueWeaponComponent::FinishReload()
 {
+	// 正常结束与超时共用此入口；仅结束进入本函数时的那次换弹。
 	if (ActionState != EFPWeaponActionState::Reloading)
 	{
 		return;
 	}
 
+	const uint32 FinishingReloadSequence = ReloadSequence;
 	CommitReload();
-	if (UWorld* World = GetWorld())
+	// Commit 的同步广播可能已中断/禁用武器，或开启新一轮换弹，不能覆盖其状态和 Timer。
+	if (ActionState != EFPWeaponActionState::Reloading || ReloadSequence != FinishingReloadSequence)
 	{
-		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+		return;
 	}
+
+	ResetReloadState();
 	ActionState = EFPWeaponActionState::Ready;
 }
 
 void UfpstrueWeaponComponent::CancelReload()
 {
-	// 所有中断路径统一恢复 Ready/Disabled 并清 Timer，防止换弹动画中断后留下不可开火状态。
+	// 取消只收尾：装填帧之前不补弹，装填帧之后保留已转移的弹药。
 	if (ActionState != EFPWeaponActionState::Reloading)
 	{
 		return;
 	}
 
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
-	}
-	bReloadAmmoCommitted = false;
+	ResetReloadState();
 	ActionState = EFPWeaponActionState::Ready;
 }
 
 void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
 {
+	// 超时 Timer 是动画 Notify 的容错，不替代正常 Notify；动画链断开时仍能结束 Reloading。
 	UWorld* World = GetWorld();
 	if (World == nullptr)
 	{
@@ -362,6 +390,16 @@ void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
 
 	World->GetTimerManager().SetTimer(ReloadTimerHandle, this, &UfpstrueWeaponComponent::FinishReload,
 									  FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod), false);
+}
+
+void UfpstrueWeaponComponent::ResetReloadState()
+{
+	// 所有出口成对清 Timer 和提交标记；序号保留到下次 Request 递增，以识别委托重入的新事务。
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+	}
+	bReloadAmmoCommitted = false;
 }
 
 // ==================== Owner / Component Lifecycle ====================
@@ -375,6 +413,7 @@ void UfpstrueWeaponComponent::HandleOwnerDeath()
 
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 组件退出前清理所有 Timer，并通知角色解除装备关系，避免留下跨生命周期的回调和悬空关系。
 	ResetWeaponRuntimeState();
 
 	if (AfpstrueCharacter* OwningCharacter = Character.Get())
@@ -389,19 +428,16 @@ void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 bool UfpstrueWeaponComponent::IsOperational() const
 {
+	// 汇总武器最基础的可用条件，供换弹等规则复用，不在多个入口重复判断角色生命周期。
 	const AfpstrueCharacter* OwningCharacter = Character.Get();
 	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead();
-}
-
-bool UfpstrueWeaponComponent::CanReload() const
-{
-	return IsOperational() && ActionState != EFPWeaponActionState::Reloading && CurrentAmmo < MagazineSize && ReserveAmmo > 0;
 }
 
 // ==================== Recoil System ====================
 
 void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 {
+	// 本发后坐力先累加到受限范围，再启动固定频率的恢复 Timer；瞄准时使用较小倍率。
 	if (PlayerController == nullptr)
 	{
 		return;
@@ -428,6 +464,7 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 
 void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 {
+	// 每次 Timer 回调只恢复一小步，并把相邻两次累计值的差量写入 Controller 视角。
 	UWorld* World = GetWorld();
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	APlayerController* PlayerController =
@@ -454,6 +491,7 @@ void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 
 void UfpstrueWeaponComponent::ClearRecoilState()
 {
+	// 停止恢复 Timer 并归零累计量，供恢复完成、角色死亡和组件退出共同调用。
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(RecoilRecoveryTimerHandle);
@@ -467,16 +505,14 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 
 void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
 {
-	// EndPlay 和异常收口复用同一重置入口，Timer 与运行时弱引用在这里成对清理。
+	// 死亡和 EndPlay 共用同一清理入口；调用者随后禁用武器，角色引用由 EndPlay 单独解除。
 	if (UWorld* World = GetWorld())
 	{
-		FTimerManager& TimerManager = World->GetTimerManager();
-		TimerManager.ClearTimer(AutomaticFireTimerHandle);
-		TimerManager.ClearTimer(ReloadTimerHandle);
+		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
 	}
 
+	ResetReloadState();
 	ClearRecoilState();
-	bReloadAmmoCommitted = false;
 	ConsecutiveShotCount = 0;
 	LastShotTimeSeconds = -1.0;
 	LastAcceptedShotTimeSeconds = -1.0;
@@ -484,5 +520,6 @@ void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
 
 void UfpstrueWeaponComponent::BroadcastAmmoChanged()
 {
+	// 弹药状态只由 WeaponComponent 写入；角色、HUD 和蓝图通过该委托读取同一份结果。
 	OnAmmoChanged.Broadcast(CurrentAmmo, MagazineSize, ReserveAmmo);
 }

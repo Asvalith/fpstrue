@@ -51,11 +51,13 @@ void UfpstrueEnemyAnimationSharingStateProcessor::ProcessActorState_Implementati
 
 UEnum* UfpstrueEnemyAnimationSharingStateProcessor::GetAnimationStateEnum_Implementation()
 {
+	// 把项目 AI 状态枚举交给插件，插件据此解释 ProcessActorState 输出的整数状态。
 	return StaticEnum<EFPEnemyAIState>();
 }
 
 // ==================== 初始化与生命周期 ====================
 
+// Coordinator 不逐帧运行；默认动画使用软引用，只有真正启用 Sharing 时才同步加载。
 UfpstrueEnemyAnimationSharingCoordinator::UfpstrueEnemyAnimationSharingCoordinator()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -118,6 +120,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCh
 
 void UfpstrueEnemyAnimationSharingCoordinator::Stop()
 {
+	// 先逐个解除 Follower，再清理句柄表；敌人恢复自身 AnimInstance 和 LOD 控制权。
 	TArray<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 	RegisteredActorHandles.GenerateKeyArray(RegisteredEnemies);
 	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
@@ -131,6 +134,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::Stop()
 
 void UfpstrueEnemyAnimationSharingCoordinator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// 世界退出时释放 Manager、运行时 Setup 和 Skeleton 的强引用，允许 UObject GC 回收临时配置。
 	Stop();
 	SharingManager = nullptr;
 	RuntimeSetup = nullptr;
@@ -264,6 +268,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 
 void UfpstrueEnemyAnimationSharingCoordinator::HandleActorHandleUpdated(int32 NewHandle, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy)
 {
+	// 插件异步返回 ActorHandle；弱引用失效或句柄无效时不写入注册表。
 	if (Enemy.IsValid() && NewHandle != INDEX_NONE)
 	{
 		RegisteredActorHandles.FindOrAdd(Enemy) = static_cast<uint32>(NewHandle);

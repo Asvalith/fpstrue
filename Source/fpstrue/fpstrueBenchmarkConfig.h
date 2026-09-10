@@ -15,6 +15,8 @@ public:
 
 	// 判断命令行是否指定了固定敌人数。
 	bool HasEnemyCountOverride() const { return bHasEnemyCountOverride; }
+	// 判断自动测试是否显式要求提高玩家最大生命值。
+	bool HasPlayerHealthOverride() const { return bHasPlayerHealthOverride; }
 	// 把命令行中的可选参数覆盖到本次渲染显著性策略。
 	void ApplyEnemySignificanceOverrides(FFPEnemyRenderSignificancePolicy& InOutPolicy) const;
 
@@ -44,6 +46,7 @@ public:
 
 	int32 EnemyCount = 0;
 	int32 Seed = 1337;
+	float PlayerHealth = 0.0f;
 	float WarmupSeconds = 10.0f;
 	float DurationSeconds = 30.0f;
 	FString TraceFile;
@@ -53,6 +56,7 @@ private:
 	FFPBenchmarkConfig();
 
 	bool bHasEnemyCountOverride = false;
+	bool bHasPlayerHealthOverride = false;
 	TOptional<float> FrustumWeight;
 	TOptional<float> ScreenCoverageWeight;
 	TOptional<float> RecentFrustumWeight;

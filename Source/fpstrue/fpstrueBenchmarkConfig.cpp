@@ -44,8 +44,10 @@ const FFPBenchmarkConfig& FFPBenchmarkConfig::Get()
 
 FFPBenchmarkConfig::FFPBenchmarkConfig()
 {
+	// 所有开关只在进程启动时解析一次；正式基线不传 BenchmarkDisable*，消融脚本才显式启用单项关闭。
 	const TCHAR* CommandLine = FCommandLine::Get();
 
+	// 布尔参数用 FParse::Param 判断“是否出现”，不需要再为 true/false 解析字符串值。
 	bAutoBenchmark = FParse::Param(CommandLine, TEXT("AutoBenchmark"));
 	bDisableAttackSweep = FParse::Param(CommandLine, TEXT("BenchmarkDisableAttackSweep"));
 	bDisableEnemyPawnCollision = FParse::Param(CommandLine, TEXT("BenchmarkDisableEnemyPawnCollision"));
@@ -71,8 +73,14 @@ FFPBenchmarkConfig::FFPBenchmarkConfig()
 	bTakeScreenshot = FParse::Param(CommandLine, TEXT("BenchmarkScreenshot"));
 	bAutoQuit = FParse::Param(CommandLine, TEXT("BenchmarkAutoQuit"));
 
+	// 带值参数用 FParse::Value 解析，并在进入 Gameplay 前钳制到可执行范围。
 	bHasEnemyCountOverride = FParse::Value(CommandLine, TEXT("BenchmarkEnemies="), EnemyCount);
 	EnemyCount = FMath::Max(EnemyCount, 0);
+	bHasPlayerHealthOverride = FParse::Value(CommandLine, TEXT("BenchmarkPlayerHealth="), PlayerHealth);
+	if (bHasPlayerHealthOverride)
+	{
+		PlayerHealth = FMath::Max(PlayerHealth, 1.0f);
+	}
 	FParse::Value(CommandLine, TEXT("BenchmarkSeed="), Seed);
 	FParse::Value(CommandLine, TEXT("BenchmarkWarmup="), WarmupSeconds);
 	FParse::Value(CommandLine, TEXT("BenchmarkDuration="), DurationSeconds);
@@ -84,6 +92,7 @@ FFPBenchmarkConfig::FFPBenchmarkConfig()
 		TraceFile.TrimQuotesInline();
 	}
 
+	// Significance 调参项保留为 TOptional：未传参时继续使用 GameMode/蓝图配置，显式传 0 时则确实覆盖为 0。
 	FrustumWeight = ParseOptionalValue<float>(CommandLine, TEXT("EnemySigFrustumWeight="));
 	ScreenCoverageWeight = ParseOptionalValue<float>(CommandLine, TEXT("EnemySigScreenWeight="));
 	RecentFrustumWeight = ParseOptionalValue<float>(CommandLine, TEXT("EnemySigRecentWeight="));

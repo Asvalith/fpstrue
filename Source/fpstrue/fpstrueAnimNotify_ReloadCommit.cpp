@@ -33,5 +33,6 @@ void UfpstrueAnimNotify_ReloadCommit::Notify(USkeletalMeshComponent* MeshComp, U
 
 FString UfpstrueAnimNotify_ReloadCommit::GetNotifyName_Implementation() const
 {
+	// 为动画编辑器提供可读名称，不参与运行时换弹状态判断。
 	return TEXT("Reload Commit");
 }

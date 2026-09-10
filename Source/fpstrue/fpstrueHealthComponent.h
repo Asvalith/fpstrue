@@ -34,6 +34,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void ResetHealth();
 
+	// 运行时更新最大生命并回满；Benchmark 用它保留完整受伤链路，同时避免测试中途死亡。
+	void SetMaxHealthAndReset(float NewMaxHealth);
+
 	// 返回当前血量。
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetHealth() const { return CurrentHealth; }

@@ -7,6 +7,7 @@
 #include "fpstrueBenchmarkRunner.generated.h"
 
 class AfpstrueGameMode;
+class APlayerController;
 
 /** 自动性能测试模块：负责准备场景、采集 CSV/Trace、应用消融并按需退出。 */
 UCLASS(ClassGroup = (Performance))
@@ -36,13 +37,23 @@ private:
 	void StartCapture();
 	// 把命令行消融开关应用到当前敌人和 AI 组件。
 	void ApplyDiagnosticOverrides();
+	// 校验玩家与敌人规模在采集前后保持有效，拒绝把变化中的场景写入结果表。
+	bool ValidateBenchmarkState(const TCHAR* Phase) const;
 	// 停止采集并保存输出。
 	void StopCapture();
+	// 正常结束和取消共用幂等的采集收尾；不处理阶段 Timer、输入或成功日志。
+	void StopActiveProfilers();
 	// 在启用自动退出时关闭测试进程。
 	void ExitBenchmark();
 
 	TWeakObjectPtr<AfpstrueGameMode> GameMode;
+	bool bAbortReported = false;
+	bool bCaptureActive = false;
 	bool bTraceActive = false;
+	// 自动测试期间屏蔽真实键鼠输入，并保存固定视点用于拒绝发生位姿漂移的样本。
+	bool bBenchmarkInputLocked = false;
+	FVector BenchmarkPlayerLocation = FVector::ZeroVector;
+	FRotator BenchmarkControlRotation = FRotator::ZeroRotator;
 
 	FTimerHandle ReadyTimerHandle;
 	FTimerHandle StartTimerHandle;
