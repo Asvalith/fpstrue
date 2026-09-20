@@ -28,15 +28,15 @@
 
 项目源码入口：
 
-- `Source/fpstrue/fpstrueCharacter.cpp`
-- `Source/fpstrue/fpstrueHealthComponent.cpp`
-- `Source/fpstrue/fpstrueWeaponComponent.cpp`
-- `Source/fpstrue/fpstrueEnemyAIController.cpp`
-- `Source/fpstrue/fpstrueEnemyCombatComponent.cpp`
-- `Source/fpstrue/fpstrueSurroundManager.cpp`
-- `Source/fpstrue/fpstrueEnemyCharacter.cpp`
-- `Source/fpstrue/fpstrueEnemySignificanceCoordinator.cpp`
-- `Source/fpstrue/fpstrueEnemyAnimationSharingCoordinator.cpp`
+- `Source/fpstrue/Characters/Player/fpstrueCharacter.cpp`
+- `Source/fpstrue/Characters/Shared/fpstrueHealthComponent.cpp`
+- `Source/fpstrue/Weapons/fpstrueWeaponComponent.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemyAIController.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueSurroundManager.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemyCharacter.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemySignificanceCoordinator.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.cpp`
 
 ---
 
@@ -576,7 +576,9 @@ projectedRadius ≈ sphereRadius / (forwardDistance * tan(FOV/2))
 
 ### 7.6 复杂度与可以继续优化的常数
 
-项目 Render Coordinator 对 N 个敌人采样是 `O(N)`，之后稳定排序是 `O(N log N)`，预算下发是 `O(N)`。N=160 时通常合理。
+项目 Render Coordinator 对 N 个敌人采样是 `O(N)`；Full、阴影和光追分别使用容量为 K 的有界堆选择候选，
+总成本约为 `O(N + Ef log Kf + Es log Ks + Er log Kr)`，预算下发仍为 `O(N)`。默认 K 远小于 160，
+因此不再为只取少量名额而完整排序全部敌人。
 
 当前每个敌人都会重复构造 `FRotationMatrix` 和计算 `tan(FOV/2)`。这些其实属于同一相机快照，可以预计算到 ViewContext；这是降低常数，不改变大 O。
 

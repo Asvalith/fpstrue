@@ -1,0 +1,17 @@
+{
+  "SchemaVersion": 1,
+  "Counts": [160],
+  "RunsPerCase": 3,
+  "WarmupSeconds": 15,
+  "DurationSeconds": 30,
+  "PlayerHealth": 1000000,
+  "BenchmarkSeed": 1337,
+  "VariantNames": ["Baseline"],
+  "ExpectedAvoidanceMode": "Any",
+  "CaptureTaskTrace": false,
+  "BalancedVariantOrder": false,
+  "StartTrimSeconds": 0,
+  "EndTrimSeconds": 0,
+  "ScreenPercentage": null,
+  "Map": "/Game/FactoryDistrict/Maps/Demonstration"
+}
