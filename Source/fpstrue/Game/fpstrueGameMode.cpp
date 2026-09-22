@@ -39,8 +39,7 @@ AfpstrueGameMode::AfpstrueGameMode()
 	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
 	BenchmarkRunner = CreateDefaultSubobject<UfpstrueBenchmarkRunner>(TEXT("BenchmarkRunner"));
 	EnemySignificanceCoordinator = CreateDefaultSubobject<UfpstrueEnemySignificanceCoordinator>(TEXT("EnemySignificanceCoordinator"));
-	EnemyAnimationSharingCoordinator =
-		CreateDefaultSubobject<UfpstrueEnemyAnimationSharingCoordinator>(TEXT("EnemyAnimationSharingCoordinator"));
+	EnemyAnimationSharingCoordinator =CreateDefaultSubobject<UfpstrueEnemyAnimationSharingCoordinator>(TEXT("EnemyAnimationSharingCoordinator"));
 }
 
 void AfpstrueGameMode::BeginPlay()
@@ -153,14 +152,14 @@ void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AfpstrueGameMode::CacheSpawnPoints()
 {
-	// 一次性收集带 EnemySpawnTag 的 TargetPoint，后续波次只复用缓存，避免每只敌人遍历世界。
+	//一次性收集带 EnemySpawnTag 的 TargetPoint，后续波次只复用缓存，避免每只敌人遍历世界。
 	SpawnPoints.Reset();
 	UGameplayStatics::GetAllActorsOfClassWithTag(this, ATargetPoint::StaticClass(), EnemySpawnTag, SpawnPoints);
 }
 
 void AfpstrueGameMode::StartNextWave()
 {
-	// 波次状态先提交并广播，再建立生成队列；HUD 看到的波次编号始终与即将生成的配置一致。
+	//波次状态先提交并广播，再建立生成队列；HUD 看到的波次编号始终与即将生成的配置一致。
 	const int32 ConfiguredWaveCount = GetConfiguredWaveCount();
 	if (!bGameRunning || CurrentWave >= ConfiguredWaveCount)
 	{
@@ -278,8 +277,7 @@ void AfpstrueGameMode::SpawnCurrentWave()
 	SpawnNextQueuedEnemy();
 	if (PendingEnemySpawnCount > 0)
 	{
-		GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy, FMath::Max(SpawnInterval, 0.01f),
-										true);
+		GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy, FMath::Max(SpawnInterval, 0.01f),true);
 	}
 }
 

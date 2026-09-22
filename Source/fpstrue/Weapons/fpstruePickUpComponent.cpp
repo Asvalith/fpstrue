@@ -26,7 +26,7 @@ void UfpstruePickUpComponent::BeginPlay()
 
 //Sphere 真正发生重叠以后调用
 void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-												   UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
+UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
 												   const FHitResult& SweepResult)
 {
 	if (bConsumed)
@@ -38,8 +38,7 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 	//归属玩家
 	AActor* OwnerActor = GetOwner();
 	//归属玩家、归属类存在检测
-	UfpstrueWeaponComponent* WeaponComponent =
-		OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
+	UfpstrueWeaponComponent* WeaponComponent =OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 
 	if (Character == nullptr || Character->IsDead() || WeaponComponent == nullptr)
 	{

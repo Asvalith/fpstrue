@@ -23,6 +23,7 @@ struct FfpstrueWaveConfig
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wave")
 	TSubclassOf<AfpstrueEnemyCharacter> EnemyClass;
 
+	//元信息：meta影响编辑器行为
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Wave", meta = (ClampMin = "1"))
 	int32 EnemyCount = 5;
 };
