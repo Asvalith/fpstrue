@@ -10,6 +10,7 @@
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -34,7 +35,7 @@ constexpr float BenchmarkPlayerRotationToleranceDegrees = 2.0f;
 
 UfpstrueBenchmarkRunner::UfpstrueBenchmarkRunner()
 {
-	// 各阶段完全由一次性 Timer 串联，Runner 不占用每帧组件 Tick。
+	// 就绪阶段用低频 Timer 轮询，其余阶段用一次性 Timer 串联，Runner 不占用每帧组件 Tick。
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
@@ -86,7 +87,8 @@ void UfpstrueBenchmarkRunner::Cancel()
 	// 完整玩法基线不让玩家无敌；若玩家死亡导致对局提前结束，本次样本必须中止并退出，不能伪装成完整采集。
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
 	const AfpstrueGameMode* OwnerGameMode = GameMode.Get();
-	if (BenchmarkConfig.bAutoBenchmark && BenchmarkConfig.bAutoQuit && OwnerGameMode != nullptr && OwnerGameMode->bGameEnded)
+	if (BenchmarkConfig.bAutoBenchmark && BenchmarkConfig.bAutoQuit && !bCaptureFinished &&
+		OwnerGameMode != nullptr && OwnerGameMode->IsFinished())
 	{
 		if (!bAbortReported)
 		{
@@ -117,10 +119,11 @@ void UfpstrueBenchmarkRunner::BeginBenchmark()
 
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
 	FMath::RandInit(BenchmarkConfig.Seed);
+	bCaptureFinished = false;
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark random seed: %d"), BenchmarkConfig.Seed);
 
 	OwnerGameMode->StartGameMode();
-	if (!OwnerGameMode->bGameRunning)
+	if (!OwnerGameMode->IsRunning())
 	{
 		return;
 	}
@@ -169,7 +172,7 @@ void UfpstrueBenchmarkRunner::WaitForBenchmarkReady()
 {
 	// 等待分帧生成队列清空后再开始预热，使稳态数据不混入批量 Spawn 尖峰。
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
-	if (OwnerGameMode == nullptr || !OwnerGameMode->bGameRunning)
+	if (OwnerGameMode == nullptr || !OwnerGameMode->IsRunning())
 	{
 		GetWorld()->GetTimerManager().ClearTimer(ReadyTimerHandle);
 		return;
@@ -406,24 +409,46 @@ void UfpstrueBenchmarkRunner::ApplyDiagnosticOverrides()
 		   OwnerGameMode->EnemyRenderSignificancePolicy.MaxFullRenderEnemies,
 		   OwnerGameMode->EnemyRenderSignificancePolicy.MaxShadowCastingEnemies,
 		   OwnerGameMode->EnemyRenderSignificancePolicy.MaxRayTracingEnemies);
+
+	// 一次性读回实际管理范围，尸体已退出存活注册表，必须单独观察；不在每帧遍历世界。
+	int32 AliveMeshes = 0, AliveShadowMeshes = 0, AliveRayTracingMeshes = 0;
+	int32 CorpseMeshes = 0, CorpseShadowMeshes = 0, CorpseRayTracingMeshes = 0;
+	for (TActorIterator<AfpstrueEnemyCharacter> It(GetWorld()); It; ++It)
+	{
+		int32 Meshes, ShadowMeshes, RayTracingMeshes;
+		It->GetRenderBudgetMeshCounts(Meshes, ShadowMeshes, RayTracingMeshes);
+		if (It->IsDead())
+		{
+			CorpseMeshes += Meshes;
+			CorpseShadowMeshes += ShadowMeshes;
+			CorpseRayTracingMeshes += RayTracingMeshes;
+		}
+		else
+		{
+			AliveMeshes += Meshes;
+			AliveShadowMeshes += ShadowMeshes;
+			AliveRayTracingMeshes += RayTracingMeshes;
+		}
+	}
+	UE_LOG(LogTemp, Display, TEXT("Benchmark managed Mesh flags: alive=%d shadow=%d rayTracing=%d corpse=%d corpseShadow=%d corpseRayTracing=%d (components, not GPU primitives)"),
+		AliveMeshes, AliveShadowMeshes, AliveRayTracingMeshes, CorpseMeshes, CorpseShadowMeshes, CorpseRayTracingMeshes);
 }
 
 bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* Phase) const
 {
 	const AfpstrueGameMode* OwnerGameMode = GameMode.Get();
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
-	const UfpstrueHealthComponent* HealthComponent =
+	const AfpstrueCharacter* Player =
 		OwnerGameMode != nullptr && IsValid(OwnerGameMode->PlayerCharacter)
-			? OwnerGameMode->PlayerCharacter->GetHealthComponent()
+			? OwnerGameMode->PlayerCharacter.Get()
 			: nullptr;
+	const UfpstrueHealthComponent* HealthComponent = Player != nullptr ? Player->GetHealthComponent() : nullptr;
 	const int32 AliveEnemyCount = OwnerGameMode != nullptr ? OwnerGameMode->RegisteredEnemies.Num() : 0;
 	const int32 RequestedEnemyCount = BenchmarkConfig.HasEnemyCountOverride() ? BenchmarkConfig.EnemyCount : AliveEnemyCount;
 	const float PlayerHealth = HealthComponent != nullptr ? HealthComponent->GetHealth() : 0.0f;
 	const bool bEnemyCountValid = !BenchmarkConfig.HasEnemyCountOverride() || AliveEnemyCount == RequestedEnemyCount;
 	const APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0);
-	const FVector CurrentPlayerLocation = OwnerGameMode != nullptr && IsValid(OwnerGameMode->PlayerCharacter)
-		? OwnerGameMode->PlayerCharacter->GetActorLocation()
-		: FVector::ZeroVector;
+	const FVector CurrentPlayerLocation = Player != nullptr ? Player->GetActorLocation() : FVector::ZeroVector;
 	const FRotator CurrentControlRotation = PlayerController != nullptr ? PlayerController->GetControlRotation() : FRotator::ZeroRotator;
 	const float LocationDrift = bBenchmarkInputLocked
 		? FVector::Distance(CurrentPlayerLocation, BenchmarkPlayerLocation)
@@ -437,7 +462,7 @@ bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* Phase) const
 	const bool bViewTransformValid = !bBenchmarkInputLocked ||
 		(LocationDrift <= BenchmarkPlayerLocationTolerance && PitchDrift <= BenchmarkPlayerRotationToleranceDegrees &&
 		 YawDrift <= BenchmarkPlayerRotationToleranceDegrees);
-	const bool bStateValid = OwnerGameMode != nullptr && OwnerGameMode->bGameRunning && !OwnerGameMode->bGameEnded &&
+	const bool bStateValid = OwnerGameMode != nullptr && OwnerGameMode->IsRunning() &&
 							 HealthComponent != nullptr && !HealthComponent->IsDead() && bEnemyCountValid && bViewTransformValid;
 
 	if (bStateValid)
@@ -451,8 +476,8 @@ bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* Phase) const
 		UE_LOG(LogTemp, Error,
 			   TEXT("Automated benchmark invalid: phase=%s requested=%d alive=%d playerHealth=%.1f running=%d ended=%d locationDrift=%.2f pitchDrift=%.2f yawDrift=%.2f"),
 			   Phase, RequestedEnemyCount, AliveEnemyCount, PlayerHealth,
-			   OwnerGameMode != nullptr && OwnerGameMode->bGameRunning ? 1 : 0,
-			   OwnerGameMode != nullptr && OwnerGameMode->bGameEnded ? 1 : 0,
+			   OwnerGameMode != nullptr && OwnerGameMode->IsRunning() ? 1 : 0,
+			   OwnerGameMode != nullptr && OwnerGameMode->IsFinished() ? 1 : 0,
 			   LocationDrift, PitchDrift, YawDrift);
 	}
 
@@ -465,6 +490,7 @@ void UfpstrueBenchmarkRunner::StopCapture()
 {
 	// 采集到期后成对停止 CSV 和 Trace；AutoQuit 延迟一秒退出，给文件写盘留出时间。
 	const bool bStateValid = ValidateBenchmarkState(TEXT("capture-end"));
+	bCaptureFinished = true;
 	const bool bWasTraceActive = bTraceActive;
 	StopActiveProfilers();
 	if (bWasTraceActive)

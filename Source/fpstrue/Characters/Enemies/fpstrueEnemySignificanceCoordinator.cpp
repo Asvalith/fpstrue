@@ -57,26 +57,19 @@ void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 		BenchmarkConfig.ApplyEnemySignificanceOverrides(OwnerGameMode->EnemyRenderSignificancePolicy);
 		SanitizePolicy();
 		bPolicyInitialized = true;
-		UE_LOG(
-			LogTemp, Display,
-			TEXT("Enemy render significance: weights[F=%.2f S=%.2f R=%.2f D=%.2f] thresholds[full=%.2f/%.2f reduced=%.2f/%.2f] "
-				 "budgets[full=%d shadow=%d rt=%d] features[tier=%d lod=%d anim=%d shadow=%d rt=%d]"),
-			OwnerGameMode->EnemyRenderSignificancePolicy.FrustumWeight, OwnerGameMode->EnemyRenderSignificancePolicy.ScreenCoverageWeight,
-			OwnerGameMode->EnemyRenderSignificancePolicy.RecentFrustumWeight, OwnerGameMode->EnemyRenderSignificancePolicy.DistanceWeight,
-			OwnerGameMode->EnemyRenderSignificancePolicy.FullEnterThreshold, OwnerGameMode->EnemyRenderSignificancePolicy.FullExitThreshold,
-			OwnerGameMode->EnemyRenderSignificancePolicy.ReducedEnterThreshold,
-			OwnerGameMode->EnemyRenderSignificancePolicy.ReducedExitThreshold,
-			OwnerGameMode->EnemyRenderSignificancePolicy.MaxFullRenderEnemies,
-			OwnerGameMode->EnemyRenderSignificancePolicy.MaxShadowCastingEnemies,
-			OwnerGameMode->EnemyRenderSignificancePolicy.MaxRayTracingEnemies,
-			OwnerGameMode->EnemyRenderSignificancePolicy.bEnableRenderTiering ? 1 : 0,
-			OwnerGameMode->EnemyRenderSignificancePolicy.bEnableSkeletalLOD ? 1 : 0,
-			OwnerGameMode->EnemyRenderSignificancePolicy.bEnableAnimationTickTiering ? 1 : 0,
-			OwnerGameMode->EnemyRenderSignificancePolicy.bEnableShadowBudget ? 1 : 0,
-			OwnerGameMode->EnemyRenderSignificancePolicy.bEnableRayTracingBudget ? 1 : 0);
+		const FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
+		UE_LOG(LogTemp, Display,
+			   TEXT("Enemy render significance: weights[F=%.2f S=%.2f R=%.2f D=%.2f] thresholds[full=%.2f/%.2f reduced=%.2f/%.2f] "
+					"budgets[full=%d shadow=%d rt=%d] features[tier=%d lod=%d anim=%d shadow=%d rt=%d]"),
+			   Policy.FrustumWeight, Policy.ScreenCoverageWeight, Policy.RecentFrustumWeight, Policy.DistanceWeight,
+			   Policy.FullEnterThreshold, Policy.FullExitThreshold, Policy.ReducedEnterThreshold, Policy.ReducedExitThreshold,
+			   Policy.MaxFullRenderEnemies, Policy.MaxShadowCastingEnemies, Policy.MaxRayTracingEnemies,
+			   Policy.bEnableRenderTiering ? 1 : 0, Policy.bEnableSkeletalLOD ? 1 : 0, Policy.bEnableAnimationTickTiering ? 1 : 0,
+			   Policy.bEnableShadowBudget ? 1 : 0, Policy.bEnableRayTracingBudget ? 1 : 0);
 	}
 
-	// 固定频率集中更新，避免每个敌人在 Tick 中各自评分、排序和争抢预算。
+	// 固定频率集中更新，避免每个敌人在 Tick 中各自评分、排序和争抢预算
+	// 首轮采样错开开局创建峰值；启动正确性由 GameMode 的初始化顺序保证，而不是依赖此延迟。
 	GetWorld()->GetTimerManager().SetTimer(UpdateTimerHandle, this, &UfpstrueEnemySignificanceCoordinator::Update,
 										   FMath::Max(OwnerGameMode->EnemySignificanceUpdateInterval, 0.1f), true, 0.1f);
 }
@@ -98,17 +91,19 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 }
 
 // ==================== 集中更新管线 ====================
-
-void UfpstrueEnemySignificanceCoordinator::Update()
-{
-	/*
+/*
 	 * 单轮固定阶段：
-	 * 1. 用玩家 Transform 更新 UE Significance Manager，先下发 Gameplay 档位；
-	 * 2. 从 PlayerCameraManager 创建唯一 Render ViewContext；
+	 * 0.守卫检查(GameMode、PlayerCharacter 是否有效)
+	 * 1.Gameplay：插件可用时用玩家 Transform 更新评分；插件缺失不阻断独立 Render 预算；
+	 * 2. Render快照：从 PlayerCameraManager 创建唯一 Render ViewContext；
 	 * 3. 收集全部存活敌人样本，用纯数值 Top-K 分配 Full/Shadow/RT 名额；
 	 * 4. 统一写回组件，并记录“消费者数量 + 局部耗时”所需的 CSV 指标。
 	 * 阶段之间不边采样边抢预算，保证结果只由本轮快照和稳定优先级决定。
 	 */
+
+void UfpstrueEnemySignificanceCoordinator::Update()
+{
+
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
 	if (OwnerGameMode == nullptr)
 	{
@@ -122,18 +117,13 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		return;
 	}
 
-	USignificanceManager* Manager = USignificanceManager::Get(GetWorld());
-	if (Manager == nullptr)
-	{
-		return;
-	}
 	OwnerGameMode->PruneInvalidEnemyRegistrations();
-
-	TArray<FTransform> Viewpoints;
-	Viewpoints.Reserve(1);
-	Viewpoints.Add(OwnerGameMode->PlayerCharacter->GetActorTransform());
-	// Gameplay 层：Significance Manager 只按玩法目标距离更新 AI 与移动频率。
-	Manager->Update(Viewpoints);
+	// 插件缺失只跳过 Gameplay 评分；自定义 Render 预算仍需独立执行。
+	if (USignificanceManager* Manager = USignificanceManager::Get(GetWorld()))
+	{
+		const FTransform Viewpoint = OwnerGameMode->PlayerCharacter->GetActorTransform();
+		Manager->Update(MakeArrayView(&Viewpoint, 1));
+	}
 
 	APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0);
 	if (PlayerController == nullptr)
@@ -143,6 +133,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 
 	// Render 层：相机视锥、屏占比和相机距离只服务于渲染分级。
 	FFPEnemyRenderViewContext ViewContext;
+	///采样阶段：统一视点、FOV、宽高比和采样时刻
 	PlayerController->GetPlayerViewPoint(ViewContext.ViewLocation, ViewContext.ViewRotation);
 	ViewContext.HorizontalFOVDegrees =
 		PlayerController->PlayerCameraManager != nullptr ? PlayerController->PlayerCameraManager->GetFOVAngle() : 90.0f;
@@ -152,21 +143,11 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	ViewContext.AspectRatio =
 		ViewportWidth > 0 && ViewportHeight > 0 ? static_cast<float>(ViewportWidth) / static_cast<float>(ViewportHeight) : 16.0f / 9.0f;
 	ViewContext.TimeSeconds = GetWorld()->GetTimeSeconds();
-
-	struct FEnemyRenderCandidate
-	{
-		AfpstrueEnemyCharacter* Enemy = nullptr;
-		FFPEnemyRenderSignificanceSample Sample;
-		FFPEnemyRenderPriorityKey PriorityKey;
-		EFPEnemyRenderSignificanceTier NaturalTier = EFPEnemyRenderSignificanceTier::Background;
-		EFPEnemyRenderSignificanceTier AssignedTier = EFPEnemyRenderSignificanceTier::Background;
-		bool bGameplayAnimationProtection = false;
-		bool bShouldCastShadow = false;
-		bool bShouldBeVisibleInRayTracing = false;
-	};
+	const FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
 
 	// 采样阶段不改组件状态，确保所有敌人使用同一帧的观察条件；这也是“统一时钟”的含义。
-	TArray<FEnemyRenderCandidate> Candidates;
+	TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
+	Candidates.Reset();
 	Candidates.Reserve(OwnerGameMode->RegisteredEnemies.Num());
 	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : OwnerGameMode->RegisteredEnemies)
 	{
@@ -178,16 +159,23 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 
 		FEnemyRenderCandidate& Candidate = Candidates.AddDefaulted_GetRef();
 		Candidate.Enemy = Enemy;
-		Candidate.Sample = Enemy->EvaluateRenderSignificance(ViewContext, OwnerGameMode->EnemyRenderSignificancePolicy);
+		Candidate.Sample = Enemy->EvaluateRenderSignificance(ViewContext, Policy);
 		Candidate.PriorityKey.Score = Candidate.Sample.Score;
 		Candidate.PriorityKey.TieBreakId = Enemy->GetUniqueID();
 		Candidate.PriorityKey.bInPrimaryFrustum = Candidate.Sample.bInPrimaryFrustum;
 		Candidate.PriorityKey.bInExpandedFrustum = Candidate.Sample.bInExpandedFrustum;
 		// 玩法保护是独立的正确性约束，不参与 RenderScore 和渲染预算排序。
-		Candidate.bGameplayAnimationProtection = Enemy->RequiresGameplayAnimationProtection(
-			ViewContext.TimeSeconds, OwnerGameMode->EnemyRenderSignificancePolicy.CombatPriorityGraceSeconds);
-		Candidate.NaturalTier = Enemy->ResolveNaturalRenderSignificanceTier(Candidate.Sample, OwnerGameMode->EnemyRenderSignificancePolicy);
-		Candidate.AssignedTier = Candidate.NaturalTier;
+		Candidate.bGameplayAnimationProtection =
+			Enemy->RequiresGameplayAnimationProtection(ViewContext.TimeSeconds, Policy.CombatPriorityGraceSeconds);
+		Candidate.NaturalTier = Enemy->ResolveNaturalRenderSignificanceTier(Candidate.Sample, Policy);
+		// 先把所有自然 Full 候选降为 Reduced，再只恢复优先级最高的 K 个
+		//先讲解再恢复优先级最高的 K 个
+		Candidate.AssignedTier = Policy.bEnableRenderTiering && Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full
+									 ? EFPEnemyRenderSignificanceTier::Reduced
+									 : Candidate.NaturalTier;
+		// 关闭某项预算时默认放行，开启时仅由对应 Top-K 授予资格，不再另扫一遍候选。
+		Candidate.bShouldCastShadow = !Policy.bEnableShadowBudget;
+		Candidate.bShouldBeVisibleInRayTracing = !Policy.bEnableRayTracingBudget;
 	}
 
 	// 三类预算复用同一个小型堆。默认名额不超过内联容量，避免为 Top-K 额外申请堆内存；
@@ -213,97 +201,66 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	};
 
 	// Render Tier 预算：先尊重自然档位，再限制 Full 档总量。
-	int32 AssignedFullCount = 0;
 	int32 FullBudgetDowngradeCount = 0;
-	if (!OwnerGameMode->EnemyRenderSignificancePolicy.bEnableRenderTiering)
+	// 禁用分档时 ResolveNaturalRenderSignificanceTier 已返回 Full，无须再次覆盖全体。
+	if (Policy.bEnableRenderTiering)
 	{
-		for (FEnemyRenderCandidate& Candidate : Candidates)
-		{
-			Candidate.AssignedTier = EFPEnemyRenderSignificanceTier::Full;
-		}
-	}
-	else
-	{
-		// 先把所有自然 Full 候选降为 Reduced，再只恢复优先级最高的 K 个。
-		for (FEnemyRenderCandidate& Candidate : Candidates)
-		{
-			if (Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full)
-			{
-				Candidate.AssignedTier = EFPEnemyRenderSignificanceTier::Reduced;
-			}
-		}
-
-		const int32 EligibleFullCount = SelectTopK(
-			OwnerGameMode->EnemyRenderSignificancePolicy.MaxFullRenderEnemies,
-			[](const FEnemyRenderCandidate& Candidate)
-			{
-				return Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full;
-			});
+		const int32 EligibleFullCount = SelectTopK(Policy.MaxFullRenderEnemies, [](const FEnemyRenderCandidate& Candidate)
+												   { return Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full; });
 		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
 		{
 			Candidates[Entry.CandidateIndex].AssignedTier = EFPEnemyRenderSignificanceTier::Full;
 		}
-		AssignedFullCount = TopKHeap.Num();
-		FullBudgetDowngradeCount = EligibleFullCount - AssignedFullCount;
+		FullBudgetDowngradeCount = EligibleFullCount - TopKHeap.Num();
 	}
 
 	// 光追预算：只让 Full 且在距离内的高排序敌人参与动态 BLAS。
-	int32 RayTracingVisibleCount = 0;
 	int32 RayTracingBudgetRejectedCount = 0;
-	if (!OwnerGameMode->EnemyRenderSignificancePolicy.bEnableRayTracingBudget)
+	if (Policy.bEnableRayTracingBudget)
 	{
-		for (FEnemyRenderCandidate& Candidate : Candidates)
-		{
-			Candidate.bShouldBeVisibleInRayTracing = true;
-		}
-	}
-	else
-	{
-		const int32 EligibleRayTracingCount = SelectTopK(
-			OwnerGameMode->EnemyRenderSignificancePolicy.MaxRayTracingEnemies,
-			[OwnerGameMode](const FEnemyRenderCandidate& Candidate)
-			{
-				return Candidate.AssignedTier == EFPEnemyRenderSignificanceTier::Full &&
-					Candidate.Sample.Distance <= OwnerGameMode->EnemyRenderSignificancePolicy.RayTracingMaxDistance;
-			});
+		const int32 EligibleRayTracingCount = SelectTopK(Policy.MaxRayTracingEnemies,
+														 [&Policy](const FEnemyRenderCandidate& Candidate)
+														 {
+															 return Candidate.AssignedTier == EFPEnemyRenderSignificanceTier::Full &&
+																	Candidate.Sample.Distance <= Policy.RayTracingMaxDistance;
+														 });
 		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
 		{
 			Candidates[Entry.CandidateIndex].bShouldBeVisibleInRayTracing = true;
 		}
-		RayTracingVisibleCount = TopKHeap.Num();
-		RayTracingBudgetRejectedCount = EligibleRayTracingCount - RayTracingVisibleCount;
+		RayTracingBudgetRejectedCount = EligibleRayTracingCount - TopKHeap.Num();
 	}
 
 	// 阴影预算：扩展视锥、距离和 Render Tier 共同决定候选资格。
-	int32 ShadowCastingCount = 0;
 	int32 ShadowBudgetRejectedCount = 0;
-	if (!OwnerGameMode->EnemyRenderSignificancePolicy.bEnableShadowBudget)
+	if (Policy.bEnableShadowBudget)
 	{
-		for (FEnemyRenderCandidate& Candidate : Candidates)
-		{
-			Candidate.bShouldCastShadow = true;
-		}
-	}
-	else
-	{
-		const int32 EligibleShadowCount = SelectTopK(
-			OwnerGameMode->EnemyRenderSignificancePolicy.MaxShadowCastingEnemies,
-			[OwnerGameMode](const FEnemyRenderCandidate& Candidate)
-			{
-				return Candidate.Sample.bInExpandedFrustum &&
-					Candidate.Sample.Distance <= OwnerGameMode->EnemyRenderSignificancePolicy.ShadowMaxDistance &&
-					Candidate.AssignedTier != EFPEnemyRenderSignificanceTier::Background;
-			});
+		const int32 EligibleShadowCount = SelectTopK(Policy.MaxShadowCastingEnemies,
+													 [&Policy](const FEnemyRenderCandidate& Candidate)
+													 {
+														 return Candidate.Sample.bInExpandedFrustum &&
+																Candidate.Sample.Distance <= Policy.ShadowMaxDistance &&
+																Candidate.AssignedTier != EFPEnemyRenderSignificanceTier::Background;
+													 });
 		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
 		{
 			Candidates[Entry.CandidateIndex].bShouldCastShadow = true;
 		}
-		ShadowCastingCount = TopKHeap.Num();
-		ShadowBudgetRejectedCount = EligibleShadowCount - ShadowCastingCount;
+		ShadowBudgetRejectedCount = EligibleShadowCount - TopKHeap.Num();
 	}
 
+	ApplyAndRecordCandidates(*OwnerGameMode, FullBudgetDowngradeCount, ShadowBudgetRejectedCount, RayTracingBudgetRejectedCount);
+	// 不跨轮保存非拥有 Actor 指针，仅保留临时数组的分配容量。
+	Candidates.Reset();
+}
+
+void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const AfpstrueGameMode& OwnerGameMode, int32 FullBudgetDowngradeCount,
+																	int32 ShadowBudgetRejectedCount, int32 RayTracingBudgetRejectedCount)
+{
 	// 统一应用结果并在同一位置记录消融所需的 CSV 指标。
 	// 注意：统一采样不等于所有消费者必须无条件重写；组件内部仍应通过状态比较避免重复修改渲染状态。
+	const FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode.EnemyRenderSignificancePolicy;
+	const TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
 	int32 GameplayFullCount = 0;
 	int32 GameplayReducedCount = 0;
 	int32 GameplayBackgroundCount = 0;
@@ -315,6 +272,11 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	int32 LOD2PlusCount = 0;
 	int32 AppliedShadowCastingCount = 0;
 	int32 AppliedRayTracingVisibleCount = 0;
+	int32 ManagedMeshCount = 0;
+	int32 ShadowMeshCount = 0;
+	int32 RayTracingMeshCount = 0;
+	int32 ShadowOwnerCount = 0;
+	int32 RayTracingOwnerCount = 0;
 	int32 ExpandedFrustumCount = 0;
 	int32 GameplayAnimationProtectionCount = 0;
 	float ScoreSum = 0.0f;
@@ -322,11 +284,11 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	float ScreenCoverageFactorSum = 0.0f;
 	float RecentFrustumFactorSum = 0.0f;
 	float DistanceFactorSum = 0.0f;
-	for (FEnemyRenderCandidate& Candidate : Candidates)
+	for (const FEnemyRenderCandidate& Candidate : Candidates)
 	{
 		Candidate.Enemy->ApplyRenderSignificanceTier(Candidate.AssignedTier, Candidate.bShouldCastShadow,
 													 Candidate.bShouldBeVisibleInRayTracing, Candidate.bGameplayAnimationProtection,
-													 OwnerGameMode->EnemyRenderSignificancePolicy);
+													 Policy);
 
 		switch (Candidate.Enemy->GetGameplaySignificanceTier())
 		{
@@ -371,9 +333,17 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		}
 		if (const USkeletalMeshComponent* CharacterMesh = Candidate.Enemy->GetMesh())
 		{
+			// 保留旧 CSV 的主 Mesh 口径，避免附件加入后历史数据列含义悄悄变化。
 			AppliedShadowCastingCount += CharacterMesh->CastShadow ? 1 : 0;
 			AppliedRayTracingVisibleCount += CharacterMesh->bVisibleInRayTracing ? 1 : 0;
 		}
+		int32 Meshes, ShadowMeshes, RayTracingMeshes;
+		Candidate.Enemy->GetRenderBudgetMeshCounts(Meshes, ShadowMeshes, RayTracingMeshes);
+		ManagedMeshCount += Meshes;
+		ShadowMeshCount += ShadowMeshes;
+		RayTracingMeshCount += RayTracingMeshes;
+		ShadowOwnerCount += ShadowMeshes > 0 ? 1 : 0;
+		RayTracingOwnerCount += RayTracingMeshes > 0 ? 1 : 0;
 
 		ExpandedFrustumCount += Candidate.Sample.bInExpandedFrustum ? 1 : 0;
 		GameplayAnimationProtectionCount += Candidate.bGameplayAnimationProtection ? 1 : 0;
@@ -398,14 +368,20 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	CSV_CUSTOM_STAT(fpstrueSignificance, LOD2Plus, LOD2PlusCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, ShadowCasters, AppliedShadowCastingCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, RayTracingVisible, AppliedRayTracingVisibleCount, ECsvCustomStatOp::Set);
+	// 名额以敌人为单位，组件数可能大于名额；均为实际标志读回，不是 GPU 执行统计。
+	CSV_CUSTOM_STAT(fpstrueSignificance, ManagedMeshes, ManagedMeshCount, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, ShadowMeshes, ShadowMeshCount, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, RayTracingMeshes, RayTracingMeshCount, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, ShadowOwners, ShadowOwnerCount, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, RayTracingOwners, RayTracingOwnerCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, ExpandedFrustum, ExpandedFrustumCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayAnimationProtection, GameplayAnimationProtectionCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, FullBudgetDowngrades, FullBudgetDowngradeCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, ShadowBudgetRejected, ShadowBudgetRejectedCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, RayTracingBudgetRejected, RayTracingBudgetRejectedCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, AnimationSharingFollowers,
-					OwnerGameMode->EnemyAnimationSharingCoordinator != nullptr
-						? OwnerGameMode->EnemyAnimationSharingCoordinator->GetRegisteredEnemyCount()
+					OwnerGameMode.EnemyAnimationSharingCoordinator != nullptr
+						? OwnerGameMode.EnemyAnimationSharingCoordinator->GetRegisteredEnemyCount()
 						: 0,
 					ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, MeanScore, ScoreSum * InverseCandidateCount, ECsvCustomStatOp::Set);
@@ -426,63 +402,37 @@ void UfpstrueEnemySignificanceCoordinator::SanitizePolicy()
 		return;
 	}
 
-	OwnerGameMode->EnemyRenderSignificancePolicy.FrustumWeight =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.FrustumWeight, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.ScreenCoverageWeight =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.ScreenCoverageWeight, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.RecentFrustumWeight =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.RecentFrustumWeight, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.DistanceWeight =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.DistanceWeight, 0.0f);
-	const float WeightSum =
-		OwnerGameMode->EnemyRenderSignificancePolicy.FrustumWeight + OwnerGameMode->EnemyRenderSignificancePolicy.ScreenCoverageWeight +
-		OwnerGameMode->EnemyRenderSignificancePolicy.RecentFrustumWeight + OwnerGameMode->EnemyRenderSignificancePolicy.DistanceWeight;
+	FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
+	Policy.FrustumWeight = FMath::Max(Policy.FrustumWeight, 0.0f);
+	Policy.ScreenCoverageWeight = FMath::Max(Policy.ScreenCoverageWeight, 0.0f);
+	Policy.RecentFrustumWeight = FMath::Max(Policy.RecentFrustumWeight, 0.0f);
+	Policy.DistanceWeight = FMath::Max(Policy.DistanceWeight, 0.0f);
+	const float WeightSum = Policy.FrustumWeight + Policy.ScreenCoverageWeight + Policy.RecentFrustumWeight + Policy.DistanceWeight;
 	if (WeightSum <= KINDA_SMALL_NUMBER)
 	{
-		OwnerGameMode->EnemyRenderSignificancePolicy.FrustumWeight = 1.0f;
+		Policy.FrustumWeight = 1.0f;
 	}
 
-	OwnerGameMode->EnemyRenderSignificancePolicy.ExpandedFrustumMargin =
-		FMath::Clamp(OwnerGameMode->EnemyRenderSignificancePolicy.ExpandedFrustumMargin, 0.0f, 1.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.RecentFrustumGraceSeconds =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.RecentFrustumGraceSeconds, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.ScreenRadiusForFullScore =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.ScreenRadiusForFullScore, 0.001f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.NearDistance = FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.NearDistance, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.FarDistance = FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.FarDistance,
-																		  OwnerGameMode->EnemyRenderSignificancePolicy.NearDistance + 1.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.CombatPriorityGraceSeconds =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.CombatPriorityGraceSeconds, 0.0f);
+	Policy.ExpandedFrustumMargin = FMath::Clamp(Policy.ExpandedFrustumMargin, 0.0f, 1.0f);
+	Policy.RecentFrustumGraceSeconds = FMath::Max(Policy.RecentFrustumGraceSeconds, 0.0f);
+	Policy.ScreenRadiusForFullScore = FMath::Max(Policy.ScreenRadiusForFullScore, 0.001f);
+	Policy.NearDistance = FMath::Max(Policy.NearDistance, 0.0f);
+	Policy.FarDistance = FMath::Max(Policy.FarDistance, Policy.NearDistance + 1.0f);
+	Policy.CombatPriorityGraceSeconds = FMath::Max(Policy.CombatPriorityGraceSeconds, 0.0f);
 
-	OwnerGameMode->EnemyRenderSignificancePolicy.FullEnterThreshold =
-		FMath::Clamp(OwnerGameMode->EnemyRenderSignificancePolicy.FullEnterThreshold, 0.0f, 1.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.FullExitThreshold =
-		FMath::Clamp(OwnerGameMode->EnemyRenderSignificancePolicy.FullExitThreshold, 0.0f,
-					 OwnerGameMode->EnemyRenderSignificancePolicy.FullEnterThreshold);
-	OwnerGameMode->EnemyRenderSignificancePolicy.ReducedEnterThreshold =
-		FMath::Clamp(OwnerGameMode->EnemyRenderSignificancePolicy.ReducedEnterThreshold, 0.0f,
-					 OwnerGameMode->EnemyRenderSignificancePolicy.FullExitThreshold);
-	OwnerGameMode->EnemyRenderSignificancePolicy.ReducedExitThreshold =
-		FMath::Clamp(OwnerGameMode->EnemyRenderSignificancePolicy.ReducedExitThreshold, 0.0f,
-					 OwnerGameMode->EnemyRenderSignificancePolicy.ReducedEnterThreshold);
-	OwnerGameMode->EnemyRenderSignificancePolicy.DemotionDelaySeconds =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.DemotionDelaySeconds, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.MinimumTierHoldSeconds =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.MinimumTierHoldSeconds, 0.0f);
+	Policy.FullEnterThreshold = FMath::Clamp(Policy.FullEnterThreshold, 0.0f, 1.0f);
+	Policy.FullExitThreshold = FMath::Clamp(Policy.FullExitThreshold, 0.0f, Policy.FullEnterThreshold);
+	Policy.ReducedEnterThreshold = FMath::Clamp(Policy.ReducedEnterThreshold, 0.0f, Policy.FullExitThreshold);
+	Policy.ReducedExitThreshold = FMath::Clamp(Policy.ReducedExitThreshold, 0.0f, Policy.ReducedEnterThreshold);
+	Policy.DemotionDelaySeconds = FMath::Max(Policy.DemotionDelaySeconds, 0.0f);
+	Policy.MinimumTierHoldSeconds = FMath::Max(Policy.MinimumTierHoldSeconds, 0.0f);
 
-	OwnerGameMode->EnemyRenderSignificancePolicy.MaxFullRenderEnemies =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.MaxFullRenderEnemies, 0);
-	OwnerGameMode->EnemyRenderSignificancePolicy.MaxShadowCastingEnemies =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.MaxShadowCastingEnemies, 0);
-	OwnerGameMode->EnemyRenderSignificancePolicy.ShadowMaxDistance =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.ShadowMaxDistance, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.MaxRayTracingEnemies =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.MaxRayTracingEnemies, 0);
-	OwnerGameMode->EnemyRenderSignificancePolicy.RayTracingMaxDistance =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.RayTracingMaxDistance, 0.0f);
-	OwnerGameMode->EnemyRenderSignificancePolicy.FullMinLOD = FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.FullMinLOD, 0);
-	OwnerGameMode->EnemyRenderSignificancePolicy.ReducedMinLOD =
-		FMath::Max(OwnerGameMode->EnemyRenderSignificancePolicy.ReducedMinLOD, OwnerGameMode->EnemyRenderSignificancePolicy.FullMinLOD);
-	OwnerGameMode->EnemyRenderSignificancePolicy.BackgroundMinLOD = FMath::Max(
-		OwnerGameMode->EnemyRenderSignificancePolicy.BackgroundMinLOD, OwnerGameMode->EnemyRenderSignificancePolicy.ReducedMinLOD);
+	Policy.MaxFullRenderEnemies = FMath::Max(Policy.MaxFullRenderEnemies, 0);
+	Policy.MaxShadowCastingEnemies = FMath::Max(Policy.MaxShadowCastingEnemies, 0);
+	Policy.ShadowMaxDistance = FMath::Max(Policy.ShadowMaxDistance, 0.0f);
+	Policy.MaxRayTracingEnemies = FMath::Max(Policy.MaxRayTracingEnemies, 0);
+	Policy.RayTracingMaxDistance = FMath::Max(Policy.RayTracingMaxDistance, 0.0f);
+	Policy.FullMinLOD = FMath::Max(Policy.FullMinLOD, 0);
+	Policy.ReducedMinLOD = FMath::Max(Policy.ReducedMinLOD, Policy.FullMinLOD);
+	Policy.BackgroundMinLOD = FMath::Max(Policy.BackgroundMinLOD, Policy.ReducedMinLOD);
 }

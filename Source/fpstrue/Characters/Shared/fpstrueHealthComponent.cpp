@@ -44,16 +44,18 @@ void UfpstrueHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void UfpstrueHealthComponent::ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
+// UE 伤害委托入口，统一完成扣血和伤害/死亡广播。
+void UfpstrueHealthComponent::HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType,
+													   AController* InstigatedBy, AActor* DamageCauser)
 {
 	// 先拒绝无效伤害和尸体重复伤害，再统一 Clamp；外部系统不能绕过这里直接写 CurrentHealth。
-	if (DamageAmount <= 0.0f || IsDead())
+	if (Damage <= 0.0f || IsDead())
 	{
 		return;
 	}
 
 	const float PreviousHealth = CurrentHealth;
-	CurrentHealth = FMath::Clamp(CurrentHealth - DamageAmount, 0.0f, MaxHealth);
+	CurrentHealth = FMath::Clamp(CurrentHealth - Damage, 0.0f, MaxHealth);
 	const float AppliedDamage = PreviousHealth - CurrentHealth;
 
 	OnDamageReceived.Broadcast(AppliedDamage, DamageCauser, InstigatedBy);
@@ -78,7 +80,8 @@ void UfpstrueHealthComponent::SetMaxHealthAndReset(float NewMaxHealth)
 
 void UfpstrueHealthComponent::ResetHealth()
 {
-	// 把配置值修正到合法范围，并重建“存活”状态；可供对象复用或新一局初始化。
+	// 把配置值修正到合法范围，并重建本组件的“存活”状态；可供对象复用或新一局初始化。
+	// 这里只恢复生命数据；角色自身的移动、武器和死亡表现标志仍需由 Owner 配套恢复。
 	MaxHealth = FMath::Max(1.0f, MaxHealth);
 	CurrentHealth = MaxHealth;
 	bDeathBroadcast = false;
@@ -89,11 +92,4 @@ float UfpstrueHealthComponent::GetHealthNormalized() const
 {
 	// HUD 读取的比例在组件内统一计算，MaxHealth 异常时安全返回 0。
 	return MaxHealth > 0.0f ? CurrentHealth / MaxHealth : 0.0f;
-}
-
-// UE 伤害委托只负责适配参数，真正的扣血、Clamp 和幂等死亡都走 ApplyDamageInternal。
-void UfpstrueHealthComponent::HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType,
-													   AController* InstigatedBy, AActor* DamageCauser)
-{
-	ApplyDamageInternal(Damage, DamageCauser, InstigatedBy);
 }

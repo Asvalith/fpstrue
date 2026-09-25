@@ -24,6 +24,7 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 {
 	GENERATED_BODY()
 
+	//功能开关(消融实验使用)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Features")
 	bool bEnableRenderTiering = true;
 
@@ -39,18 +40,8 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Features")
 	bool bEnableRayTracingBudget = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
-	float FrustumWeight = 0.45f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
-	float ScreenCoverageWeight = 0.30f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
-	float RecentFrustumWeight = 0.15f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
-	float DistanceWeight = 0.10f;
-
+	//评分输入：评分计算中使用的视锥扩展、最近可见宽限、屏占比满分半径和距离范围
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Inputs", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ExpandedFrustumMargin = 0.15f;
 
@@ -66,7 +57,21 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Inputs", meta = (ClampMin = "1.0"))
 	float FarDistance = 10000.0f;
 
-	// 只控制战斗动画/LOD 的正确性保护窗口，不进入 RenderScore。
+
+	//评分权重：主视锥、屏占比、最近可见、距离。归一化后总和为 1。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
+	float FrustumWeight = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
+	float ScreenCoverageWeight = 0.30f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
+	float RecentFrustumWeight = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Score|Weights", meta = (ClampMin = "0.0"))
+	float DistanceWeight = 0.10f;
+
+	// 战斗只恢复必要动画和 LOD，不提高渲染评分，也不额外分配阴影或光追名额。
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation Protection", meta = (ClampMin = "0.0"))
 	float CombatPriorityGraceSeconds = 0.75f;
 
@@ -88,6 +93,8 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tier|Hysteresis", meta = (ClampMin = "0.0"))
 	float MinimumTierHoldSeconds = 0.50f;
 
+
+	// 预算：Full Render、阴影和硬件光追的最大敌人数量，以及阴影和光追的最大距离
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Budget", meta = (ClampMin = "0"))
 	int32 MaxFullRenderEnemies = 12;
 
@@ -113,9 +120,10 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 	int32 BackgroundMinLOD = 2;
 };
 
-// Coordinator 每轮从玩家相机生成一次，所有敌人共享同一份观察上下文。
+// Coordinator 每轮从玩家相机生成一次，所有敌人通过 const 引用读取同一份值类型快照。
 struct FFPEnemyRenderViewContext
 {
+	//相机位置、旋转、水平FOV、宽高比和采样时刻
 	FVector ViewLocation = FVector::ZeroVector;
 	FRotator ViewRotation = FRotator::ZeroRotator;
 	float HorizontalFOVDegrees = 90.0f;
@@ -126,6 +134,7 @@ struct FFPEnemyRenderViewContext
 // 纯渲染采样结果：不得加入攻击、受击、威胁等玩法状态。
 struct FFPEnemyRenderSignificanceSample
 {
+	//一个敌人一份的采样结果
 	float Score = 0.0f;
 	float FrustumFactor = 0.0f;
 	float ScreenCoverageFactor = 0.0f;
@@ -143,6 +152,8 @@ struct FFPEnemyRenderSignificanceSample
  * 用于保证同一批候选的结果确定。若以后需要把相近评分视为同档，应在生成键之前显式量化评分，
  * 不能在比较器中使用 IsNearlyEqual；“近似相等”不具备传递性，会破坏排序算法要求的严格弱序。
  */
+
+//排序键
 struct FFPEnemyRenderPriorityKey
 {
 	float Score = 0.0f;
@@ -164,7 +175,6 @@ struct FFPEnemyRenderPriorityLess
 		{
 			return Left.bInExpandedFrustum;
 		}
-
 		const float LeftScore = FMath::IsFinite(Left.Score) ? FMath::Clamp(Left.Score, 0.0f, 1.0f) : -1.0f;
 		const float RightScore = FMath::IsFinite(Right.Score) ? FMath::Clamp(Right.Score, 0.0f, 1.0f) : -1.0f;
 		if (LeftScore != RightScore)
@@ -202,7 +212,7 @@ struct FFPEnemyRenderTopKWorstFirst
  */
 template <typename AllocatorType>
 FORCEINLINE void FPEnemyRenderTopKInsert(TArray<FFPEnemyRenderTopKEntry, AllocatorType>& TopKHeap, int32 MaxCount,
-										int32 CandidateIndex, const FFPEnemyRenderPriorityKey& PriorityKey)
+	int32 CandidateIndex, const FFPEnemyRenderPriorityKey& PriorityKey)
 {
 	if (MaxCount <= 0 || CandidateIndex == INDEX_NONE)
 	{
@@ -217,7 +227,6 @@ FORCEINLINE void FPEnemyRenderTopKInsert(TArray<FFPEnemyRenderTopKEntry, Allocat
 		return;
 	}
 
-	check(!TopKHeap.IsEmpty());
 	if (FFPEnemyRenderPriorityLess{}(Entry.PriorityKey, TopKHeap[0].PriorityKey))
 	{
 		TopKHeap.HeapPopDiscard(WorstFirst, EAllowShrinking::No);

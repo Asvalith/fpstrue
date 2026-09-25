@@ -47,6 +47,8 @@ private:
 
 	TWeakObjectPtr<AfpstrueGameMode> GameMode;
 	bool bAbortReported = false;
+	// 采集窗口已结束后，正常退出的 EndPlay 不得再把样本标记为提前中止。
+	bool bCaptureFinished = false;
 	bool bCaptureActive = false;
 	bool bTraceActive = false;
 	// 自动测试期间屏蔽真实键鼠输入，并保存固定视点用于拒绝发生位姿漂移的样本。

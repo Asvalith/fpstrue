@@ -24,17 +24,17 @@ enum class EFPWeaponActionState : uint8
 
 //动态多播委托类型
 //成功执行一次射击时广播
-//开始换弹时告诉监听者是不是“空仓换弹”
-//弹药发生变化时广播
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWeaponFireEvent);
+//开始换弹时告诉监听者是不是“空仓换弹”
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWeaponReloadEvent, bool, bWasEmptyReload);
+//弹药发生变化时广播
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FWeaponAmmoChangedEvent, int32, CurrentAmmo, int32, MagazineSize, int32, ReserveAmmo);
 
 //Hitscan命中结果
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FWeaponTraceEvent, bool, bHit, FVector, TraceStart, FVector, TraceEnd, FVector, TraceTarget,
 											  FHitResult, HitResult);
 
-//BlueprintSpawnableComponent：可在蓝图Actor的Components面板
+//BlueprintSpawnableComponent：可在蓝图 Actor 的 Components 面板添加本组件
 /**
  * 玩家武器模块：独占装备、动作状态、弹药事务、Hitscan、散布和后坐力，并通过事件驱动 HUD/蓝图。
  *
@@ -87,7 +87,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|State")
 	bool IsReloading() const { return ActionState == EFPWeaponActionState::Reloading; }
 
-	//检查是否正在开火限制montage重复播放
+	//检查是否正在开火，供蓝图限制 Montage 重复播放；查询本身不控制动画。
 	UFUNCTION(BlueprintPure, Category = "Weapon|State")
 	bool IsFiring() const { return ActionState == EFPWeaponActionState::Firing; }
 
@@ -110,7 +110,7 @@ public:
 
 	// ==================== Events ====================
 	//事件
-	//蓝图蓝图可以Bind Event到这些动态多播委托
+	//蓝图可以 Bind Event 到这些动态多播委托
 	//蓝图可以决定播放动画、音效、HUD、特效
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FWeaponFireEvent OnWeaponFirePerformed;
@@ -132,8 +132,7 @@ protected:
 
 private:
 	// ==================== Action State / Rules ====================
-	// 第一层：Action State；状态只由本组件内部直接写入。
-	// 第二层：Rules
+	// Action State 只由本组件内部直接写入；规则查询只读现有状态。
 	//状态边界
 	//统一检查武器已装备、未禁用且角色存活
 	bool IsOperational() const;
@@ -143,15 +142,11 @@ private:
 	// ==================== Fire System ====================
 	// 自动射击 Timer 和首次按下输入共用的单次射击入口。
 	void Fire();
-	// Fire 已确认弹药充足后，在同一 Game Thread 调用栈内提交扣弹并广播 HUD 更新。
-	void ConsumeAmmo();
 	// 根据相机、瞄准状态和连续射击次数计算本发 Hitscan。
 	// 执行一条带散布的射线，处理伤害、冲量和命中事件。
 	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
 
 	// ==================== Reload System ====================
-	// 为本次换弹设置唯一的兜底 Timer；超时通过 FinishReload 补交弹药并结束流程。
-	void ScheduleReloadTimeout(float DurationSeconds);
 	// Finish、Cancel、死亡和 EndPlay 共用的清理；不改弹药或 ActionState，由调用者决定最终状态。
 	void ResetReloadState();
 
@@ -212,7 +207,7 @@ private:
 
 	// Spread
 	//散布参数
-	//腰射基础散步角
+	//腰射基础散布角
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
 	float HipFireSpreadAngle = 1.5f;
 	//ADS瞄准时基础散布角
@@ -275,7 +270,7 @@ private:
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AfpstrueCharacter> Character;
 
-	// 第一层 Action State
+	// Action State
 	//Ready、Firing、Reloading、Disabled四种互斥动作状态
 	UPROPERTY(VisibleInstanceOnly, Category = "Weapon|State")
 	EFPWeaponActionState ActionState = EFPWeaponActionState::Disabled;
@@ -304,8 +299,8 @@ private:
 	float AccumulatedRecoilPitch = 0.0f;
 	float AccumulatedRecoilYaw = 0.0f;
 
-	// 第四层 Recovery / Timers
-	//异步Timer句柄，EndPlay时统一清理
+	// Recovery / Timers
+	// Timer 延后在 Game Thread 回调，不是 Worker 并行任务；EndPlay 时统一清理句柄。
 	FTimerHandle AutomaticFireTimerHandle;
 	FTimerHandle ReloadTimerHandle;
 	FTimerHandle RecoilRecoveryTimerHandle;

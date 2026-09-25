@@ -27,7 +27,7 @@ constexpr float SharedMovingSpeedThreshold = 10.0f;
  * 避免每个敌人各自创建一套 Sharing 配置。
  */
 
-// ==================== 状态适配：复用现有 AI FSM ====================
+// ==================== 状态适配：读取 Controller 状态与实际速度 ====================
 
 void UfpstrueEnemyAnimationSharingStateProcessor::ProcessActorState_Implementation(int32& OutState, AActor* InActor, uint8 CurrentState,
 																				   uint8 OnDemandState, bool& bShouldProcess)
@@ -218,16 +218,9 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 		return;
 	}
 
-	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	const bool bIsRegisteredWithSharing = RegisteredActorHandles.Contains(EnemyKey);
-	const bool bRegistrationPending = PendingActorRegistrations.Contains(EnemyKey);
-	const bool bShouldShare = Enemy->CanUseAnimationSharing();
-	if (!bShouldShare)
+	if (!Enemy->CanUseAnimationSharing())
 	{
-		if (bIsRegisteredWithSharing || bRegistrationPending)
-		{
-			SuspendEnemy(Enemy);
-		}
+		SuspendEnemy(Enemy);
 		return;
 	}
 
@@ -239,7 +232,8 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 		return;
 	}
 
-	if (!bIsRegisteredWithSharing && !bRegistrationPending)
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
+	if (!RegisteredActorHandles.Contains(EnemyKey) && !PendingActorRegistrations.Contains(EnemyKey))
 	{
 		PendingActorRegistrations.Add(EnemyKey);
 		SharingManager->RegisterActorWithSkeleton(
@@ -278,7 +272,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 		SharingManager->UnregisterActor(Enemy);
 
 		// Animation Sharing 注册或待注册时都可能接管此标志；退出后必须还给项目的骨骼 LOD 分级。
-		TArray<USkeletalMeshComponent*> OwnedMeshComponents;
+		TInlineComponentArray<USkeletalMeshComponent*, 4> OwnedMeshComponents;
 		Enemy->GetComponents(OwnedMeshComponents);
 		for (USkeletalMeshComponent* MeshComponent : OwnedMeshComponents)
 		{

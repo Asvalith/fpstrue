@@ -15,7 +15,7 @@ class USkeleton;
 
 /**
  * Animation Sharing 的原生状态处理器。
- * 共享层直接复用 AI FSM 的 Idle / Chase 状态；攻击、受击和死亡会先退出共享系统，
+ * 共享层读取 Controller 的 Idle / Chase 表现状态；行为选择仍由行为树负责。攻击、受击和死亡会先退出共享系统，
  * 继续由敌人原有 AnimBP、Montage、Notify 和布料/物理链处理。
  */
 UCLASS()
@@ -24,10 +24,10 @@ class FPSTRUE_API UfpstrueEnemyAnimationSharingStateProcessor final : public UAn
 	GENERATED_BODY()
 
 public:
-	// 根据 AI FSM 和实际速度，把敌人映射到共享待机或跑步状态。
+	// 根据 Controller 表现状态和实际速度，把敌人映射到共享待机或跑步状态。
 	virtual void ProcessActorState_Implementation(int32& OutState, AActor* InActor, uint8 CurrentState, uint8 OnDemandState,
 												  bool& bShouldProcess) override;
-	// 告诉插件共享状态使用敌人的 AI FSM 枚举。
+	// 告诉插件共享状态复用 EFPEnemyAIState 枚举，而不另建一套动画状态编号。
 	virtual UEnum* GetAnimationStateEnum_Implementation() override;
 };
 
@@ -87,6 +87,7 @@ protected:
 private:
 	// 自动化回归在临时世界中构造插件登记，覆盖真实 UnregisterActor 的 swap 句柄回调。
 	friend class FFpstrueAnimationSharingStopTest;
+	friend class FFpstrueEnemyCombatLifecycleTest;
 
 	// ==================== Setup 与 Handle 维护 ====================
 

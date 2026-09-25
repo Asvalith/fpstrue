@@ -65,6 +65,8 @@ public:
 		// The wrapper starts a GameMode to dispatch component/actor BeginPlay.
 		// Select the native base so project defaults cannot spawn a real match.
 		GetWorld()->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+		// FTestWorldWrapper 默认不创建 AI 系统；真实行为树/Blackboard 需要它。
+		GetWorld()->CreateAISystem();
 		if (!Wrapper.BeginPlayInTestWorld())
 		{
 			Wrapper.ForwardErrorMessages(&Test);
@@ -77,8 +79,8 @@ public:
 
 	bool Advance(float DurationSeconds)
 	{
-		// Small explicit steps advance real TimerManager callbacks, including the
-		// controller's randomized first decision, without a latent editor session.
+		// Small explicit steps advance real timers and behavior-tree tasks, including
+		// the randomized initial decision wait, without a latent editor session.
 		const int32 FrameCount = FMath::CeilToInt(DurationSeconds / 0.01f);
 		for (int32 Frame = 0; Frame < FrameCount; ++Frame)
 		{
@@ -241,7 +243,7 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Decisions do not snap the actor to ControlRotation"),
 		FMath::IsNearlyEqual(Facing.Enemy->GetActorRotation().Yaw, 16.0, 0.01));
 
-	// Exercise the product's inclusive tolerance through the same timer-driven decision.
+	// Exercise the product's inclusive tolerance through the same behavior-tree decision.
 	// No private helper or duplicate angular-error implementation is used by this test.
 	Facing.Enemy->SetActorRotation(FRotator(0.0f, 15.0f, 0.0f));
 	if (!World.Advance(0.15f))
@@ -263,11 +265,14 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 		FMath::IsNearlyEqual(WrappedFacing.Enemy->GetActorRotation().Yaw, 179.0, 0.01));
 
 	// 关闭伤害窗口可以重复调用，但不能提前结束完整攻击；完整重置才释放事务。
-	Facing.Enemy->EndAttackWindow();
-	Facing.Enemy->UpdateAttackWindow();
-	Facing.Enemy->EndAttackWindow();
+	UfpstrueEnemyCombatComponent* Combat = Facing.Enemy->GetCombatComponent();
+	if (!TestNotNull(TEXT("Character exposes its owned combat component"), Combat))
+		return false;
+	Combat->EndAttackWindow();
+	Combat->UpdateAttackWindow();
+	Combat->EndAttackWindow();
 	TestTrue(TEXT("Closing the damage window leaves the attack transaction active"), Facing.Enemy->IsAttacking());
-	Facing.Enemy->FindComponentByClass<UfpstrueEnemyCombatComponent>()->ResetCombat();
+	Combat->ResetCombat();
 	Facing.Enemy->HandleAttackFinishedNotify();
 	TestFalse(TEXT("A late finish notification cannot restart a reset attack"), Facing.Enemy->IsAttacking());
 	return true;

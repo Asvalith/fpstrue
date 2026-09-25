@@ -68,7 +68,7 @@ protected:
 	// 解除 Owner 伤害事件订阅。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	// 把 Owner 收到的 UE 伤害转入统一扣血流程。
+	// Owner 的 UE 伤害入口：统一扣血、Clamp 和事件广播，保证死亡只广播一次。
 	UFUNCTION()
 	void HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType, AController* InstigatedBy,
 								  AActor* DamageCauser);
@@ -80,8 +80,4 @@ protected:
 	float CurrentHealth = 100.0f;
 
 	bool bDeathBroadcast = false;
-
-private:
-	// 执行扣血、Clamp 和事件广播，保证死亡只广播一次。
-	void ApplyDamageInternal(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 };

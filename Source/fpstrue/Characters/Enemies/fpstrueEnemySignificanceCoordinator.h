@@ -4,9 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Characters/Enemies/fpstrueEnemySignificance.h"
 #include "fpstrueEnemySignificanceCoordinator.generated.h"
 
 class AfpstrueGameMode;
+class AfpstrueEnemyCharacter;
 
 /** 敌人显著性调度模块：集中采样所有敌人，通过有界 Top-K 分配 LOD、动画、阴影和骨骼 RT 预算。 */
 UCLASS(ClassGroup = (Performance))
@@ -30,10 +32,27 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	// 周期间复用容量；Actor 指针只在当前 Update 的同步采样/应用阶段使用。
+	struct FEnemyRenderCandidate
+	{
+		AfpstrueEnemyCharacter* Enemy = nullptr;
+		FFPEnemyRenderSignificanceSample Sample;
+		FFPEnemyRenderPriorityKey PriorityKey;
+		EFPEnemyRenderSignificanceTier NaturalTier = EFPEnemyRenderSignificanceTier::Background;
+		EFPEnemyRenderSignificanceTier AssignedTier = EFPEnemyRenderSignificanceTier::Background;
+		bool bGameplayAnimationProtection = false;
+		bool bShouldCastShadow = false;
+		bool bShouldBeVisibleInRayTracing = false;
+	};
+	TArray<FEnemyRenderCandidate> CandidateBuffer;
+
 	// ==================== 集中更新与策略校验 ====================
 
 	// 一次完成 Gameplay 更新、Render 采样、Top-K 预算选择、组件应用和 CSV 统计。
 	void Update();
+	// 预算选完后统一应用并读回实际结果；统计不参与下一轮决策。
+	void ApplyAndRecordCandidates(const AfpstrueGameMode& OwnerGameMode, int32 FullBudgetDowngradeCount, int32 ShadowBudgetRejectedCount,
+								  int32 RayTracingBudgetRejectedCount);
 	// 修正权重、阈值、距离和名额的非法配置。
 	void SanitizePolicy();
 

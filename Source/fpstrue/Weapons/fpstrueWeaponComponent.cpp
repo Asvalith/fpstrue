@@ -191,7 +191,9 @@ void UfpstrueWeaponComponent::Fire()
 	}
 	LastAcceptedShotTimeSeconds = CurrentTimeSeconds;
 
-	ConsumeAmmo();
+	// 弹药校验通过后提交扣弹，再广播 HUD 更新。
+	--CurrentAmmo;
+	BroadcastAmmoChanged();
 
 	OnWeaponFirePerformed.Broadcast();
 	FireLineTrace(World, Camera);
@@ -206,13 +208,6 @@ void UfpstrueWeaponComponent::Fire()
 	{
 		StopFire();
 	}
-}
-
-void UfpstrueWeaponComponent::ConsumeAmmo()
-{
-	// 该函数只在 Fire 完成弹药校验后调用，统一完成扣弹和 HUD 事件广播。
-	--CurrentAmmo;
-	BroadcastAmmoChanged();
 }
 
 void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
@@ -290,6 +285,13 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
  * 因此开始事件之前必须先设置状态和 Timer；Finish 在提交事件返回后还要确认事务序号未变。
  */
 
+bool UfpstrueWeaponComponent::IsOperational() const
+{
+	// 汇总武器最基础的可用条件，供换弹等规则复用，不在多个入口重复判断角色生命周期。
+	const AfpstrueCharacter* OwningCharacter = Character.Get();
+	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead();
+}
+
 bool UfpstrueWeaponComponent::CanReload() const
 {
 	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
@@ -311,7 +313,13 @@ bool UfpstrueWeaponComponent::RequestReload()
 	ActionState = EFPWeaponActionState::Reloading;
 	// 先建立本次兜底，再广播；监听者同步 Finish/Cancel 时才能一并清除正确的 Timer。
 	const float SelectedReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
-	ScheduleReloadTimeout(FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration));
+	// 超时 Timer 是动画 Notify 的容错，不替代正常 Notify；动画链断开时仍能结束 Reloading。
+	// 本次请求只有这一处设置 Timer，超时通过 FinishReload 补交弹药并结束流程。
+	if (UWorld* World = GetWorld())
+	{
+		const float Timeout = FMath::Max(0.01f, FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration) + ReloadCompletionGracePeriod);
+		World->GetTimerManager().SetTimer(ReloadTimerHandle, this, &UfpstrueWeaponComponent::FinishReload, Timeout, false);
+	}
 	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 
 	// true 表示请求曾被接纳；监听者可能已同步结束换弹，广播之后不再写回状态或重设计时器。
@@ -368,19 +376,6 @@ void UfpstrueWeaponComponent::CancelReload()
 	ActionState = EFPWeaponActionState::Ready;
 }
 
-void UfpstrueWeaponComponent::ScheduleReloadTimeout(float DurationSeconds)
-{
-	// 超时 Timer 是动画 Notify 的容错，不替代正常 Notify；动画链断开时仍能结束 Reloading。
-	UWorld* World = GetWorld();
-	if (World == nullptr)
-	{
-		return;
-	}
-
-	World->GetTimerManager().SetTimer(ReloadTimerHandle, this, &UfpstrueWeaponComponent::FinishReload,
-									  FMath::Max(0.01f, DurationSeconds + ReloadCompletionGracePeriod), false);
-}
-
 void UfpstrueWeaponComponent::ResetReloadState()
 {
 	// 所有出口成对清 Timer 和提交标记；序号保留到下次 Request 递增，以识别委托重入的新事务。
@@ -389,37 +384,6 @@ void UfpstrueWeaponComponent::ResetReloadState()
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 	}
 	bReloadAmmoCommitted = false;
-}
-
-// ==================== Owner / Component Lifecycle ====================
-
-void UfpstrueWeaponComponent::HandleOwnerDeath()
-{
-	// 玩家死亡属于强制中断：停止连射、取消换弹和后坐力恢复，再把武器置为 Disabled。
-	ResetWeaponRuntimeState();
-	ActionState = EFPWeaponActionState::Disabled;
-}
-
-void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-	// 组件退出前清理所有 Timer，并通知角色解除装备关系，避免留下跨生命周期的回调和悬空关系。
-	ResetWeaponRuntimeState();
-
-	if (AfpstrueCharacter* OwningCharacter = Character.Get())
-	{
-		OwningCharacter->ClearEquippedWeaponComponent(this);
-	}
-
-	ActionState = EFPWeaponActionState::Disabled;
-	Character.Reset();
-	Super::EndPlay(EndPlayReason);
-}
-
-bool UfpstrueWeaponComponent::IsOperational() const
-{
-	// 汇总武器最基础的可用条件，供换弹等规则复用，不在多个入口重复判断角色生命周期。
-	const AfpstrueCharacter* OwningCharacter = Character.Get();
-	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead();
 }
 
 // ==================== Recoil System ====================
@@ -490,7 +454,29 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 	AccumulatedRecoilYaw = 0.0f;
 }
 
-// ==================== Runtime Helpers ====================
+// ==================== 生命周期结束与公共清理 ====================
+
+void UfpstrueWeaponComponent::HandleOwnerDeath()
+{
+	// 玩家死亡属于强制中断：停止连射、取消换弹和后坐力恢复，再把武器置为 Disabled。
+	ResetWeaponRuntimeState();
+	ActionState = EFPWeaponActionState::Disabled;
+}
+
+void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// 组件退出前清理所有 Timer，并通知角色解除装备关系，避免留下跨生命周期的回调和悬空关系。
+	ResetWeaponRuntimeState();
+
+	if (AfpstrueCharacter* OwningCharacter = Character.Get())
+	{
+		OwningCharacter->ClearEquippedWeaponComponent(this);
+	}
+
+	ActionState = EFPWeaponActionState::Disabled;
+	Character.Reset();
+	Super::EndPlay(EndPlayReason);
+}
 
 void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
 {

@@ -14,8 +14,7 @@ class FPSTRUE_API UfpstrueAnimNotify_ReloadCommit : public UAnimNotify
 
 public:
 	// 找到当前武器并提交一次换弹事务。
-	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
-						const FAnimNotifyEventReference& EventReference) override;
+	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,const FAnimNotifyEventReference& EventReference) override;
 
 	// 返回动画编辑器中显示的 Notify 名称。
 	virtual FString GetNotifyName_Implementation() const override;

@@ -43,7 +43,7 @@ public:
 	// 绑定健康事件、同步 HUD 初始血量并初始化移动速度。
 	virtual void BeginPlay() override;
 
-	//蓝图直接访问Mesh1P和FirstPersonCameraComponent组件
+	// C++ 通过以下接口访问 Mesh1P 和 FirstPersonCameraComponent；蓝图通过下方 BlueprintReadOnly 组件属性访问。
 	// WeaponComponent 装备时使用第一人称 Mesh 的 GripPoint。
 	USkeletalMeshComponent* GetMesh1P() const { return Mesh1P; }
 	// WeaponComponent 的 Hitscan 使用该相机确定射线起点和方向。
@@ -163,6 +163,12 @@ protected:
 	void OnPlayerDied();
 
 private:
+	// 输入映射随 Controller/LocalPlayer 切换而迁移，与 UMG 界面本身的切换不是同一件事。
+	// 把默认 Mapping Context 添加到当前 LocalPlayer。
+	void ApplyInputMappingContexts();
+	// 从旧 LocalPlayer 移除本角色添加的 Mapping Context。
+	void RemoveInputMappingContexts();
+
 	/// **组件指针**、配置参数、内部状态
 	//Mesh1P
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Mesh", meta = (AllowPrivateAccess = "true"))
@@ -227,12 +233,6 @@ private:
 
 	//增强输入子系统的弱指针，便于移除 Mapping Context
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> BoundInputSubsystem;
-
-	// 应用和移除输入映射上下文（UMG切换）
-	// 把默认 Mapping Context 添加到当前 LocalPlayer。
-	void ApplyInputMappingContexts();
-	// 从旧 LocalPlayer 移除本角色添加的 Mapping Context。
-	void RemoveInputMappingContexts();
 
 	//死亡处理标志，防止重复处理死亡事件
 	// HealthComponent 保存死亡事实；这里只防止死亡表现和广播重复执行。

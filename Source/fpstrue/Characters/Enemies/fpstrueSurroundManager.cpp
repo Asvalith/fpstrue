@@ -11,7 +11,7 @@
 
 /*
  * 多敌人共享的群体协调器。
- * 它不替代单个 AIController 的状态机，只集中维护必须全局一致的资源：玩家位置快照、稳定槽位、
+ * 它不替代单个敌人的行为树决策，只集中维护必须全局一致的资源：玩家位置快照、稳定槽位、
  * 并发攻击名额和每帧 MoveTo 提交预算，从而减少围攻拥堵和重复导航请求。
  *
  * 数据结构职责：
@@ -164,7 +164,8 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 
 // ==================== 稳定槽位的申请与释放 ====================
 
-bool AfpstrueSurroundManager::RequestSurroundSlot(AfpstrueEnemyCharacter* Enemy)
+// 槽位位置和攻击接近点都来自同一缓存，避免 AIController 在每次决策中重复导航投影。
+bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation)
 {
 	// 已分配的敌人直接复用原槽位；只有首次申请才寻找空位，避免每轮决策改变目标导致来回晃动。
 	if (!IsValid(Enemy) || !IsValid(TargetCharacter))
@@ -173,28 +174,42 @@ bool AfpstrueSurroundManager::RequestSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	}
 
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	if (EnemyToSlot.Contains(EnemyKey))
+	const int32* AssignedSlot = EnemyToSlot.Find(EnemyKey);
+	int32 SlotIndex = AssignedSlot != nullptr ? *AssignedSlot : INDEX_NONE;
+	if (AssignedSlot == nullptr)
 	{
-		return true;
-	}
-
-	if (EnemyToSlot.Num() >= SurroundSlots.Num())
-	{
-		CleanupInvalidEntries();
+		// 为尚未占槽的敌人选择并记录一个可用槽位。
 		if (EnemyToSlot.Num() >= SurroundSlots.Num())
+		{
+			CleanupInvalidEntries();
+			if (EnemyToSlot.Num() >= SurroundSlots.Num())
+			{
+				return false;
+			}
+		}
+
+		SlotIndex = FindBestFreeSlot(Enemy->GetActorLocation());
+		if (!SurroundSlots.IsValidIndex(SlotIndex))
 		{
 			return false;
 		}
+		SurroundSlots[SlotIndex].Occupant = Enemy;
+		EnemyToSlot.Add(EnemyKey, SlotIndex);
 	}
 
-	const int32 BestSlotIndex = FindBestFreeSlot(Enemy->GetActorLocation());
-	if (!SurroundSlots.IsValidIndex(BestSlotIndex))
+	if (!SurroundSlots.IsValidIndex(SlotIndex))
 	{
 		return false;
 	}
 
-	SurroundSlots[BestSlotIndex].Occupant = Enemy;
-	EnemyToSlot.Add(EnemyKey, BestSlotIndex);
+	const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
+	if (!Slot.bHasProjectedApproachLocation)
+	{
+		return false;
+	}
+
+	// 槽位和共享追踪使用同一份目标快照，避免同一决策周期混用实时位置与缓存位置。
+	OutLocation = Slot.ProjectedApproachLocation;
 	return true;
 }
 
@@ -208,21 +223,18 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	ReleaseAttackPermission(Enemy);
 
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	int32* SlotIndexPtr = EnemyToSlot.Find(EnemyKey);
-	if (SlotIndexPtr == nullptr)
+	int32 ReleasedSlotIndex = INDEX_NONE;
+	if (!EnemyToSlot.RemoveAndCopyValue(EnemyKey, ReleasedSlotIndex))
 	{
 		return;
 	}
 
-	const int32 ReleasedSlotIndex = *SlotIndexPtr;
 	const bool bReleasedInnerSlot = SurroundSlots.IsValidIndex(ReleasedSlotIndex) && SurroundSlots[ReleasedSlotIndex].RingIndex == 0;
 
 	if (SurroundSlots.IsValidIndex(ReleasedSlotIndex))
 	{
 		SurroundSlots[ReleasedSlotIndex].Occupant.Reset();
 	}
-	EnemyToSlot.Remove(EnemyKey);
-
 	if (bReleasedInnerSlot)
 	{
 		PromoteOuterOccupantToInnerSlot(ReleasedSlotIndex);
@@ -304,34 +316,6 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 	return true;
 }
 
-// 槽位位置和攻击接近点都来自同一缓存，避免 AIController 在每次决策中重复导航投影。
-bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation)
-{
-	if (!IsValid(Enemy) || !IsValid(TargetCharacter))
-	{
-		return false;
-	}
-	if (!RequestSurroundSlot(Enemy))
-	{
-		return false;
-	}
-	const int32* SlotIndexPtr = EnemyToSlot.Find(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
-	if (SlotIndexPtr == nullptr || !SurroundSlots.IsValidIndex(*SlotIndexPtr))
-	{
-		return false;
-	}
-
-	const FfpstrueSurroundSlot& Slot = SurroundSlots[*SlotIndexPtr];
-	if (!Slot.bHasProjectedApproachLocation)
-	{
-		return false;
-	}
-
-	// 槽位和共享追踪使用同一份目标快照，避免同一决策周期混用实时位置与缓存位置。
-	OutLocation = Slot.ProjectedApproachLocation;
-	return true;
-}
-
 bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
 {
 	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
@@ -366,7 +350,7 @@ void AfpstrueSurroundManager::ResetManager()
 
 void AfpstrueSurroundManager::CleanupInvalidEntries()
 {
-	// 弱引用不会阻止 Actor 销毁；本函数只清掉已失效键，并同步清空对应槽位占用。
+	// 弱引用不会阻止 Actor 销毁；清掉已失效或死亡敌人的登记，并同步清空对应槽位占用。
 	for (auto Iterator = EnemyToSlot.CreateIterator(); Iterator; ++Iterator)
 	{
 		if (Iterator.Key().IsValid() && !Iterator.Key()->IsDead())
@@ -403,12 +387,7 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 		for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
 		{
 			const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid())
-			{
-				continue;
-			}
-
-			if (!Slot.bHasProjectedSlotLocation)
+			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid() || !Slot.bHasProjectedSlotLocation)
 			{
 				continue;
 			}

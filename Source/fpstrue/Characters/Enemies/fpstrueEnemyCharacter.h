@@ -13,6 +13,7 @@ class AfpstrueEnemyCharacter;
 class UfpstrueEnemyAnimationSharingCoordinator;
 class UfpstrueEnemyCombatComponent;
 class UfpstrueHealthComponent;
+class UMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyDeathReported, AfpstrueEnemyCharacter*, DeadEnemy);
 
@@ -38,25 +39,12 @@ public:
 	// 创建健康/战斗组件并设置基础骨骼动画优化。
 	AfpstrueEnemyCharacter();
 
-	// ==================== 战斗与玩法接口 ====================
-
-	// 动画结束 Notify 通过角色入口通知 CombatComponent 完成攻击。
-	UFUNCTION(BlueprintCallable, Category = "Combat")
-	void HandleAttackFinishedNotify();
-
-	// AttackWindow Notify 通过角色入口开启武器 Sweep。
-	void BeginAttackWindow();
-
-	// AttackWindow Notify 通过角色入口更新武器 Sweep。
-	void UpdateAttackWindow();
-
-	// AttackWindow Notify 通过角色入口结束武器 Sweep。
-	void EndAttackWindow();
+	// ==================== 状态查询 ====================
 
 	// AI、GameMode 和 Significance 读取 HealthComponent 的死亡事实。
 	bool IsDead() const;
 
-	// AI FSM 判断攻击事务是否仍在进行。
+	// 行为树采样攻击事务是否仍在进行。
 	bool IsAttacking() const;
 
 	// AI 与动画保护判断玩家是否已经进入有效攻击范围。
@@ -65,15 +53,14 @@ public:
 	// AIController 读取配置的追击范围。
 	float GetChaseRange() const { return ChaseRange; }
 
-	// AIController 读取基础攻击范围。
-	float GetAttackRange() const;
-	// CombatComponent 和 AI 使用包含碰撞体修正的实际攻击范围。
-	float GetEffectiveAttackRange() const;
+	// ==================== 战斗与玩法接口 ====================
 
-	// ==================== Benchmark 诊断接口 ====================
+	// 动画结束 Notify 通过角色入口通知 CombatComponent 完成攻击。
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void HandleAttackFinishedNotify();
 
-	// BenchmarkRunner 单独关闭攻击 Sweep、Pawn 碰撞或移动 Tick。
-	void ApplyBenchmarkDiagnosticOverrides(bool bDisableAttackSweep, bool bDisablePawnCollision, bool bDisableCharacterMovementTick);
+	// AttackWindow Notify 直接取得已缓存组件，驱动武器 Sweep 的开启、更新与结束。
+	UfpstrueEnemyCombatComponent* GetCombatComponent() const { return CombatComponent.Get(); }
 
 	// ==================== Render Significance 接口 ====================
 
@@ -86,6 +73,12 @@ public:
 	// Coordinator 调用：应用全局预算后的 LOD、动画、阴影和 RT 结果。
 	void ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier NewTier, bool bShouldCastShadow, bool bShouldBeVisibleInRayTracing,
 									 bool bForceFullAnimationAndLOD, const FFPEnemyRenderSignificancePolicy& Policy);
+	// 动态增删本 Actor/ChildActor 的 Mesh 后调用；常规采样只用缓存，不遍历附件层级。
+	// 独立 Actor 仅 Attach 不属于此预算；所收集的 Mesh 继承上限，不覆盖其原始禁用设置。
+	UFUNCTION(BlueprintCallable, Category = "Performance|Render Budget")
+	void RefreshRenderBudgetMeshes();
+	// 读回已登记 Mesh 的实际标志；这是组件数量，不是 GPU 图元或敌人数。
+	void GetRenderBudgetMeshCounts(int32& OutMeshes, int32& OutShadowMeshes, int32& OutRayTracingMeshes) const;
 
 	// CSV 统计读取当前 Gameplay Tier。
 	EFPEnemySignificanceTier GetGameplaySignificanceTier() const { return SignificanceTier; }
@@ -99,6 +92,11 @@ public:
 	bool RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const;
 	// GameMode 注入同一 World 的共享协调器；弱引用只表达协作关系，不取得所有权。
 	void SetAnimationSharingCoordinator(UfpstrueEnemyAnimationSharingCoordinator* InCoordinator);
+
+	// ==================== Benchmark 诊断接口 ====================
+
+	// BenchmarkRunner 单独关闭攻击 Sweep、Pawn 碰撞或移动 Tick。
+	void ApplyBenchmarkDiagnosticOverrides(bool bDisableAttackSweep, bool bDisablePawnCollision, bool bDisableCharacterMovementTick);
 
 	// ==================== 对外事件 ====================
 
@@ -139,7 +137,8 @@ protected:
 
 	// 在敌人蓝图 Class Defaults 中配置；BeginPlay 写入 CharacterMovement 的 Yaw 转速（度/秒）。
 	// AI 仍决定朝向来源，移动和站定面向目标都由 CharacterMovement 按此转速执行。
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Rotation", meta = (ClampMin = "1.0", ClampMax = "3600.0", Units = "deg/s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Rotation",
+			  meta = (ClampMin = "1.0", ClampMax = "3600.0", Units = "deg/s"))
 	float MovementYawRotationRate = 540.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
@@ -206,21 +205,23 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// 内部战斗与动画桥接仅开放给 Controller、共享协调器和 CombatComponent。
-	friend class AfpstrueEnemyAIController;
+	// 内部战斗与动画桥接仅开放给共享协调器和 CombatComponent。
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemyCombatComponent;
 
-	// ==================== 战斗、重要性与动画内部桥接 ====================
+	// ==================== 战斗与受击内部桥接 ====================
 
-	// AIController 通过角色入口请求 CombatComponent 开始攻击。
-	bool TryAttackTarget();
-	// AIController 在申请攻击名额前检查距离、冷却和事务状态。
-	bool CanStartAttack() const;
 	// 从 AIController 读取唯一玩家目标，供战斗和距离判断使用。
 	AfpstrueCharacter* GetCombatTarget() const;
 	// 攻击前恢复全速动画/LOD，结束后重新应用性能档位。
 	void SetAttackAnimationPriority(bool bHighPriority);
+	// 根据最近伤害方向给 CharacterMovement 添加轻量受击冲量。
+	void ApplyHitReactionImpulse();
+	// 布娃娃启用后的下一帧施加死亡冲量。
+	void ApplyDeathImpulse();
+
+	// ==================== Gameplay 分级 ====================
+
 	// 向 UE Significance Manager 注册 Gameplay 距离评分回调。
 	void RegisterWithSignificanceManager();
 	// 死亡和 EndPlay 时注销 Gameplay Significance。
@@ -231,18 +232,19 @@ private:
 	void ApplySignificanceTier(EFPEnemySignificanceTier NewTier);
 	// 根据 Gameplay Tier 调整 CharacterMovement Tick 间隔。
 	void ApplyGameplaySignificanceIntervals();
+
+	// ==================== Render 分级与动画共享 ====================
+
 	// 把当前 Render Tier 和预算结果写入 SkeletalMeshComponent。
 	void ApplyRenderSignificanceSettings();
+	// 存活时消费预算，死亡后关闭主 Mesh 与附件的阴影/光追；普通可见性和布娃娃不受影响。
+	void ApplyRenderBudgetMeshFlags();
 	// 判断本敌人是否满足成为低风险 Animation Sharing Follower 的条件。
 	bool CanUseAnimationSharing() const;
 	// Render Tier 变化后让 Coordinator 刷新共享注册状态。
 	void RefreshAnimationSharingRegistration();
 	// 战斗、受击或死亡前立即退出 Animation Sharing。
 	void SuspendAnimationSharing();
-	// 根据最近伤害方向给 CharacterMovement 添加轻量受击冲量。
-	void ApplyHitReactionImpulse();
-	// 布娃娃启用后的下一帧施加死亡冲量。
-	void ApplyDeathImpulse();
 
 	// ==================== 运行时状态 ====================
 
@@ -267,6 +269,13 @@ private:
 	bool bGameplayAnimationProtection = false;
 	int32 AppliedMinimumLOD = INDEX_NONE;
 	FFPEnemyRenderSignificancePolicy LastRenderSignificancePolicy;
+	struct FRenderBudgetMesh
+	{
+		TWeakObjectPtr<UMeshComponent> Mesh;
+		bool bAuthoredShadow = false;
+		bool bAuthoredRayTracing = false;
+	};
+	TArray<FRenderBudgetMesh> RenderBudgetMeshes;
 
 	// 观察 GameMode 注入的共享协调器，不延长其生命周期。
 	UPROPERTY(Transient)

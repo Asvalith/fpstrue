@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
+#include "Characters/Enemies/fpstrueEnemyCombatConfig.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -28,8 +29,7 @@ CSV_DEFINE_CATEGORY(fpstrueCombat, true);
  * 攻击链：AI 获得攻击名额 -> TryAttackTarget 建立事务 -> 蓝图播放 Montage
  *       -> AnimNotifyState Begin/Tick/End 驱动有效窗口 -> Sweep 命中后 ApplyDamage
  *       -> 结束 Notify 或保护 Timer 汇入 FinishAttack -> 归还攻击名额。
- * bIsAttacking、bAttackWindowActive 和 bHitTargetThisAttack 都只由本组件写入，分别表示事务、有效判定窗口和
- * 单次命中提交状态，避免把“动画正在播放”和“本帧可以造成伤害”混成一个布尔值。
+ * AttackPhase 统一描述前摇/有效窗口/收招；命中提交与消融开关是独立事实，不混入阶段枚举。
  */
 
 // ==================== 生命周期与攻击范围 ====================
@@ -42,8 +42,9 @@ UfpstrueEnemyCombatComponent::UfpstrueEnemyCombatComponent()
 
 void UfpstrueEnemyCombatComponent::BeginPlay()
 {
-	// 把上次攻击时间向前偏移一个冷却周期，使敌人开局满足其他条件时可以立即攻击。
+	// 配置先于冷却初始化：开局满足其他条件时可以立即攻击。
 	Super::BeginPlay();
+	ApplyCombatConfiguration();
 	if (const UWorld* World = GetWorld())
 	{
 		LastAttackTime = World->GetTimeSeconds() - AttackInterval;
@@ -52,9 +53,30 @@ void UfpstrueEnemyCombatComponent::BeginPlay()
 
 void UfpstrueEnemyCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 退出前终止攻击窗口、保护 Timer 和攻击名额，避免 Notify 在对象销毁阶段继续回调。
+	// 退出时清理事务和 Timer；迟到 Notify 在无事务时成为无操作。
 	ResetCombat();
 	Super::EndPlay(EndPlayReason);
+}
+
+void UfpstrueEnemyCombatComponent::ApplyCombatConfiguration()
+{
+	if (CombatConfiguration != nullptr)
+	{
+		AttackRange = CombatConfiguration->AttackRange;
+		AttackDamage = CombatConfiguration->AttackDamage;
+		AttackInterval = CombatConfiguration->AttackInterval;
+		AttackAnimationDuration = CombatConfiguration->AttackAnimationDuration;
+		AttackFailSafeDuration = CombatConfiguration->AttackFailSafeDuration;
+		AttackCompletionGracePeriod = CombatConfiguration->AttackCompletionGracePeriod;
+		WeaponTraceStartSocketName = CombatConfiguration->WeaponTraceStartSocketName;
+		WeaponTraceEndSocketName = CombatConfiguration->WeaponTraceEndSocketName;
+		WeaponTraceRadius = CombatConfiguration->WeaponTraceRadius;
+		WeaponTraceSampleCount = CombatConfiguration->WeaponTraceSampleCount;
+	}
+	// 每个实例初始化一次，记录真正选中的来源；不在攻击热路径持续打日志。
+	UE_LOG(LogTemp, Log, TEXT("EnemyCombatConfig Owner=%s Source=%s Range=%.1f Damage=%.1f Interval=%.2f Samples=%d"),
+		   *GetNameSafe(GetOwner()), CombatConfiguration != nullptr ? *CombatConfiguration->GetPathName() : TEXT("BlueprintDefaults"),
+		   AttackRange, AttackDamage, AttackInterval, WeaponTraceSampleCount);
 }
 
 AfpstrueEnemyCharacter* UfpstrueEnemyCombatComponent::GetEnemy() const
@@ -65,13 +87,15 @@ AfpstrueEnemyCharacter* UfpstrueEnemyCombatComponent::GetEnemy() const
 
 float UfpstrueEnemyCombatComponent::GetEffectiveAttackRange() const
 {
-	// 攻击距离至少覆盖双方胶囊半径之和，避免角色碰撞已经相贴却永远达不到配置半径。
+	//攻击距离至少覆盖双方胶囊半径之和，避免角色碰撞已经相贴却永远达不到配置半径
+
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	if (Enemy == nullptr)
 	{
 		return 0.0f;
 	}
 
+	//玩法向优化：避免敌人站在玩家面前却永远挥不到刀
 	const AfpstrueCharacter* TargetCharacter = Enemy->GetCombatTarget();
 	const float EnemyRadius = Enemy->GetCapsuleComponent()->GetScaledCapsuleRadius();
 	const float TargetRadius = TargetCharacter != nullptr ? TargetCharacter->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
@@ -93,52 +117,73 @@ bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
 		   FMath::Square(GetEffectiveAttackRange());
 }
 
-// ==================== 攻击事务与动画窗口 ====================
-
-bool UfpstrueEnemyCombatComponent::TryAttackTarget()
+// 实时提交检查与 AI 快照预筛选共用资格规则，但采样时机不同。
+bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 {
-	// 只有冷却、目标和事务状态均满足才开始；成功后先建立 C++ 状态，再通知蓝图播放动画。
-	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || !CanStartAttack())
+	// 提交入口重新采样真实距离，不依赖 AI 较早生成的决策快照。
+	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	const AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
+	return TargetCharacter != nullptr &&
+		   CanStartAttackAtDistanceSquared(FVector::DistSquared2D(Enemy->GetActorLocation(), TargetCharacter->GetActorLocation()));
+}
+
+bool UfpstrueEnemyCombatComponent::CanStartAttackAtDistanceSquared(float DistanceSquared) const
+{
+	// AI 只读预筛选复用已采样距离；资格规则仍集中于组件，不允许该查询直接提交攻击。
+	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	const UWorld* World = GetWorld();
+	if (Enemy == nullptr || World == nullptr || !FMath::IsFinite(DistanceSquared) || DistanceSquared < 0.0f)
 	{
 		return false;
 	}
 
-	EndAttackWindow();
-	bIsAttacking = true;
-	bHitTargetThisAttack = false;
-	if (const UWorld* World = GetWorld())
-	{
-		Enemy->LastCombatRelevantTime = World->GetTimeSeconds();
-	}
-	Enemy->SetAttackAnimationPriority(true);
+	const AfpstrueCharacter* TargetCharacter = Enemy->GetCombatTarget();
+	return TargetCharacter != nullptr && !TargetCharacter->IsDead() && !Enemy->IsDead() && !IsAttacking() &&
+		   DistanceSquared <= FMath::Square(GetEffectiveAttackRange()) && World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
+}
 
+// ==================== 攻击事务与动画窗口 ====================
+//攻击准备
+bool UfpstrueEnemyCombatComponent::TryAttackTarget()
+{
+	// 只有冷却、目标和事务状态均满足才开始；成功后先建立 C++ 状态，再通知蓝图播放动画。
+	AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	UWorld* World = GetWorld();
+	if (Enemy == nullptr || World == nullptr || !CanStartAttack())
+	{
+		return false;
+	}
+
+	// 建立事务本身即确保伤害窗口尚未开启，不再先关闭一次窗口。
+	AttackPhase = EFPEnemyAttackPhase::Windup;
+	++AttackSequence;
+	bHitTargetThisAttack = false;
+
+	//停止移动，避免攻击过程中角色漂移或被物理推开，保证动画和轨迹检测的准确性。
 	if (UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement())
 	{
 		Movement->StopMovementImmediately();
 	}
 
-	ScheduleAttackFinish(FMath::Max(AttackAnimationDuration, AttackFailSafeDuration));
+	// 先恢复战斗动画/移动，再通知蓝图播放；外部回调必须看到完整的攻击状态。
+	Enemy->LastCombatRelevantTime = World->GetTimeSeconds();
+	Enemy->SetAttackAnimationPriority(true);
+	// 安排动画 Notify 缺失时的攻击结束保护 Timer。
+	// 在动画预计时长之后设置一次性保护 Timer，Notify 丢失或 Montage 中断也不会永久占用攻击名额。
+	const float FinishDelay = FMath::Max(0.01f, FMath::Max(AttackAnimationDuration, AttackFailSafeDuration) + AttackCompletionGracePeriod);
+	World->GetTimerManager().SetTimer(AttackFinishTimerHandle, this, &UfpstrueEnemyCombatComponent::FinishAttack, FinishDelay, false);
 	Enemy->OnAttackStarted();
 	return true;
-}
-
-void UfpstrueEnemyCombatComponent::HandleAttackFinishedNotify()
-{
-	// FinishAttack 统一校验事务状态，Notify 和保护 Timer 共用同一出口。
-	FinishAttack();
 }
 
 void UfpstrueEnemyCombatComponent::BeginAttackWindow()
 {
 	// NotifyState Begin 记录刀刃首个采样位置；后续 Tick 才能用上一帧到当前帧的轨迹补足快速运动区域。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || Enemy->IsDead() || !bIsAttacking)
+	if (Enemy == nullptr || Enemy->IsDead() || !IsAttacking() || AttackPhase == EFPEnemyAttackPhase::Active || bHitTargetThisAttack)
 	{
 		return;
 	}
-
-	EndAttackWindow();
 
 	FVector CurrentWeaponBase;
 	FVector CurrentWeaponTip;
@@ -149,7 +194,8 @@ void UfpstrueEnemyCombatComponent::BeginAttackWindow()
 		return;
 	}
 
-	bAttackWindowActive = true;
+	// 重复 Begin 不覆盖历史采样；已经命中过也不能重新打开同一事务。
+	AttackPhase = EFPEnemyAttackPhase::Active;
 	PreviousWeaponBase = CurrentWeaponBase;
 	PreviousWeaponTip = CurrentWeaponTip;
 }
@@ -158,7 +204,7 @@ void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 {
 	// 只在动画有效帧执行连续 Sweep；已命中唯一玩家后会立即关闭窗口，避免后续帧重复扣血和无效查询。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || !bAttackWindowActive || Enemy->IsDead() || !bIsAttacking)
+	if (Enemy == nullptr || AttackPhase != EFPEnemyAttackPhase::Active || Enemy->IsDead())
 	{
 		return;
 	}
@@ -181,70 +227,39 @@ void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 		return;
 	}
 
+	//socket之间插值出采样点：每个采样点计算上一帧到当前帧的轨迹，降低快速挥砍和低帧率下的漏判。
 	const int32 SampleCount = FMath::Clamp(WeaponTraceSampleCount, 2, 8);
+	const uint32 UpdatingSequence = AttackSequence;
 	for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
 	{
 		const float Alpha = static_cast<float>(SampleIndex) / static_cast<float>(SampleCount - 1);
 		const FVector PreviousSample = FMath::Lerp(PreviousWeaponBase, PreviousWeaponTip, Alpha);
 		const FVector CurrentSample = FMath::Lerp(CurrentWeaponBase, CurrentWeaponTip, Alpha);
 		SweepWeaponSegment(PreviousSample, CurrentSample);
-		if (!bAttackWindowActive)
+		if (AttackSequence != UpdatingSequence || AttackPhase != EFPEnemyAttackPhase::Active)
 		{
-			// 当前攻击已经命中唯一玩家目标，无需继续提交本帧剩余 Sweep。
+			// 命中/中断或伤害回调启动了另一事务，旧更新不能继续查询或覆盖新采样。
 			return;
 		}
 	}
 
+	// 点的跨帧轨迹与当前完整刀身覆盖不同空间，保留第二类 Sweep。
 	SweepWeaponSegment(CurrentWeaponBase, CurrentWeaponTip);
-	PreviousWeaponBase = CurrentWeaponBase;
-	PreviousWeaponTip = CurrentWeaponTip;
+	if (AttackSequence == UpdatingSequence && AttackPhase == EFPEnemyAttackPhase::Active)
+	{
+		PreviousWeaponBase = CurrentWeaponBase;
+		PreviousWeaponTip = CurrentWeaponTip;
+	}
 }
 
 void UfpstrueEnemyCombatComponent::EndAttackWindow()
 {
 	// NotifyState 结束只关闭伤害有效窗口，不直接结束完整攻击事务或冷却。
 	// 关闭后不再使用上一帧轨迹样本；下一次 Begin 会重新建立起始位置。
-	bAttackWindowActive = false;
-}
-
-// Benchmark 开关只跳过 Sweep；攻击动画、状态和 Timer 仍正常运行，保证消融只改变一个消费者。
-void UfpstrueEnemyCombatComponent::SetAttackSweepDisabledForBenchmark(bool bDisabled)
-{
-	bDisableAttackSweepForBenchmark = bDisabled;
-}
-
-void UfpstrueEnemyCombatComponent::ResetCombat()
-{
-	// 死亡、停止 AI 和 EndPlay 共用该幂等收口，确保状态、Timer 与全局名额同时释放。
-	EndAttackWindow();
-	bIsAttacking = false;
-	bHitTargetThisAttack = false;
-	if (UWorld* World = GetWorld())
+	if (AttackPhase == EFPEnemyAttackPhase::Active)
 	{
-		World->GetTimerManager().ClearTimer(AttackFinishTimerHandle);
+		AttackPhase = EFPEnemyAttackPhase::Recovery;
 	}
-	if (AfpstrueEnemyCharacter* Enemy = GetEnemy())
-	{
-		if (AfpstrueEnemyAIController* AIController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
-		{
-			AIController->ReleaseAttackPermission();
-		}
-	}
-}
-
-bool UfpstrueEnemyCombatComponent::CanStartAttack() const
-{
-	// 该查询不修改状态，AIController 可在申请全局攻击名额前先排除冷却、死亡和距离不满足的敌人。
-	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	const UWorld* World = GetWorld();
-	if (Enemy == nullptr || World == nullptr)
-	{
-		return false;
-	}
-
-	const AfpstrueCharacter* TargetCharacter = Enemy->GetCombatTarget();
-	return TargetCharacter != nullptr && !TargetCharacter->IsDead() && !Enemy->IsDead() && !bIsAttacking && IsTargetInAttackRange() &&
-		   World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
 }
 
 // ==================== 武器轨迹、碰撞查询与伤害去重 ====================
@@ -305,12 +320,13 @@ void UfpstrueEnemyCombatComponent::SweepWeaponSegment(const FVector& TraceStart,
 		return;
 	}
 
+	const uint32 SweepingSequence = AttackSequence;
 	for (const FHitResult& HitResult : HitResults)
 	{
-		if (TryApplyAttackDamage(HitResult.GetActor()))
+		const bool bAppliedDamage = TryApplyAttackDamage(HitResult.GetActor());
+		if (bAppliedDamage || AttackSequence != SweepingSequence || AttackPhase != EFPEnemyAttackPhase::Active)
 		{
-			// 当前玩法只允许命中唯一玩家目标；成功后关闭窗口，后续帧不再做无效 Sweep。
-			EndAttackWindow();
+			// 命中由提交函数关闭窗口；旧调用栈不能在回调后关闭另一轮攻击的窗口。
 			break;
 		}
 	}
@@ -322,56 +338,129 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
 	if (Enemy == nullptr || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
-		bHitTargetThisAttack)
+		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack)
 	{
 		return false;
 	}
 
+	const uint32 CommittingSequence = AttackSequence;
+	// ApplyDamage 会同步调用外部监听者；先提交标记阻止同一事务重入扣血。
+	bHitTargetThisAttack = true;
 	const float AppliedDamage = UGameplayStatics::ApplyDamage(HitActor, AttackDamage, Enemy->GetController(), Enemy, nullptr);
+	if (AttackSequence != CommittingSequence)
+	{
+		return AppliedDamage > 0.0f;
+	}
 	if (AppliedDamage <= 0.0f)
 	{
+		// 未造成伤害仍保留原来的重试语义，但只能回滚当前事务自己的提交标记。
+		bHitTargetThisAttack = false;
 		return false;
 	}
 
-	bHitTargetThisAttack = true;
+	EndAttackWindow();
 	return true;
 }
 
 // ==================== 中断清理与超时兜底 ====================
 
-void UfpstrueEnemyCombatComponent::ScheduleAttackFinish(float DurationSeconds)
+void UfpstrueEnemyCombatComponent::HandleAttackFinishedNotify()
 {
-	// 在动画预计时长之后设置一次性保护 Timer，Notify 丢失或 Montage 中断也不会永久占用攻击名额。
-	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr)
-	{
-		return;
-	}
-
-	GetWorld()->GetTimerManager().SetTimer(AttackFinishTimerHandle, this, &UfpstrueEnemyCombatComponent::FinishAttack,
-										   FMath::Max(0.01f, DurationSeconds + AttackCompletionGracePeriod), false);
+	// FinishAttack 统一校验事务状态，Notify 和保护 Timer 共用同一出口。
+	FinishAttack();
 }
 
 void UfpstrueEnemyCombatComponent::FinishAttack()
 {
 	// 动画 Notify 与失败保护 Timer 共用该幂等出口：结束窗口、更新时间、恢复渲染策略并归还全局攻击名额。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || !bIsAttacking)
+	if (Enemy == nullptr || !IsAttacking())
 	{
 		return;
 	}
 
-	EndAttackWindow();
-	bIsAttacking = false;
-	Enemy->SetAttackAnimationPriority(false);
-	GetWorld()->GetTimerManager().ClearTimer(AttackFinishTimerHandle);
 	if (UWorld* World = GetWorld())
 	{
 		LastAttackTime = World->GetTimeSeconds();
 	}
-	if (AfpstrueEnemyAIController* AIController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+	ResetCombat();
+	Enemy->SetAttackAnimationPriority(false);
+}
+
+void UfpstrueEnemyCombatComponent::ResetCombat()
+{
+	// 中断不消费正常结束冷却；死亡/EndPlay 的动画处置仍由 Owner 控制。
+	// 正常结束、死亡中断与 EndPlay 共用清理：结束事务、取消保护 Timer、归还攻击名额。
+	// 冷却与动画恢复由调用者决定，避免中断被当成正常攻击完成。
+	AttackPhase = EFPEnemyAttackPhase::Idle;
+	++AttackSequence;
+	bHitTargetThisAttack = false;
+	if (UWorld* World = GetWorld())
 	{
-		// 动画 Notify 和失败保护计时器最终都汇入这里，统一归还攻击预算。
-		AIController->ReleaseAttackPermission();
+		World->GetTimerManager().ClearTimer(AttackFinishTimerHandle);
+	}
+	if (AfpstrueEnemyCharacter* Enemy = GetEnemy())
+	{
+		if (AfpstrueEnemyAIController* AIController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+		{
+			AIController->ReleaseAttackPermission();
+		}
+	}
+}
+
+// Benchmark 开关只跳过 Sweep；攻击动画、状态和 Timer 仍正常运行，保证消融只改变一个消费者。
+void UfpstrueEnemyCombatComponent::SetAttackSweepDisabledForBenchmark(bool bDisabled)
+{
+	bDisableAttackSweepForBenchmark = bDisabled;
+}
+
+// ==================== 动画窗口适配 ====================
+
+namespace
+{
+// Notify 收到播放动画的 Mesh；事务属于其 Enemy Owner，不能保存在共享的 Notify 对象中。
+UfpstrueEnemyCombatComponent* GetCombatForNotify(USkeletalMeshComponent* MeshComp)
+{
+	AfpstrueEnemyCharacter* Enemy = MeshComp != nullptr ? Cast<AfpstrueEnemyCharacter>(MeshComp->GetOwner()) : nullptr;
+	return Enemy != nullptr ? Enemy->GetCombatComponent() : nullptr;
+}
+} // namespace
+
+// 动画进入有效帧区间时建立采样点；同一攻击的命中标志只在事务开始时清空。
+void UfpstrueAnimNotifyState_AttackWindow::NotifyBegin(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, float TotalDuration,
+													   const FAnimNotifyEventReference& EventReference)
+{
+	Super::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
+
+	// AnimNotifyState Begin 直接交给 CombatComponent，开始记录刀刃连续轨迹。
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	{
+		Combat->BeginAttackWindow();
+	}
+}
+
+// 有效区间内每个动画更新步推进一次连续 Sweep，覆盖相邻姿态之间刀刃扫过的空间。
+void UfpstrueAnimNotifyState_AttackWindow::NotifyTick(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, float FrameDeltaTime,
+													  const FAnimNotifyEventReference& EventReference)
+{
+	Super::NotifyTick(MeshComp, Animation, FrameDeltaTime, EventReference);
+
+	// AnimNotifyState Tick 只在有效动画区间调用，角色本身不为近战检测开启常驻 Tick。
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	{
+		Combat->UpdateAttackWindow();
+	}
+}
+
+// 离开有效帧区间后立即关闭检测，攻击事务本身仍由结束 Notify 或保护 Timer 收尾。
+void UfpstrueAnimNotifyState_AttackWindow::NotifyEnd(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+													 const FAnimNotifyEventReference& EventReference)
+{
+	Super::NotifyEnd(MeshComp, Animation, EventReference);
+
+	// AnimNotifyState End 关闭伤害窗口，但完整攻击事务仍由结束 Notify 或保护 Timer 完成。
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	{
+		Combat->EndAttackWindow();
 	}
 }

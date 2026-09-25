@@ -123,7 +123,8 @@ bool FFpstrueAnimationSharingStopTest::RunTest(const FString& Parameters)
 
 	// 正常运行时移除首对象，插件尾对象换到首槽；后续 Significance 必须命中那个对象。
 	SeedFollowers();
-	Coordinator->SuspendEnemy(Enemies[0]);
+	// 原生敌人尚未获得低档渲染策略，不具备共享资格；Refresh 应复用完整注销路径。
+	Coordinator->RefreshEnemyRegistration(Enemies[0]);
 	const uint32* SwappedHandle = Coordinator->RegisteredActorHandles.Find(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemies[2]));
 	if (!TestNotNull(TEXT("The swapped follower keeps its registration"), SwappedHandle))
 	{
@@ -137,6 +138,11 @@ bool FFpstrueAnimationSharingStopTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The other follower significance is unchanged"), Data->PerActorData[1].SignificanceValue, 0.0f);
 	Coordinator->SuspendEnemy(Enemies[0]);
 	TestEqual(TEXT("Repeated Suspend does not remove another follower"), Data->RegisteredActors.Num(), 2);
+	// 未登记对象重复刷新不应碰插件数据，也不能重置不属于共享层的 LOD 标志。
+	Enemies[0]->GetMesh()->bIgnoreLeaderPoseComponentLOD = true;
+	Coordinator->RefreshEnemyRegistration(Enemies[0]);
+	TestEqual(TEXT("Unregistered Refresh does not remove another follower"), Data->RegisteredActors.Num(), 2);
+	TestTrue(TEXT("Unregistered Refresh preserves unrelated LOD flags"), Enemies[0]->GetMesh()->bIgnoreLeaderPoseComponentLOD);
 
 	// 失败或中止的待注册请求也必须能退出，并归还可能已经接管的 LOD 标志。
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> PendingEnemy(Enemies[0]);

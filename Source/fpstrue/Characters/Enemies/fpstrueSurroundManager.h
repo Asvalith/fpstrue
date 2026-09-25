@@ -28,7 +28,7 @@ struct FfpstrueSurroundSlot
 /**
  * 群体 AI 协调模块：共享玩家位置、分配稳定包围槽，并限制并发攻击和每帧 MoveTo 请求。
  *
- * 只保存跨敌人资源，不接管单敌人FSM。敌人使用弱引用参与槽位和预算；玩家位置及NavMesh投影集中缓存，
+ * 只保存跨敌人资源，不接管单敌人的行为树决策。敌人使用弱引用参与槽位和预算；玩家位置及NavMesh投影集中缓存，
  * AIController 通过窄接口申请/释放资源，避免各敌人独立维护互相冲突的群体状态。
  */
 UCLASS()
@@ -59,7 +59,7 @@ public:
 	void ResetManager();
 
 protected:
-	// 构建槽位并启动共享目标和调试 Timer。
+	// 构建槽位并按配置启动调试 Timer；共享目标 Timer 在注入玩家时启动。
 	virtual void BeginPlay() override;
 	// 停止 Timer 并清空所有弱引用状态。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -121,8 +121,6 @@ private:
 	void UpdateSharedTargetSnapshot(bool bForce);
 	// 批量把原始槽位和接近点投影到 NavMesh。
 	void RebuildProjectedSlotCache();
-	// 为尚未占槽的敌人选择并记录一个可用槽位。
-	bool RequestSurroundSlot(AfpstrueEnemyCharacter* Enemy);
 	// 移除失效敌人的槽位和攻击名额，防止弱引用表膨胀。
 	void CleanupInvalidEntries();
 	// 按距离和内外环优先级选择最佳空闲槽位。
@@ -131,7 +129,7 @@ private:
 	void PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex);
 	// 根据玩家位置、槽位角度和半径计算未投影位置。
 	FVector CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride = -1.0f) const;
-	// 调试模式下绘制槽位、占用关系和攻击接近点。
+	// 调试模式下绘制已投影槽位，并以颜色区分是否占用。
 	void DrawDebugSlots();
 
 	// 缓存本局共享玩家目标，供槽位投影与敌人决策读取。

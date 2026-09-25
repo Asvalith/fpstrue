@@ -8,7 +8,7 @@
 /*
  * 自动测试的只读命令行快照。
  * 运行期间所有模块读取同一份静态配置，避免不同敌人在不同时间重复解析命令行，
- * TOptional 则区分“没有传参”和“显式传入 0/false”两种情况。
+ * 数值项用 TOptional 区分“没有传参”和“显式传入 0”；布尔开关按参数是否出现判断。
  */
 
 namespace
@@ -44,7 +44,7 @@ const FFPBenchmarkConfig& FFPBenchmarkConfig::Get()
 
 FFPBenchmarkConfig::FFPBenchmarkConfig()
 {
-	// 所有开关只在进程启动时解析一次；正式基线不传 BenchmarkDisable*，消融脚本才显式启用单项关闭。
+	// 所有开关只在首次读取时解析一次；正式基线不传 BenchmarkDisable*，消融脚本才显式启用单项关闭。
 	const TCHAR* CommandLine = FCommandLine::Get();
 
 	// 布尔参数用 FParse::Param 判断“是否出现”，不需要再为 true/false 解析字符串值。

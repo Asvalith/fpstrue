@@ -29,7 +29,8 @@ DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
 // 构造角色的胶囊体、第一人称相机、手臂网格和可复用生命组件；构造阶段不访问运行时世界。
 AfpstrueCharacter::AfpstrueCharacter()
-{ //胶囊体
+{
+	//胶囊体
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
 	//弹簧臂创建、挂载、位置、长度
@@ -60,7 +61,7 @@ AfpstrueCharacter::AfpstrueCharacter()
 	Mesh1P->bCastDynamicShadow = false;
 	Mesh1P->CastShadow = false;
 
-	//禁用tick（逻辑完全由事件驱动（输入、碰撞、动画通知等））
+	//禁用角色自身 Tick：输入、碰撞、动画通知等事件驱动角色逻辑；Movement、相机和 Mesh 组件仍各自更新。
 	PrimaryActorTick.bCanEverTick = false;
 	//自定义健康组件
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
@@ -105,6 +106,8 @@ void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	//最后调用基类
 	Super::EndPlay(EndPlayReason);
 }
+
+// ==================== 控制器切换与输入绑定 ====================
 
 //玩家控制变更（游戏开始、角色切换）
 void AfpstrueCharacter::NotifyControllerChanged()
@@ -153,7 +156,7 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		return false;
 	};
 
-	// 连续轴输入：只有输入值持续变化时才需要反复调用。
+	// 连续轴输入：Triggered 在触发条件满足期间逐帧调用；方向键一直按住时，即使值不变也持续移动。
 	if (IsActionAssigned(MoveAction, TEXT("MoveAction")))
 	{
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
@@ -230,7 +233,7 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 {
 	// 将 Enhanced Input 的二维值映射到角色本地前向和右向，实际位移由 CharacterMovement 完成。
 	//获得向量
-	FVector2D MovementVector = Value.Get<FVector2D>();
+	const FVector2D MovementVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
@@ -245,7 +248,7 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 {
 	// 将二维视角输入写入 Controller 的 Yaw/Pitch，角色与相机最终读取控制旋转。
 	//获得向量
-	FVector2D LookAxisVector = Value.Get<FVector2D>();
+	const FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
@@ -311,6 +314,8 @@ void AfpstrueCharacter::StopAim()
 	}
 }
 
+// ==================== 武器输入与装备关系 ====================
+
 // 武器交互
 // 这里是输入边界：Character 不直接扣弹、射线检测或改变武器动作状态，只把请求交给当前装备组件。
 void AfpstrueCharacter::StartWeaponFire()
@@ -374,6 +379,8 @@ void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponCompone
 	Mesh1P->SetHiddenInGame(true, true);
 	OnEquippedWeaponChanged.Broadcast(nullptr);
 }
+
+// ==================== 生命与伤害事件 ====================
 
 // 生命与伤害
 //生命组件内部事件转发给Character的蓝图表现层，用于UI和动画的更新

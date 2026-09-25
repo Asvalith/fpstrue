@@ -18,7 +18,8 @@ UfpstruePickUpComponent::UfpstruePickUpComponent()
 
 //在游戏开始时绑定 OnSphereBeginOverlap 事件
 void UfpstruePickUpComponent::BeginPlay()
-{ //先调用父类的 BeginPlay() 方法，确保组件的基本初始化逻辑被执行
+{
+	//先调用父类的 BeginPlay() 方法，确保组件的基本初始化逻辑被执行
 	Super::BeginPlay();
 	//OnComponentBeginOverlap添加动态广播OnSphereBeginOverlap方法，确保当发生重叠时会通过this回调OnSphereBeginOverlap函数
 	OnComponentBeginOverlap.AddUniqueDynamic(this, &UfpstruePickUpComponent::OnSphereBeginOverlap);
@@ -26,8 +27,7 @@ void UfpstruePickUpComponent::BeginPlay()
 
 //Sphere 真正发生重叠以后调用
 void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
-												   const FHitResult& SweepResult)
+	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
 	if (bConsumed)
 	{
@@ -35,16 +35,17 @@ UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
 	}
 	//找到碰到的角色（之后判断是不是玩家）
 	AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(OtherActor);
-	//归属玩家
+	//拾取组件的 Owner 是武器 Actor，不是刚进入范围的玩家。
 	AActor* OwnerActor = GetOwner();
-	//归属玩家、归属类存在检测
-	UfpstrueWeaponComponent* WeaponComponent =OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
+	//从武器 Actor 取得装备组件；随后一起校验玩家与武器是否存在。
+	UfpstrueWeaponComponent* WeaponComponent = OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 
 	if (Character == nullptr || Character->IsDead() || WeaponComponent == nullptr)
 	{
 		return;
 	}
 
+	// AttachWeapon 会同步广播装备事件，先占用再调用，防止监听者重入拾取。
 	bConsumed = true;
 	if (!WeaponComponent->AttachWeapon(Character))
 	{
@@ -61,7 +62,8 @@ UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
 	OnPickUp.Broadcast(Character);
 
 	if (IsValid(this))
-	{ //注销组件，从Actor数组中移除，标记为待销毁。UObject内存回收由UE的对象生命周期/GC机制处理。
+	{
+		//注销组件，从Actor数组中移除，标记为待销毁。UObject内存回收由UE的对象生命周期/GC机制处理。
 		DestroyComponent();
 	}
 }
