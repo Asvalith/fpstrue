@@ -25,7 +25,9 @@ function Read-RenderCostConfig {
             }
             'VariantNames' {
                 $Supported = @('Baseline', 'EnemyRayTracingOff', 'EnemyShadowsOff', 'OcclusionQueriesOn',
-                    'OcclusionQueriesOff', 'HardwareQueries', 'HZBOcclusion', 'BufferedQueries2')
+                    'OcclusionQueriesOff', 'HardwareQueries', 'HZBOcclusion', 'BufferedQueries2',
+                    'LumenReflectionsDS2', 'LumenScreenProbeDS32', 'OriginalRenderPolicy', 'OptimizedRenderPolicy',
+                    'TSRHistory200', 'TSRHistory150', 'SplineRayTracingOn', 'SplineRayTracingOff')
                 if ($Value -isnot [array] -or $Value.Count -eq 0 -or
                     @($Value | Where-Object { $_ -isnot [string] -or $Supported -notcontains $_ }).Count -gt 0) {
                     throw 'VariantNames must be a nonempty array of supported variant names.'

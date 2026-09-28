@@ -2,7 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Characters/Enemies/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
 #include "Misc/AutomationTest.h"
 
 #include <limits>

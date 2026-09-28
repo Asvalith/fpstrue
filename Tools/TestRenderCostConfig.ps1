@@ -43,6 +43,11 @@ try {
         Assert-That ($null -eq $Settings.ScreenPercentage -and -not $Settings.CaptureTaskTrace) 'Baseline acquired a diagnostic override.'
         Assert-That ($Report.Configuration.InputConfig.SHA256 -eq (Get-FileHash -LiteralPath $Profile -Algorithm SHA256).Hash) 'Input hash mismatch.'
     }
+    Check 'TSR history comparison is an accepted isolated variant pair' {
+        $Report = Validate @{ Counts = @(160); VariantNames = @('TSRHistory200', 'TSRHistory150'); BalancedVariantOrder = $true }
+        Assert-That (($Report.Configuration.Settings.VariantNames -join ',') -eq 'TSRHistory200,TSRHistory150') 'TSR variant selection changed.'
+        Assert-That $Report.Configuration.Settings.BalancedVariantOrder 'Balanced order was not preserved.'
+    }
     Check 'CLI (including false/null/original defaults) beats JSON; JSON beats defaults' {
         $Path = Write-Config '{"SchemaVersion":1,"Counts":[160,20,160],"RunsPerCase":2,"CaptureTaskTrace":true,"BalancedVariantOrder":true,"ScreenPercentage":75}'
         $Report = Validate @{ ConfigFile = $Path }
@@ -52,6 +57,12 @@ try {
         $Report = Validate @{ ConfigFile = $Path; RunsPerCase = 3; CaptureTaskTrace = $false; BalancedVariantOrder = $false; ScreenPercentage = $null }
         Assert-That ($Report.Configuration.Settings.RunsPerCase -eq 3 -and $Report.Configuration.Sources.RunsPerCase -eq 'CommandLine') 'Explicit original default lost.'
         Assert-That (-not $Report.Configuration.Settings.CaptureTaskTrace -and -not $Report.Configuration.Settings.BalancedVariantOrder -and $null -eq $Report.Configuration.Settings.ScreenPercentage) 'Explicit false/null lost.'
+    }
+    Check 'spline ray tracing diagnosis accepts explicit On Off without changing defaults' {
+        $Path = Write-Config '{"SchemaVersion":1,"Counts":[0],"VariantNames":["SplineRayTracingOn","SplineRayTracingOff"]}'
+        $Report = Validate @{ ConfigFile = $Path }
+        Assert-That (($Report.Configuration.Settings.VariantNames -join ',') -eq 'SplineRayTracingOn,SplineRayTracingOff') 'Spline variants rejected.'
+        Assert-That ($null -eq $Report.Configuration.Settings.ScreenPercentage) 'Spline test changed screen percentage.'
     }
     Check 'DryRun needs no UE/project and creates no evidence' {
         $MissingRoot = Join-Path $TestRoot 'MissingProject'

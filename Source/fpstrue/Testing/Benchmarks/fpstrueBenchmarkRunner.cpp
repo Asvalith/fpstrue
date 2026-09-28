@@ -3,8 +3,8 @@
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Game/fpstrueGameMode.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
@@ -121,6 +121,13 @@ void UfpstrueBenchmarkRunner::BeginBenchmark()
 	FMath::RandInit(BenchmarkConfig.Seed);
 	bCaptureFinished = false;
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark random seed: %d"), BenchmarkConfig.Seed);
+
+	// 正常对局时限不应截断长驻留实验。覆盖只存在于独立 AutoBenchmark 进程，
+	// 额外 60 秒覆盖分帧生成、ready 轮询和退出收尾，不改变正式配置资产。
+	OwnerGameMode->BenchmarkGameDurationOverride =
+		FMath::CeilToInt(BenchmarkConfig.WarmupSeconds + BenchmarkConfig.DurationSeconds) + 60;
+	UE_LOG(LogTemp, Display, TEXT("Automated benchmark game duration override: %d seconds"),
+		   OwnerGameMode->BenchmarkGameDurationOverride);
 
 	OwnerGameMode->StartGameMode();
 	if (!OwnerGameMode->IsRunning())

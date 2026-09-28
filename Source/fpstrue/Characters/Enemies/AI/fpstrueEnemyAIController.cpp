@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/AI/fpstrueEnemyBehaviorTree.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -10,7 +10,7 @@
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Testing/Benchmarks/fpstruePerformanceStats.h"
-#include "Characters/Enemies/fpstrueSurroundManager.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "AITypes.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"

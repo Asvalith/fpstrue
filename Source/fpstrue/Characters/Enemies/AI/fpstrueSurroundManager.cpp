@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Characters/Enemies/fpstrueSurroundManager.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"

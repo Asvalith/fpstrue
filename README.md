@@ -27,7 +27,7 @@
 | 80 敌人 | GPU Skinned BLAS | 0.495 | 0.199 | 59.8% |
 | 80 敌人 | 总 RHI Draw Calls / 帧（阴影策略对照） | 2111.8 | 1655.0 | 21.6% |
 
-这些结果验证了决策降频、移动分级、姿态共享和渲染参与限制的局部收益。历史实验采用简化 HUD、声音和玩家受伤的诊断口径；各项独立消融不相加为整帧收益。采集条件、逐组数据与原始报告索引见[消费者消融明细](PERFORMANCE_EVIDENCE.md)和[分阶段实验记录](Docs/Performance/EXPERIMENT_LOG.md)。
+这些结果验证了决策降频、移动分级、姿态共享和渲染参与限制的局部收益。历史实验采用简化 HUD、声音和玩家受伤的诊断口径；各项独立消融不相加为整帧收益。完整调查过程见[性能实验报告](Docs/Performance/EXPERIMENT_LOG.md)，逐组数据与原始文件对应关系见[实验附录](PERFORMANCE_EVIDENCE.md)。
 
 另一项关键发现来自 RT 长等待：零敌人对照、Task Trace、源码和查询开关干预共同表明，一类 `WaitForGatherDynamicMeshElements` 长等待的上游是历史遮挡查询结果同步。这使后续工作从继续削减敌人逻辑，转向 GPU 工作分解和 CPU/GPU 同步验证。具体 GPU 子阶段归因与完整玩法的最终稳定帧率仍在验收中。
 
@@ -81,7 +81,7 @@ GameMode 使用 `Waiting → Starting → Playing → Finished` 表达对局阶�
 - 攻击阶段使用 `Idle / Windup / Active / Recovery`，只有 Active 执行伤害查询；重复打开窗口不重置刀刃历史采样，命中过的本次攻击不能重新开窗。
 - 正常结束、保护 Timer 和死亡中断共用事务清理，归还许可并清除定时任务；正常结束更新冷却，中断不伪造正常完成。
 
-默认可编辑资产位于 `/Game/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
+默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
 
 历史 AI Decision 数据来自 Timer 版本；行为树版本需要重新测量整体决策与 BrainComponent 调度成本，不沿用旧数据宣称迁移提速。
 
@@ -150,10 +150,10 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 | 规模测试与调用链分析 | 敌人增加后，哪些工作随规模增长 | 优先定位移动与动画，区分局部计算和任务等待 |
 | 消费者重复对照 | 哪些策略确实减少了工作 | 确认决策、移动、动画共享、阴影与骨骼 RT 的局部收益 |
 | 零敌人与任务依赖追踪 | 敌人成本下降后，RT 为什么仍等待 | 追到历史遮挡查询结果同步，转向场景渲染与同步链 |
-| 查询策略和 GPU 工作分解 | 缩短等待能否改善整帧 | HZB 因整帧回退未采用；Buffer2 与分辨率诊断继续验收 |
+| 查询策略和 GPU 工作分解 | 缩短等待能否改善整帧 | HZB 因整帧回退未采用；Buffer2 与 Lumen 反射下采样的组合在固定镜头三轮对照中改善 Frame/P95，动态镜头和完整玩法仍待验收 |
 
-- [分阶段实验记录](Docs/Performance/EXPERIMENT_LOG.md)：实验动机、条件、结果、决策和后续方向。
-- [消费者消融与历史数据明细](PERFORMANCE_EVIDENCE.md)：逐组数据和原始报告索引。
+- [完整性能实验报告](Docs/Performance/EXPERIMENT_LOG.md)：按调查阶段串联问题、实验、发现与后续决策。
+- [性能实验附录](PERFORMANCE_EVIDENCE.md)：逐组数据、异常样本、Trace 事件与本机原始文件对应关系。
 - [Unreal Insights 截图](PerformanceEvidence/UnrealInsights_160Enemies.png)：历史 160 敌人样本，仅对应当次采集。
 
 ![160 敌人场景的 Unreal Insights 历史采样](PerformanceEvidence/UnrealInsights_160Enemies.png)
@@ -176,13 +176,13 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 | 玩家控制 | [Character](Source/fpstrue/Characters/Player/fpstrueCharacter.cpp) |
 | 武器、射击与换弹 | [WeaponComponent](Source/fpstrue/Weapons/fpstrueWeaponComponent.cpp) |
 | 通用伤害与生命 | [HealthComponent](Source/fpstrue/Characters/Shared/fpstrueHealthComponent.cpp) |
-| 敌人 AI 与路径请求 | [EnemyAIController](Source/fpstrue/Characters/Enemies/fpstrueEnemyAIController.cpp) |
+| 敌人 AI 与路径请求 | [EnemyAIController](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyAIController.cpp) |
 | 行为树任务与默认树 | [BehaviorTree](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyBehaviorTree.cpp) |
 | 攻击事务与命中窗口 | [EnemyCombatComponent](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.cpp) |
-| 围攻槽位与共享预算 | [SurroundManager](Source/fpstrue/Characters/Enemies/fpstrueSurroundManager.cpp) |
+| 围攻槽位与共享预算 | [SurroundManager](Source/fpstrue/Characters/Enemies/AI/fpstrueSurroundManager.cpp) |
 | 角色表现与性能档位 | [EnemyCharacter](Source/fpstrue/Characters/Enemies/fpstrueEnemyCharacter.cpp) |
-| Top-K 与预算分配 | [SignificanceCoordinator](Source/fpstrue/Characters/Enemies/fpstrueEnemySignificanceCoordinator.cpp)、[优先级键与堆](Source/fpstrue/Characters/Enemies/fpstrueEnemySignificance.h) |
-| 动画共享接入 | [AnimationSharingCoordinator](Source/fpstrue/Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.cpp) |
+| Top-K 与预算分配 | [SignificanceCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.cpp)、[优先级键与堆](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificance.h) |
+| 动画共享接入 | [AnimationSharingCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.cpp) |
 | 波次、注册表与胜负 | [GameMode](Source/fpstrue/Game/fpstrueGameMode.cpp) |
 | 玩法配置资产 | [WaveConfiguration](Source/fpstrue/Game/fpstrueWaveConfiguration.h)、[EnemyCombatConfig](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatConfig.h) |
 | 测试与性能采集 | [Automation](Source/fpstrue/Testing/Automation/)、[Benchmarks](Source/fpstrue/Testing/Benchmarks/)、[Tools](Tools/) |
@@ -224,8 +224,9 @@ Source/fpstrue/
   Game/                     波次、生成、注册表与结算
   Characters/
     Player/                 玩家控制
-    Enemies/                AI、近战、围攻、显著性与动画共享
-      AI/                   C++ 行为树任务、条件与默认树构建
+    Enemies/                敌人角色、近战组件与战斗配置
+      AI/                   Controller、行为树、导航与群体战术资源
+      Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
     Shared/                 生命组件与碰撞通道
   Weapons/                  射击、换弹、拾取与动画通知
   Testing/

@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/AI/fpstrueEnemyBehaviorTree.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"

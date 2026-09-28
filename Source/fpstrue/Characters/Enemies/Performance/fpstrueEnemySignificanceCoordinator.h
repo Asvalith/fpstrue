@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "Characters/Enemies/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
 #include "fpstrueEnemySignificanceCoordinator.generated.h"
 
 class AfpstrueGameMode;

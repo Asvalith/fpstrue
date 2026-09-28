@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
-#include "Characters/Enemies/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
 #include "Game/fpstrueWaveConfiguration.h"
 #include "fpstrueGameMode.generated.h"
 
@@ -264,6 +264,8 @@ private:
 	int32 PendingEnemySpawnCount = 0;
 	int32 NextQueuedSpawnIndex = 0;
 	int32 ConsecutiveSpawnFailureCount = 0;
+	// 仅由 AutoBenchmark 在 StartGameMode 前写入，允许长驻留采集越过正常 90 秒对局时限。
+	int32 BenchmarkGameDurationOverride = 0;
 	EFPMatchPhase MatchPhase = EFPMatchPhase::Waiting;
 
 	FTimerHandle CountdownTimerHandle;

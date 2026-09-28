@@ -61,10 +61,10 @@ void UfpstrueGameModeTestObserver::HandleResult(bool bPlayerWon)
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/fpstrueSurroundManager.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "BrainComponent.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"

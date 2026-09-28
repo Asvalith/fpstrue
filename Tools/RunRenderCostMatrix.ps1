@@ -6,7 +6,7 @@ param(
     [Nullable[double]]$ScreenPercentage = $null,
     [double]$PlayerHealth = 1000000,
     [int]$BenchmarkSeed = 1337,
-    [ValidateSet("Baseline", "EnemyRayTracingOff", "EnemyShadowsOff", "OcclusionQueriesOn", "OcclusionQueriesOff", "HardwareQueries", "HZBOcclusion", "BufferedQueries2")]
+    [ValidateSet("Baseline", "EnemyRayTracingOff", "EnemyShadowsOff", "OcclusionQueriesOn", "OcclusionQueriesOff", "HardwareQueries", "HZBOcclusion", "BufferedQueries2", "LumenReflectionsDS2", "LumenScreenProbeDS32", "OriginalRenderPolicy", "OptimizedRenderPolicy", "TSRHistory200", "TSRHistory150", "SplineRayTracingOn", "SplineRayTracingOff")]
     [string[]]$VariantNames = @("Baseline", "EnemyRayTracingOff", "EnemyShadowsOff"),
     [ValidateSet("Any", "RVO", "DetourCrowd")]
     [string]$ExpectedAvoidanceMode = "Any",
@@ -74,6 +74,7 @@ if ($StartTrimSeconds -lt 0 -or $EndTrimSeconds -lt 0 -or
     throw "Summary edge trimming must leave a positive capture interval."
 }
 
+$TsrControlExec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2,r.Lumen.Reflections.DownsampleFactor 2,r.Lumen.ScreenProbeGather.DownsampleFactor 16"
 $VariantCatalog = @(
     [PSCustomObject]@{ Name = "Baseline"; Switch = ""; Exec = "" },
     [PSCustomObject]@{ Name = "EnemyRayTracingOff"; Switch = "-BenchmarkEnemyRayTracingOff"; Exec = "" },
@@ -86,7 +87,22 @@ $VariantCatalog = @(
     # hardware control by ONE policy value; do not combine HZB and buffering changes.
     [PSCustomObject]@{ Name = "HardwareQueries"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 1" },
     [PSCustomObject]@{ Name = "HZBOcclusion"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 1,r.NumBufferedOcclusionQueries 1" },
-    [PSCustomObject]@{ Name = "BufferedQueries2"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2" }
+    [PSCustomObject]@{ Name = "BufferedQueries2"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2" },
+    # GPU screening candidates. Each changes one sampling density and is
+    # validated from the final echoed CVar before the run can be accepted.
+    [PSCustomObject]@{ Name = "LumenReflectionsDS2"; Switch = ""; Exec = "r.Lumen.Reflections.DownsampleFactor 2" },
+    [PSCustomObject]@{ Name = "LumenScreenProbeDS32"; Switch = ""; Exec = "r.Lumen.ScreenProbeGather.DownsampleFactor 32" },
+    # Final interaction check: explicit values make this A/B independent of
+    # project defaults before the winning pair is committed to DefaultEngine.ini.
+    [PSCustomObject]@{ Name = "OriginalRenderPolicy"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 1,r.Lumen.Reflections.DownsampleFactor 1" },
+    [PSCustomObject]@{ Name = "OptimizedRenderPolicy"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2,r.Lumen.Reflections.DownsampleFactor 2" }
+    # Isolate the TSR history resolution while keeping the current query/Lumen policy fixed.
+    [PSCustomObject]@{ Name = "TSRHistory200"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 200" },
+    [PSCustomObject]@{ Name = "TSRHistory150"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 150" }
+    # Diagnostic only: removing spline geometry from ray tracing is not the final fix.
+    # A separate process restores the explicit On control; no defaults/assets change.
+    [PSCustomObject]@{ Name = "SplineRayTracingOn"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 200,r.RayTracing.Geometry.SplineMeshes 1" },
+    [PSCustomObject]@{ Name = "SplineRayTracingOff"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 200,r.RayTracing.Geometry.SplineMeshes 0" }
 )
 $Variants = @($VariantCatalog | Where-Object { $VariantNames -contains $_.Name })
 if ($Variants.Count -eq 0) {
@@ -214,6 +230,7 @@ $OrderRandom = [System.Random]::new($BenchmarkSeed)
 $BalancedVariants = @($Variants | Sort-Object { $OrderRandom.Next() })
 $TotalCases = $Counts.Count * $Variants.Count * $RunsPerCase
 $CompletedCases = 0
+$PreviousOwnedProcessId = $null
 
 for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
     $RunCounts = @($Counts | Sort-Object { $OrderRandom.Next() })
@@ -244,6 +261,8 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
             # Read actual runtime values after applying overrides. The plain
             # Baseline variant only queries these values, allowing a default probe.
             $RunExecCmds += ",r.AllowOcclusionQueries,r.HZBOcclusion,r.NumBufferedOcclusionQueries"
+            $RunExecCmds += ",r.Lumen.Reflections.DownsampleFactor,r.Lumen.ScreenProbeGather.DownsampleFactor,r.TSR.History.ScreenPercentage"
+            $RunExecCmds += ",r.RayTracing.Geometry.SplineMeshes"
             $RunExecCmds += ",r.ScreenPercentage,r.DynamicRes.OperationMode,r.DynamicRes.TestScreenPercentage,t.MaxFPS,r.VSync,sg.ResolutionQuality"
             $Arguments = @(
                 $Project,
@@ -295,18 +314,46 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
             $IsolationObservations = New-Object System.Collections.Generic.List[object]
             $IsolationValid = $true
             $Process = $null
+            $OwnedProcessId = $null
             $ProcessExitCode = $null
             $TimedOut = $false
             $RunError = ""
             $RunClock = [Diagnostics.Stopwatch]::StartNew()
             try {
-                $Observation = Get-IsolationObservation -Phase "before-launch"
+                # Unreal can finish its tracked process before Windows removes the
+                # same PID from enumeration. Wait only for our preceding PID; a
+                # different UE process still fails the normal isolation audit.
+                if ($null -ne $PreviousOwnedProcessId) {
+                    $PreviousRemovalDeadline = [DateTime]::UtcNow.AddSeconds(30)
+                    while ($null -ne (Get-Process -Id $PreviousOwnedProcessId -ErrorAction SilentlyContinue) -and
+                        [DateTime]::UtcNow -lt $PreviousRemovalDeadline) {
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+                # Require a short stable clean interval for the exact process we
+                # just owned. Windows process enumeration can briefly disagree
+                # with the retained process handle immediately after exit.
+                $StableCleanSamples = 0
+                $BeforeLaunchDeadline = [DateTime]::UtcNow.AddSeconds(5)
+                do {
+                    $Observation = Get-IsolationObservation -Phase "before-launch"
+                    if ($Observation.Conflicts.Count -eq 0) {
+                        ++$StableCleanSamples
+                    } elseif ($null -ne $PreviousOwnedProcessId -and
+                        @($Observation.Conflicts | Where-Object { $_.ProcessId -ne $PreviousOwnedProcessId }).Count -eq 0) {
+                        $StableCleanSamples = 0
+                    } else {
+                        break
+                    }
+                    if ($StableCleanSamples -lt 5) { Start-Sleep -Milliseconds 100 }
+                } while ($StableCleanSamples -lt 5 -and [DateTime]::UtcNow -lt $BeforeLaunchDeadline)
                 $IsolationObservations.Add($Observation)
-                if ($Observation.Conflicts.Count -gt 0) {
+                if ($Observation.Conflicts.Count -gt 0 -or $StableCleanSamples -lt 5) {
                     $IsolationValid = $false
                     $RunError = "Conflicting processes were present before launch; the game was not started."
                 } else {
                     $Process = Start-Process -FilePath $EditorPath -ArgumentList $Arguments -WindowStyle Hidden -PassThru
+                    $OwnedProcessId = $Process.Id
                     while (-not $Process.HasExited) {
                         $Observation = Get-IsolationObservation -OwnedProcessId $Process.Id -Phase "running"
                         $IsolationObservations.Add($Observation)
@@ -336,13 +383,13 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 }
                 # The exited owned process can remain briefly enumerable while
                 # its retained handle is alive. It is not a competing UE process.
-                $Observation = Get-IsolationObservation -OwnedProcessId $(if ($null -ne $Process) { $Process.Id } else { 0 }) -Phase "after-exit"
+                $Observation = Get-IsolationObservation -OwnedProcessId $(if ($null -ne $OwnedProcessId) { $OwnedProcessId } else { 0 }) -Phase "after-exit"
                 $IsolationObservations.Add($Observation)
                 if ($Observation.Conflicts.Count -gt 0) { $IsolationValid = $false }
                 $RunClock.Stop()
                 [PSCustomObject]@{
                     RunId = $RunId
-                    OwnedProcessId = if ($null -ne $Process) { $Process.Id } else { $null }
+                    OwnedProcessId = $OwnedProcessId
                     ProcessExitCode = $ProcessExitCode
                     IsolationValid = $IsolationValid
                     PollMilliseconds = $IsolationPollMilliseconds
@@ -354,6 +401,18 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                     Note = "750 ms process snapshots can miss shorter overlaps; shader workers are conservatively treated as contamination."
                 } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $IsolationAuditPath -Encoding UTF8
             }
+            # Close the retained process handle, then let Windows remove this exact
+            # process entry before the next case performs its before-launch audit.
+            # A different UE process is never waited away or ignored.
+            if ($null -ne $Process) {
+                $Process.Dispose()
+                $RemovalDeadline = [DateTime]::UtcNow.AddSeconds(10)
+                while ($null -ne (Get-Process -Id $OwnedProcessId -ErrorAction SilentlyContinue) -and
+                    [DateTime]::UtcNow -lt $RemovalDeadline) {
+                    Start-Sleep -Milliseconds 100
+                }
+            }
+            $PreviousOwnedProcessId = $OwnedProcessId
             $GpuAfter = Get-GpuSnapshot
             $AfterFingerprint = @(Get-ExperimentFingerprint)
             $InputIdentityValid = ($AfterFingerprint | ConvertTo-Json -Compress) -eq ($InitialFingerprint | ConvertTo-Json -Compress)
@@ -417,19 +476,41 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
             $PlayerHealthAtEnd = if ($EndMatch.Success) { [double]$EndMatch.Groups[3].Value } else { 0.0 }
             $ShadowCastersAtStart = if ($SnapshotMatch.Success) { [int]$SnapshotMatch.Groups[1].Value } else { -1 }
             $RayTracingVisibleAtStart = if ($SnapshotMatch.Success) { [int]$SnapshotMatch.Groups[2].Value } else { -1 }
-            $StrictCandidate = $Count -gt 0 -and $Variant.Name -in @("HardwareQueries", "BufferedQueries2")
+            $StrictCandidate = $Count -gt 0 -and $Variant.Name -in @("HardwareQueries", "BufferedQueries2", "OriginalRenderPolicy", "OptimizedRenderPolicy", "TSRHistory200", "TSRHistory150")
             $CandidateConsumersValid = -not $StrictCandidate -or
                 ($ShadowCastersAtStart -eq 5 -and $RayTracingVisibleAtStart -eq 12)
             $SpawnFailures = ($LogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
+            $ReadyMarker = "Automated benchmark ready: requested=$Count alive=$Count"
+            $ReadyLineIndex = -1
+            for ($LineIndex = 0; $LineIndex -lt $LogLines.Count; ++$LineIndex) {
+                if ($LogLines[$LineIndex].Contains($ReadyMarker)) {
+                    $ReadyLineIndex = $LineIndex
+                    break
+                }
+            }
+            # Generation may retry before the benchmark becomes ready. Those
+            # retries are retained for audit, but only failures after the ready
+            # boundary invalidate the measured interval.
+            $PostReadyLogLines = if ($ReadyLineIndex -ge 0) {
+                @($LogLines | Select-Object -Skip ($ReadyLineIndex + 1))
+            } else {
+                @($LogLines)
+            }
+            $PostReadySpawnFailures = ($PostReadyLogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
+            $PreReadyRecoverableSpawnFailures = [Math]::Max(0, $SpawnFailures - $PostReadySpawnFailures)
             $VSMQueueOverflows = ($LogLines | Select-String -SimpleMatch "Non-Nanite Marking Job Queue overflow").Count
             $TexturePoolWarnings = ($LogLines | Select-String -Pattern "Texture streaming pool.*over budget").Count
-            $RenderWarningsValid = $SpawnFailures -eq 0 -and $VSMQueueOverflows -eq 0 -and $TexturePoolWarnings -eq 0
+            $RenderWarningsValid = $PostReadySpawnFailures -eq 0 -and $VSMQueueOverflows -eq 0 -and $TexturePoolWarnings -eq 0
             $ConsumerOverrideValid =
                 ($Variant.Name -ne "EnemyRayTracingOff" -or $RayTracingVisibleAtStart -eq 0) -and
                 ($Variant.Name -ne "EnemyShadowsOff" -or $ShadowCastersAtStart -eq 0)
             $AllowOcclusionValue = Get-CVarValue $LogText "r.AllowOcclusionQueries"
             $HZBValue = Get-CVarValue $LogText "r.HZBOcclusion"
             $BufferedQueryValue = Get-CVarValue $LogText "r.NumBufferedOcclusionQueries"
+            $LumenReflectionDownsampleValue = Get-CVarValue $LogText "r.Lumen.Reflections.DownsampleFactor"
+            $LumenScreenProbeDownsampleValue = Get-CVarValue $LogText "r.Lumen.ScreenProbeGather.DownsampleFactor"
+            $TsrHistoryScreenPercentageValue = Get-CVarValue $LogText "r.TSR.History.ScreenPercentage"
+            $SplineRayTracingValue = Get-CVarValue $LogText "r.RayTracing.Geometry.SplineMeshes"
             $ScreenPercentageValue = Get-CVarValue $LogText "r.ScreenPercentage"
             $DynamicResolutionValue = Get-CVarValue $LogText "r.DynamicRes.OperationMode"
             $DynamicResolutionTestValue = Get-CVarValue $LogText "r.DynamicRes.TestScreenPercentage"
@@ -463,13 +544,37 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 ($Variant.Name -ne "OcclusionQueriesOn" -or $AllowOcclusionValue -in @("1", "true")) -and
                 ($Variant.Name -ne "OcclusionQueriesOff" -or $AllowOcclusionValue -in @("0", "false"))
             $CandidateConfigurationValid = $true
-            if ($Variant.Name -in @("HardwareQueries", "HZBOcclusion", "BufferedQueries2")) {
+            if ($Variant.Name -in @("HardwareQueries", "HZBOcclusion", "BufferedQueries2", "OriginalRenderPolicy", "OptimizedRenderPolicy")) {
                 $ExpectedHZB = if ($Variant.Name -eq "HZBOcclusion") { "1" } else { "0" }
-                $ExpectedBuffer = if ($Variant.Name -eq "BufferedQueries2") { "2" } else { "1" }
+                $ExpectedBuffer = if ($Variant.Name -in @("BufferedQueries2", "OptimizedRenderPolicy")) { "2" } else { "1" }
                 $CandidateConfigurationValid = $AllowOcclusionValue -in @("1", "true") -and
                     $HZBValue -eq $ExpectedHZB -and $BufferedQueryValue -eq $ExpectedBuffer
             }
+            if ($Variant.Name -eq "LumenReflectionsDS2") {
+                $CandidateConfigurationValid = $LumenReflectionDownsampleValue -eq "2"
+            } elseif ($Variant.Name -eq "LumenScreenProbeDS32") {
+                $CandidateConfigurationValid = $LumenScreenProbeDownsampleValue -eq "32"
+            } elseif ($Variant.Name -in @("OriginalRenderPolicy", "OptimizedRenderPolicy")) {
+                $ExpectedReflectionDownsample = if ($Variant.Name -eq "OptimizedRenderPolicy") { "2" } else { "1" }
+                $CandidateConfigurationValid = $CandidateConfigurationValid -and
+                    $LumenReflectionDownsampleValue -eq $ExpectedReflectionDownsample
+            } elseif ($Variant.Name -in @("TSRHistory200", "TSRHistory150")) {
+                $ExpectedTsrHistory = if ($Variant.Name -eq "TSRHistory200") { "200" } else { "150" }
+                $CandidateConfigurationValid = $AllowOcclusionValue -in @("1", "true") -and
+                    $HZBValue -eq "0" -and $BufferedQueryValue -eq "2" -and
+                    $LumenReflectionDownsampleValue -eq "2" -and $LumenScreenProbeDownsampleValue -eq "16" -and
+                    $TsrHistoryScreenPercentageValue -eq $ExpectedTsrHistory -and
+                    $ScreenPercentageValue -eq "0" -and $DynamicResolutionValue -eq "0"
+            }
             $AvoidanceEnemies = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[1].Value } else { -1 }
+            if ($Variant.Name -in @("SplineRayTracingOn", "SplineRayTracingOff")) {
+                $ExpectedSpline = if ($Variant.Name -eq "SplineRayTracingOff") { "0" } else { "1" }
+                $CandidateConfigurationValid = $AllowOcclusionValue -in @("1", "true") -and
+                    $HZBValue -eq "0" -and $BufferedQueryValue -eq "2" -and
+                    $LumenReflectionDownsampleValue -eq "2" -and $LumenScreenProbeDownsampleValue -eq "16" -and
+                    $TsrHistoryScreenPercentageValue -eq "200" -and $SplineRayTracingValue -eq $ExpectedSpline -and
+                    $ScreenPercentageValue -eq "0" -and $DynamicResolutionValue -eq "0"
+            }
             $RVOEnabled = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[2].Value } else { -1 }
             $CrowdFollowing = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[3].Value } else { -1 }
             $CrowdValid = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[4].Value } else { -1 }
@@ -494,7 +599,7 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 $AliveAtEnd -eq $Count -and $PlayerHealthAtEnd -gt 0 -and
                 $SnapshotMatch.Success -and $ConsumerOverrideValid -and $AvoidanceValid -and $TraceValid -and $OcclusionOverrideValid -and
                 $CandidateConfigurationValid -and $InputIdentityValid -and $IsolationValid -and $InputLocked -and
-                $DefaultDiagnosticsValid -and $CandidateConsumersValid -and (-not $StrictCandidate -or $RenderWarningsValid) -and
+                $DefaultDiagnosticsValid -and $CandidateConsumersValid -and $RenderWarningsValid -and
                 $ProcessCompleted -and $ArtifactsComplete -and $ScreenPercentageOverrideValid
 
             $ManifestRows += [PSCustomObject]@{
@@ -513,6 +618,10 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 AllowOcclusionQueries = $AllowOcclusionValue
                 HZBOcclusion = $HZBValue
                 NumBufferedOcclusionQueries = $BufferedQueryValue
+                LumenReflectionDownsampleFactor = $LumenReflectionDownsampleValue
+                LumenScreenProbeDownsampleFactor = $LumenScreenProbeDownsampleValue
+                TSRHistoryScreenPercentage = $TsrHistoryScreenPercentageValue
+                SplineRayTracing = $SplineRayTracingValue
                 CandidateConfigurationValid = $CandidateConfigurationValid
                 InputIdentityValid = $InputIdentityValid
                 IsolationValid = $IsolationValid
@@ -521,7 +630,7 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 DefaultDiagnosticsValid = $DefaultDiagnosticsValid
                 CandidateConsumersValid = $CandidateConsumersValid
                 RenderWarningsValid = $RenderWarningsValid
-                OwnedProcessId = if ($null -ne $Process) { $Process.Id } else { $null }
+                OwnedProcessId = $OwnedProcessId
                 ProcessExitCode = $ProcessExitCode
                 ProcessCompleted = $ProcessCompleted
                 TimedOut = $TimedOut
@@ -558,6 +667,8 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 Trace = $TraceDestination
                 Valid = $Valid
                 SpawnFailures = $SpawnFailures
+                PreReadyRecoverableSpawnFailures = $PreReadyRecoverableSpawnFailures
+                PostReadySpawnFailures = $PostReadySpawnFailures
                 VSMQueueOverflows = $VSMQueueOverflows
                 TexturePoolWarnings = $TexturePoolWarnings
                 Csv = if ($null -ne $Csv) { $CsvDestination } else { "" }

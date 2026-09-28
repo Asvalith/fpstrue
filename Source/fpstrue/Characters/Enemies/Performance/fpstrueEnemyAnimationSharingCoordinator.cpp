@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"

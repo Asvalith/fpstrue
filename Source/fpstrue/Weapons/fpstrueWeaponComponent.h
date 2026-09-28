@@ -40,6 +40,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FWeaponTraceEvent, bool, bHit, FVe
  *
  * Character 只提交输入请求；本组件用 ActionState 约束开火/换弹互斥，用 Notify 提交换弹数值，
  * 并用 Timer 为连续射击、后坐力恢复和 Notify 丢失提供独立生命周期。
+ * Ready -> Firing -> Ready；Ready/Firing -> Reloading -> Ready；死亡或卸下 -> Disabled。
+ * Reloading 中 Commit 只转移弹药，Finish/Cancel 才解除动作锁。
  */
 UCLASS(Blueprintable, BlueprintType, ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
@@ -79,8 +81,8 @@ public:
 	void CancelReload();
 
 	// ==================== Owner Lifecycle ====================
-	//角色死亡时停止射击和换弹，并禁用武器
-	void HandleOwnerDeath();
+	//角色死亡、卸下或 EndPlay 时停止射击、换弹和后坐力，并禁用武器。
+	void DisableWeapon();
 
 	// ==================== State / Rule Query ====================
 	// Character 的冲刺/瞄准规则读取当前是否换弹。
@@ -132,23 +134,24 @@ protected:
 
 private:
 	// ==================== Action State / Rules ====================
-	// Action State 只由本组件内部直接写入；规则查询只读现有状态。
+	// Action State 只从这里切换；离开 Firing/Reloading 时同步清理对应 Timer。
+	void SetActionState(EFPWeaponActionState NewState);
 	//状态边界
 	//统一检查武器已装备、未禁用且角色存活
 	bool IsOperational() const;
+	// 同步委托返回后检查动作是否仍是原来那次，避免旧调用继续操作新动作。
+	bool IsCurrentAction(EFPWeaponActionState ExpectedState, uint32 ExpectedRevision) const;
 	// 射击和换弹规则读取弹匣是否还有弹药。
 	bool HasAmmo() const { return CurrentAmmo > 0; }
 
 	// ==================== Fire System ====================
 	// 自动射击 Timer 和首次按下输入共用的单次射击入口。
 	void Fire();
+	// 空仓入口与最后一发共用：能换弹就换弹，否则停止射击。
+	void HandleEmptyMagazine();
 	// 根据相机、瞄准状态和连续射击次数计算本发 Hitscan。
 	// 执行一条带散布的射线，处理伤害、冲量和命中事件。
-	void FireLineTrace(UWorld* World, UCameraComponent* Camera);
-
-	// ==================== Reload System ====================
-	// Finish、Cancel、死亡和 EndPlay 共用的清理；不改弹药或 ActionState，由调用者决定最终状态。
-	void ResetReloadState();
+	void FireLineTrace(UWorld& World, UCameraComponent& Camera);
 
 	// ==================== Recoil System ====================
 	// 射击成功后把随机水平/垂直后坐力应用到 PlayerController。
@@ -159,8 +162,6 @@ private:
 	void ClearRecoilState();
 
 	// ==================== Runtime Helpers ====================
-	//死亡或组件结束时统一清理Timer和临时状态
-	void ResetWeaponRuntimeState();
 	//弹药改变后统一广播给UI
 	void BroadcastAmmoChanged();
 
@@ -285,9 +286,9 @@ private:
 	// Reload Transaction
 	// 同一次换弹中，多个 Notify / FinishReload 最多只转移一次弹药。
 	bool bReloadAmmoCommitted = false;
-	// 每次成功请求递增；同步委托可能取消并重新请求，旧 Finish 调用不得结束新的一次换弹。
+	// 每次动作切换递增；同步委托可能取消并重新请求，旧 Fire/Finish 不得操作新动作。
 	// 这只是同调用栈的重入保护；现有无参动画 Notify 不携带序号，不能据此识别旧动画事件。
-	uint32 ReloadSequence = 0;
+	uint32 ActionRevision = 0;
 
 	// Fire / Spread
 	//连续射击和后坐力状态

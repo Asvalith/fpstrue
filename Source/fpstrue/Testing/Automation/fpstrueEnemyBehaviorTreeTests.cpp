@@ -4,7 +4,7 @@
 
 #include "Misc/AutomationTest.h"
 #include "Characters/Enemies/AI/fpstrueEnemyBehaviorTree.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "BehaviorTree/BehaviorTree.h"
@@ -209,7 +209,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 
 namespace FPEnemyBehaviorAssetTests
 {
-const TCHAR* const Packages[] = {TEXT("/Game/AI/BT_FPEnemy"), TEXT("/Game/AI/BB_FPEnemy"), TEXT("/Game/AI/BP_FPEnemyAIController"),
+const TCHAR* const Packages[] = {TEXT("/Game/FirstPerson/AI/BT_FPEnemy"), TEXT("/Game/FirstPerson/AI/BB_FPEnemy"), TEXT("/Game/FirstPerson/AI/BP_FPEnemyAIController"),
 								 TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP")};
 
 UObject* ReadObjectProperty(const UObject* Object, FName Name)
@@ -243,9 +243,9 @@ void FFPEnemyBehaviorTreeAssetGraphTest::GetTests(TArray<FString>& OutBeautified
 
 bool FFPEnemyBehaviorTreeAssetGraphTest::RunTest(const FString& Parameters)
 {
-	UBehaviorTree* Tree = LoadObject<UBehaviorTree>(nullptr, TEXT("/Game/AI/BT_FPEnemy.BT_FPEnemy"));
-	UBlackboardData* Data = LoadObject<UBlackboardData>(nullptr, TEXT("/Game/AI/BB_FPEnemy.BB_FPEnemy"));
-	UBlueprint* ControllerBlueprint = LoadObject<UBlueprint>(nullptr, TEXT("/Game/AI/BP_FPEnemyAIController.BP_FPEnemyAIController"));
+	UBehaviorTree* Tree = LoadObject<UBehaviorTree>(nullptr, TEXT("/Game/FirstPerson/AI/BT_FPEnemy.BT_FPEnemy"));
+	UBlackboardData* Data = LoadObject<UBlackboardData>(nullptr, TEXT("/Game/FirstPerson/AI/BB_FPEnemy.BB_FPEnemy"));
+	UBlueprint* ControllerBlueprint = LoadObject<UBlueprint>(nullptr, TEXT("/Game/FirstPerson/AI/BP_FPEnemyAIController.BP_FPEnemyAIController"));
 	UBlueprint* EnemyBlueprint = LoadObject<UBlueprint>(nullptr, TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP.enemy_BP"));
 	if (!TestNotNull(TEXT("Serialized BehaviorTree loads"), Tree) || !TestNotNull(TEXT("Serialized Blackboard loads"), Data) ||
 		!TestNotNull(TEXT("Controller Blueprint loads"), ControllerBlueprint) ||

@@ -10,7 +10,7 @@ void UfpstrueReloadReentryObserver::HandleAmmoChanged(int32 CurrentAmmo, int32 M
 	{
 		if (UfpstrueWeaponComponent* ObservedWeapon = Weapon.Get())
 		{
-			ObservedWeapon->HandleOwnerDeath();
+			ObservedWeapon->DisableWeapon();
 		}
 	}
 }
@@ -18,8 +18,8 @@ void UfpstrueReloadReentryObserver::HandleAmmoChanged(int32 CurrentAmmo, int32 M
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Shared/fpstrueCollisionChannels.h"
@@ -383,6 +383,91 @@ bool FFpstrueHitscanDamageTest::RunTest(const FString& Parameters)
 	Weapon->StopFire();
 	TestEqual(TEXT("A miss still consumes one round"), Weapon->GetCurrentAmmo(), AmmoBeforeShot - 2);
 	TestEqual(TEXT("A nonblocking target takes no additional damage"), Health->GetHealth(), 60.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadTransitionsTest, "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
+{
+	using namespace FpstrueGameplayBoundaryTests;
+	FGameplayWorld World(*this);
+	if (!World.Initialize()) return false;
+	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this);
+	if (Weapon == nullptr) return false;
+
+	Weapon->StartFire();
+	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
+	const int32 ReserveBefore = Weapon->GetReserveAmmo();
+	TestTrue(TEXT("Reload interrupts automatic fire"), Weapon->RequestReload());
+	Weapon->StartFire();
+	Weapon->StopFire();
+	TestTrue(TEXT("Trigger input cannot unlock Reloading"), Weapon->IsReloading());
+	TestFalse(TEXT("Repeated reload is rejected"), Weapon->RequestReload());
+	if (!World.Advance(0.3f)) return false;
+	TestEqual(TEXT("The old firing timer cannot consume ammunition"), Weapon->GetCurrentAmmo(), AmmoBefore);
+	Weapon->CancelReload();
+	TestFalse(TEXT("Cancelled reload rejects late commit"), Weapon->CommitReload());
+	Weapon->FinishReload();
+	if (!World.Advance(5.2f)) return false;
+	TestEqual(TEXT("Cancellation before commit does not load ammunition"), Weapon->GetCurrentAmmo(), AmmoBefore);
+	TestEqual(TEXT("Cancelled fallback does not spend reserve"), Weapon->GetReserveAmmo(), ReserveBefore);
+
+	TestTrue(TEXT("Reload can restart after cancellation"), Weapon->RequestReload());
+	TestTrue(TEXT("The new reload commits once"), Weapon->CommitReload());
+	Weapon->CancelReload();
+	TestEqual(TEXT("Cancellation after commit keeps loaded ammunition"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
+	TestEqual(TEXT("Reload conserves total ammunition"), Weapon->GetCurrentAmmo() + Weapon->GetReserveAmmo(), AmmoBefore + ReserveBefore);
+
+	Weapon->StartFire();
+	Weapon->StopFire();
+	TestTrue(TEXT("Missing animation notification still has a fallback"), Weapon->RequestReload());
+	if (!World.Advance(5.2f)) return false;
+	TestFalse(TEXT("Fallback closes the reload"), Weapon->IsReloading());
+	TestEqual(TEXT("Fallback commits missing ammunition"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
+
+	Weapon->StartFire();
+	Weapon->StopFire();
+	TestTrue(TEXT("Begin reload before unequipping"), Weapon->RequestReload());
+	const int32 AmmoBeforeUnequip = Weapon->GetCurrentAmmo();
+	CastChecked<AfpstrueCharacter>(Weapon->GetOwner())->ClearEquippedWeaponComponent(Weapon);
+	Weapon->FinishReload();
+	Weapon->CancelReload();
+	Weapon->StartFire();
+	if (!World.Advance(5.2f)) return false;
+	TestFalse(TEXT("Unequipped weapon remains disabled"), Weapon->IsFiring());
+	TestFalse(TEXT("Unequipping cancels reload"), Weapon->IsReloading());
+	TestFalse(TEXT("Unequipped weapon cannot reload"), Weapon->CanReload());
+	TestEqual(TEXT("Late callbacks and timeout cannot load an unequipped weapon"), Weapon->GetCurrentAmmo(), AmmoBeforeUnequip);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueAutoReloadConflictTest, "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueAutoReloadConflictTest::RunTest(const FString& Parameters)
+{
+	using namespace FpstrueGameplayBoundaryTests;
+	FGameplayWorld World(*this);
+	if (!World.Initialize()) return false;
+	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this);
+	if (Weapon == nullptr) return false;
+	AfpstrueCharacter* Player = CastChecked<AfpstrueCharacter>(Weapon->GetOwner());
+	const FBoolProperty* Aiming = FindFProperty<FBoolProperty>(Player->GetClass(), TEXT("bIsAiming"));
+	const FBoolProperty* Sprinting = FindFProperty<FBoolProperty>(Player->GetClass(), TEXT("bIsSprinting"));
+	if (!TestNotNull(TEXT("Aim state is reflected"), Aiming) || !TestNotNull(TEXT("Sprint state is reflected"), Sprinting)) return false;
+	// 只设置输入前态；耗尽弹匣、换弹和状态收尾均运行真实代码。
+	for (const FBoolProperty* InputState : {Aiming, Sprinting})
+	{
+		InputState->SetPropertyValue_InContainer(Player, true);
+		Weapon->StartFire();
+		if (!World.Advance(3.2f)) return false;
+		TestTrue(TEXT("Empty magazine starts automatic reload"), Weapon->IsReloading());
+		TestFalse(TEXT("Automatic reload clears aiming"), Player->IsAiming());
+		TestFalse(TEXT("Automatic reload clears sprinting"), Sprinting->GetPropertyValue_InContainer(Player));
+		Weapon->FinishReload();
+	}
 	return true;
 }
 

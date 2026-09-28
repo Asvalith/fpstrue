@@ -172,6 +172,14 @@ $OptionalMetrics = [ordered]@{
     RayTracingDynamicGeometryMs = "GPU/RayTracingDynamicGeometry"
     ShadowDepthsMs = "GPU/ShadowDepths"
     ShadowProjectionMs = "GPU/ShadowProjection"
+    LumenSceneLightingMs = "GPU/LumenSceneLighting"
+    LumenScreenProbeGatherMs = "GPU/LumenScreenProbeGather"
+    LumenReflectionsMs = "GPU/LumenReflections"
+    TemporalSuperResolutionMs = "GPU/TemporalSuperResolution"
+    PostprocessingMs = "GPU/Postprocessing"
+    StreamingPoolMB = "TextureStreaming/StreamingPool"
+    WantedMipsMB = "TextureStreaming/WantedMips"
+    NonStreamingMipsMB = "TextureStreaming/NonStreamingMips"
     ShadowDrawCalls = "DrawCall/ShadowDepths"
     AliveEnemies = "fpstrueSignificance/AliveEnemies"
     ShadowCasters = "fpstrueSignificance/ShadowCasters"
@@ -284,7 +292,7 @@ if ($RunSummary.Count -eq 0) {
     throw "The manifest does not contain any valid runs."
 }
 
-$VariantOrder = @("Baseline", "HardwareQueries", "HZBOcclusion", "BufferedQueries2", "EnemyRayTracingOff", "EnemyShadowsOff", "OcclusionQueriesOn", "OcclusionQueriesOff")
+$VariantOrder = @("Baseline", "OriginalRenderPolicy", "OptimizedRenderPolicy", "LumenReflectionsDS2", "LumenScreenProbeDS32", "TSRHistory200", "TSRHistory150", "SplineRayTracingOn", "SplineRayTracingOff", "HardwareQueries", "HZBOcclusion", "BufferedQueries2", "EnemyRayTracingOff", "EnemyShadowsOff", "OcclusionQueriesOn", "OcclusionQueriesOff")
 $GroupSummary = @()
 foreach ($Count in @($RunSummary.EnemyCount | Sort-Object -Unique)) {
     foreach ($Variant in $VariantOrder) {
@@ -333,11 +341,23 @@ foreach ($Count in @($GroupSummary.EnemyCount | Sort-Object -Unique)) {
     $Baseline = @($GroupSummary | Where-Object { $_.EnemyCount -eq $Count -and $_.Variant -eq "Baseline" }) |
         Select-Object -First 1
     if (-not $Baseline) {
+        $Baseline = @($GroupSummary | Where-Object { $_.EnemyCount -eq $Count -and $_.Variant -eq "OriginalRenderPolicy" }) |
+            Select-Object -First 1
+    }
+    if (-not $Baseline) {
         $Baseline = @($GroupSummary | Where-Object { $_.EnemyCount -eq $Count -and $_.Variant -eq "HardwareQueries" }) |
             Select-Object -First 1
     }
     if (-not $Baseline) {
         $Baseline = @($GroupSummary | Where-Object { $_.EnemyCount -eq $Count -and $_.Variant -eq "OcclusionQueriesOn" }) |
+            Select-Object -First 1
+    }
+    if (-not $Baseline) {
+        $Baseline = @($GroupSummary | Where-Object { $_.EnemyCount -eq $Count -and $_.Variant -eq "SplineRayTracingOn" }) |
+            Select-Object -First 1
+    }
+    if (-not $Baseline) {
+        $Baseline = @($GroupSummary | Where-Object { $_.EnemyCount -eq $Count -and $_.Variant -eq "TSRHistory200" }) |
             Select-Object -First 1
     }
     if (-not $Baseline) {

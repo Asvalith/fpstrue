@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
-#include "Characters/Enemies/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
 #include "fpstrueEnemyCharacter.generated.h"
 
 class AfpstrueCharacter;

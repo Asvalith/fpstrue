@@ -30,7 +30,7 @@
 
 转速的统一入口是角色的 MovementYawRotationRate，不能同时在 CharacterMovement 上另改 RotationRate 并期待两处都生效。三个参数保留运行时数值保护，不改变原有决策和转向算法。
 
-AI 使用 `/Game/AI/BP_FPEnemyAIController`，其 `BehaviorTreeAsset` 指向 `/Game/AI/BT_FPEnemy`，配套 Blackboard 为 `/Game/AI/BB_FPEnemy`。在行为树中编辑分支与条件，C++ Task 执行采样、行为和等待；Controller 保留 MoveTo 去重、预算、朝向与攻击许可。决策间隔由树内等待任务消费，不再维护另一套 Controller 决策 Timer。
+AI 使用 `/Game/FirstPerson/AI/BP_FPEnemyAIController`，其 `BehaviorTreeAsset` 指向 `/Game/FirstPerson/AI/BT_FPEnemy`，配套 Blackboard 为 `/Game/FirstPerson/AI/BB_FPEnemy`。在行为树中编辑分支与条件，C++ Task 执行采样、行为和等待；Controller 保留 MoveTo 去重、预算、朝向与攻击许可。决策间隔由树内等待任务消费，不再维护另一套 Controller 决策 Timer。
 
 `Tools/CreateEnemyBehaviorTree.py` 用 UE 编辑器 Python 生成并绑定树、Blackboard 和 Controller 蓝图；重复执行不重建已经编辑过的树。没有自定义树的原生 Controller 仍可使用默认树模板。
 

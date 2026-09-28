@@ -72,7 +72,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 
 	if (AfpstrueCharacter* ExistingCharacter = Character.Get())
 	{
-		return ExistingCharacter == TargetCharacter;
+		return ExistingCharacter == TargetCharacter && IsOperational();
 	}
 
 	if (TargetCharacter->HasEquippedWeapon())
@@ -99,11 +99,50 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	MagazineSize = FMath::Max(1, MagazineSize);
 	CurrentAmmo = MagazineSize;
 	ReserveAmmo = FMath::Max(0, StartingReserveAmmo);
-	ActionState = EFPWeaponActionState::Ready;
+	SetActionState(EFPWeaponActionState::Ready);
 	TargetCharacter->SetEquippedWeaponComponent(this);
 	BroadcastAmmoChanged();
 
 	return true;
+}
+
+// ==================== Action State / Rules ====================
+
+void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
+{
+	if (ActionState == NewState)
+	{
+		return;
+	}
+
+	// 出口清理只写一次：停止射击、结束/取消换弹、死亡和卸下都经过这里。
+	if (UWorld* World = GetWorld())
+	{
+		if (ActionState == EFPWeaponActionState::Firing)
+		{
+			World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
+		}
+		else if (ActionState == EFPWeaponActionState::Reloading)
+		{
+			World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+		}
+	}
+	bReloadAmmoCommitted = false;
+	ActionState = NewState;
+	++ActionRevision;
+}
+
+bool UfpstrueWeaponComponent::IsOperational() const
+{
+	// 汇总装备关系与角色生命周期；已经卸下的组件不能再接受射击或装填。
+	const AfpstrueCharacter* OwningCharacter = Character.Get();
+	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead()
+		&& OwningCharacter->GetEquippedWeaponComponent() == this;
+}
+
+bool UfpstrueWeaponComponent::IsCurrentAction(EFPWeaponActionState ExpectedState, uint32 ExpectedRevision) const
+{
+	return ActionState == ExpectedState && ActionRevision == ExpectedRevision && IsOperational();
 }
 
 // ==================== Fire System ====================
@@ -111,15 +150,16 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 void UfpstrueWeaponComponent::StartFire()
 {
 	// StartFire 只提交 Ready -> Firing；首次和后续每一发的有效性统一由 Fire 校验。
-	if (ActionState != EFPWeaponActionState::Ready)
+	if (ActionState != EFPWeaponActionState::Ready || !IsOperational())
 	{
 		return;
 	}
 
-	ActionState = EFPWeaponActionState::Firing;
+	SetActionState(EFPWeaponActionState::Firing);
+	const uint32 FiringRevision = ActionRevision;
 	Fire();
 
-	if (ActionState == EFPWeaponActionState::Firing && HasAmmo())
+	if (IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision) && HasAmmo())
 	{
 		if (UWorld* World = GetWorld())
 		{
@@ -131,15 +171,10 @@ void UfpstrueWeaponComponent::StartFire()
 
 void UfpstrueWeaponComponent::StopFire()
 {
-	// 停止自动射击 Timer，并且只把正在开火的状态恢复为 Ready，避免覆盖 Reloading/Disabled。
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
-	}
-
+	// 只退出 Firing；松开扳机不能解除 Reloading/Disabled。
 	if (ActionState == EFPWeaponActionState::Firing)
 	{
-		ActionState = EFPWeaponActionState::Ready;
+		SetActionState(EFPWeaponActionState::Ready);
 	}
 }
 
@@ -152,7 +187,7 @@ void UfpstrueWeaponComponent::Fire()
 	}
 
 	UWorld* const World = GetWorld();
-	if (World == nullptr)
+	if (World == nullptr || !IsOperational())
 	{
 		StopFire();
 		return;
@@ -161,16 +196,13 @@ void UfpstrueWeaponComponent::Fire()
 	// 空弹匣在解析射击依赖前直接转入统一换弹入口；无备弹时停止连射。
 	if (!HasAmmo())
 	{
-		if (!RequestReload())
-		{
-			StopFire();
-		}
+		HandleEmptyMagazine();
 		return;
 	}
 
 	// 射击入口先校验持有者，再读取相机与控制器。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
-	if (!IsValid(OwningCharacter) || OwningCharacter->IsDead() || OwningCharacter->GetController() == nullptr)
+	if (OwningCharacter->GetController() == nullptr)
 	{
 		StopFire();
 		return;
@@ -191,26 +223,38 @@ void UfpstrueWeaponComponent::Fire()
 	}
 	LastAcceptedShotTimeSeconds = CurrentTimeSeconds;
 
-	// 弹药校验通过后提交扣弹，再广播 HUD 更新。
+	const uint32 FiringRevision = ActionRevision;
+	// 先完成扣弹与命中结算，再通知 HUD/开火表现；监听者重入不能取消一发已扣弹的命中。
 	--CurrentAmmo;
+	FireLineTrace(*World, *Camera);
+	if (IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision))
+	{
+		ApplyRecoil(Cast<APlayerController>(OwningCharacter->GetController()));
+	}
 	BroadcastAmmoChanged();
 
-	OnWeaponFirePerformed.Broadcast();
-	FireLineTrace(World, Camera);
-
-	if (APlayerController* PlayerController = Cast<APlayerController>(OwningCharacter->GetController()))
+	if (!IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision))
 	{
-		ApplyRecoil(PlayerController);
+		return;
 	}
+	OnWeaponFirePerformed.Broadcast();
 
 	//最后一发完成命中和表现后再退出射击状态，避免Firing残留
-	if (!HasAmmo() && !RequestReload())
+	if (IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision) && !HasAmmo())
+	{
+		HandleEmptyMagazine();
+	}
+}
+
+void UfpstrueWeaponComponent::HandleEmptyMagazine()
+{
+	if (!RequestReload())
 	{
 		StopFire();
 	}
 }
 
-void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Camera)
+void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, UCameraComponent& Camera)
 {
 	// 根据瞄准状态和连续射击次数计算散布，并在同一入口完成单射线查询。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
@@ -219,7 +263,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 		return;
 	}
 
-	const double CurrentTimeSeconds = World->GetTimeSeconds();
+	const double CurrentTimeSeconds = World.GetTimeSeconds();
 	if (LastShotTimeSeconds < 0.0 || CurrentTimeSeconds - LastShotTimeSeconds > SpreadResetDelay)
 	{
 		ConsecutiveShotCount = 0;
@@ -231,8 +275,8 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 	++ConsecutiveShotCount;
 
 	// 从相机发出射击专用射线，返回第一个阻挡命中，并据骨骼名称结算点伤害。
-	const FVector Start = Camera->GetComponentLocation();
-	const FVector Forward = Camera->GetForwardVector();
+	const FVector Start = Camera.GetComponentLocation();
+	const FVector Forward = Camera.GetForwardVector();
 	const FVector ShotDirection = SpreadAngle > 0.0f ? MakeGaussianSpreadDirection(Forward, SpreadAngle) : Forward;
 	const FVector End = Start + ShotDirection * LineTraceRange;
 
@@ -243,35 +287,27 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
 	QueryParams.bTraceComplex = true;
 
 	// WeaponTrace 与相机可见性解耦：透明表现、交互射线和玩家子弹可以分别配置响应。
-	const bool bHit = World->LineTraceSingleByChannel(HitResult, Start, End, FpstrueCollisionChannels::WeaponTrace, QueryParams);
-
-	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
-	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
+	const bool bHit = World.LineTraceSingleByChannel(HitResult, Start, End, FpstrueCollisionChannels::WeaponTrace, QueryParams);
 
 	// 只有查询真正命中后才读取目标、骨骼和物理组件；未命中只广播弹道终点供表现层使用。
-	if (bHit)
+	AActor* HitActor = HitResult.GetActor();
+	if (bHit && IsValid(HitActor))
 	{
-		if (AActor* HitActor = HitResult.GetActor())
+		const bool bCriticalHit = CriticalHitBones.Contains(HitResult.BoneName);
+		const float DamageToApply = bCriticalHit ? LineTraceHeadDamage : LineTraceDamage;
+
+		UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, OwningCharacter->GetController(), GetOwner(),
+									   nullptr);
+
+		// 受伤事件可能销毁目标；仅对仍有效的非角色物理组件追加冲量。
+		UPrimitiveComponent* HitComponent = HitResult.GetComponent();
+		if (IsValid(HitActor) && !HitActor->IsA<ACharacter>() && IsValid(HitComponent) && HitComponent->IsSimulatingPhysics())
 		{
-			const FName HitBoneName = HitResult.BoneName;
-			const bool bCriticalHit = CriticalHitBones.Contains(HitBoneName);
-			const float DamageToApply = bCriticalHit ? LineTraceHeadDamage : LineTraceDamage;
-
-			UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, OwningCharacter->GetController(), GetOwner(),
-											   nullptr);
-
-			if (!HitActor->IsA<ACharacter>())
-			{
-				if (UPrimitiveComponent* HitComponent = HitResult.GetComponent())
-				{
-					if (HitComponent->IsSimulatingPhysics())
-					{
-						HitComponent->AddImpulseAtLocation(ShotDirection * LineTraceImpulse, HitResult.ImpactPoint);
-					}
-				}
-			}
+			HitComponent->AddImpulseAtLocation(ShotDirection * LineTraceImpulse, HitResult.ImpactPoint);
 		}
 	}
+	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
+	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
 }
 
 // ==================== Reload System ====================
@@ -282,20 +318,14 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld* World, UCameraComponent* Cam
  * 两个动画出口都未触发时，唯一的兜底 Timer 调用 Finish，防止状态永久卡住。
  *
  * Delegate 在当前调用栈同步执行，监听者可能取消换弹、死亡或开始下一次换弹。
- * 因此开始事件之前必须先设置状态和 Timer；Finish 在提交事件返回后还要确认事务序号未变。
+ * 因此开始事件之前必须先设置状态和 Timer；Finish 在提交事件返回后还要确认动作版本未变。
  */
-
-bool UfpstrueWeaponComponent::IsOperational() const
-{
-	// 汇总武器最基础的可用条件，供换弹等规则复用，不在多个入口重复判断角色生命周期。
-	const AfpstrueCharacter* OwningCharacter = Character.Get();
-	return IsValid(OwningCharacter) && ActionState != EFPWeaponActionState::Disabled && !OwningCharacter->IsDead();
-}
 
 bool UfpstrueWeaponComponent::CanReload() const
 {
 	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
-	return IsOperational() && ActionState != EFPWeaponActionState::Reloading && CurrentAmmo < MagazineSize && ReserveAmmo > 0;
+	return IsOperational() && (ActionState == EFPWeaponActionState::Ready || ActionState == EFPWeaponActionState::Firing)
+		&& GetWorld() != nullptr && CurrentAmmo < MagazineSize && ReserveAmmo > 0;
 }
 
 bool UfpstrueWeaponComponent::RequestReload()
@@ -306,21 +336,21 @@ bool UfpstrueWeaponComponent::RequestReload()
 		return false;
 	}
 
-	StopFire();
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
-	++ReloadSequence;
-	bReloadAmmoCommitted = false;
-	ActionState = EFPWeaponActionState::Reloading;
+	SetActionState(EFPWeaponActionState::Reloading);
+	const uint32 RequestedRevision = ActionRevision;
 	// 先建立本次兜底，再广播；监听者同步 Finish/Cancel 时才能一并清除正确的 Timer。
 	const float SelectedReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
 	// 超时 Timer 是动画 Notify 的容错，不替代正常 Notify；动画链断开时仍能结束 Reloading。
 	// 本次请求只有这一处设置 Timer，超时通过 FinishReload 补交弹药并结束流程。
-	if (UWorld* World = GetWorld())
+	const float Timeout = FMath::Max(0.01f, FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration) + ReloadCompletionGracePeriod);
+	GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle, this, &UfpstrueWeaponComponent::FinishReload, Timeout, false);
+	// 手动请求和空仓自动换弹共用角色互斥处理；先上 Reloading 锁，再退出瞄准，防止蓝图回调重新开火。
+	Character->PrepareForWeaponReload();
+	if (IsCurrentAction(EFPWeaponActionState::Reloading, RequestedRevision))
 	{
-		const float Timeout = FMath::Max(0.01f, FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration) + ReloadCompletionGracePeriod);
-		World->GetTimerManager().SetTimer(ReloadTimerHandle, this, &UfpstrueWeaponComponent::FinishReload, Timeout, false);
+		OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 	}
-	OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 
 	// true 表示请求曾被接纳；监听者可能已同步结束换弹，广播之后不再写回状态或重设计时器。
 	return true;
@@ -329,7 +359,7 @@ bool UfpstrueWeaponComponent::RequestReload()
 bool UfpstrueWeaponComponent::CommitReload()
 {
 	// bReloadAmmoCommitted 是单次提交保护：同一轮换弹的重复 Notify 只会第一次搬运弹药。
-	if (ActionState != EFPWeaponActionState::Reloading || bReloadAmmoCommitted)
+	if (ActionState != EFPWeaponActionState::Reloading || bReloadAmmoCommitted || !IsOperational())
 	{
 		return false;
 	}
@@ -352,16 +382,15 @@ void UfpstrueWeaponComponent::FinishReload()
 		return;
 	}
 
-	const uint32 FinishingReloadSequence = ReloadSequence;
+	const uint32 FinishingRevision = ActionRevision;
 	CommitReload();
 	// Commit 的同步广播可能已中断/禁用武器，或开启新一轮换弹，不能覆盖其状态和 Timer。
-	if (ActionState != EFPWeaponActionState::Reloading || ReloadSequence != FinishingReloadSequence)
+	if (!IsCurrentAction(EFPWeaponActionState::Reloading, FinishingRevision))
 	{
 		return;
 	}
 
-	ResetReloadState();
-	ActionState = EFPWeaponActionState::Ready;
+	CancelReload();
 }
 
 void UfpstrueWeaponComponent::CancelReload()
@@ -372,18 +401,7 @@ void UfpstrueWeaponComponent::CancelReload()
 		return;
 	}
 
-	ResetReloadState();
-	ActionState = EFPWeaponActionState::Ready;
-}
-
-void UfpstrueWeaponComponent::ResetReloadState()
-{
-	// 所有出口成对清 Timer 和提交标记；序号保留到下次 Request 递增，以识别委托重入的新事务。
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
-	}
-	bReloadAmmoCommitted = false;
+	SetActionState(IsOperational() ? EFPWeaponActionState::Ready : EFPWeaponActionState::Disabled);
 }
 
 // ==================== Recoil System ====================
@@ -422,7 +440,7 @@ void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	APlayerController* PlayerController =
 		OwningCharacter != nullptr ? Cast<APlayerController>(OwningCharacter->GetController()) : nullptr;
-	if (World == nullptr || PlayerController == nullptr || OwningCharacter->IsDead())
+	if (World == nullptr || PlayerController == nullptr || !IsOperational())
 	{
 		ClearRecoilState();
 		return;
@@ -456,37 +474,24 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 
 // ==================== 生命周期结束与公共清理 ====================
 
-void UfpstrueWeaponComponent::HandleOwnerDeath()
-{
-	// 玩家死亡属于强制中断：停止连射、取消换弹和后坐力恢复，再把武器置为 Disabled。
-	ResetWeaponRuntimeState();
-	ActionState = EFPWeaponActionState::Disabled;
-}
-
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 组件退出前清理所有 Timer，并通知角色解除装备关系，避免留下跨生命周期的回调和悬空关系。
-	ResetWeaponRuntimeState();
+	DisableWeapon();
 
 	if (AfpstrueCharacter* OwningCharacter = Character.Get())
 	{
 		OwningCharacter->ClearEquippedWeaponComponent(this);
 	}
 
-	ActionState = EFPWeaponActionState::Disabled;
 	Character.Reset();
 	Super::EndPlay(EndPlayReason);
 }
 
-void UfpstrueWeaponComponent::ResetWeaponRuntimeState()
+void UfpstrueWeaponComponent::DisableWeapon()
 {
-	// 死亡和 EndPlay 共用同一清理入口；调用者随后禁用武器，角色引用由 EndPlay 单独解除。
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(AutomaticFireTimerHandle);
-	}
-
-	ResetReloadState();
+	// 死亡、卸下和 EndPlay 共用强制中断；先禁用，再清理，后续回调不能恢复 Ready。
+	SetActionState(EFPWeaponActionState::Disabled);
 	ClearRecoilState();
 	ConsecutiveShotCount = 0;
 	LastShotTimeSeconds = -1.0;

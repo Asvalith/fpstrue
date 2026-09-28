@@ -309,8 +309,8 @@ void AfpstrueCharacter::StopAim()
 	//原来是在瞄准的话，修改状态
 	if (bWasAiming)
 	{
-		OnAimChanged(false);
 		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+		OnAimChanged(false);
 	}
 }
 
@@ -340,15 +340,18 @@ void AfpstrueCharacter::StopWeaponFire()
 
 void AfpstrueCharacter::RequestWeaponReload()
 {
-	// 角色只处理瞄准/冲刺互斥，再把弹药事务交给 WeaponComponent，避免角色重复维护弹药状态。
-	if (EquippedWeaponComponent == nullptr || IsDead() || !EquippedWeaponComponent->CanReload())
+	// 请求规则只由武器判断；手动与自动换弹都在接纳后调用 PrepareForWeaponReload。
+	if (EquippedWeaponComponent != nullptr)
 	{
-		return;
+		EquippedWeaponComponent->RequestReload();
 	}
+}
 
-	StopAim();
+void AfpstrueCharacter::PrepareForWeaponReload()
+{
+	// 先恢复移动，再广播瞄准变化；蓝图回调返回后不再覆盖其新状态。
 	StopSprint();
-	EquippedWeaponComponent->RequestReload();
+	StopAim();
 }
 
 //装备枪支，可见性设置
@@ -374,7 +377,7 @@ void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponCompone
 		return;
 	}
 
-	StopWeaponFire();
+	EquippedWeaponComponent->DisableWeapon();
 	EquippedWeaponComponent = nullptr;
 	Mesh1P->SetHiddenInGame(true, true);
 	OnEquippedWeaponChanged.Broadcast(nullptr);
@@ -415,7 +418,7 @@ void AfpstrueCharacter::HandleDeath()
 
 	if (EquippedWeaponComponent != nullptr)
 	{
-		EquippedWeaponComponent->HandleOwnerDeath();
+		EquippedWeaponComponent->DisableWeapon();
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())

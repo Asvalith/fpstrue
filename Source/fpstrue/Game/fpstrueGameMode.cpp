@@ -3,13 +3,13 @@
 #include "Game/fpstrueGameMode.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Characters/Enemies/fpstrueEnemySignificanceCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.h"
 #include "Testing/Benchmarks/fpstruePerformanceStats.h"
-#include "Characters/Enemies/fpstrueSurroundManager.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
@@ -283,6 +283,10 @@ float AfpstrueGameMode::GetConfiguredWaveInterval() const
 
 int32 AfpstrueGameMode::GetConfiguredGameDuration() const
 {
+	if (BenchmarkGameDurationOverride > 0)
+	{
+		return BenchmarkGameDurationOverride;
+	}
 	return FMath::Max(WaveConfiguration != nullptr ? WaveConfiguration->GameDuration : GameDuration, 1);
 }
 

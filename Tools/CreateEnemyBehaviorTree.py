@@ -7,7 +7,7 @@ Existing populated trees are never rebuilt; rerunning preserves designer edits.
 import unreal
 
 
-ROOT = "/Game/AI"
+ROOT = "/Game/FirstPerson/AI"
 ENEMY_PATH = "/Game/FirstPerson/Blueprints/enemy/enemy_BP"
 TREE_PATH = ROOT + "/BT_FPEnemy"
 BLACKBOARD_PATH = ROOT + "/BB_FPEnemy"

@@ -54,6 +54,8 @@ public:
 	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
 	// 武器销毁或卸下时清空装备关系并通知 HUD。
 	void ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent);
+	// 武器接纳换弹后统一退出瞄准/冲刺，覆盖手动与空仓自动换弹。
+	void PrepareForWeaponReload();
 
 	//Character只暴露当前装备关系，武器运行时状态由WeaponComponent持有
 	// WeaponComponent 装备前检查玩家是否已经持有武器。
@@ -125,7 +127,7 @@ protected:
 	void StartWeaponFire();
 	// 把停止开火输入转交当前 WeaponComponent。
 	void StopWeaponFire();
-	// 结束瞄准/冲刺后向 WeaponComponent 提交换弹请求。
+	// 向 WeaponComponent 提交换弹请求；接纳后统一处理瞄准/冲刺互斥。
 	void RequestWeaponReload();
 
 	//绑定到 HealthComponent 的血量变化委托。

@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
-#include "Characters/Enemies/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 

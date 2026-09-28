@@ -3,7 +3,7 @@
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Enemies/fpstrueEnemyCombatConfig.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Enemies/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Testing/Benchmarks/fpstruePerformanceStats.h"
 #include "Components/CapsuleComponent.h"

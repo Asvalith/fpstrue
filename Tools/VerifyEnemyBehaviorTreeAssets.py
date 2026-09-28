@@ -9,9 +9,9 @@ import unreal
 
 
 try:
-    tree = unreal.load_asset("/Game/AI/BT_FPEnemy")
-    blackboard = unreal.load_asset("/Game/AI/BB_FPEnemy")
-    controller_class = unreal.EditorAssetLibrary.load_blueprint_class("/Game/AI/BP_FPEnemyAIController")
+    tree = unreal.load_asset("/Game/FirstPerson/AI/BT_FPEnemy")
+    blackboard = unreal.load_asset("/Game/FirstPerson/AI/BB_FPEnemy")
+    controller_class = unreal.EditorAssetLibrary.load_blueprint_class("/Game/FirstPerson/AI/BP_FPEnemyAIController")
     enemy_class = unreal.EditorAssetLibrary.load_blueprint_class("/Game/FirstPerson/Blueprints/enemy/enemy_BP")
     if None in (tree, blackboard, controller_class, enemy_class):
         raise RuntimeError("Missing enemy behavior assets.")
