@@ -1,0 +1,247 @@
+{
+  "experiment_date": "2026-09-09",
+  "samples": [
+    {
+      "label": "0 敌人 · median",
+      "enemy_count": 0,
+      "selection": "median",
+      "query_event": "1410954",
+      "pipe_event": "1411241",
+      "worker_thread": "Foreground Worker #0",
+      "query_completion_thread": "RHIInterruptThread",
+      "worker_start": 33.8657848,
+      "worker_end": 33.8708911,
+      "rt_wait_start": 33.866051,
+      "rt_wait_end": 33.8711026,
+      "rt_start": 33.8660498,
+      "rt_end": 33.8711035,
+      "query_completed": 33.8708814,
+      "pipe_completed": 33.8710968
+    },
+    {
+      "label": "0 敌人 · P95",
+      "enemy_count": 0,
+      "selection": "P95",
+      "query_event": "1480032",
+      "pipe_event": "1480342",
+      "worker_thread": "Foreground Worker #0",
+      "query_completion_thread": "RHIInterruptThread",
+      "worker_start": 34.9021027,
+      "worker_end": 34.9102491,
+      "rt_wait_start": 34.9024137,
+      "rt_wait_end": 34.9104634,
+      "rt_start": 34.9024124,
+      "rt_end": 34.9104652,
+      "query_completed": 34.910236,
+      "pipe_completed": 34.910452
+    },
+    {
+      "label": "160 敌人 · median",
+      "enemy_count": 160,
+      "selection": "median",
+      "query_event": "2496165",
+      "pipe_event": "2496785",
+      "worker_thread": "Background Worker #16",
+      "query_completion_thread": "RHIInterruptThread",
+      "worker_start": 46.399877,
+      "worker_end": 46.4052138,
+      "rt_wait_start": 46.4001074,
+      "rt_wait_end": 46.4054211,
+      "rt_start": 46.4001061,
+      "rt_end": 46.4054233,
+      "query_completed": 46.4050694,
+      "pipe_completed": 46.4054104
+    },
+    {
+      "label": "160 敌人 · P95",
+      "enemy_count": 160,
+      "selection": "P95",
+      "query_event": "3177585",
+      "pipe_event": "3178199",
+      "worker_thread": "Foreground Worker #0",
+      "query_completion_thread": "RHIInterruptThread",
+      "worker_start": 54.9441776,
+      "worker_end": 54.9515519,
+      "rt_wait_start": 54.9445612,
+      "rt_wait_end": 54.9517402,
+      "rt_start": 54.9445597,
+      "rt_end": 54.9517411,
+      "query_completed": 54.9515266,
+      "pipe_completed": 54.951735
+    }
+  ],
+  "coverage": [
+    {
+      "enemy_count": 0,
+      "count": 1366,
+      "overlap_count": 1365,
+      "wait_ms": 5.122763469985359,
+      "overlap_ms": 4.905517276720426,
+      "fraction": 0.9575919921858984
+    },
+    {
+      "enemy_count": 160,
+      "count": 1199,
+      "overlap_count": 1199,
+      "wait_ms": 5.367530859049207,
+      "overlap_ms": 5.112180567139344,
+      "fraction": 0.9524268609505311
+    }
+  ],
+  "comparison": [
+    {
+      "key": "VisibilityWaitMs",
+      "label": "可见性等待代理",
+      "unit": "ms",
+      "on": 5.137,
+      "on_runs": [
+        5.14,
+        5.135
+      ],
+      "off": 0.042,
+      "off_runs": [
+        0.07,
+        0.015
+      ]
+    },
+    {
+      "key": "RenderThreadMs",
+      "label": "Render Thread",
+      "unit": "ms",
+      "on": 13.256,
+      "on_runs": [
+        12.747,
+        13.764
+      ],
+      "off": 9.04,
+      "off_runs": [
+        9.4,
+        8.68
+      ]
+    },
+    {
+      "key": "RHIThreadMs",
+      "label": "RHI Thread",
+      "unit": "ms",
+      "on": 8.189,
+      "on_runs": [
+        7.519,
+        8.859
+      ],
+      "off": 9.542,
+      "off_runs": [
+        9.67,
+        9.413
+      ]
+    },
+    {
+      "key": "GpuMs",
+      "label": "GPU",
+      "unit": "ms",
+      "on": 10.566,
+      "on_runs": [
+        10.717,
+        10.414
+      ],
+      "off": 10.566,
+      "off_runs": [
+        10.652,
+        10.48
+      ]
+    },
+    {
+      "key": "FrameAverageMs",
+      "label": "Frame",
+      "unit": "ms",
+      "on": 13.532,
+      "on_runs": [
+        12.998,
+        14.066
+      ],
+      "off": 12.252,
+      "off_runs": [
+        12.498,
+        12.007
+      ]
+    },
+    {
+      "key": "DrawCalls",
+      "label": "RHI Draw Calls",
+      "unit": "次/帧",
+      "on": 1860.6,
+      "on_runs": [
+        1886.7,
+        1834.6
+      ],
+      "off": 2310.4,
+      "off_runs": [
+        2309.3,
+        2311.4
+      ]
+    }
+  ],
+  "source": [
+    {
+      "file": "Renderer/Private/SceneVisibility.cpp",
+      "line": 4722,
+      "text": "Tasks.DynamicMeshElementsPipe->Wait(ENamedThreads::GetRenderThread_Local());"
+    },
+    {
+      "file": "Renderer/Private/SceneVisibility.cpp",
+      "line": 3071,
+      "text": "RHIGetRenderQueryResult(ViewState.Occlusion.LastOcclusionQueryArray[QueryIndex], Result, bWait);"
+    },
+    {
+      "file": "D3D12RHI/Private/D3D12Query.cpp",
+      "line": 334,
+      "text": "Query->SyncPoint->Wait();"
+    },
+    {
+      "file": "D3D12RHI/Private/D3D12Submission.cpp",
+      "line": 1271,
+      "text": "if (CompletedFenceValue < Payload->CompletionFenceValue)"
+    },
+    {
+      "file": "D3D12RHI/Private/D3D12Submission.cpp",
+      "line": 1333,
+      "text": "Query.CopyResultTo(Query.Target);"
+    },
+    {
+      "file": "D3D12RHI/Private/D3D12Submission.cpp",
+      "line": 1419,
+      "text": "SyncPoint->GraphEvent->DispatchSubsequents();"
+    },
+    {
+      "file": "Renderer/Private/SceneVisibility.cpp",
+      "line": 4337,
+      "text": "Tasks.DynamicMeshElementsPipe->DispatchSubsequents();"
+    }
+  ],
+  "provenance": [
+    {
+      "path": "Saved/Profiling/RenderWaitTaskTrace_20260909/task_dependency_audit.md",
+      "sha256": "905c3e9481f6e7f0854bc4d5958a3ab7512efab1327252a3c6cb367937a0ac24"
+    },
+    {
+      "path": "Saved/Profiling/RenderWaitTaskTrace_20260909/render_wait_diagnosis.md",
+      "sha256": "ee2956864fc8ea6a92801491253f76ba503437f28cafbf512df744e6cc3496f2"
+    },
+    {
+      "path": "Saved/Profiling/OcclusionQueryDiagnosis_Checked_20260909/group_summary.csv",
+      "sha256": "5048d17a3ad9f4a35984927bf23e3c7ca5f8be7df5d6375f12ca879e98f10861"
+    },
+    {
+      "path": "Saved/Profiling/OcclusionQueryDiagnosis_Checked_20260909/run_summary.csv",
+      "sha256": "ad3263c07f3ff7c4ac1d23967c95541ed1a4fe66a88280d0c2ad54addff9d1da"
+    },
+    {
+      "path": "Saved/Profiling/OcclusionQueryDiagnosis_Checked_20260909/manifest.csv",
+      "sha256": "1b5ab643949588951fe1597ce34cd725d79276ee4de93629ec50858c91b220f3"
+    }
+  ],
+  "definitions": {
+    "timeline": "Relative to each selected RT scope start, milliseconds; not GPU execution.",
+    "coverage": "Duration-weighted interval overlap, not percentage of GPU busy time.",
+    "comparison": "Two independent runs per condition, equal run weight; fixed-view diagnostic, not current baseline."
+  }
+}

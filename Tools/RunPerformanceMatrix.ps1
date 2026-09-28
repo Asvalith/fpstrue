@@ -1,9 +1,9 @@
 param(
-    [int[]]$Counts = @(20, 80, 160),
-    [double]$WarmupSeconds = 10,
+    [int[]]$Counts = @(160),
+    [double]$WarmupSeconds = 15,
     [double]$DurationSeconds = 30,
     [int]$BenchmarkSeed = 1337,
-    [string]$RunName = "CurrentScaleMatrix_20260830"
+    [string]$RunName = "PerformanceBaseline160"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,10 +40,8 @@ foreach ($Count in $Counts) {
         "-ResY=900",
         "-NoVSync",
         "-NoSplash",
-        "-NoSound",
         "-NoLiveCoding",
         "-Unattended",
-        "-RenderOffscreen",
         "-AutoBenchmark",
         "-BenchmarkEnemies=$Count",
         "-BenchmarkWarmup=$WarmupSeconds",
@@ -59,7 +57,8 @@ foreach ($Count in $Counts) {
         "-ShaderWorkingDir=Saved/ShaderWorkingDir"
     )
 
-    $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+    # 正式基线使用可见窗口和正常呈现路径；隐藏/离屏模式只适合快速诊断，不作为玩家体验基线。
+    $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -WindowStyle Normal -Wait -PassThru
     if ($Process.ExitCode -ne 0) {
         throw "Benchmark process failed for $Count enemies with exit code $($Process.ExitCode)"
     }
