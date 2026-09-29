@@ -5,17 +5,18 @@
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "BrainComponent.h"
-#include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "Testing/Benchmarks/fpstruePerformanceStats.h"
+#include "Runtime/fpstruePerformanceStats.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "AITypes.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 
@@ -54,7 +55,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 {
 	// Possess 是 AI 生命周期入口：解析受控敌人、清空移动缓存，再启动错峰的行为树。
 	Super::OnPossess(InPawn);
-	bDisableDecisionThrottlingForBenchmark = FFPBenchmarkConfig::Get().bDisableAIThrottling;
+	bDisableDecisionThrottlingForBenchmark = FFPRuntimeOptions::Get().bDisableAIThrottling;
 
 	ControlledEnemy = Cast<AfpstrueEnemyCharacter>(InPawn);
 	if (ControlledEnemy == nullptr)
@@ -64,10 +65,12 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 	}
 
 	AIState = EFPEnemyAIState::Idle;
+	CommandPhase = ECommandPhase::Accepting;
 	DecisionContext = FDecisionContext{};
 	bHasMoveGoal = false;
-	NextMoveRetryTime = 0.0f;
-	bLastMoveGoalWasCombatPriority = false;
+	OwnedMoveRequestId = FAIRequestID::InvalidRequest;
+	MoveFailures[0] = MoveFailures[1] = FMoveFailure{};
+	++MoveRequestRevision;
 	ApplyRotationPolicy(AIState);
 
 	if (ControlledEnemy->IsDead())
@@ -110,8 +113,28 @@ void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason
 void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager)
 {
 	// Controller 只保存敌人决策上下文；共享包围目标由 GameMode 统一初始化。
+	if (CommandPhase == ECommandPhase::Stopping || CommandPhase == ECommandPhase::ChangingContext)
+	{
+		return; // 清理期间不接受外部回调重新注入上下文。
+	}
+	if (TargetCharacter != NewTargetCharacter || SurroundManager != NewSurroundManager)
+	{
+		CommandPhase = ECommandPhase::ChangingContext;
+		if (ControlledEnemy != nullptr && ControlledEnemy->GetCombatComponent() != nullptr)
+		{
+			ControlledEnemy->GetCombatComponent()->ResetCombat();
+		}
+		ReleaseSurroundSlot();
+		StopMovementIfNeeded();
+		DecisionContext = FDecisionContext{};
+		if (CommandPhase != ECommandPhase::ChangingContext)
+		{
+			return; // 同步回调调用了 StopAI，外层不能把已经停止的上下文重新激活。
+		}
+	}
 	TargetCharacter = NewTargetCharacter;
 	SurroundManager = NewSurroundManager;
+	CommandPhase = IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() ? ECommandPhase::Accepting : ECommandPhase::Stopped;
 }
 
 void AfpstrueEnemyAIController::ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick)
@@ -183,18 +206,21 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	const bool bHasTarget = BuildDecisionContext();
 	NextBehaviorDecisionDelay =
 		FMath::Max(0.01f, bHasTarget ? GetNextDecisionInterval(DecisionContext) : IdleDecisionInterval * SignificanceDecisionMultiplier);
+	// 自定义树观察者也只能在完整的一轮快照发布后收到通知，避免读取半更新条件。
+	DecisionBlackboard.PauseObserverNotifications();
 	DecisionBlackboard.SetValueAsObject(FPEnemyBlackboard::TargetActor, bHasTarget ? TargetCharacter.Get() : nullptr);
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::HasTarget, bHasTarget);
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::Attacking, bHasTarget && ControlledEnemy->IsAttacking());
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InAttackRange, DecisionContext.bInAttackRange);
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InChaseRange, DecisionContext.bInChaseRange);
+	DecisionBlackboard.ResumeObserverNotifications(true);
 }
 
 bool AfpstrueEnemyAIController::BuildDecisionContext()
 {
 	DecisionContext = FDecisionContext{};
 	// 统一修复或拒绝敌人、目标和 Manager 上下文，保证后续决策分支可以直接使用这些引用。
-	if (!IsValid(ControlledEnemy) || ControlledEnemy->IsDead())
+	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead())
 	{
 		// 不在采样任务的 ExecuteTask 内重入 StopTree；死亡入口会停止树，本轮走安全 Idle 叶子。
 		return false;
@@ -207,7 +233,7 @@ bool AfpstrueEnemyAIController::BuildDecisionContext()
 	if (!IsTargetUsable(TargetCharacter))
 	{
 		// 平时使用 GameMode 注入的玩家；仅在缓存目标失效时安全解析，不在正常路径反复查询。
-		TargetCharacter = Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
+		InitializeCombatContext(Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)), SurroundManager);
 	}
 	if (!IsTargetUsable(TargetCharacter))
 	{
@@ -216,10 +242,15 @@ bool AfpstrueEnemyAIController::BuildDecisionContext()
 
 	// 一轮只计算一次二维距离平方，并派生攻击/追击两个布尔条件，避免各分支重复开方和取位置。
 	// 敌人和目标校验成功后才采样；叶子保留存活检查，但不重复计算距离与范围。
-	DecisionContext.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), TargetCharacter->GetActorLocation());
-	const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
-	DecisionContext.EffectiveAttackRange = Combat != nullptr ? Combat->GetEffectiveAttackRange() : 0.0f;
-	DecisionContext.bInAttackRange = DecisionContext.DistanceSquared <= FMath::Square(DecisionContext.EffectiveAttackRange);
+	// 先用廉价距离筛选，再检查高度和环境；楼上/墙后目标应走导航分支而不是原地重复尝试攻击。
+	if (const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent())
+	{
+		DecisionContext.bInAttackRange = Combat->SampleAttackReach(DecisionContext.DistanceSquared, DecisionContext.EffectiveAttackRange);
+	}
+	else
+	{
+		DecisionContext.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), TargetCharacter->GetActorLocation());
+	}
 	DecisionContext.bInChaseRange = DecisionContext.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
 	return true;
 }
@@ -276,12 +307,16 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	CSV_SCOPED_TIMING_STAT(fpstrueAI, DecisionTime);
 	SCOPE_CYCLE_COUNTER(STAT_fpstrueAIDecisionTime);
 	// 叶子仍校验对象存活，避免自定义树跳过采样，或外部回调使目标失效。
+	if (!AcceptsCombatCommands()) return false;
 	if (Action == EFPEnemyBehaviorAction::Idle)
 	{
 		// 没有目标或超出追击范围才停路，并立即归还槽位，避免 Idle 敌人长期占用共享资源。
 		// 远距离但仍在追击范围内的敌人仍可沿共享目标追踪，不能仅凭远距档位直接休眠。
+		if (ControlledEnemy != nullptr && ControlledEnemy->GetCombatComponent() != nullptr)
+		{
+			ControlledEnemy->GetCombatComponent()->ResetCombat();
+		}
 		ReleaseSurroundSlot();
-		ReleaseAttackPermission();
 		SetAIState(ControlledEnemy != nullptr && ControlledEnemy->IsDead() ? EFPEnemyAIState::Dead : EFPEnemyAIState::Idle);
 		StopMovementIfNeeded();
 		return true;
@@ -294,13 +329,21 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	switch (Action)
 	{
 	case EFPEnemyBehaviorAction::SustainAttack:
-		return HandleActiveAttack();
+		// 已有攻击只维持朝向和停路，不允许本轮决策重新提交移动。
+		if (!ControlledEnemy->IsAttacking())
+		{
+			return false;
+		}
+		SetAIState(EFPEnemyAIState::Attack);
+		StopMovementIfNeeded(true);
+		UpdateFacingTarget();
+		return true;
 	case EFPEnemyBehaviorAction::TryAttack:
 	{
 		// 冷却/预算失败交由 BT 的下一个叶子维持站位，而不是在 Controller 再跑一套分支链。
 		// 冷却中的敌人继续维持包围位置，不申请并立即释放攻击名额。
 		UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
-		if (Combat == nullptr || !Combat->CanStartAttackAtDistanceSquared(DecisionContext.DistanceSquared))
+		if (Combat == nullptr || !DecisionContext.bInAttackRange || !Combat->IsAttackReady())
 		{
 			return false;
 		}
@@ -324,6 +367,10 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 		SetAIState(EFPEnemyAIState::Attack);
 		if (!Combat->TryAttackTarget())
 		{
+			if (Combat->IsAttacking())
+			{
+				return true; // 动画回调同步开始了替代事务，旧请求不能归还它的名额。
+			}
 			ReleaseAttackPermission();
 			SetAIState(EFPEnemyAIState::Chase);
 			return false;
@@ -331,7 +378,12 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 		return true;
 	}
 	case EFPEnemyBehaviorAction::MaintainCombatPosition:
-		MaintainCombatPosition();
+		// 冷却和预算拒绝共用等待行为：有槽位继续走，无槽位站定；不残留 Attack 旋转策略。
+		SetAIState(EFPEnemyAIState::Chase);
+		if (!HandleSurroundMovement())
+		{
+			FaceTargetAtRest();
+		}
 		return true;
 	case EFPEnemyBehaviorAction::Surround:
 		return HandleSurroundMovement();
@@ -341,30 +393,6 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 		return true;
 	default:
 		return false;
-	}
-}
-
-bool AfpstrueEnemyAIController::HandleActiveAttack()
-{
-	// 攻击事务已经开始时保持 Attack 和面向目标，不允许本轮决策重新提交移动。
-	if (!ControlledEnemy->IsAttacking())
-	{
-		return false;
-	}
-
-	SetAIState(EFPEnemyAIState::Attack);
-	StopMovementIfNeeded(true);
-	UpdateFacingTarget();
-	return true;
-}
-
-void AfpstrueEnemyAIController::MaintainCombatPosition()
-{
-	// 冷却和预算拒绝共用等待行为，避免一个分支清了移动、另一个分支却残留 Attack 旋转策略。
-	SetAIState(EFPEnemyAIState::Chase);
-	if (!HandleSurroundMovement())
-	{
-		FaceTargetAtRest();
 	}
 }
 
@@ -383,8 +411,13 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 	}
 
 	SetAIState(EFPEnemyAIState::Chase);
-	MoveToGoal(AttackGoal, CombatMoveAcceptanceRadius, true);
-	return true;
+	const EMoveGoalResult Result = MoveToGoal(AttackGoal, CombatMoveAcceptanceRadius, true);
+	if (Result == EMoveGoalResult::Unreachable || Result == EMoveGoalResult::InvalidContext)
+	{
+		ReleaseSurroundSlot();
+		return false; // 给 BT 的共享追击后备分支机会，而不是吞掉导航失败。
+	}
+	return true; // 帧预算延后也保持当前行为，不中断有效路径。
 }
 
 void AfpstrueEnemyAIController::HandleSharedPursuit()
@@ -408,18 +441,38 @@ void AfpstrueEnemyAIController::HandleSharedPursuit()
 
 // ==================== 移动与朝向：请求去重 → 预算 → 到达后转向 ====================
 
-void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority)
+bool AfpstrueEnemyAIController::FMoveGoalKey::Matches(const FMoveGoalKey& Other, float DistanceTolerance) const
 {
+	return bCombatPriority == Other.bCombatPriority && NavigationFilter == Other.NavigationFilter &&
+		FMath::IsNearlyEqual(AcceptanceRadius, Other.AcceptanceRadius) &&
+		FVector::DistSquared(Location, Other.Location) < FMath::Square(FMath::Max(1.0f, DistanceTolerance));
+}
+
+void AfpstrueEnemyAIController::RecordMoveFailure(const FMoveGoalKey& Goal)
+{
+	FMoveFailure& Failure = MoveFailures[Goal.bCombatPriority ? 1 : 0];
+	Failure.Goal = Goal;
+	Failure.RetryAfter = GetWorld()->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
+}
+
+AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal(
+	const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority)
+{
+	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead() || GetWorld() == nullptr ||
+		GoalLocation.ContainsNaN() || !FMath::IsFinite(AcceptanceRadius) || AcceptanceRadius < 0.0f)
+	{
+		return EMoveGoalResult::InvalidContext;
+	}
+	const FMoveGoalKey RequestedGoal{GoalLocation, AcceptanceRadius, DefaultNavigationFilterClass.Get(), bCombatPriority};
 	// 去重和预算都发生在提交 PathFollowing 之前；被限流时保留旧路径，下轮仍可重试，不会让角色原地急停。
-	const bool bSameGoal = bCombatPriority == bLastMoveGoalWasCombatPriority &&
-						   FVector::DistSquared2D(GoalLocation, LastMoveGoal) < FMath::Square(PathRefreshDistance);
+	const bool bSameGoal = RequestedGoal.Matches(LastMoveGoal, PathRefreshDistance);
 	if (bSameGoal && bHasMoveGoal)
 	{
-		if (GetMoveStatus() != EPathFollowingStatus::Idle)
+		if (OwnedMoveRequestId.IsValid() && GetCurrentMoveRequestID() == OwnedMoveRequestId && GetMoveStatus() != EPathFollowingStatus::Idle)
 		{
 			// 目标没变且路径仍在执行：保持路径朝向，不因靠近玩家或上次原地等待而横移。
 			ApplyRotationPolicy(EFPEnemyAIState::Chase);
-			return;
+			return EMoveGoalResult::Moving;
 		}
 
 		const UPathFollowingComponent* PathFollowing = GetPathFollowingComponent();
@@ -429,22 +482,21 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float Ac
 			// 复用引擎含胶囊半径/高度的到达规则，并检查上次请求经过导航投影后的目标。
 			// 成功到位后缓存继续有效，只刷新朝向，不反复提交 AlreadyAtGoal 请求。
 			FaceTargetAtRest();
-			return;
+			return EMoveGoalResult::Arrived;
 		}
 
 		// Idle 也可能是路径中断、部分路径走完或角色被挤离槽位，不能永久用旧缓存阻止重寻路。
 		bHasMoveGoal = false;
-		if (const UWorld* RetryWorld = GetWorld())
-		{
-			NextMoveRetryTime = RetryWorld->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
-		}
-		return;
+		OwnedMoveRequestId = FAIRequestID::InvalidRequest;
+		RecordMoveFailure(RequestedGoal);
+		return EMoveGoalResult::Unreachable;
 	}
 
 	const UWorld* World = GetWorld();
-	if (bSameGoal && World != nullptr && World->GetTimeSeconds() < NextMoveRetryTime)
+	const FMoveFailure& Failure = MoveFailures[bCombatPriority ? 1 : 0];
+	if (World->GetTimeSeconds() < Failure.RetryAfter && RequestedGoal.Matches(Failure.Goal, PathRefreshDistance))
 	{
-		return;
+		return EMoveGoalResult::Unreachable;
 	}
 
 	if (SurroundManager != nullptr && !SurroundManager->TryConsumeMoveRequestBudget(bCombatPriority))
@@ -452,11 +504,15 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float Ac
 		// 预算拒绝时继续沿旧路径移动；LastMoveGoal 不更新，下一轮仍会识别到待刷新的目标。
 		INC_DWORD_STAT(STAT_fpstrueAIMoveBudgetRejectedCount);
 		CSV_CUSTOM_STAT(fpstrueAI, MoveBudgetRejectedCount, 1, ECsvCustomStatOp::Accumulate);
-		return;
+		return EMoveGoalResult::Deferred;
 	}
 
 	INC_DWORD_STAT(STAT_fpstrueAIMoveRequestCount);
 	CSV_CUSTOM_STAT(fpstrueAI, MoveRequestCount, 1, ECsvCustomStatOp::Accumulate);
+	const uint32 SubmittingRevision = ++MoveRequestRevision;
+	// Abort/MoveTo 可能同步广播完成事件。先撤回旧归属，只有本次返回且仍为当前请求才能发布新缓存。
+	OwnedMoveRequestId = FAIRequestID::InvalidRequest;
+	bHasMoveGoal = false;
 	// 使用显式请求替代一串位置布尔参数，保留原 MoveToLocation 的导航、接受半径和部分路径语义。
 	// 与引擎包装函数一致，提交新请求前取消旧路径，但保留速度；不得在预算拒绝之前执行这一步。
 	if (UPathFollowingComponent* PathFollowing = GetPathFollowingComponent();
@@ -465,6 +521,7 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float Ac
 		PathFollowing->AbortMove(*this, FPathFollowingResultFlags::ForcedScript | FPathFollowingResultFlags::NewRequest,
 								 FAIRequestID::CurrentRequest, EPathFollowingVelocityMode::Keep);
 	}
+	if (MoveRequestRevision != SubmittingRevision || !AcceptsCombatCommands()) return EMoveGoalResult::Deferred;
 
 	FAIMoveRequest MoveRequest(GoalLocation);
 	MoveRequest.SetUsePathfinding(true);
@@ -474,15 +531,17 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float Ac
 	MoveRequest.SetAcceptanceRadius(AcceptanceRadius);
 	MoveRequest.SetReachTestIncludesAgentRadius(true);
 	MoveRequest.SetCanStrafe(false);
-	const EPathFollowingRequestResult::Type MoveResult = MoveTo(MoveRequest).Code;
-	LastMoveGoal = GoalLocation;
+	const FPathFollowingRequestResult Result = MoveTo(MoveRequest);
+	if (MoveRequestRevision != SubmittingRevision || !AcceptsCombatCommands()) return EMoveGoalResult::Deferred;
+	const EPathFollowingRequestResult::Type MoveResult = Result.Code;
+	LastMoveGoal = RequestedGoal;
 	// UE MoveTo 会把投影结果写回请求。不能用部分路径末端替代它，否则到达死路也会被当成到位。
 	LastResolvedMoveGoal = MoveRequest.GetGoalLocation();
-	bLastMoveGoalWasCombatPriority = bCombatPriority;
 	bHasMoveGoal = MoveResult != EPathFollowingRequestResult::Failed;
+	OwnedMoveRequestId = MoveResult == EPathFollowingRequestResult::RequestSuccessful ? Result.MoveId : FAIRequestID::InvalidRequest;
 	if (bHasMoveGoal)
 	{
-		NextMoveRetryTime = 0.0f;
+		MoveFailures[bCombatPriority ? 1 : 0] = FMoveFailure{};
 		if (MoveResult == EPathFollowingRequestResult::AlreadyAtGoal)
 		{
 			FaceTargetAtRest();
@@ -493,21 +552,24 @@ void AfpstrueEnemyAIController::MoveToGoal(const FVector& GoalLocation, float Ac
 			ApplyRotationPolicy(EFPEnemyAIState::Chase);
 		}
 	}
-	else if (World != nullptr)
+	else
 	{
-		NextMoveRetryTime = World->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
+		RecordMoveFailure(RequestedGoal);
 	}
+	return MoveResult == EPathFollowingRequestResult::Failed ? EMoveGoalResult::Unreachable :
+		(MoveResult == EPathFollowingRequestResult::AlreadyAtGoal ? EMoveGoalResult::Arrived : EMoveGoalResult::Moving);
 }
 
 void AfpstrueEnemyAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result)
 {
-	// 主动 StopMovement 和新 MoveTo 都会产生 Aborted；只有真实寻路失败才进入退避。
-	if (Result.IsFailure() && Result.Code != EPathFollowingResult::Aborted)
+	// 只处理拥有的异步请求。MoveTo 内的同步失败/AlreadyAtGoal 由返回值提交，不在回调抢写尚未发布的缓存。
+	if (OwnedMoveRequestId.IsValid() && RequestID == OwnedMoveRequestId)
 	{
-		bHasMoveGoal = false;
-		if (const UWorld* World = GetWorld())
+		OwnedMoveRequestId = FAIRequestID::InvalidRequest;
+		if (Result.IsFailure())
 		{
-			NextMoveRetryTime = World->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
+			bHasMoveGoal = false;
+			if (Result.Code != EPathFollowingResult::Aborted && GetWorld() != nullptr) RecordMoveFailure(LastMoveGoal);
 		}
 	}
 
@@ -591,6 +653,8 @@ void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bo
 
 void AfpstrueEnemyAIController::StopAI()
 {
+	if (CommandPhase == ECommandPhase::Stopping) return;
+	CommandPhase = ECommandPhase::Stopping;
 	// 先停行为树，再停止导航和清理资源；否则下一次 BT 唤醒可能重新发起 MoveTo。
 	// 敌人死亡、解除占有和对局结束都走同一收口，确保路径、行为树、槽位和攻击名额不会只清理一部分。
 	if (BrainComponent != nullptr)
@@ -598,24 +662,31 @@ void AfpstrueEnemyAIController::StopAI()
 		BrainComponent->StopLogic(TEXT("Enemy stopped"));
 	}
 	StopMovementIfNeeded();
-	ReleaseAttackPermission();
+	if (ControlledEnemy != nullptr && ControlledEnemy->GetCombatComponent() != nullptr)
+	{
+		// StopAI 是完整业务停止：先取消旧攻击，归还其捕获的许可，再清 Controller 上下文。
+		ControlledEnemy->GetCombatComponent()->ResetCombat();
+	}
 	TargetCharacter = nullptr;
 	ReleaseSurroundSlot();
 	DecisionContext = FDecisionContext{};
 	if (UBlackboardComponent* DecisionBlackboard = GetBlackboardComponent())
 	{
 		// RunBehaviorTree 可以复用兼容 Blackboard；停止后不能保留上一轮目标和条件。
+		DecisionBlackboard->PauseObserverNotifications();
 		DecisionBlackboard->ClearValue(FPEnemyBlackboard::TargetActor);
 		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::HasTarget, false);
 		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::Attacking, false);
 		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::InAttackRange, false);
 		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::InChaseRange, false);
+		DecisionBlackboard->ResumeObserverNotifications(false);
 	}
 
 	if (ControlledEnemy != nullptr)
 	{
 		SetAIState(ControlledEnemy->IsDead() ? EFPEnemyAIState::Dead : EFPEnemyAIState::Idle);
 	}
+	CommandPhase = ECommandPhase::Stopped;
 }
 
 void AfpstrueEnemyAIController::StopMovementIfNeeded(bool bPreserveMoveGoal)
@@ -624,9 +695,10 @@ void AfpstrueEnemyAIController::StopMovementIfNeeded(bool bPreserveMoveGoal)
 	const bool bShouldStop = GetMoveStatus() != EPathFollowingStatus::Idle;
 	if (!bPreserveMoveGoal || bShouldStop)
 	{
+		++MoveRequestRevision;
+		OwnedMoveRequestId = FAIRequestID::InvalidRequest;
 		bHasMoveGoal = false;
-		NextMoveRetryTime = 0.0f;
-		bLastMoveGoalWasCombatPriority = false;
+		MoveFailures[0] = MoveFailures[1] = FMoveFailure{};
 	}
 	if (bShouldStop)
 	{

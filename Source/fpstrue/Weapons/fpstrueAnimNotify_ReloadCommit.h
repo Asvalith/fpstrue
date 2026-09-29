@@ -13,8 +13,9 @@ class FPSTRUE_API UfpstrueAnimNotify_ReloadCommit : public UAnimNotify
 	GENERATED_BODY()
 
 public:
-	// 找到当前武器并提交一次换弹事务。
+	// 找到武器后校验通知的 Montage 实例身份，再提交对应换弹事务。
 	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,const FAnimNotifyEventReference& EventReference) override;
+	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload) override;
 
 	// 返回动画编辑器中显示的 Notify 名称。
 	virtual FString GetNotifyName_Implementation() const override;

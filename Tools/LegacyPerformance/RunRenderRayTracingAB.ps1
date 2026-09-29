@@ -1,14 +1,14 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
-    [int]$EnemyCount = 160,
-    [int]$RunsPerGroup = 3,
-    [double]$WarmupSeconds = 10,
-    [double]$DurationSeconds = 30,
+    [int]$EnemyCount = 20,
+    [int]$RunsPerGroup = 2,
+    [double]$WarmupSeconds = 5,
+    [double]$DurationSeconds = 5,
     [int]$BenchmarkSeed = 1337,
-    [string]$RunName = "EnemyOptimizationAblation_20260824",
-    [switch]$AllEnabledOnly,
-    [switch]$SignificanceOnly,
-    [switch]$UnverifiedConsumersOnly,
-    [string[]]$SelectedGroups = @()
+    [ValidateSet("RayTracingEffects", "DynamicShadows")]
+    [string]$TestMode = "RayTracingEffects",
+    [string]$RunName = "RenderRayTracingAB_20260826"
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,50 +17,73 @@ $ProjectRoot = "E:\ueprojrct\fpstrue_safe2"
 $Editor = "E:\program\ue554\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe"
 $Project = Join-Path $ProjectRoot "fpstrue.uproject"
 $Map = "/Game/FactoryDistrict/Maps/Demonstration"
-$DdcPath = Join-Path $ProjectRoot "Saved\DerivedDataCache"
 $EvidenceRoot = Join-Path $ProjectRoot "Saved\Profiling\$RunName"
 $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
 
-$Groups = @(
-    [PSCustomObject]@{ Name = "AllEnabled"; Flag = "" },
-    [PSCustomObject]@{ Name = "NoSignificance"; Flag = "-BenchmarkDisableEnemySignificance" },
-    [PSCustomObject]@{ Name = "NoAIThrottling"; Flag = "-BenchmarkDisableAIThrottling" },
-    [PSCustomObject]@{ Name = "NoAnimationOptimization"; Flag = "-BenchmarkDisableAnimationOptimizations" },
-    [PSCustomObject]@{ Name = "NoMovementTiering"; Flag = "-BenchmarkDisableMovementTiering" },
-    [PSCustomObject]@{ Name = "NoSkeletalLOD"; Flag = "-BenchmarkDisableEnemySkeletalLOD" },
-    [PSCustomObject]@{ Name = "NoAnimationTiering"; Flag = "-BenchmarkDisableEnemyAnimationTiering" },
-    [PSCustomObject]@{ Name = "NoAnimationSharing"; Flag = "-BenchmarkDisableEnemyAnimationSharing" },
-    [PSCustomObject]@{ Name = "NoShadowTiering"; Flag = "-BenchmarkDisableShadowTiering" },
-    [PSCustomObject]@{ Name = "NoRayTracingTiering"; Flag = "-BenchmarkDisableEnemyRayTracingTiering" }
-)
+if (Get-Process -Name "UnrealEditor" -ErrorAction SilentlyContinue) {
+    throw "Close the running Unreal Editor before the A/B test. A second editor process would invalidate the result."
+}
 
-if ($SelectedGroups.Count -gt 0) {
-    $UnknownGroups = @($SelectedGroups | Where-Object { $_ -notin $Groups.Name })
-    if ($UnknownGroups.Count -gt 0) {
-        throw "Unknown ablation groups: $($UnknownGroups -join ', ')"
+if ($TestMode -eq "DynamicShadows") {
+    $Groups = @(
+        [PSCustomObject]@{
+            Name = "Baseline"
+            ExecCmds = "showflag.DynamicShadows 1"
+        },
+        [PSCustomObject]@{
+            Name = "DynamicShadowsOff"
+            ExecCmds = "showflag.DynamicShadows 0"
+        }
+    )
+}
+else {
+    $Groups = @(
+        [PSCustomObject]@{
+            Name = "Baseline"
+            ExecCmds = "r.RayTracing.ForceAllRayTracingEffects -1"
+        },
+        [PSCustomObject]@{
+            Name = "RayTracingEffectsOff"
+            ExecCmds = "r.RayTracing.ForceAllRayTracingEffects 0"
+        }
+    )
+}
+
+function Get-NumericValues {
+    param(
+        [object[]]$Rows,
+        [string]$Column
+    )
+
+    $Values = foreach ($Row in $Rows) {
+        $Value = 0.0
+        if ([double]::TryParse(
+                [string]$Row.$Column,
+                [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$Value)) {
+            $Value
+        }
     }
-    $Groups = @($Groups | Where-Object { $_.Name -in $SelectedGroups })
+
+    return @($Values)
 }
-elseif ($UnverifiedConsumersOnly) {
-    $Groups = @($Groups | Where-Object {
-        $_.Name -in @(
-            "AllEnabled",
-            "NoMovementTiering",
-            "NoSkeletalLOD",
-            "NoAnimationTiering",
-            "NoAnimationSharing",
-            "NoShadowTiering",
-            "NoRayTracingTiering"
-        )
-    })
-}
-elseif ($SignificanceOnly) {
-    $Groups = @($Groups | Where-Object { $_.Name -in @("AllEnabled", "NoSignificance") })
-}
-elseif ($AllEnabledOnly) {
-    $Groups = @($Groups | Where-Object { $_.Name -eq "AllEnabled" })
+
+function Get-Percentile {
+    param(
+        [double[]]$Values,
+        [double]$Percentile
+    )
+
+    if ($Values.Count -eq 0) {
+        return 0.0
+    }
+
+    $Sorted = @($Values | Sort-Object)
+    $Index = [Math]::Floor(($Sorted.Count - 1) * $Percentile)
+    return $Sorted[$Index]
 }
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
@@ -68,6 +91,7 @@ $ManifestRows = @()
 
 for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
     $RunGroups = @($Groups | Sort-Object { Get-Random })
+
     foreach ($Group in $RunGroups) {
         $RunId = "$($Group.Name)_Run$Run"
         $RunRoot = Join-Path $EvidenceRoot $RunId
@@ -96,15 +120,9 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             "-BenchmarkScreenshot",
             "-BenchmarkAutoQuit",
             "-csvGpuStats",
-            '-ExecCmds="stat unit,stat streaming"',
-            "-log=$LogName",
-            "-ddc=NoZenLocalFallback",
-            "-LocalDataCachePath=$DdcPath",
-            "-ShaderWorkingDir=Saved/ShaderWorkingDir"
+            "-ExecCmds=`"$($Group.ExecCmds)`"",
+            "-log=$LogName"
         )
-        if ($Group.Flag) {
-            $Arguments += $Group.Flag
-        }
 
         Write-Output "Starting $RunId with $EnemyCount enemies"
         $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
@@ -145,7 +163,7 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             Run = $Run
             EnemyCount = $EnemyCount
             BenchmarkSeed = $BenchmarkSeed
-            DisabledFlag = $Group.Flag
+            ExecCmds = $Group.ExecCmds
             Ready = $Ready
             CaptureStopped = $Stopped
             SpawnFailures = ($LogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
@@ -155,9 +173,48 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             Screenshot = $ScreenshotDestination
             Log = $LogDestination
         }
+
         $ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
         Write-Output "Completed $RunId"
     }
 }
 
-& (Join-Path $ProjectRoot "Tools\SummarizeEnemyOptimizationAblation.ps1") -EvidenceRoot $EvidenceRoot
+$MetricNames = @(
+    "FrameTime",
+    "GameThreadTime",
+    "RenderThreadTime",
+    "GPUTime",
+    "Exclusive/GameThread/Input",
+    "Exclusive/RenderThread/EventWait/Visibility",
+    "Exclusive/RenderThread/RenderOther",
+    "GPU/RayTracingDynamicGeometry",
+    "GPU/RayTracingScene",
+    "RHI/DrawCalls"
+)
+$SummaryRows = @()
+
+foreach ($ManifestRow in $ManifestRows) {
+    $Rows = @(Import-Csv -LiteralPath $ManifestRow.Csv)
+
+    foreach ($MetricName in $MetricNames) {
+        $Values = @(Get-NumericValues -Rows $Rows -Column $MetricName)
+        if ($Values.Count -eq 0) {
+            continue
+        }
+
+        $SummaryRows += [PSCustomObject]@{
+            Group = $ManifestRow.Group
+            Run = $ManifestRow.Run
+            Metric = $MetricName
+            Average = ($Values | Measure-Object -Average).Average
+            P95 = Get-Percentile -Values $Values -Percentile 0.95
+            P99 = Get-Percentile -Values $Values -Percentile 0.99
+            Maximum = ($Values | Measure-Object -Maximum).Maximum
+        }
+    }
+}
+
+$SummaryPath = Join-Path $EvidenceRoot "summary.csv"
+$SummaryRows | Export-Csv -LiteralPath $SummaryPath -NoTypeInformation -Encoding UTF8
+Write-Output "Render A/B evidence is ready in $EvidenceRoot"
+Write-Output "Summary: $SummaryPath"

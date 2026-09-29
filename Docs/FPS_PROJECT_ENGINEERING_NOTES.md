@@ -58,17 +58,13 @@ void AfpstrueCharacter::StartWeaponFire()
     }
 }
 
-void AfpstrueCharacter::StartReload()
+void AfpstrueCharacter::RequestWeaponReload()
 {
-    if (EquippedWeaponComponent == nullptr || IsDead() ||
-        !EquippedWeaponComponent->CanReload())
+    if (EquippedWeaponComponent != nullptr)
     {
-        return;
+        // 资格、动作锁与瞄准/冲刺互斥统一由武器接纳请求后处理，手动/自动换弹不各写一套。
+        EquippedWeaponComponent->RequestReload();
     }
-
-    StopAim();
-    StopSprint();
-    EquippedWeaponComponent->RequestReload();
 }
 ```
 
@@ -175,7 +171,7 @@ OnPlayerDied();                        // 蓝图动画、音效、UI 表现
 测试脚本提供两组破坏性诊断：
 
 ```powershell
-# Tools/RunProfileGuidedAblation.ps1:25-26
+# Tools/LegacyPerformance/RunProfileGuidedAblation.ps1（历史实验，原第 25-26 行）
 -BenchmarkDisableCharacterMovementTick
 -BenchmarkDisableSkeletalMeshTick
 ```

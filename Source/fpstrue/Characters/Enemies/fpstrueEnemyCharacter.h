@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "Components/SkinnedMeshComponent.h"
+#include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
 #include "fpstrueEnemyCharacter.generated.h"
 
@@ -56,10 +58,11 @@ public:
 	// ==================== 战斗与玩法接口 ====================
 
 	// 动画结束 Notify 通过角色入口通知 CombatComponent 完成攻击。
-	UFUNCTION(BlueprintCallable, Category = "Combat")
+	UFUNCTION(BlueprintCallable, Category = "Combat", meta = (DeprecatedFunction, DeprecationMessage = "Use Enemy Attack Finished native Notify with playback identity"))
 	void HandleAttackFinishedNotify();
 
 	// AttackWindow Notify 直接取得已缓存组件，驱动武器 Sweep 的开启、更新与结束。
+	UFUNCTION(BlueprintPure, Category = "Combat")
 	UfpstrueEnemyCombatComponent* GetCombatComponent() const { return CombatComponent.Get(); }
 
 	// ==================== Render Significance 接口 ====================
@@ -79,6 +82,8 @@ public:
 	void RefreshRenderBudgetMeshes();
 	// 读回已登记 Mesh 的实际标志；这是组件数量，不是 GPU 图元或敌人数。
 	void GetRenderBudgetMeshCounts(int32& OutMeshes, int32& OutShadowMeshes, int32& OutRayTracingMeshes) const;
+	// 候选资格读取资产原始许可，不读取上一轮已经被预算关闭的实际标志。
+	void GetRenderBudgetEligibility(bool& bOutShadow, bool& bOutRayTracing) const;
 
 	// CSV 统计读取当前 Gameplay Tier。
 	EFPEnemySignificanceTier GetGameplaySignificanceTier() const { return SignificanceTier; }
@@ -120,8 +125,7 @@ protected:
 	void HandleDeath();
 
 	// HealthComponent 受伤事件入口：记录保护时间并播放受击反馈。
-	UFUNCTION()
-	void HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
+	void HandleDamageResolved(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy, const FFPDamageContext& Context);
 
 	// ==================== 组件 ====================
 
@@ -192,7 +196,11 @@ protected:
 
 	// ==================== Blueprint 表现事件 ====================
 
-	// 蓝图开始播放敌人攻击动画。
+	// 明确的播放命令：蓝图把 AttackId 原样交给 Combat 的 PlayAttackMontageForAttack。
+	UFUNCTION(BlueprintImplementableEvent, Category = "AI|Animation")
+	void OnAttackPlaybackRequested(int64 AttackId);
+
+	// 攻击已开始的观察通知，不负责隐式选择或绑定动画。
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
 	void OnAttackStarted();
 
@@ -210,6 +218,7 @@ private:
 	// 语法复习：friend 只开放 private 访问权，不改变对象所有权；内部桥接仅开放给共享协调器和 CombatComponent。
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemyCombatComponent;
+	friend class FFpstrueEnemyQueuedDamageContextTest;
 
 	// ==================== 战斗与受击内部桥接 ====================
 
@@ -221,6 +230,8 @@ private:
 	void ApplyHitReactionImpulse();
 	// 布娃娃启用后的下一帧施加死亡冲量。
 	void ApplyDeathImpulse();
+	// 受击保护有自己的截止时间，即使协调器停用，也不会永久锁在全速动画。
+	void RefreshHitAnimationProtection();
 
 	// ==================== Gameplay 分级 ====================
 
@@ -253,6 +264,9 @@ private:
 	// HealthComponent 保存死亡事实；这里只记录死亡副作用是否已经执行。
 	bool bDeathEffectsApplied = false;
 	bool bDisableAnimationOptimizationsForBenchmark = false;
+	// BeginPlay 保存资产原始设置；战斗保护结束后恢复，而不是强制开启优化。
+	bool bAuthoredUpdateRateOptimizations = false;
+	EVisibilityBasedAnimTickOption AuthoredAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 	bool bRegisteredWithSignificanceManager = false;
 	EFPEnemySignificanceTier SignificanceTier = EFPEnemySignificanceTier::Full;
 	EFPEnemyRenderSignificanceTier NaturalRenderSignificanceTier = EFPEnemyRenderSignificanceTier::Full;
@@ -261,6 +275,8 @@ private:
 	float RenderSignificanceScore = 1.0f;
 	float LastPrimaryFrustumTime = -MAX_flt;
 	float LastCombatRelevantTime = -MAX_flt;
+	float HitAnimationProtectionUntil = -MAX_flt;
+	FTimerHandle HitAnimationProtectionTimer;
 	float LastNaturalRenderTierChangeTime = 0.0f;
 	float PendingRenderDemotionStartTime = -MAX_flt;
 	bool bRenderShouldCastShadow = true;
@@ -283,7 +299,6 @@ private:
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
 
-	FVector LastDamageDirection = FVector::ForwardVector;
-	FVector LastDamageLocation = FVector::ZeroVector;
-	FName LastDamageBoneName = NAME_None;
+	FFPDamageContext LastAppliedDamage;
+	FFPDamageContext DeathDamageContext;
 };

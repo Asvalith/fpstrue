@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.h"
-#include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -46,7 +46,7 @@ void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 		return;
 	}
 
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
 	if (!OwnerGameMode->bEnableEnemySignificance || BenchmarkConfig.bDisableEnemySignificance)
 	{
 		return;
@@ -160,6 +160,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		FEnemyRenderCandidate& Candidate = Candidates.AddDefaulted_GetRef();
 		Candidate.Enemy = Enemy;
 		Candidate.Sample = Enemy->EvaluateRenderSignificance(ViewContext, Policy);
+		Enemy->GetRenderBudgetEligibility(Candidate.bShadowEligible, Candidate.bRayTracingEligible);
 		Candidate.PriorityKey.Score = Candidate.Sample.Score;
 		Candidate.PriorityKey.TieBreakId = Enemy->GetUniqueID();
 		Candidate.PriorityKey.bInPrimaryFrustum = Candidate.Sample.bInPrimaryFrustum;
@@ -169,7 +170,6 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 			Enemy->RequiresGameplayAnimationProtection(ViewContext.TimeSeconds, Policy.CombatPriorityGraceSeconds);
 		Candidate.NaturalTier = Enemy->ResolveNaturalRenderSignificanceTier(Candidate.Sample, Policy);
 		// 先把所有自然 Full 候选降为 Reduced，再只恢复优先级最高的 K 个
-		//先讲解再恢复优先级最高的 K 个
 		Candidate.AssignedTier = Policy.bEnableRenderTiering && Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full
 									 ? EFPEnemyRenderSignificanceTier::Reduced
 									 : Candidate.NaturalTier;
@@ -221,7 +221,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		const int32 EligibleRayTracingCount = SelectTopK(Policy.MaxRayTracingEnemies,
 														 [&Policy](const FEnemyRenderCandidate& Candidate)
 														 {
-															 return Candidate.AssignedTier == EFPEnemyRenderSignificanceTier::Full &&
+															 return Candidate.bRayTracingEligible && Candidate.AssignedTier == EFPEnemyRenderSignificanceTier::Full &&
 																	Candidate.Sample.Distance <= Policy.RayTracingMaxDistance;
 														 });
 		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
@@ -238,7 +238,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		const int32 EligibleShadowCount = SelectTopK(Policy.MaxShadowCastingEnemies,
 													 [&Policy](const FEnemyRenderCandidate& Candidate)
 													 {
-														 return Candidate.Sample.bInExpandedFrustum &&
+														 return Candidate.bShadowEligible && Candidate.Sample.bInExpandedFrustum &&
 																Candidate.Sample.Distance <= Policy.ShadowMaxDistance &&
 																Candidate.AssignedTier != EFPEnemyRenderSignificanceTier::Background;
 													 });
@@ -261,15 +261,13 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 	// 注意：统一采样不等于所有消费者必须无条件重写；组件内部仍应通过状态比较避免重复修改渲染状态。
 	const FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode.EnemyRenderSignificancePolicy;
 	const TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
-	int32 GameplayFullCount = 0;
-	int32 GameplayReducedCount = 0;
-	int32 GameplayBackgroundCount = 0;
-	int32 RenderFullCount = 0;
-	int32 RenderReducedCount = 0;
-	int32 RenderBackgroundCount = 0;
-	int32 LOD0Count = 0;
-	int32 LOD1Count = 0;
-	int32 LOD2PlusCount = 0;
+	// 档位按 Full/Reduced/Background，LOD 按 0/1/2+ 分桶；保持全部历史 CSV 列及其计量口径。
+	static_assert(static_cast<int32>(EFPEnemySignificanceTier::Background) == 2);
+	static_assert(static_cast<int32>(EFPEnemyRenderSignificanceTier::Background) == 2);
+	int32 GameplayCounts[3] = {};
+	int32 RenderCounts[3] = {};
+	int32 MinLODCounts[3] = {};
+	int32 PredictedLODCounts[3] = {};
 	int32 AppliedShadowCastingCount = 0;
 	int32 AppliedRayTracingVisibleCount = 0;
 	int32 ManagedMeshCount = 0;
@@ -290,49 +288,17 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 													 Candidate.bShouldBeVisibleInRayTracing, Candidate.bGameplayAnimationProtection,
 													 Policy);
 
-		switch (Candidate.Enemy->GetGameplaySignificanceTier())
-		{
-		case EFPEnemySignificanceTier::Full:
-			++GameplayFullCount;
-			break;
-		case EFPEnemySignificanceTier::Reduced:
-			++GameplayReducedCount;
-			break;
-		case EFPEnemySignificanceTier::Background:
-		default:
-			++GameplayBackgroundCount;
-			break;
-		}
-
-		switch (Candidate.Enemy->GetRenderSignificanceTier())
-		{
-		case EFPEnemyRenderSignificanceTier::Full:
-			++RenderFullCount;
-			break;
-		case EFPEnemyRenderSignificanceTier::Reduced:
-			++RenderReducedCount;
-			break;
-		case EFPEnemyRenderSignificanceTier::Background:
-		default:
-			++RenderBackgroundCount;
-			break;
-		}
-
-		const int32 AppliedMinLOD = Candidate.Enemy->GetAppliedMinimumLOD();
-		if (AppliedMinLOD <= 0)
-		{
-			++LOD0Count;
-		}
-		else if (AppliedMinLOD == 1)
-		{
-			++LOD1Count;
-		}
-		else
-		{
-			++LOD2PlusCount;
-		}
+		++GameplayCounts[FMath::Min(static_cast<int32>(Candidate.Enemy->GetGameplaySignificanceTier()), 2)];
+		++RenderCounts[FMath::Min(static_cast<int32>(Candidate.Enemy->GetRenderSignificanceTier()), 2)];
+		++MinLODCounts[FMath::Clamp(Candidate.Enemy->GetAppliedMinimumLOD(), 0, 2)];
 		if (const USkeletalMeshComponent* CharacterMesh = Candidate.Enemy->GetMesh())
 		{
+			// CPU 预测选择与 MinLOD 策略约束分开；预测值也不冒充 GPU 每个 Pass 的实际 LOD。
+			const int32 PredictedLOD = CharacterMesh->GetPredictedLODLevel();
+			if (PredictedLOD >= 0)
+			{
+				++PredictedLODCounts[FMath::Min(PredictedLOD, 2)];
+			}
 			// 保留旧 CSV 的主 Mesh 口径，避免附件加入后历史数据列含义悄悄变化。
 			AppliedShadowCastingCount += CharacterMesh->CastShadow ? 1 : 0;
 			AppliedRayTracingVisibleCount += CharacterMesh->bVisibleInRayTracing ? 1 : 0;
@@ -357,15 +323,22 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 	const float CandidateCount = static_cast<float>(Candidates.Num());
 	const float InverseCandidateCount = CandidateCount > 0.0f ? 1.0f / CandidateCount : 0.0f;
 	CSV_CUSTOM_STAT(fpstrueSignificance, AliveEnemies, Candidates.Num(), ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayFull, GameplayFullCount, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayReduced, GameplayReducedCount, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayBackground, GameplayBackgroundCount, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, RenderFull, RenderFullCount, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, RenderReduced, RenderReducedCount, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, RenderBackground, RenderBackgroundCount, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, LOD0, LOD0Count, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, LOD1, LOD1Count, ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(fpstrueSignificance, LOD2Plus, LOD2PlusCount, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayFull, GameplayCounts[0], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayReduced, GameplayCounts[1], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, GameplayBackground, GameplayCounts[2], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, RenderFull, RenderCounts[0], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, RenderReduced, RenderCounts[1], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, RenderBackground, RenderCounts[2], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, LOD0, MinLODCounts[0], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, LOD1, MinLODCounts[1], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, LOD2Plus, MinLODCounts[2], ECsvCustomStatOp::Set);
+	// 旧 LOD* 列保留脚本兼容，含义一直是最低 LOD 约束；新增明确命名避免与实际选择混淆。
+	CSV_CUSTOM_STAT(fpstrueSignificance, MinLOD0, MinLODCounts[0], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, MinLOD1, MinLODCounts[1], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, MinLOD2Plus, MinLODCounts[2], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, PredictedLOD0, PredictedLODCounts[0], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, PredictedLOD1, PredictedLODCounts[1], ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(fpstrueSignificance, PredictedLOD2Plus, PredictedLODCounts[2], ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, ShadowCasters, AppliedShadowCastingCount, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(fpstrueSignificance, RayTracingVisible, AppliedRayTracingVisibleCount, ECsvCustomStatOp::Set);
 	// 名额以敌人为单位，组件数可能大于名额；均为实际标志读回，不是 GPU 执行统计。

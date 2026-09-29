@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
-#include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Animation/AnimSequence.h"
@@ -84,7 +84,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCh
 		return;
 	}
 
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
 	if (!bEnableAnimationSharing || BenchmarkConfig.bDisableEnemyAnimationSharing || BenchmarkConfig.bDisableAnimationOptimizations)
 	{
 		UE_LOG(LogTemp, Display, TEXT("Enemy Animation Sharing disabled: feature=%d ablation=%d animationOptimizationsOff=%d"),
@@ -99,7 +99,20 @@ void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCh
 		return;
 	}
 
-	if (UAnimationSharingManager::GetManagerForWorld(GetWorld()) != nullptr)
+	UAnimationSharingManager* WorldManager = UAnimationSharingManager::GetManagerForWorld(GetWorld());
+	if (WorldManager != nullptr && WorldManager == SharingManager && RuntimeSetup != nullptr)
+	{
+		// Stop 只注销 Follower，不销毁 World 共享池；只复用自己创建且骨架一致的实例。
+		const AfpstrueEnemyCharacter* Defaults = InEnemyClass.GetDefaultObject();
+		const USkeletalMesh* Mesh = Defaults != nullptr && Defaults->GetMesh() != nullptr
+			? Defaults->GetMesh()->GetSkeletalMeshAsset() : nullptr;
+		if (Mesh != nullptr && Mesh->GetSkeleton() == SharingSkeleton)
+		{
+			bRunning = true;
+			return;
+		}
+	}
+	if (WorldManager != nullptr)
 	{
 		// 一个 World 只能有一个 Manager；不覆盖关卡或其他系统已经创建的 Setup。
 		UE_LOG(LogTemp, Warning, TEXT("Enemy Animation Sharing skipped: this World already owns an Animation Sharing manager."));

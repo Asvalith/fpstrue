@@ -4,6 +4,7 @@
 
 > `review` 用于完整项目开发与复习，保留 Content 资产和“语法复习”注释；`main` 用于面试展示，不随开发分支自动更新。
 > [FPS项目架构、性能与UE机制说明](Docs/FPS_PROJECT_ENGINEERING_NOTES.md)保留复习笔记；最新目录和优化记录以本页及实验报告为准。
+> 当前状态归属、阅读顺序和动画回调迁移边界见[代码职责与动作生命周期](Docs/CODE_OWNERSHIP.md)。
 
 项目重点是完整玩法实现、多敌人更新调度，以及从实验数据追到线程依赖的性能归因。
 
@@ -206,17 +207,20 @@ UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation �
 
 自动化测试覆盖行为树结构与运行生命周期、真实树资产的编辑器连线、开局回调重入、配置选源、攻击阶段与清理、射击换弹、严格弱序、Top-K 等价性、共享注销、渲染档位迟滞，以及附件和尸体的渲染资格。真实资产测试仅在对应 Content 齐备时运行。NullRHI 验证代码与组件属性，画面和 GPU 性能另做实景回归。
 
-当前本地验证：Development Editor 与 Development Game 目标编译通过；18 项 UE 自动化测试通过，报告位于 `Saved/Automation/StructureCleanup2/`。其中 3 项带原生测试角色缺少 Skeleton 的夹具警告，无失败项。回归包含共享注销后的句柄交换、攻击 Timer 清理、预算关闭时的资格边界，以及合并后攻击窗口 Notify 的原反射路径和 Begin/Tick/End 调用。
+2026-09-29 精简后本地验证：Development Editor 与 Development Game 目标编译通过；41 项 UE 自动化测试全部通过，报告位于 `Saved/Automation/CodeCleanup_20260929_Final/`，0 失败、0 未运行；其中 16 项带原生夹具或故障注入警告。回归覆盖真实 BP 普通/空仓换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 归属与双策略退避、生命队列终止和命中上下文、受击解除 Tick 冷却、CSV 迟到启动清理及暂停 watchdog。`BP_Weapon`、`enemy_BP` 已迁移到明确动作编号的播放入口，并在新进程审计接线；一次性迁移工具已备份移出编译，重复采样与清理逻辑已合并，职责及边界见[代码职责与动作生命周期](Docs/CODE_OWNERSHIP.md)。原有共享注销、Top-K、预算等回归一并通过，性能配置脚本 56 项检查通过。NullRHI 功能测试不代替画面、完整 AnimBP 姿态与性能验收。
 
 实际关卡的 160 敌人功能烟测通过，组件属性读回为 5 个投影 Mesh、12 个光追 Mesh，与当次预算一致。日志为 `Saved/Logs/StructureCleanup2160Smoke.log`。关卡中 `TargetPoint_5` 仍有生成失败日志，队列通过换点重试补齐目标数量；此轮使用 NullRHI 和测试生命值，仅核对玩法流程与预算下发，不产生 GPU 性能结论。
 
 另用 32 敌人检查预算边界：Full 名额为 0 时，Full 与骨骼光追参与数均为 0；关闭渲染分档后，同一配置得到 32 个 Full，独立阴影/光追预算仍为 5/12。日志分别为 `Saved/Logs/EquivalentCleanupZeroFull.log` 与 `Saved/Logs/EquivalentCleanupTieringOff.log`。
 
-配置脚本另有 29 项检查，无须启动 UE：
+性能测试统一入口为 `Tools/RunRenderCostMatrix.ps1`。采集条件放在 `Tools/ExperimentProfiles/*.json`；实验开关与读回要求集中在同目录的 `RenderCostCases.psd1`。历史启动脚本已移入 `Tools/LegacyPerformance/`，业务埋点不动。`scene-acceptance.json` 是 0/160 敌人的单轮收尾验收预设，不代表已经运行验收。
+
+配置脚本另有 56 项检查，无须启动 UE：
 
 ```powershell
 .\Tools\TestRenderCostConfig.ps1
 .\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\baseline160.json -ValidateOnly
+.\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\scene-acceptance.json -ValidateOnly
 ```
 
 正式采集前按[配置说明](Docs/CONFIGURATION.md)检查引擎路径、地图和生效参数。固定场景成本采集与正常生命条件下的玩法基线分别记录；Top-K 的算法验证不代替实景性能 A/B。
@@ -234,10 +238,13 @@ Source/fpstrue/
       Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
     Shared/                 生命组件与碰撞通道
   Weapons/                  射击、换弹、拾取与动画通知
+  Runtime/                  运行时诊断参数快照与业务埋点声明
   Testing/
     Automation/             玩法、算法与生命周期回归
-    Benchmarks/             性能配置、采集与埋点
+    Benchmarks/             采集条件、实验阶段、资源恢复与产物校验
 Tools/                      实验采集、分析与配置校验
+  ExperimentProfiles/       集中的实验定义与采集预设
+  LegacyPerformance/        历史实验启动脚本（冻结）
 Docs/Performance/           分阶段实验记录
 PerformanceEvidence/        可公开的性能截图
 ```

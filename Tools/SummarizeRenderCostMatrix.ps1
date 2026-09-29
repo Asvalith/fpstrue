@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$EvidenceRoot,
     [double]$StartTrimSeconds = 0,

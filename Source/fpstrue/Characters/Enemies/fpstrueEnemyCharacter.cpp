@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueCollisionChannels.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
@@ -16,6 +16,20 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Math/RotationMatrix.h"
 #include "SignificanceManager.h"
+
+namespace
+{
+	// 同一 Gameplay 档位有不同消费者，共用映射但不混合决策倍率与 Movement 更新时机。
+	float GameplayTierValue(EFPEnemySignificanceTier Tier, float Full, float Reduced, float Background)
+	{
+		switch (Tier)
+		{
+		case EFPEnemySignificanceTier::Reduced: return Reduced;
+		case EFPEnemySignificanceTier::Background: return Background;
+		default: return Full;
+		}
+	}
+}
 
 /*
  * 敌人 Pawn 与各子系统之间的桥接层。
@@ -56,7 +70,7 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	Super::BeginPlay();
 
 	//从全局 Benchmark 配置读入诊断开关，缓存成成员变量，避免每帧查配置
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
 	if (BenchmarkConfig.bDisableMovementTiering)
 	{
 		bEnableMovementUpdateTiering = false;
@@ -70,11 +84,8 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	// 动画诊断单独处理；阴影和光追已统一应用到预算 Mesh 集合。
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
-		if (bDisableAnimationOptimizationsForBenchmark)
-		{
-			CharacterMesh->bEnableUpdateRateOptimizations = false;
-			CharacterMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-		}
+		bAuthoredUpdateRateOptimizations = CharacterMesh->bEnableUpdateRateOptimizations;
+		AuthoredAnimTickOption = CharacterMesh->VisibilityBasedAnimTickOption;
 
 		//默认网格仅查询，忽略pawn；移动碰撞由胶囊体完成；WeaponTrace通道 Block
 		CharacterMesh->SetSimulatePhysics(false);
@@ -83,12 +94,13 @@ void AfpstrueEnemyCharacter::BeginPlay()
 		// 射击绕过移动胶囊并命中 Physics Asset，HitResult 才能携带用于部位伤害的 BoneName。
 		CharacterMesh->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Block);
 	}
+	ApplyRenderSignificanceSettings();
 	GetCapsuleComponent()->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Ignore);
 
 	if (HealthComponent != nullptr)
 	{
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
-		HealthComponent->OnDamageReceived.AddUniqueDynamic(this, &AfpstrueEnemyCharacter::HandleDamageReceived);
+		HealthComponent->OnDamageResolved.AddUObject(this, &AfpstrueEnemyCharacter::HandleDamageResolved);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -111,11 +123,12 @@ void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	//先解除动画共享、注销登记、移除委托
 	SuspendAnimationSharing();
 	UnregisterFromSignificanceManager();
+	GetWorldTimerManager().ClearTimer(HitAnimationProtectionTimer);
 
 	if (HealthComponent != nullptr)
 	{
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
-		HealthComponent->OnDamageReceived.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDamageReceived);
+		HealthComponent->OnDamageResolved.RemoveAll(this);
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -159,7 +172,7 @@ AfpstrueCharacter* AfpstrueEnemyCharacter::GetCombatTarget() const
 
 void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
 {
-	// 蓝图动画结束 Notify 进入 C++ 统一收口；没有攻击事务时，重复或迟到的结束回调不会再次结算。
+	// 保留反射符号帮助旧资产给出迁移诊断；无身份的动画回调不再猜测当前攻击。
 	if (CombatComponent != nullptr)
 	{
 		CombatComponent->HandleAttackFinishedNotify();
@@ -175,34 +188,11 @@ void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 		SuspendAnimationSharing();
 	}
 
-	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	// Combat 已先提交攻击阶段；所有组件设置只从当前事实合成，不在入口重复写另一套策略。
+	ApplyGameplaySignificanceIntervals();
+	ApplyRenderSignificanceSettings();
+	if (!bHighPriority)
 	{
-		CharacterMesh->VisibilityBasedAnimTickOption = (bDisableAnimationOptimizationsForBenchmark || bHighPriority)
-														   ? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
-														   : EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
-
-		if (bHighPriority)
-		{
-			CharacterMesh->SetComponentTickInterval(0.0f);
-			if (AppliedMinimumLOD != 0)
-			{
-				CharacterMesh->OverrideMinLOD(0);
-				AppliedMinimumLOD = 0;
-			}
-		}
-	}
-
-	if (bHighPriority)
-	{
-		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
-		{
-			Movement->SetComponentTickInterval(0.0f);
-		}
-	}
-	else
-	{
-		ApplyGameplaySignificanceIntervals();
-		ApplyRenderSignificanceSettings();
 		RefreshAnimationSharingRegistration();
 	}
 }
@@ -212,45 +202,76 @@ void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 float AfpstrueEnemyCharacter::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator,
 										 AActor* DamageCauser)
 {
-	// AActor 伤害入口只补充命中方向/骨骼信息；实际血量写入仍由通用 HealthComponent 通过 OnTakeAnyDamage 完成。
+	// 命中上下文跟随 Health 操作排队；嵌套 B/C 伤害不能互相覆盖延迟使用的方向和骨骼。
+	if (IsDead() || !FMath::IsFinite(DamageAmount) || DamageAmount <= 0.0f)
+	{
+		// 死亡冲量下一帧读取击杀快照，尸体追加命中不能覆盖它。
+		return 0.0f;
+	}
+	// 每次伤害从完整默认快照开始，通用/环境伤害不能沿用上一发的骨骼与命中位置。
+	FFPDamageContext Context;
+	Context.Direction = -GetActorForwardVector();
+	Context.Location = GetActorLocation();
+	Context.bHasHitData = true;
 	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
 	{
 		const FPointDamageEvent* PointDamageEvent = static_cast<const FPointDamageEvent*>(&DamageEvent);
-		LastDamageDirection = PointDamageEvent->ShotDirection.GetSafeNormal();
-		LastDamageLocation = PointDamageEvent->HitInfo.ImpactPoint;
-		LastDamageBoneName = PointDamageEvent->HitInfo.BoneName;
+		Context.Direction = PointDamageEvent->ShotDirection.GetSafeNormal();
+		Context.Location = PointDamageEvent->HitInfo.ImpactPoint;
+		Context.BoneName = PointDamageEvent->HitInfo.BoneName;
 	}
 	else if (DamageCauser != nullptr)
 	{
-		LastDamageDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
-		LastDamageLocation = GetActorLocation();
-		LastDamageBoneName = NAME_None;
+		Context.Direction = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
 	}
 
-	if (LastDamageDirection.IsNearlyZero())
+	if (Context.Direction.IsNearlyZero() || Context.Direction.ContainsNaN())
 	{
-		LastDamageDirection = GetActorForwardVector() * -1.0f;
+		Context.Direction = GetActorForwardVector() * -1.0f;
 	}
 
-	if (LastDamageLocation.IsNearlyZero())
+	if (Context.Location.ContainsNaN())
 	{
-		LastDamageLocation = GetActorLocation();
+		Context.Location = GetActorLocation();
 	}
-
+	if (HealthComponent != nullptr)
+	{
+		auto ContextScope = HealthComponent->ScopeDamageContext(Context);
+		return Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+	}
 	return Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 }
 
-void AfpstrueEnemyCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
+void AfpstrueEnemyCharacter::HandleDamageResolved(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy,
+	const FFPDamageContext& Context)
 {
-	// 受击会刷新战斗保护时间、退出动画共享并触发表现事件；生命扣减已由 HealthComponent 完成。
+	LastAppliedDamage = Context;
+	if (!Context.bHasHitData)
+	{
+		LastAppliedDamage.Direction = -GetActorForwardVector();
+		LastAppliedDamage.Location = GetActorLocation();
+	}
+	// Health 已完成本次扣血；在同一个通知入口消费不可变伤害快照，再恢复战斗动画并触发表现。
 	if (const UWorld* World = GetWorld())
 	{
 		LastCombatRelevantTime = World->GetTimeSeconds();
+		const float Grace = FMath::Max(LastRenderSignificancePolicy.CombatPriorityGraceSeconds, 0.01f);
+		HitAnimationProtectionUntil = LastCombatRelevantTime + Grace;
+		GetWorldTimerManager().SetTimer(HitAnimationProtectionTimer, this,
+			&AfpstrueEnemyCharacter::RefreshHitAnimationProtection, Grace, false);
 	}
-	// 受击表现由原AnimBP/Montage 独立播放；下一次渲染重要性更新会进入 Full 保护期。
+	// 先退出共享并立即恢复必要动画，再发受击表现；不等待下一轮集中采样，也不赠送阴影/光追名额。
 	SuspendAnimationSharing();
+	ApplyRenderSignificanceSettings();
 	ApplyHitReactionImpulse();
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
+}
+
+void AfpstrueEnemyCharacter::RefreshHitAnimationProtection()
+{
+	HitAnimationProtectionUntil = -MAX_flt;
+	ApplyRenderSignificanceSettings();
+	RefreshAnimationSharingRegistration();
 }
 
 void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
@@ -262,7 +283,7 @@ void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
 		return;
 	}
 
-	FVector HitDirection(LastDamageDirection.X, LastDamageDirection.Y, 0.0f);
+	FVector HitDirection(LastAppliedDamage.Direction.X, LastAppliedDamage.Direction.Y, 0.0f);
 	if (!HitDirection.Normalize())
 	{
 		return;
@@ -280,19 +301,20 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	}
 
 	bDeathEffectsApplied = true;
+	DeathDamageContext = LastAppliedDamage;
+	GetWorldTimerManager().ClearTimer(HitAnimationProtectionTimer);
 	// 尸体不再参与存活敌人 Top-K。退出前撤销全部附属 Mesh 资格，避免名额被新敌人复用后超额。
 	RefreshRenderBudgetMeshes();
 	SuspendAnimationSharing();
 	UnregisterFromSignificanceManager();
-	if (CombatComponent != nullptr)
-	{
-		CombatComponent->ResetCombat();
-	}
-	SetAttackAnimationPriority(false);
-
 	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
 	{
+		// StopAI 先禁止新命令，再清理 Combat；不在这里重复结束同一攻击事务。
 		EnemyAIController->StopAI();
+	}
+	else if (CombatComponent != nullptr)
+	{
+		CombatComponent->ResetCombat(); // 未被 AI 接管的角色仍需释放播放和许可。
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -342,14 +364,14 @@ void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 	CharacterMesh->SetEnableGravity(true);
 	CharacterMesh->WakeAllRigidBodies();
 
-	const FVector ImpulseDirection = (LastDamageDirection + FVector::UpVector * DeathImpulseUpwardBias).GetSafeNormal();
+	const FVector ImpulseDirection = (DeathDamageContext.Direction + FVector::UpVector * DeathImpulseUpwardBias).GetSafeNormal();
 	if (ImpulseDirection.IsNearlyZero())
 	{
 		return;
 	}
 
-	CharacterMesh->AddImpulseAtLocation(ImpulseDirection * FMath::Clamp(DeathImpulseStrength, 0.0f, 15000.0f), LastDamageLocation,
-										LastDamageBoneName);
+	CharacterMesh->AddImpulseAtLocation(ImpulseDirection * FMath::Clamp(DeathImpulseStrength, 0.0f, 15000.0f), DeathDamageContext.Location,
+										DeathDamageContext.BoneName);
 }
 
 // ==================== Gameplay Significance：目标距离与交互状态 ====================
@@ -448,22 +470,8 @@ void AfpstrueEnemyCharacter::ApplySignificanceTier(EFPEnemySignificanceTier NewT
 
 	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
 	{
-		float DecisionMultiplier = 1.0f;
-		switch (SignificanceTier)
-		{
-		case EFPEnemySignificanceTier::Reduced:
-			DecisionMultiplier = ReducedDecisionIntervalMultiplier;
-			break;
-
-		case EFPEnemySignificanceTier::Background:
-			DecisionMultiplier = BackgroundDecisionIntervalMultiplier;
-			break;
-
-		case EFPEnemySignificanceTier::Full:
-		default:
-			break;
-		}
-		EnemyAIController->SetSignificanceDecisionMultiplier(DecisionMultiplier);
+		EnemyAIController->SetSignificanceDecisionMultiplier(
+			GameplayTierValue(SignificanceTier, 1.0f, ReducedDecisionIntervalMultiplier, BackgroundDecisionIntervalMultiplier));
 	}
 }
 
@@ -478,20 +486,7 @@ void AfpstrueEnemyCharacter::ApplyGameplaySignificanceIntervals()
 	float MovementTickInterval = 0.0f;
 	if (!IsAttacking() && bEnableMovementUpdateTiering)
 	{
-		switch (SignificanceTier)
-		{
-		case EFPEnemySignificanceTier::Reduced:
-			MovementTickInterval = MidRateMovementTickInterval;
-			break;
-
-		case EFPEnemySignificanceTier::Background:
-			MovementTickInterval = FarRateMovementTickInterval;
-			break;
-
-		case EFPEnemySignificanceTier::Full:
-		default:
-			break;
-		}
+		MovementTickInterval = GameplayTierValue(SignificanceTier, 0.0f, MidRateMovementTickInterval, FarRateMovementTickInterval);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -697,8 +692,9 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceTier(EFPEnemyRenderSignifica
 
 void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 {
-	// 攻击和战斗保护优先于性能档：此时动画 Tick 与 LOD 恢复完整，阴影/RT 仍遵循各自独立预算。
-	if (IsDead() || !bHasRenderSignificancePolicy)
+	// 唯一动画设置入口：合成攻击/受击保护、资产默认值和预算策略。
+	// MinLOD=0 只解除最低精度限制，不强制实际选择 LOD0；命中骨骼仍须在资产中保留。
+	if (IsDead())
 	{
 		return;
 	}
@@ -711,8 +707,13 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 
 	float AnimationTickInterval = 0.0f;
 	int32 RequestedMinLOD = LastRenderSignificancePolicy.FullMinLOD;
-	const bool bUseFullAnimationAndLOD = IsAttacking() || bGameplayAnimationProtection;
-	if (!bUseFullAnimationAndLOD && LastRenderSignificancePolicy.bEnableRenderTiering)
+	const bool bHitProtected = GetWorld() != nullptr && GetWorld()->GetTimeSeconds() < HitAnimationProtectionUntil;
+	const bool bUseFullAnimationAndLOD = IsAttacking() || bGameplayAnimationProtection || bHitProtected;
+	const bool bRefreshCombatPose = bUseFullAnimationAndLOD || bDisableAnimationOptimizationsForBenchmark;
+	CharacterMesh->VisibilityBasedAnimTickOption = bRefreshCombatPose
+		? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones : AuthoredAnimTickOption;
+	CharacterMesh->bEnableUpdateRateOptimizations = bAuthoredUpdateRateOptimizations && !bRefreshCombatPose;
+	if (!bUseFullAnimationAndLOD && bHasRenderSignificancePolicy && LastRenderSignificancePolicy.bEnableRenderTiering)
 	{
 		switch (RenderSignificanceTier)
 		{
@@ -732,9 +733,17 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 		}
 	}
 
-	CharacterMesh->SetComponentTickInterval(
-		bDisableAnimationOptimizationsForBenchmark || !LastRenderSignificancePolicy.bEnableAnimationTickTiering ? 0.0f
-																												: AnimationTickInterval);
+	const float TargetInterval = bDisableAnimationOptimizationsForBenchmark || !LastRenderSignificancePolicy.bEnableAnimationTickTiering
+		? 0.0f : AnimationTickInterval;
+	if (TargetInterval == 0.0f && CharacterMesh->GetComponentTickInterval() > 0.0f)
+	{
+		// 仅改 TickInterval 不会撤销已排入的冷却；战斗提升要让下一可用帧真正更新。
+		CharacterMesh->SetComponentTickIntervalAndCooldown(0.0f);
+	}
+	else
+	{
+		CharacterMesh->SetComponentTickInterval(TargetInterval);
+	}
 
 	if (!LastRenderSignificancePolicy.bEnableSkeletalLOD || bUseFullAnimationAndLOD)
 	{
@@ -742,7 +751,7 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 	}
 	const int32 LODCount = FMath::Max(CharacterMesh->GetNumLODs(), 1);
 	const int32 SafeMinLOD = FMath::Clamp(RequestedMinLOD, 0, LODCount - 1);
-	if (AppliedMinimumLOD != SafeMinLOD)
+	if ((bHasRenderSignificancePolicy || bUseFullAnimationAndLOD) && AppliedMinimumLOD != SafeMinLOD)
 	{
 		CharacterMesh->OverrideMinLOD(SafeMinLOD);
 		AppliedMinimumLOD = SafeMinLOD;
@@ -822,6 +831,23 @@ void AfpstrueEnemyCharacter::GetRenderBudgetMeshCounts(int32& OutMeshes, int32& 
 			++OutMeshes;
 			OutShadowMeshes += BudgetMesh->CastShadow ? 1 : 0;
 			OutRayTracingMeshes += BudgetMesh->bVisibleInRayTracing ? 1 : 0;
+		}
+	}
+}
+
+void AfpstrueEnemyCharacter::GetRenderBudgetEligibility(bool& bOutShadow, bool& bOutRayTracing) const
+{
+	bOutShadow = bOutRayTracing = false;
+	if (IsDead())
+	{
+		return;
+	}
+	for (const FRenderBudgetMesh& Entry : RenderBudgetMeshes)
+	{
+		if (Entry.Mesh.IsValid())
+		{
+			bOutShadow |= Entry.bAuthoredShadow && !bDisableEnemyShadowsForBenchmark;
+			bOutRayTracing |= Entry.bAuthoredRayTracing && !bDisableEnemyRayTracingForBenchmark;
 		}
 	}
 }

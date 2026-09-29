@@ -106,6 +106,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Shared Target", meta = (ClampMin = "25.0"))
 	float SharedTargetMoveThreshold = 200.0f;
 
+	// 位移阈值负责合并频繁变化，最大年龄负责让“小幅移动后停住”最终刷新。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Shared Target", meta = (ClampMin = "0.05"))
+	float SharedTargetMaxAge = 0.5f;
+
+	// 导航尚未生成或某些接近点投影失败时，静止目标也需要低频重试。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Navigation", meta = (ClampMin = "0.05"))
+	float NavigationRetryInterval = 0.5f;
+	// 成功投影也会过期：动态障碍/NavMesh 重建时，静止玩家不能永久复用旧接近点。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Navigation", meta = (ClampMin = "0.05"))
+	float NavigationCacheMaxAge = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Debug")
 	bool bDrawDebugSlots = false;
 
@@ -113,6 +124,7 @@ protected:
 	float DebugDrawInterval = 0.25f;
 
 private:
+	friend class FFpstrueSurroundCacheLifecycleTest;
 	// 根据内外环配置创建稳定槽位布局。
 	void BuildSlots();
 	// Timer 回调：按阈值刷新共享目标位置。
@@ -138,6 +150,10 @@ private:
 
 	FVector CachedTargetLocation = FVector::ZeroVector;
 	bool bHasSharedTargetSnapshot = false;
+	bool bNeedsNavigationRetry = false;
+	double SharedTargetSnapshotTime = 0.0;
+	double NextNavigationRetryTime = 0.0;
+	double NavigationCacheTime = 0.0;
 
 	// 语法复习：TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
 	TArray<FfpstrueSurroundSlot> SurroundSlots;

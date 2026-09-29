@@ -1,23 +1,22 @@
 param(
-    [int[]]$Counts = @(20, 50, 100, 160),
-    [int]$RunsPerCase = 3,
-    [double]$WarmupSeconds = 15,
-    [double]$DurationSeconds = 30,
-    [Nullable[double]]$ScreenPercentage = $null,
-    [double]$PlayerHealth = 1000000,
-    [int]$BenchmarkSeed = 1337,
-    [ValidateSet("Baseline", "EnemyRayTracingOff", "EnemyShadowsOff", "OcclusionQueriesOn", "OcclusionQueriesOff", "HardwareQueries", "HZBOcclusion", "BufferedQueries2", "LumenReflectionsDS2", "LumenScreenProbeDS32", "OriginalRenderPolicy", "OptimizedRenderPolicy", "TSRHistory200", "TSRHistory150", "SplineRayTracingOn", "SplineRayTracingOff")]
-    [string[]]$VariantNames = @("Baseline", "EnemyRayTracingOff", "EnemyShadowsOff"),
+    [int[]]$Counts,
+    [int]$RunsPerCase,
+    [double]$WarmupSeconds,
+    [double]$DurationSeconds,
+    [Nullable[double]]$ScreenPercentage,
+    [double]$PlayerHealth,
+    [int]$BenchmarkSeed,
+    [string[]]$VariantNames,
     [ValidateSet("Any", "RVO", "DetourCrowd")]
-    [string]$ExpectedAvoidanceMode = "Any",
+    [string]$ExpectedAvoidanceMode,
     [switch]$CaptureTaskTrace,
     [switch]$BalancedVariantOrder,
-    [double]$StartTrimSeconds = 0,
-    [double]$EndTrimSeconds = 0,
+    [double]$StartTrimSeconds,
+    [double]$EndTrimSeconds,
     [string]$RunName = "",
     [string]$ProjectRoot = "",
-    [string]$EditorPath = "E:\program\ue554\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe",
-    [string]$Map = "/Game/FactoryDistrict/Maps/Demonstration",
+    [string]$EditorPath = "",
+    [string]$Map,
     [string]$DdcPath = "",
     [string]$ConfigFile = "",
     [Alias("DryRun")]
@@ -38,7 +37,9 @@ foreach ($Name in $RenderCostConfigParameters) {
         $ParameterSources[$Name] = "ConfigFile"
     }
     if ($PSBoundParameters.ContainsKey($Name)) { $ParameterSources[$Name] = "CommandLine" }
+    if ($ParameterSources[$Name] -eq "Default") { Set-Variable -Name $Name -Value $RenderCostCatalog.Defaults[$Name] }
 }
+if (-not $PSBoundParameters.ContainsKey('EditorPath')) { $EditorPath = $RenderCostCatalog.Capture.EditorPath }
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path $PSScriptRoot -Parent
@@ -74,39 +75,16 @@ if ($StartTrimSeconds -lt 0 -or $EndTrimSeconds -lt 0 -or
     throw "Summary edge trimming must leave a positive capture interval."
 }
 
-$TsrControlExec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2,r.Lumen.Reflections.DownsampleFactor 2,r.Lumen.ScreenProbeGather.DownsampleFactor 16"
-$VariantCatalog = @(
-    [PSCustomObject]@{ Name = "Baseline"; Switch = ""; Exec = "" },
-    [PSCustomObject]@{ Name = "EnemyRayTracingOff"; Switch = "-BenchmarkEnemyRayTracingOff"; Exec = "" },
-    [PSCustomObject]@{ Name = "EnemyShadowsOff"; Switch = "-BenchmarkEnemyShadowsOff"; Exec = "" },
-    # Process-local diagnosis only. Disabling culling may INCREASE draw/GPU costs;
-    # this isolates the query dependency, not an approved production optimization.
-    [PSCustomObject]@{ Name = "OcclusionQueriesOn"; Switch = ""; Exec = "r.AllowOcclusionQueries 1" },
-    [PSCustomObject]@{ Name = "OcclusionQueriesOff"; Switch = ""; Exec = "r.AllowOcclusionQueries 0" },
-    # Keep occlusion enabled in all three candidates. Each differs from the explicit
-    # hardware control by ONE policy value; do not combine HZB and buffering changes.
-    [PSCustomObject]@{ Name = "HardwareQueries"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 1" },
-    [PSCustomObject]@{ Name = "HZBOcclusion"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 1,r.NumBufferedOcclusionQueries 1" },
-    [PSCustomObject]@{ Name = "BufferedQueries2"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2" },
-    # GPU screening candidates. Each changes one sampling density and is
-    # validated from the final echoed CVar before the run can be accepted.
-    [PSCustomObject]@{ Name = "LumenReflectionsDS2"; Switch = ""; Exec = "r.Lumen.Reflections.DownsampleFactor 2" },
-    [PSCustomObject]@{ Name = "LumenScreenProbeDS32"; Switch = ""; Exec = "r.Lumen.ScreenProbeGather.DownsampleFactor 32" },
-    # Final interaction check: explicit values make this A/B independent of
-    # project defaults before the winning pair is committed to DefaultEngine.ini.
-    [PSCustomObject]@{ Name = "OriginalRenderPolicy"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 1,r.Lumen.Reflections.DownsampleFactor 1" },
-    [PSCustomObject]@{ Name = "OptimizedRenderPolicy"; Switch = ""; Exec = "r.AllowOcclusionQueries 1,r.HZBOcclusion 0,r.NumBufferedOcclusionQueries 2,r.Lumen.Reflections.DownsampleFactor 2" }
-    # Isolate the TSR history resolution while keeping the current query/Lumen policy fixed.
-    [PSCustomObject]@{ Name = "TSRHistory200"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 200" },
-    [PSCustomObject]@{ Name = "TSRHistory150"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 150" }
-    # Diagnostic only: removing spline geometry from ray tracing is not the final fix.
-    # A separate process restores the explicit On control; no defaults/assets change.
-    [PSCustomObject]@{ Name = "SplineRayTracingOn"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 200,r.RayTracing.Geometry.SplineMeshes 1" },
-    [PSCustomObject]@{ Name = "SplineRayTracingOff"; Switch = ""; Exec = "$TsrControlExec,r.TSR.History.ScreenPercentage 200,r.RayTracing.Geometry.SplineMeshes 0" }
-)
-$Variants = @($VariantCatalog | Where-Object { $VariantNames -contains $_.Name })
-if ($Variants.Count -eq 0) {
+# The catalog is the only source of supported names, launch values and readback requirements.
+if ($VariantNames.Count -eq 0) {
     throw "VariantNames did not select any supported test variant."
+}
+if (@($VariantNames | Where-Object { $RenderCostVariantNames -notcontains $_ }).Count -gt 0) {
+    throw "VariantNames contains unsupported test variants."
+}
+$Variants = @($RenderCostCatalog.Variants | Where-Object { $VariantNames -contains $_.Name })
+if ($null -ne $ScreenPercentage -and @($Variants | Where-Object { $_.RequireDefaultResolution }).Count -gt 0) {
+    throw "Selected variants require the default internal resolution; do not also override ScreenPercentage."
 }
 
 # CLI maps may include an object name or travel options; the fingerprint identifies the package file.
@@ -120,7 +98,13 @@ $ResolvedSettings = [ordered]@{}
 foreach ($Name in $RenderCostConfigParameters) { $ResolvedSettings[$Name] = (Get-Variable -Name $Name).Value }
 $ResolvedSettings.CaptureTaskTrace = [bool]$CaptureTaskTrace
 $ResolvedSettings.BalancedVariantOrder = [bool]$BalancedVariantOrder
-$ExperimentConfiguration = [PSCustomObject]@{ SchemaVersion = 1; Settings = $ResolvedSettings; Sources = $ParameterSources; InputConfig = $InputConfig }
+$ExperimentConfiguration = [PSCustomObject]@{
+    SchemaVersion = 1; Settings = $ResolvedSettings; Sources = $ParameterSources; InputConfig = $InputConfig
+    CatalogPath = $RenderCostCatalogPath; Capture = $RenderCostCatalog.Capture
+    Cases = @($Variants | ForEach-Object {
+        [PSCustomObject]@{ Definition = $_; ExecCmds = Get-RenderCostExecCommands $_ $ScreenPercentage }
+    })
+}
 if ($ValidateOnly) {
     # A configuration report only: no UE/process queries or Saved/Profiling output.
     [PSCustomObject]@{ Mode = "ValidateOnly"; Configuration = $ExperimentConfiguration } | ConvertTo-Json -Depth 8
@@ -140,9 +124,10 @@ if (-not (Test-Path -LiteralPath $MapFile -PathType Leaf)) {
 
 # Observe only; even engine-owned shader workers invalidate a clean timing run.
 # Never terminate another project, an Insights session, or a worker process.
-$ConflictingProcessNames = @("UnrealEditor", "UnrealEditor-Cmd", "UnrealInsights", "Insights", "ShaderCompileWorker", "UnrealLightmass")
-$IsolationPollMilliseconds = 750
-$RunTimeoutSeconds = [Math]::Max(300.0, $WarmupSeconds + $DurationSeconds + 180.0)
+$ConflictingProcessNames = $RenderCostCatalog.Capture.ConflictingProcessNames
+$IsolationPollMilliseconds = $RenderCostCatalog.Capture.IsolationPollMilliseconds
+$RunTimeoutSeconds = [Math]::Max($RenderCostCatalog.Capture.MinimumTimeoutSeconds,
+    $WarmupSeconds + $DurationSeconds + $RenderCostCatalog.Capture.TimeoutSlackSeconds)
 function Get-IsolationObservation {
     param([int]$OwnedProcessId = 0, [string]$Phase)
     $Conflicts = @(Get-Process -Name $ConflictingProcessNames -ErrorAction SilentlyContinue |
@@ -158,7 +143,6 @@ if (Test-Path -LiteralPath $EvidenceRoot) {
 $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
-$ExecCmds = "r.RayTracing.ForceAllRayTracingEffects -1,r.RayTracing.Geometry.SkeletalMeshes 1"
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
@@ -170,20 +154,17 @@ $FingerprintPaths = @(
     $MapFile,
     (Join-Path $ProjectRoot "Config\DefaultEngine.ini"),
     (Join-Path $ProjectRoot "Config\DefaultGame.ini"),
-    (Join-Path $ProjectRoot "Config\DefaultScalability.ini")
+    (Join-Path $ProjectRoot "Config\DefaultScalability.ini"),
+    $PSCommandPath,
+    (Join-Path $PSScriptRoot "ReadRenderCostConfig.ps1"),
+    $RenderCostCatalogPath
+    if ($null -ne $InputConfig) { $InputConfig.Path }
 ) | Where-Object { Test-Path -LiteralPath $_ }
 function Get-ExperimentFingerprint {
     @($FingerprintPaths | ForEach-Object {
         $Item = Get-Item -LiteralPath $_
         [PSCustomObject]@{ Path = $Item.FullName; Length = $Item.Length; SHA256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }
     })
-}
-function Get-CVarValue {
-    param([string]$Text, [string]$Name)
-    $Pattern = '(?im)' + [regex]::Escape($Name) + '\s*=\s*"?([^"\s]+)"?'
-    $MatchesFound = [regex]::Matches($Text, $Pattern)
-    if ($MatchesFound.Count -eq 0) { return $null }
-    return $MatchesFound[$MatchesFound.Count - 1].Groups[1].Value
 }
 $InitialFingerprint = @(Get-ExperimentFingerprint)
 $GpuCommand = Get-Command nvidia-smi -ErrorAction SilentlyContinue
@@ -198,7 +179,10 @@ $GameUserSettingsSnapshot = if (Test-Path -LiteralPath $GameUserSettingsPath) {
     [PSCustomObject]@{
         Path = $GameUserSettingsPath
         SHA256 = (Get-FileHash -LiteralPath $GameUserSettingsPath -Algorithm SHA256).Hash
-        Content = Get-Content -LiteralPath $GameUserSettingsPath -Raw
+        # Get-Content attaches provider metadata to its string in Windows PowerShell 5.1.
+        # Serializing that extended string can walk PSDrive/Provider object graphs.
+        # Read plain text so the audit contains only the INI, not filesystem objects.
+        Content = [IO.File]::ReadAllText($GameUserSettingsPath)
     }
 } else { $null }
 $EnvironmentRecord = [ordered]@{
@@ -206,7 +190,7 @@ $EnvironmentRecord = [ordered]@{
     ExperimentConfiguration = $ExperimentConfiguration
     EditorPath = $EditorPath
     Map = $Map
-    Resolution = "1600x900"
+    Resolution = "{0}x{1}" -f $RenderCostCatalog.Capture.Width, $RenderCostCatalog.Capture.Height
     NoVSync = $true
     RequestedScreenPercentage = $ScreenPercentage
     GameUserSettings = $GameUserSettingsSnapshot
@@ -224,7 +208,7 @@ $EnvironmentRecord = [ordered]@{
     RunTimeoutSeconds = $RunTimeoutSeconds
     Note = "GPU snapshots are boundary observations, not continuous thermal stability proof. Default input hashes are checked around each run."
 }
-$EnvironmentRecord | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $EvidenceRoot "environment.json") -Encoding UTF8
+$EnvironmentRecord | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $EvidenceRoot "environment.json") -Encoding UTF8
 $ManifestRows = @()
 $OrderRandom = [System.Random]::new($BenchmarkSeed)
 $BalancedVariants = @($Variants | Sort-Object { $OrderRandom.Next() })
@@ -251,26 +235,14 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
             $StartedAt = Get-Date
             $LogName = "Benchmark_{0}_{1}.log" -f $RunName, $RunId
             $TraceDestination = if ($CaptureTaskTrace) { Join-Path $RunRoot "$RunId.utrace" } else { "" }
-            $RunExecCmds = $ExecCmds
-            if (-not [string]::IsNullOrWhiteSpace($Variant.Exec)) {
-                $RunExecCmds += ",$($Variant.Exec)"
-            }
-            if ($null -ne $ScreenPercentage) {
-                $RunExecCmds += ",r.ScreenPercentage " + ([double]$ScreenPercentage).ToString("R", [Globalization.CultureInfo]::InvariantCulture)
-            }
-            # Read actual runtime values after applying overrides. The plain
-            # Baseline variant only queries these values, allowing a default probe.
-            $RunExecCmds += ",r.AllowOcclusionQueries,r.HZBOcclusion,r.NumBufferedOcclusionQueries"
-            $RunExecCmds += ",r.Lumen.Reflections.DownsampleFactor,r.Lumen.ScreenProbeGather.DownsampleFactor,r.TSR.History.ScreenPercentage"
-            $RunExecCmds += ",r.RayTracing.Geometry.SplineMeshes"
-            $RunExecCmds += ",r.ScreenPercentage,r.DynamicRes.OperationMode,r.DynamicRes.TestScreenPercentage,t.MaxFPS,r.VSync,sg.ResolutionQuality"
+            $RunExecCmds = Get-RenderCostExecCommands $Variant $ScreenPercentage
             $Arguments = @(
                 $Project,
                 $Map,
                 "-game",
                 "-windowed",
-                "-ResX=1600",
-                "-ResY=900",
+                "-ResX=$($RenderCostCatalog.Capture.Width)",
+                "-ResY=$($RenderCostCatalog.Capture.Height)",
                 "-NoVSync",
                 "-NoSplash",
                 "-NoLiveCoding",
@@ -297,7 +269,7 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                 # Enable task lifecycle recording before warmup so cross-boundary dependencies have IDs.
                 # The existing Runner starts the file and capture region after warmup. Named events
                 # expose renderer wait/dispatch scopes; traced timings are diagnostic, not baseline replacements.
-                $Arguments += "-trace=cpu,gpu,frame,bookmark,task,stats,region,counters"
+                $Arguments += "-trace=$($RenderCostCatalog.Capture.TraceChannels)"
                 $Arguments += "-statnamedevents"
                 $Arguments += "-BenchmarkTraceFile=$TraceDestination"
             }
@@ -398,7 +370,7 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                     TimedOut = $TimedOut
                     RunError = $RunError
                     Observations = $IsolationObservations.ToArray()
-                    Note = "750 ms process snapshots can miss shorter overlaps; shader workers are conservatively treated as contamination."
+                    Note = "$IsolationPollMilliseconds ms process snapshots can miss shorter overlaps; shader workers are conservatively treated as contamination."
                 } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $IsolationAuditPath -Encoding UTF8
             }
             # Close the retained process handle, then let Windows remove this exact
@@ -476,9 +448,11 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
             $PlayerHealthAtEnd = if ($EndMatch.Success) { [double]$EndMatch.Groups[3].Value } else { 0.0 }
             $ShadowCastersAtStart = if ($SnapshotMatch.Success) { [int]$SnapshotMatch.Groups[1].Value } else { -1 }
             $RayTracingVisibleAtStart = if ($SnapshotMatch.Success) { [int]$SnapshotMatch.Groups[2].Value } else { -1 }
-            $StrictCandidate = $Count -gt 0 -and $Variant.Name -in @("HardwareQueries", "BufferedQueries2", "OriginalRenderPolicy", "OptimizedRenderPolicy", "TSRHistory200", "TSRHistory150")
-            $CandidateConsumersValid = -not $StrictCandidate -or
-                ($ShadowCastersAtStart -eq 5 -and $RayTracingVisibleAtStart -eq 12)
+            $VariantValidation = Test-RenderCostVariant $Variant $LogText $Count $ShadowCastersAtStart $RayTracingVisibleAtStart
+            $CandidateConsumersValid = $VariantValidation.ConsumersValid
+            $CandidateConfigurationValid = $VariantValidation.ConfigurationValid
+            $ConsumerOverrideValid = $VariantValidation.ConsumerOverrideValid
+            $OcclusionOverrideValid = $VariantValidation.OcclusionOverrideValid
             $SpawnFailures = ($LogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
             $ReadyMarker = "Automated benchmark ready: requested=$Count alive=$Count"
             $ReadyLineIndex = -1
@@ -501,9 +475,6 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
             $VSMQueueOverflows = ($LogLines | Select-String -SimpleMatch "Non-Nanite Marking Job Queue overflow").Count
             $TexturePoolWarnings = ($LogLines | Select-String -Pattern "Texture streaming pool.*over budget").Count
             $RenderWarningsValid = $PostReadySpawnFailures -eq 0 -and $VSMQueueOverflows -eq 0 -and $TexturePoolWarnings -eq 0
-            $ConsumerOverrideValid =
-                ($Variant.Name -ne "EnemyRayTracingOff" -or $RayTracingVisibleAtStart -eq 0) -and
-                ($Variant.Name -ne "EnemyShadowsOff" -or $ShadowCastersAtStart -eq 0)
             $AllowOcclusionValue = Get-CVarValue $LogText "r.AllowOcclusionQueries"
             $HZBValue = Get-CVarValue $LogText "r.HZBOcclusion"
             $BufferedQueryValue = Get-CVarValue $LogText "r.NumBufferedOcclusionQueries"
@@ -538,43 +509,7 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
                     [double]::TryParse($ResolutionQualityValue, $NumberStyle, $NumberCulture, [ref]$ActualResolutionQuality) -and
                     -not [double]::IsNaN($ActualResolutionQuality) -and -not [double]::IsInfinity($ActualResolutionQuality)
             }
-            # Validate and record the same final echoed value; an earlier matching
-            # value must not make a later conflicting override appear valid.
-            $OcclusionOverrideValid =
-                ($Variant.Name -ne "OcclusionQueriesOn" -or $AllowOcclusionValue -in @("1", "true")) -and
-                ($Variant.Name -ne "OcclusionQueriesOff" -or $AllowOcclusionValue -in @("0", "false"))
-            $CandidateConfigurationValid = $true
-            if ($Variant.Name -in @("HardwareQueries", "HZBOcclusion", "BufferedQueries2", "OriginalRenderPolicy", "OptimizedRenderPolicy")) {
-                $ExpectedHZB = if ($Variant.Name -eq "HZBOcclusion") { "1" } else { "0" }
-                $ExpectedBuffer = if ($Variant.Name -in @("BufferedQueries2", "OptimizedRenderPolicy")) { "2" } else { "1" }
-                $CandidateConfigurationValid = $AllowOcclusionValue -in @("1", "true") -and
-                    $HZBValue -eq $ExpectedHZB -and $BufferedQueryValue -eq $ExpectedBuffer
-            }
-            if ($Variant.Name -eq "LumenReflectionsDS2") {
-                $CandidateConfigurationValid = $LumenReflectionDownsampleValue -eq "2"
-            } elseif ($Variant.Name -eq "LumenScreenProbeDS32") {
-                $CandidateConfigurationValid = $LumenScreenProbeDownsampleValue -eq "32"
-            } elseif ($Variant.Name -in @("OriginalRenderPolicy", "OptimizedRenderPolicy")) {
-                $ExpectedReflectionDownsample = if ($Variant.Name -eq "OptimizedRenderPolicy") { "2" } else { "1" }
-                $CandidateConfigurationValid = $CandidateConfigurationValid -and
-                    $LumenReflectionDownsampleValue -eq $ExpectedReflectionDownsample
-            } elseif ($Variant.Name -in @("TSRHistory200", "TSRHistory150")) {
-                $ExpectedTsrHistory = if ($Variant.Name -eq "TSRHistory200") { "200" } else { "150" }
-                $CandidateConfigurationValid = $AllowOcclusionValue -in @("1", "true") -and
-                    $HZBValue -eq "0" -and $BufferedQueryValue -eq "2" -and
-                    $LumenReflectionDownsampleValue -eq "2" -and $LumenScreenProbeDownsampleValue -eq "16" -and
-                    $TsrHistoryScreenPercentageValue -eq $ExpectedTsrHistory -and
-                    $ScreenPercentageValue -eq "0" -and $DynamicResolutionValue -eq "0"
-            }
             $AvoidanceEnemies = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[1].Value } else { -1 }
-            if ($Variant.Name -in @("SplineRayTracingOn", "SplineRayTracingOff")) {
-                $ExpectedSpline = if ($Variant.Name -eq "SplineRayTracingOff") { "0" } else { "1" }
-                $CandidateConfigurationValid = $AllowOcclusionValue -in @("1", "true") -and
-                    $HZBValue -eq "0" -and $BufferedQueryValue -eq "2" -and
-                    $LumenReflectionDownsampleValue -eq "2" -and $LumenScreenProbeDownsampleValue -eq "16" -and
-                    $TsrHistoryScreenPercentageValue -eq "200" -and $SplineRayTracingValue -eq $ExpectedSpline -and
-                    $ScreenPercentageValue -eq "0" -and $DynamicResolutionValue -eq "0"
-            }
             $RVOEnabled = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[2].Value } else { -1 }
             $CrowdFollowing = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[3].Value } else { -1 }
             $CrowdValid = if ($AvoidanceMatch.Success) { [int]$AvoidanceMatch.Groups[4].Value } else { -1 }

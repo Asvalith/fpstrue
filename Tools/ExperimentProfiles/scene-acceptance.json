@@ -1,0 +1,11 @@
+{
+  "SchemaVersion": 1,
+  "Counts": [0, 160],
+  "RunsPerCase": 1,
+  "WarmupSeconds": 20,
+  "DurationSeconds": 180,
+  "VariantNames": ["Baseline"],
+  "CaptureTaskTrace": false,
+  "ScreenPercentage": null,
+  "Map": "/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked"
+}

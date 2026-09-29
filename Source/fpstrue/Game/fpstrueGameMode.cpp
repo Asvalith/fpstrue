@@ -1,14 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Game/fpstrueGameMode.h"
-#include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.h"
-#include "Testing/Benchmarks/fpstruePerformanceStats.h"
+#include "Runtime/fpstruePerformanceStats.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/TargetPoint.h"
@@ -84,7 +83,7 @@ void AfpstrueGameMode::StartGameMode()
 	}
 	for (int32 Wave = 1; Wave <= ConfiguredWaveCount; ++Wave)
 	{
-		if (!GetEnemyClassForWave(Wave))
+		if (!GetWaveConfig(Wave).EnemyClass)
 		{
 			UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: EnemyClass is not configured for wave %d."), Wave);
 			FinishGame(false);
@@ -93,7 +92,8 @@ void AfpstrueGameMode::StartGameMode()
 	}
 
 	// 世界配置：先收集，再校验；后续波次只复用缓存，不为每只敌人遍历世界。
-	CacheSpawnPoints();
+	SpawnPoints.Reset();
+	UGameplayStatics::GetAllActorsOfClassWithTag(this, ATargetPoint::StaticClass(), EnemySpawnTag, SpawnPoints);
 	if (SpawnPoints.IsEmpty())
 	{
 		UE_LOG(LogTemp, Error, TEXT("StartGameMode failed: no TargetPoint has the tag '%s'."), *EnemySpawnTag.ToString());
@@ -156,7 +156,7 @@ void AfpstrueGameMode::StartGameMode()
 	// 共享管理器必须在首个敌人生成前就绪；敌人实际是否加入仍由 Render Significance 决定。
 	if (EnemyAnimationSharingCoordinator != nullptr)
 	{
-		EnemyAnimationSharingCoordinator->Start(GetEnemyClassForWave(1));
+		EnemyAnimationSharingCoordinator->Start(GetWaveConfig(1).EnemyClass);
 	}
 	if (EnemySignificanceCoordinator != nullptr)
 	{
@@ -183,14 +183,6 @@ void AfpstrueGameMode::StartGameMode()
 }
 
 // ==================== 波次、生成与共享场景资源 ====================
-// 收集关卡中带 EnemySpawnTag 的 TargetPoint，后续波次只复用缓存，避免每只敌人遍历世界。
-void AfpstrueGameMode::CacheSpawnPoints()
-{
-	//一次性收集带 EnemySpawnTag 的 TargetPoint，后续波次只复用缓存，避免每只敌人遍历世界。
-	SpawnPoints.Reset();
-	UGameplayStatics::GetAllActorsOfClassWithTag(this, ATargetPoint::StaticClass(), EnemySpawnTag, SpawnPoints);
-}
-
 //创建群体管理器并注入当前玩家角色；若已存在有效实例则直接注入目标并返回成功，避免重复创建。
 bool AfpstrueGameMode::CreateSurroundManager()
 {
@@ -225,8 +217,7 @@ bool AfpstrueGameMode::CreateSurroundManager()
 int32 AfpstrueGameMode::GetConfiguredWaveCount() const
 {
 	// 自动压测固定为一个指定规模波次；正常游戏先读外部资产，未指定资产时才读旧 WaveConfigs（压测直接一波生成）。
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
-	if (BenchmarkConfig.HasEnemyCountOverride())
+	if (BenchmarkEnemyCountOverride != INDEX_NONE)
 	{
 		return 1;
 	}
@@ -238,42 +229,31 @@ int32 AfpstrueGameMode::GetConfiguredWaveCount() const
 	return WaveConfigs.IsEmpty() ? TotalWaves : WaveConfigs.Num();
 }
 
-// 第 N 波敌人数量查询；旧蓝图未配置显式波次时使用 Base + (N - 1) * Added。
-int32 AfpstrueGameMode::GetEnemyCountForWave(int32 WaveNumber) const
+FfpstrueWaveConfig AfpstrueGameMode::GetWaveConfig(int32 WaveNumber) const
 {
-	// 将基准覆盖、数据化波次和旧式线性增长三种来源收口成一个敌人数查询入口。
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
-	if (BenchmarkConfig.HasEnemyCountOverride())
-	{
-		return BenchmarkConfig.EnemyCount;
-	}
-
+	// 类型与数量成对解析，避免两个查询各自选择数据源。只在没有资产时支持旧式线性增长。
 	const int32 WaveIndex = WaveNumber - 1;
 	const TArray<FfpstrueWaveConfig>& Waves = WaveConfiguration != nullptr ? WaveConfiguration->Waves : WaveConfigs;
+	FfpstrueWaveConfig Wave;
 	if (Waves.IsValidIndex(WaveIndex))
 	{
-		return FMath::Max(Waves[WaveIndex].EnemyCount, 1);
+		Wave = Waves[WaveIndex];
+		Wave.EnemyCount = FMath::Max(Wave.EnemyCount, 1);
 	}
-
-	return WaveConfiguration != nullptr ? 0 : BaseEnemiesPerWave + WaveIndex * EnemiesAddedPerWave;
-}
-
-// 波次专用敌人类只回退到当前配置来源的默认类，不跨资产与旧蓝图混用。
-TSubclassOf<AfpstrueEnemyCharacter> AfpstrueGameMode::GetEnemyClassForWave(int32 WaveNumber) const
-{
-	// 当前波次有专用敌人类时使用专用配置，否则回退到默认 EnemyClass。
-	const int32 WaveIndex = WaveNumber - 1;
-	const TArray<FfpstrueWaveConfig>& Waves = WaveConfiguration != nullptr ? WaveConfiguration->Waves : WaveConfigs;
-	if (Waves.IsValidIndex(WaveIndex) && Waves[WaveIndex].EnemyClass)
+	else
 	{
-		return Waves[WaveIndex].EnemyClass;
+		Wave.EnemyCount = WaveConfiguration != nullptr ? 0 : BaseEnemiesPerWave + WaveIndex * EnemiesAddedPerWave;
 	}
-	if (WaveConfiguration != nullptr && !Waves.IsValidIndex(WaveIndex))
+	// 无效资产波次连默认类也不取，开局校验才能报告缺项，而不是生成另一套配置。
+	if (!Wave.EnemyClass && (WaveConfiguration == nullptr || Waves.IsValidIndex(WaveIndex)))
 	{
-		return nullptr;
+		Wave.EnemyClass = WaveConfiguration != nullptr ? WaveConfiguration->DefaultEnemyClass : EnemyClass;
 	}
-
-	return WaveConfiguration != nullptr ? WaveConfiguration->DefaultEnemyClass : EnemyClass;
+	if (BenchmarkEnemyCountOverride != INDEX_NONE)
+	{
+		Wave.EnemyCount = BenchmarkEnemyCountOverride; // 显式 0 是零敌人基线，不钳制为 1。
+	}
+	return Wave;
 }
 
 float AfpstrueGameMode::GetConfiguredWaveInterval() const
@@ -360,16 +340,21 @@ void AfpstrueGameMode::SpawnCurrentWave()
 	}
 
 	// 计算本波敌人数量和类引用，供 SpawnNextQueuedEnemy 使用。
-	PendingEnemySpawnCount = GetEnemyCountForWave(CurrentWave);
-	QueuedEnemyClass = GetEnemyClassForWave(CurrentWave);
+	const FfpstrueWaveConfig Wave = GetWaveConfig(CurrentWave);
+	PendingEnemySpawnCount = Wave.EnemyCount;
+	QueuedEnemyClass = Wave.EnemyClass;
 
 	//立即生成首个敌人，后续由 Timer 分帧生成。
 	SpawnNextQueuedEnemy();
 	//生成第一个后启用定时器
 	if (IsRunning() && PendingEnemySpawnCount > 0)
 	{
-		GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy, FMath::Max(SpawnInterval, 0.01f),
-										true);
+		// 卡顿后不在同一帧补跑多次 Spawn；Timer 间隔本身不保证“每帧最多一次”。
+		FTimerManagerTimerParameters TimerParameters;
+		TimerParameters.bLoop = true;
+		TimerParameters.bMaxOncePerFrame = true;
+		GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy,
+			FMath::Max(SpawnInterval, 0.01f), TimerParameters);
 	}
 }
 
@@ -540,19 +525,27 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 		return false;
 	}
 
-	INC_DWORD_STAT(STAT_fpstrueEnemySpawnCount);
 	AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController());
-	if (EnemyController != nullptr)
-	{
-		EnemyController->InitializeCombatContext(PlayerCharacter, SurroundManager);
-	}
-	else
+	if (EnemyController == nullptr)
 	{
 		UE_LOG(LogTemp, Error, TEXT("Enemy %s has controller %s; expected fpstrueEnemyAIController."), *GetNameSafe(SpawnedEnemy),
 			   *GetNameSafe(SpawnedEnemy->GetController()));
+		// 不把无法接入本项目 AI 的 Pawn 登记为成功，也不在世界留下孤立实例。
+		if (AController* InvalidController = SpawnedEnemy->GetController())
+		{
+			InvalidController->Destroy();
+		}
+		SpawnedEnemy->Destroy();
+		return false;
+	}
+	EnemyController->InitializeCombatContext(PlayerCharacter, SurroundManager);
+	if (!CanActivateSpawnedEnemy())
+	{
+		return false;
 	}
 
 	RegisterEnemy(SpawnedEnemy);
+	INC_DWORD_STAT(STAT_fpstrueEnemySpawnCount);
 	return true;
 }
 
@@ -571,9 +564,9 @@ void AfpstrueGameMode::ClearSpawnQueue()
 
 void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
-	// 注册表只持有弱引用，同时绑定死亡/EndPlay/销毁出口并接入显著性与动画共享协调器。
+	// 只登记 BeginPlay 完成的存活敌人：Death 负责逻辑死亡，EndPlay 覆盖包括 Destroy 在内的全部离场。
 	// 注册表是 GameMode 对“当前存活参与者”的唯一视图；Contains 命中时不重复绑定事件或累计数量。
-	if (!IsValid(Enemy))
+	if (!IsValid(Enemy) || !Enemy->HasActorBegunPlay() || Enemy->IsDead())
 	{
 		return;
 	}
@@ -586,9 +579,8 @@ void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 
 	RegisteredEnemies.Add(EnemyKey);
 	Enemy->SetAnimationSharingCoordinator(EnemyAnimationSharingCoordinator);
-	Enemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
+	Enemy->OnEnemyDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::UnregisterEnemy);
 	Enemy->OnEndPlay.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyEndPlay);
-	Enemy->OnDestroyed.AddUniqueDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
 
 	if (IsRunning())
 	{
@@ -599,7 +591,7 @@ void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	// 无论敌人通过死亡还是直接销毁离场，都在这里解除委托、协调器关系并更新存活计数。
-	// Death 和 Destroyed 可能先后到达；TSet::Remove 的返回值让注销与数量广播保持幂等。
+	// Death 和 EndPlay 可能先后到达；TSet::Remove 的返回值让注销与数量广播保持幂等。
 	if (Enemy == nullptr)
 	{
 		return;
@@ -620,9 +612,8 @@ void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy)
 
 void AfpstrueGameMode::DisconnectEnemy(AfpstrueEnemyCharacter* Enemy)
 {
-	Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDied);
+	Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::UnregisterEnemy);
 	Enemy->OnEndPlay.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyEndPlay);
-	Enemy->OnDestroyed.RemoveDynamic(this, &AfpstrueGameMode::HandleEnemyDestroyed);
 	if (EnemyAnimationSharingCoordinator != nullptr)
 	{
 		EnemyAnimationSharingCoordinator->SuspendEnemy(Enemy);
@@ -650,15 +641,16 @@ void AfpstrueGameMode::PruneInvalidEnemyRegistrations()
 
 void AfpstrueGameMode::ClearEnemyRegistrations()
 {
-	// EndPlay 阶段批量解除敌人委托和协调器引用，最后清空弱引用集合。
-	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
+	// 先摘下集合，再执行可能重入的外部清理；旧清理不能破坏遍历器或新登记项。
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> EndingEnemies = MoveTemp(RegisteredEnemies);
+	RegisteredEnemies.Reset();
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : EndingEnemies)
 	{
 		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
 		{
 			DisconnectEnemy(Enemy);
 		}
 	}
-	RegisteredEnemies.Reset();
 }
 
 // ==================== 游戏状态、事件与计时器 ====================
@@ -675,15 +667,17 @@ void AfpstrueGameMode::BindPlayerDeathEvent()
 	if (IsValid(PlayerCharacter))
 	{
 		PlayerCharacter->OnPlayerDeathReported.AddUniqueDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
+		PlayerCharacter->OnEndPlay.AddUniqueDynamic(this, &AfpstrueGameMode::HandlePlayerEndPlay);
 	}
 }
 
 void AfpstrueGameMode::UnbindPlayerDeathEvent()
 {
 	// 结算和 EndPlay 都显式解绑，避免生命周期末尾继续收到玩家事件。
-	if (IsValid(PlayerCharacter))
+	if (PlayerCharacter != nullptr)
 	{
 		PlayerCharacter->OnPlayerDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
+		PlayerCharacter->OnEndPlay.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerEndPlay);
 	}
 }
 
@@ -698,27 +692,15 @@ void AfpstrueGameMode::UpdateCountdown()
 	RemainingTime = FMath::Max(RemainingTime - 1, 0);
 	OnRemainingTimeChanged.Broadcast(RemainingTime);
 
-	if (IsRunning() && RemainingTime <= 0 && IsPlayerAlive())
+	if (IsRunning() && (!IsPlayerAlive() || RemainingTime <= 0))
 	{
-		FinishGame(true);
+		FinishGame(IsPlayerAlive());
 	}
-}
-
-void AfpstrueGameMode::HandleEnemyDied(AfpstrueEnemyCharacter* DeadEnemy)
-{
-	// 敌人死亡和 Actor 销毁最终都进入同一个幂等注销入口。
-	UnregisterEnemy(DeadEnemy);
-}
-
-void AfpstrueGameMode::HandleEnemyDestroyed(AActor* DestroyedActor)
-{
-	// Destroyed 委托给出 AActor，安全 Cast 成敌人后复用注销流程。
-	UnregisterEnemy(Cast<AfpstrueEnemyCharacter>(DestroyedActor));
 }
 
 void AfpstrueGameMode::HandleEnemyEndPlay(AActor* EndingActor, EEndPlayReason::Type EndPlayReason)
 {
-	// EndPlay 比 Destroyed 覆盖面更广；UnregisterEnemy 幂等，因此 Destroy 路径不会重复广播或重复释放。
+	// UE 先执行 EndPlay 再广播 OnDestroyed；此处已完成清理，不需要第二套销毁回调。
 	UnregisterEnemy(Cast<AfpstrueEnemyCharacter>(EndingActor));
 }
 
@@ -728,6 +710,23 @@ void AfpstrueGameMode::HandlePlayerDied(AfpstrueCharacter* DeadPlayer)
 	if (IsRunning() && DeadPlayer == PlayerCharacter)
 	{
 		FinishGame(false);
+	}
+}
+
+void AfpstrueGameMode::HandlePlayerEndPlay(AActor* EndingActor, EEndPlayReason::Type EndPlayReason)
+{
+	if (!IsRunning() || EndingActor != PlayerCharacter)
+	{
+		return;
+	}
+	if (EndPlayReason == EEndPlayReason::Destroyed || EndPlayReason == EEndPlayReason::RemovedFromWorld)
+	{
+		FinishGame(false);
+	}
+	else
+	{
+		// 世界切换/退出只清理，不在拆世界过程中再次创建结算 UI。
+		StopGameplay();
 	}
 }
 
@@ -747,7 +746,8 @@ void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 void AfpstrueGameMode::StopActiveEnemies()
 {
 	// 对局结束时停止所有仍存活 AI；只冻结行为，不在遍历过程中直接销毁 Actor。
-	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : RegisteredEnemies)
+	const TArray<TWeakObjectPtr<AfpstrueEnemyCharacter>> EnemiesToStop = RegisteredEnemies.Array();
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : EnemiesToStop)
 	{
 		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
 		{
