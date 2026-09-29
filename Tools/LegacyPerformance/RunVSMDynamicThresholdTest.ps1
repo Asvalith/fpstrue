@@ -1,3 +1,5 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
     [int]$EnemyCount = 80
 )

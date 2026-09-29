@@ -98,6 +98,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|AI")
 	TSubclassOf<AfpstrueSurroundManager> SurroundManagerClass;
 
+	// Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
 	// 本局敌人共用的围攻管理器实例；可编辑的是上面的类配置，不是此运行时实例。
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Game|AI")
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
@@ -151,24 +152,21 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// 性能协调器与基准采集器通过受控访问读取对局内部状态。
+	// friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
 	friend class UfpstrueBenchmarkRunner;
 	friend class UfpstrueEnemySignificanceCoordinator;
 	friend class FFpstrueGameModeStartupTest;
 	friend class FFpstrueWaveConfigurationTest;
+	friend class FFpstrueGameModeParticipantBoundaryTest;
 
 	// ==================== 波次与生成 ====================
 
-	// 查找带指定 Tag 的 TargetPoint，供所有波次复用。
-	void CacheSpawnPoints();
 	// 创建全局 SurroundManager，并注入当前玩家目标。
 	bool CreateSurroundManager();
 	// 返回正常配置或 Benchmark 覆盖后的总波数。
 	int32 GetConfiguredWaveCount() const;
-	// 返回指定波次应生成的敌人数。
-	int32 GetEnemyCountForWave(int32 WaveNumber) const;
-	// 返回指定波次使用的敌人类，未覆盖时回退到默认类。
-	TSubclassOf<AfpstrueEnemyCharacter> GetEnemyClassForWave(int32 WaveNumber) const;
+	// 一次解析同一来源的类型和数量；资产缺波次不回退旧蓝图，Benchmark 仅覆盖数量。
+	FfpstrueWaveConfig GetWaveConfig(int32 WaveNumber) const;
 	// 配置只选一种来源；外部资产绝不逐字段回退到旧蓝图默认值。
 	float GetConfiguredWaveInterval() const;
 	int32 GetConfiguredGameDuration() const;
@@ -188,6 +186,7 @@ private:
 	// 把新敌人加入唯一注册表，并连接死亡事件和动画共享协调器。
 	void RegisterEnemy(AfpstrueEnemyCharacter* Enemy);
 	// 从注册表和共享系统移除敌人，并按需通知 HUD 数量变化。
+	UFUNCTION()
 	void UnregisterEnemy(AfpstrueEnemyCharacter* Enemy);
 	// 单个注销与退出批量清理共用，解除委托和共享引用，不修改集合或广播。
 	void DisconnectEnemy(AfpstrueEnemyCharacter* Enemy);
@@ -213,25 +212,21 @@ private:
 	// 结算与 EndPlay 共用：清理倒计时、波次、生成和性能协调器 Timer，再停止 AI、解绑玩家。
 	void StopGameplay();
 
-	// 敌人 HealthComponent 触发死亡后更新注册表。
-	UFUNCTION()
-	void HandleEnemyDied(AfpstrueEnemyCharacter* DeadEnemy);
-
-	// 敌人因其他原因销毁时执行同样的注册表清理。
-	UFUNCTION()
-	void HandleEnemyDestroyed(AActor* DestroyedActor);
-
-	// 覆盖关卡移除、流送和世界切换等不一定经过死亡/Destroyed 委托的离场路径。
+	// EndPlay 同时覆盖直接 Destroy、关卡移除和世界切换，无需再订阅 OnDestroyed。
 	UFUNCTION()
 	void HandleEnemyEndPlay(AActor* EndingActor, EEndPlayReason::Type EndPlayReason);
 
 	// 玩家死亡时把本局结算为失败。
 	UFUNCTION()
 	void HandlePlayerDied(AfpstrueCharacter* DeadPlayer);
+	// 直接销毁/移出世界也结束对局，不要求先经过 Health 死亡事件。
+	UFUNCTION()
+	void HandlePlayerEndPlay(AActor* EndingActor, EEndPlayReason::Type EndPlayReason);
 
 	// ==================== 运行时引用与状态 ====================
 
-	// 出生点数组与 GameplayStatics 的 TArray<AActor*>& 接口保持一致，仅缓存本局运行时引用。
+	// 这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
+	// UPROPERTY 仍会让 GC 扫描数组，Transient 则明确它们只在本局运行时有效。
 	UPROPERTY(Transient)
 	TArray<AActor*> SpawnPoints;
 
@@ -255,7 +250,7 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Performance|Animation Sharing")
 	TObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> EnemyAnimationSharingCoordinator;
 
-	//注册表保证敌人唯一；弱引用不阻止 Actor 销毁，失效项由注销流程清理。
+	// TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
 	// 幂等注销由 Remove 的返回值保证，弱引用仅表示注册表不拥有敌人。
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
@@ -266,6 +261,8 @@ private:
 	int32 ConsecutiveSpawnFailureCount = 0;
 	// 仅由 AutoBenchmark 在 StartGameMode 前写入，允许长驻留采集越过正常 90 秒对局时限。
 	int32 BenchmarkGameDurationOverride = 0;
+	// 由测试器在开局前注入；正常玩法不读取 Benchmark 配置。INDEX_NONE 表示使用玩法资产。
+	int32 BenchmarkEnemyCountOverride = INDEX_NONE;
 	EFPMatchPhase MatchPhase = EFPMatchPhase::Waiting;
 
 	FTimerHandle CountdownTimerHandle;

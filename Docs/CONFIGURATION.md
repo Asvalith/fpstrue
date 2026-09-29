@@ -36,6 +36,13 @@ AI 使用 `/Game/FirstPerson/AI/BP_FPEnemyAIController`，其 `BehaviorTreeAsset
 
 武器射速、伤害、弹匣、散布、换弹时长，以及 AI 决策间隔、路径刷新距离、槽位和预算继续在所属蓝图/组件中编辑，不复制到实验 JSON。运行时状态（当前弹药、攻击者集合、换弹提交标记等）不作为默认配置开放。
 
+### 动画播放接线
+
+- 武器蓝图从 `OnWeaponReloadPlaybackRequested(ReloadId, bWasEmptyReload)` 选择普通/空仓 Montage，将事件中的编号传给手臂和枪械各自的 `PlayReloadMontage`。装填由原生 `ReloadCommit` Notify 提交，播放实例结束回调收尾。
+- 敌人蓝图从 `OnAttackPlaybackRequested(AttackId)` 调用 Combat 的 `PlayAttackMontageForAttack`。攻击窗口由原生 AnimNotifyState 驱动；受击动画不调用攻击完成入口。
+- 异步回调保存发起时的动作编号；无参数 `CommitReload`、`FinishReload`、`HandleAttackFinishedNotify` 是拒绝执行的弃用接口。`OnWeaponReloadStarted` 和 `OnAttackStarted` 只用于状态观察。
+- 本展示分支提供 C++ 契约与测试代码；在有资源使用权限的工程中按上述入口连接对应蓝图。全套真实资产回归要求项目 Mesh、Montage、AnimBP 和蓝图均齐备。
+
 ### 渲染预算的作用范围
 
 - 阴影与光追名额按敌人分配，应用于自身 Mesh 及 ChildActor 组件拥有的 Mesh；只收紧资产原有资格，不把原本关闭的效果打开。
@@ -63,11 +70,15 @@ MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarr
 - 新素材打包时必须确认已被 Cook；仅把资源路径写进文本不能保证该资源进入安装包。
 - INI 只提供动画软引用默认值，与上面的玩法 Data Asset、行为树资产各自独立。
 
-## 性能实验：JSON 只是现有脚本的预设
+## 性能实验：统一入口与集中配置
+
+统一采集入口是 `Tools/RunRenderCostMatrix.ps1`。`Tools/ExperimentProfiles/RenderCostCases.psd1` 保存公共默认值、采集设置及实验 CVar，并由同一份定义生成启动命令和读回检查；JSON 选择地图、人数、轮次和实验组。`scene-acceptance.json` 对应烘焙地图的 0/160 敌人、20 秒预热和 180 秒采集。
+
+运行时策略覆盖集中在 `Runtime/fpstrueRuntimeOptions`，业务埋点声明位于 `Runtime/fpstruePerformanceStats.h`；`Testing/Benchmarks` 管理采集阶段、CSV/Trace 资源和结果校验。历史实验脚本保留在 `Tools/LegacyPerformance/`，用于复核旧数据。
 
 `Tools/ExperimentProfiles/baseline160.json` 保存 160 敌人、3 轮、15 秒预热、30 秒采集的常规 Baseline 方案。它不代表已通过性能验收，也不改变项目默认画质；ScreenPercentage 为 null，表示不额外覆盖内部渲染比例。
 
-优先级固定为：**显式命令行参数 > JSON 中的值 > 原脚本默认值**。JSON 只接受已有实验字段，不接受任意控制台命令、程序路径或输出目录。
+优先级固定为：**显式命令行参数 > JSON 中的值 > 配置表 Defaults**。JSON 只接受已有实验字段，不接受任意控制台命令、程序路径或输出目录。
 
 下面在项目根目录的 PowerShell 中执行。先只检查配置，不启动 UE：
 

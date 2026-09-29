@@ -1,3 +1,5 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
     [int]$EnemyCount = 80
 )
@@ -9,22 +11,23 @@ $Editor = "E:\program\ue554\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe"
 $Project = Join-Path $ProjectRoot "fpstrue.uproject"
 $Map = "/Game/FactoryDistrict/Maps/Demonstration"
 $DdcPath = "E:\ueprojrct\ddc"
-$EvidenceRoot = Join-Path $ProjectRoot "Saved\Profiling\VSM_RadiusThreshold_20260816"
+$EvidenceRoot = Join-Path $ProjectRoot "Saved\Profiling\VSM_CoarsePages_AB_20260816"
 $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
-$Thresholds = @(0.02, 0.03)
+
+$Variants = @(
+    [PSCustomObject]@{ Name = "CoarsePagesOn"; Value = 1 },
+    [PSCustomObject]@{ Name = "CoarsePagesOff"; Value = 0 }
+)
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 $Results = @()
 
-foreach ($Threshold in $Thresholds) {
-    $Label = $Threshold.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture).Replace(".", "_")
-    $Name = "RadiusThreshold$Label"
-    Write-Output "Starting VSM test: $Name"
+foreach ($Variant in $Variants) {
+    Write-Output "Starting VSM test: $($Variant.Name)"
     $StartedAt = Get-Date
-    $LogName = "VSM_$Name.log"
-    $CVarValue = $Threshold.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $LogName = "VSM_AB_$($Variant.Name).log"
     $Arguments = @(
         $Project,
         $Map,
@@ -45,7 +48,7 @@ foreach ($Threshold in $Thresholds) {
         "-BenchmarkScreenshot",
         "-BenchmarkAutoQuit",
         "-csvGpuStats",
-        "-ExecCmds=`"r.Shadow.RadiusThreshold=$CVarValue,stat unit,stat streaming`"",
+        "-ExecCmds=`"r.Shadow.Virtual.NonNanite.IncludeInCoarsePages=$($Variant.Value),stat unit,stat streaming`"",
         "-log=$LogName",
         "-ddc=InstalledNoZenLocalFallback",
         "-LocalDataCachePath=$DdcPath"
@@ -53,7 +56,7 @@ foreach ($Threshold in $Thresholds) {
 
     $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
     if ($Process.ExitCode -ne 0) {
-        throw "VSM test failed for $Name with exit code $($Process.ExitCode)"
+        throw "VSM test failed for $($Variant.Name) with exit code $($Process.ExitCode)"
     }
 
     $Csv = Get-ChildItem -LiteralPath $SourceCsv -File -Filter "*.csv" |
@@ -65,12 +68,13 @@ foreach ($Threshold in $Thresholds) {
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     $Log = Get-Item -LiteralPath (Join-Path $SourceLogs $LogName)
+
     if (-not $Csv -or -not $Screenshot -or -not $Log) {
-        throw "VSM evidence is incomplete for $Name"
+        throw "VSM evidence is incomplete for $($Variant.Name)"
     }
 
-    $NamedCsv = Join-Path $EvidenceRoot "$Name.csv"
-    $NamedScreenshot = Join-Path $EvidenceRoot "$Name.png"
+    $NamedCsv = Join-Path $EvidenceRoot "$($Variant.Name).csv"
+    $NamedScreenshot = Join-Path $EvidenceRoot "$($Variant.Name).png"
     $NamedLog = Join-Path $EvidenceRoot $LogName
     Copy-Item -LiteralPath $Csv.FullName -Destination $NamedCsv -Force
     Copy-Item -LiteralPath $Screenshot.FullName -Destination $NamedScreenshot -Force
@@ -80,11 +84,12 @@ foreach ($Threshold in $Thresholds) {
     $Ready = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark ready: requested=$EnemyCount alive=$EnemyCount")
     $Stopped = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark capture stopped.")
     if (-not $Ready -or -not $Stopped) {
-        throw "VSM test did not reach a valid capture state for $Name"
+        throw "VSM test did not reach a valid capture state for $($Variant.Name)"
     }
 
     $Results += [PSCustomObject]@{
-        RadiusThreshold = $CVarValue
+        Variant = $Variant.Name
+        IncludeInCoarsePages = $Variant.Value
         EnemyCount = $EnemyCount
         VSMQueueOverflows = ($LogLines | Select-String -SimpleMatch "Non-Nanite Marking Job Queue overflow").Count
         TexturePoolWarnings = ($LogLines | Select-String -Pattern "Texture streaming pool.*over budget").Count
@@ -94,7 +99,7 @@ foreach ($Threshold in $Thresholds) {
         Log = $NamedLog
     }
 
-    Write-Output "Completed VSM test: $Name"
+    Write-Output "Completed VSM test: $($Variant.Name)"
 }
 
 $Results | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8

@@ -4,8 +4,13 @@
 #include "Characters/Enemies/fpstrueEnemyCombatConfig.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
+#include "Animation/ActiveMontageInstanceScope.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimNotifyQueue.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Testing/Benchmarks/fpstruePerformanceStats.h"
+#include "Runtime/fpstruePerformanceStats.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
@@ -26,9 +31,9 @@ CSV_DEFINE_CATEGORY(fpstrueCombat, true);
  * AIController 只负责“何时攻击”，本组件负责一次攻击从开始、动画窗口、连续轨迹检测到结束的完整生命周期，
  * 并集中处理重复命中、Notify 丢失和死亡中断，避免 Character 与 Controller 各维护一份攻击状态。
  *
- * 攻击链：AI 获得攻击名额 -> TryAttackTarget 建立事务 -> 蓝图播放 Montage
+ * 攻击链：AI 获得攻击名额 -> TryAttackTarget 建立事务 -> 蓝图用事务 ID 请求播放并绑定 Montage 实例
  *       -> AnimNotifyState Begin/Tick/End 驱动有效窗口 -> Sweep 命中后 ApplyDamage
- *       -> 结束 Notify 或保护 Timer 汇入 FinishAttack -> 归还攻击名额。
+ *       -> 同实例的自然完成/结束 Notify 或保护 Timer 汇入 FinishAttack；中断走 ResetCombat，均归还原许可。
  * AttackPhase 统一描述前摇/有效窗口/收招；命中提交与消融开关是独立事实，不混入阶段枚举。
  */
 
@@ -54,6 +59,7 @@ void UfpstrueEnemyCombatComponent::BeginPlay()
 void UfpstrueEnemyCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 退出时清理事务和 Timer；迟到 Notify 在无事务时成为无操作。
+	bEndingPlay = true;
 	ResetCombat();
 	Super::EndPlay(EndPlayReason);
 }
@@ -85,61 +91,76 @@ AfpstrueEnemyCharacter* UfpstrueEnemyCombatComponent::GetEnemy() const
 	return Cast<AfpstrueEnemyCharacter>(GetOwner());
 }
 
-float UfpstrueEnemyCombatComponent::GetEffectiveAttackRange() const
+bool UfpstrueEnemyCombatComponent::SampleAttackReach(float& OutDistanceSquared, float& OutEffectiveRange) const
 {
-	//攻击距离至少覆盖双方胶囊半径之和，避免角色碰撞已经相贴却永远达不到配置半径
-
+	// 一次解析目标、位置和胶囊，距离/范围供 AI 复用；只有距离与高度合格才查询环境遮挡。
+	OutDistanceSquared = MAX_flt;
+	OutEffectiveRange = 0.0f;
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr)
-	{
-		return 0.0f;
-	}
-
-	//玩法向优化：避免敌人站在玩家面前却永远挥不到刀
-	const AfpstrueCharacter* TargetCharacter = Enemy->GetCombatTarget();
-	const float EnemyRadius = Enemy->GetCapsuleComponent()->GetScaledCapsuleRadius();
-	const float TargetRadius = TargetCharacter != nullptr ? TargetCharacter->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
-	const float MinimumReachableDistance = EnemyRadius + TargetRadius + 5.0f;
-	return FMath::Max(AttackRange, MinimumReachableDistance);
-}
-
-bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
-{
-	// 使用二维距离平方判断地面近战范围，忽略台阶和胶囊中心高度差并避免开方。
-	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	const AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
-	if (Enemy == nullptr || TargetCharacter == nullptr)
+	const AfpstrueCharacter* Target = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
+	if (Enemy == nullptr || !IsValid(Target))
 	{
 		return false;
 	}
 
-	return FVector::DistSquared2D(Enemy->GetActorLocation(), TargetCharacter->GetActorLocation()) <=
-		   FMath::Square(GetEffectiveAttackRange());
+	const FVector EnemyLocation = Enemy->GetActorLocation();
+	const FVector TargetLocation = Target->GetActorLocation();
+	const UCapsuleComponent* EnemyCapsule = Enemy->GetCapsuleComponent();
+	const UCapsuleComponent* TargetCapsule = Target->GetCapsuleComponent();
+	OutDistanceSquared = FVector::DistSquared2D(EnemyLocation, TargetLocation);
+	// 距离至少覆盖双方胶囊半径，避免已经相贴却永远进入不了攻击范围。
+	OutEffectiveRange = FMath::Max(AttackRange, EnemyCapsule->GetScaledCapsuleRadius() + TargetCapsule->GetScaledCapsuleRadius() + 5.0f);
+	return OutDistanceSquared <= FMath::Square(OutEffectiveRange) && HasClearAttackPath(Target);
+}
+
+bool UfpstrueEnemyCombatComponent::HasClearAttackPath(const AfpstrueCharacter* Target) const
+{
+	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	const UWorld* World = GetWorld();
+	if (Enemy == nullptr || !IsValid(Target) || World == nullptr)
+	{
+		return false;
+	}
+	const FVector EnemyLocation = Enemy->GetActorLocation();
+	const FVector TargetLocation = Target->GetActorLocation();
+	const float MaxHeightDifference = Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() +
+		Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	if (FMath::Abs(EnemyLocation.Z - TargetLocation.Z) > MaxHeightDifference)
+	{
+		return false;
+	}
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyMeleeEnvironment), false, Enemy);
+	QueryParams.AddIgnoredActor(Target);
+	return !World->LineTraceTestByChannel(EnemyLocation, TargetLocation, ECC_Visibility, QueryParams);
+}
+
+bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
+{
+	float DistanceSquared, EffectiveRange;
+	return SampleAttackReach(DistanceSquared, EffectiveRange);
 }
 
 // 实时提交检查与 AI 快照预筛选共用资格规则，但采样时机不同。
 bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 {
-	// 提交入口重新采样真实距离，不依赖 AI 较早生成的决策快照。
-	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	const AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
-	return TargetCharacter != nullptr &&
-		   CanStartAttackAtDistanceSquared(FVector::DistSquared2D(Enemy->GetActorLocation(), TargetCharacter->GetActorLocation()));
+	// 提交入口重新采样真实距离和环境，不依赖 AI 较早生成的决策快照。
+	return IsAttackReady() && IsTargetInAttackRange();
 }
 
-bool UfpstrueEnemyCombatComponent::CanStartAttackAtDistanceSquared(float DistanceSquared) const
+bool UfpstrueEnemyCombatComponent::IsAttackReady() const
 {
-	// AI 只读预筛选复用已采样距离；资格规则仍集中于组件，不允许该查询直接提交攻击。
+	// 资格规则仍集中于组件；不重复空间采样，也不允许该查询直接提交攻击。
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const UWorld* World = GetWorld();
-	if (Enemy == nullptr || World == nullptr || !FMath::IsFinite(DistanceSquared) || DistanceSquared < 0.0f)
+	const AfpstrueEnemyAIController* Controller = Enemy != nullptr ? Cast<AfpstrueEnemyAIController>(Enemy->GetController()) : nullptr;
+	if (bEndingPlay || bStartingPlayback || Enemy == nullptr || World == nullptr || Controller == nullptr || !Controller->AcceptsCombatCommands())
 	{
 		return false;
 	}
 
 	const AfpstrueCharacter* TargetCharacter = Enemy->GetCombatTarget();
 	return TargetCharacter != nullptr && !TargetCharacter->IsDead() && !Enemy->IsDead() && !IsAttacking() &&
-		   DistanceSquared <= FMath::Square(GetEffectiveAttackRange()) && World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
+		   World->GetTimeSeconds() - LastAttackTime >= AttackInterval;
 }
 
 // ==================== 攻击事务与动画窗口 ====================
@@ -157,7 +178,11 @@ bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 	// 建立事务本身即确保伤害窗口尚未开启，不再先关闭一次窗口。
 	AttackPhase = EFPEnemyAttackPhase::Windup;
 	++AttackSequence;
+	const uint32 StartingSequence = AttackSequence;
 	bHitTargetThisAttack = false;
+	AttackTarget = Enemy->GetCombatTarget();
+	const AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(Enemy->GetController());
+	AttackPermissionSource = Controller != nullptr ? Controller->GetSurroundManager() : nullptr;
 
 	//停止移动，避免攻击过程中角色漂移或被物理推开，保证动画和轨迹检测的准确性。
 	if (UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement())
@@ -170,10 +195,122 @@ bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 	Enemy->SetAttackAnimationPriority(true);
 	// 安排动画 Notify 缺失时的攻击结束保护 Timer。
 	// 在动画预计时长之后设置一次性保护 Timer，Notify 丢失或 Montage 中断也不会永久占用攻击名额。
-	const float FinishDelay = FMath::Max(0.01f, FMath::Max(AttackAnimationDuration, AttackFailSafeDuration) + AttackCompletionGracePeriod);
-	World->GetTimerManager().SetTimer(AttackFinishTimerHandle, this, &UfpstrueEnemyCombatComponent::FinishAttack, FinishDelay, false);
+	ScheduleAttackFailSafe();
+	Enemy->OnAttackPlaybackRequested(static_cast<int64>(StartingSequence));
+	if (AttackSequence != StartingSequence || !IsAttacking())
+	{
+		return false; // 蓝图回调可以同步停止 AI 或替换上下文，不能继续绑定另一次播放。
+	}
+	// 观察通知不承担播放命令；资产迁移后此事件不得再自行播放攻击或完成事务。
 	Enemy->OnAttackStarted();
+	return AttackSequence == StartingSequence && IsAttacking();
+}
+
+bool UfpstrueEnemyCombatComponent::PlayAttackMontageForAttack(int64 AttackId, UAnimMontage* Montage, float PlayRate)
+{
+	AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	if (bStartingPlayback || bEndingPlay || !IsAttacking() || AttackId != static_cast<int64>(AttackSequence) || AttackPlayback.IsSet())
+	{
+		return false;
+	}
+	TGuardValue<bool> PlaybackGuard(bStartingPlayback, true);
+	if (Enemy == nullptr || !IsValid(Montage) || !FMath::IsFinite(PlayRate) || PlayRate <= 0.0f)
+	{
+		ResetCombat(); // 当前命令确实失败，不能占着攻击名额等 5 秒保护超时。
+		return false;
+	}
+	USkeletalMeshComponent* Mesh = Enemy->GetMesh();
+	UAnimInstance* Anim = Mesh->GetAnimInstance();
+	// UE 5.5 的 true 只停止同 SlotGroup 的播放：保留原攻击/受击互斥，不影响其他组。
+	if (Anim == nullptr || Anim->Montage_Play(Montage, PlayRate, EMontagePlayReturnType::MontageLength, 0.0f, true) <= 0.0f)
+	{
+		if (AttackId == static_cast<int64>(AttackSequence)) ResetCombat();
+		return false;
+	}
+	FFPActionPlayback StartedPlayback;
+	if (!StartedPlayback.TryBind(static_cast<uint32>(AttackId), Mesh, Montage))
+	{
+		if (AttackId == static_cast<int64>(AttackSequence)) ResetCombat();
+		return false;
+	}
+	if (AttackId != static_cast<int64>(AttackSequence) || !IsAttacking() || bEndingPlay)
+	{
+		// 播放过程中旧 Montage 的停止委托可以取消动作，但不能递归开始另一轮动作。
+		StartedPlayback.Stop();
+		return false;
+	}
+	AttackPlayback = StartedPlayback;
+	BindAttackPlaybackCompletion();
 	return true;
+}
+
+bool UfpstrueEnemyCombatComponent::BindAttackMontageForAttack(int64 AttackId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* Montage)
+{
+	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	if (bStartingPlayback || bEndingPlay || !IsAttacking() || AttackId != static_cast<int64>(AttackSequence) ||
+		Enemy == nullptr || PlaybackMesh != Enemy->GetMesh()) return false;
+	const bool bAlreadyBound = AttackPlayback.IsSet();
+	if (!AttackPlayback.TryBind(AttackSequence, PlaybackMesh, Montage)) return false;
+	if (!bAlreadyBound) BindAttackPlaybackCompletion();
+	return true;
+}
+
+void UfpstrueEnemyCombatComponent::BindAttackPlaybackCompletion()
+{
+	const FFPActionPlayback ExpectedPlayback = AttackPlayback;
+	UAnimInstance* Anim = ExpectedPlayback.AnimInstance.Get();
+	FAnimMontageInstance* Instance = Anim != nullptr ? Anim->GetMontageInstanceForID(ExpectedPlayback.MontageInstanceId) : nullptr;
+	if (Instance == nullptr || Instance->Montage != ExpectedPlayback.Montage.Get()) return;
+	ScheduleAttackFailSafe(Instance);
+	// 只订阅明确实例，不订阅只含 Montage 资产的全局事件；同资源旧播放结束不能结束新事务。
+	// 显式 Bind 路径已有的观察回调保留，但必须在本组件提交完成/中断后通知。
+	const FOnMontageEnded PreviousObserver = Instance->OnMontageEnded;
+	Instance->OnMontageEnded.BindWeakLambda(this, [this, ExpectedPlayback, PreviousObserver](UAnimMontage* Montage, bool bInterrupted)
+	{
+		if (IsAttacking() && AttackSequence == ExpectedPlayback.ActionId &&
+			AttackPlayback.MontageInstanceId == ExpectedPlayback.MontageInstanceId &&
+			AttackPlayback.Mesh == ExpectedPlayback.Mesh && AttackPlayback.AnimInstance == ExpectedPlayback.AnimInstance &&
+			Montage == ExpectedPlayback.Montage.Get())
+		{
+			if (bInterrupted) ResetCombat();
+			else FinishAttack();
+		}
+		PreviousObserver.ExecuteIfBound(Montage, bInterrupted);
+	});
+}
+
+void UfpstrueEnemyCombatComponent::ScheduleAttackFailSafe(const FAnimMontageInstance* Playback)
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr || !IsAttacking()) return;
+	float MinimumDuration = FMath::Max(AttackAnimationDuration, AttackFailSafeDuration);
+	if (Playback != nullptr && Playback->Montage != nullptr)
+	{
+		const UAnimMontage* Montage = Playback->Montage;
+		const double EffectiveRate = static_cast<double>(Playback->GetPlayRate()) * Montage->RateScale;
+		if (FMath::IsFinite(EffectiveRate) && EffectiveRate != 0.0)
+		{
+			const double RemainingTrack = EffectiveRate > 0.0 ? Montage->GetPlayLength() - Playback->GetPosition() : Playback->GetPosition();
+			const double RemainingDuration = FMath::Max(0.0, RemainingTrack) / FMath::Abs(EffectiveRate) + Montage->BlendOut.GetBlendTime();
+			if (FMath::IsFinite(RemainingDuration))
+			{
+				MinimumDuration = FMath::Max(MinimumDuration, static_cast<float>(FMath::Min(RemainingDuration, static_cast<double>(MAX_flt))));
+			}
+		}
+	}
+	// 本接口用于一次性攻击；循环/后续改速不会无限续租名额，最多获得本次绑定计算出的有限播放预算。
+	const float FinishDelay = static_cast<float>(FMath::Clamp(static_cast<double>(MinimumDuration) +
+		FMath::Max(0.0f, AttackCompletionGracePeriod), 0.01, static_cast<double>(MAX_flt)));
+	const uint32 ScheduledSequence = AttackSequence;
+	World->GetTimerManager().SetTimer(AttackFinishTimerHandle, FTimerDelegate::CreateWeakLambda(this, [this, ScheduledSequence]()
+	{
+		if (AttackSequence == ScheduledSequence) FinishAttack();
+	}), FinishDelay, false);
+}
+
+bool UfpstrueEnemyCombatComponent::IsAttackNotifyCurrent(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference) const
+{
+	return IsAttacking() && AttackPlayback.Matches(AttackSequence, PlaybackMesh, EventReference);
 }
 
 void UfpstrueEnemyCombatComponent::BeginAttackWindow()
@@ -320,9 +457,22 @@ void UfpstrueEnemyCombatComponent::SweepWeaponSegment(const FVector& TraceStart,
 		return;
 	}
 
+	// Pawn 对象查询负责找受击者，Visibility 阻挡负责截断刀刃轨迹；不能把墙也加入对象查询后仍遍历全部 Pawn。
+	FCollisionQueryParams BlockerParams(QueryParams);
+	if (AttackTarget.IsValid())
+	{
+		BlockerParams.AddIgnoredActor(AttackTarget.Get());
+	}
+	FHitResult BlockingHit;
+	const bool bBlocked = World->SweepSingleByChannel(BlockingHit, TraceStart, TraceEnd, FQuat::Identity,
+		ECC_Visibility, FCollisionShape::MakeSphere(WeaponTraceRadius), BlockerParams);
 	const uint32 SweepingSequence = AttackSequence;
 	for (const FHitResult& HitResult : HitResults)
 	{
+		if (bBlocked && HitResult.Time >= BlockingHit.Time)
+		{
+			continue;
+		}
 		const bool bAppliedDamage = TryApplyAttackDamage(HitResult.GetActor());
 		if (bAppliedDamage || AttackSequence != SweepingSequence || AttackPhase != EFPEnemyAttackPhase::Active)
 		{
@@ -336,9 +486,9 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 {
 	// Sweep 可命中多个 Pawn，但当前事务只接受指定玩家且每次攻击最多成功扣血一次。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	AfpstrueCharacter* TargetCharacter = Enemy != nullptr ? Enemy->GetCombatTarget() : nullptr;
+	AfpstrueCharacter* TargetCharacter = AttackTarget.Get();
 	if (Enemy == nullptr || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
-		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack)
+		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack || !HasClearAttackPath(TargetCharacter))
 	{
 		return false;
 	}
@@ -366,8 +516,19 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 
 void UfpstrueEnemyCombatComponent::HandleAttackFinishedNotify()
 {
-	// FinishAttack 统一校验事务状态，Notify 和保护 Timer 共用同一出口。
-	FinishAttack();
+	if (!bReportedLegacyFinish)
+	{
+		bReportedLegacyFinish = true;
+		UE_LOG(LogTemp, Warning, TEXT("%s ignored deprecated identity-free attack finish; migrate to Enemy Attack Finished Notify."), *GetNameSafe(GetOwner()));
+	}
+}
+
+void UfpstrueEnemyCombatComponent::HandleAttackFinishedNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference)
+{
+	if (IsAttackNotifyCurrent(PlaybackMesh, EventReference))
+	{
+		FinishAttack();
+	}
 }
 
 void UfpstrueEnemyCombatComponent::FinishAttack()
@@ -384,28 +545,36 @@ void UfpstrueEnemyCombatComponent::FinishAttack()
 		LastAttackTime = World->GetTimeSeconds();
 	}
 	ResetCombat();
-	Enemy->SetAttackAnimationPriority(false);
 }
 
 void UfpstrueEnemyCombatComponent::ResetCombat()
 {
-	// 中断不消费正常结束冷却；死亡/EndPlay 的动画处置仍由 Owner 控制。
-	// 正常结束、死亡中断与 EndPlay 共用清理：结束事务、取消保护 Timer、归还攻击名额。
-	// 冷却与动画恢复由调用者决定，避免中断被当成正常攻击完成。
+	// 先清状态再执行动画停止回调；许可固定归还给开始时的 Manager，不读取可变化的 Controller。
+	const bool bWasAttacking = IsAttacking();
+	const FFPActionPlayback PlaybackToStop = AttackPlayback;
+	AfpstrueSurroundManager* PermissionSource = AttackPermissionSource.Get();
 	AttackPhase = EFPEnemyAttackPhase::Idle;
 	++AttackSequence;
 	bHitTargetThisAttack = false;
+	AttackTarget.Reset();
+	AttackPermissionSource.Reset();
+	AttackPlayback.Reset();
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(AttackFinishTimerHandle);
 	}
 	if (AfpstrueEnemyCharacter* Enemy = GetEnemy())
 	{
-		if (AfpstrueEnemyAIController* AIController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+		if (PermissionSource != nullptr)
 		{
-			AIController->ReleaseAttackPermission();
+			PermissionSource->ReleaseAttackPermission(Enemy);
+		}
+		if (bWasAttacking && !Enemy->IsDead())
+		{
+			Enemy->SetAttackAnimationPriority(false);
 		}
 	}
+	PlaybackToStop.Stop();
 }
 
 // Benchmark 开关只跳过 Sweep；攻击动画、状态和 Timer 仍正常运行，保证消融只改变一个消费者。
@@ -424,7 +593,45 @@ UfpstrueEnemyCombatComponent* GetCombatForNotify(USkeletalMeshComponent* MeshCom
 	AfpstrueEnemyCharacter* Enemy = MeshComp != nullptr ? Cast<AfpstrueEnemyCharacter>(MeshComp->GetOwner()) : nullptr;
 	return Enemy != nullptr ? Enemy->GetCombatComponent() : nullptr;
 }
+
+FAnimNotifyEventReference MakeAttackNotifyReference(const FBranchingPointNotifyPayload& Payload)
+{
+	FAnimNotifyEventReference Reference(Payload.NotifyEvent, Payload.SequenceAsset);
+	Reference.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(Payload.MontageInstanceID);
+	return Reference;
+}
 } // namespace
+
+void UfpstrueAnimNotify_AttackFinished::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+	const FAnimNotifyEventReference& EventReference)
+{
+	Super::Notify(MeshComp, Animation, EventReference);
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	{
+		Combat->HandleAttackFinishedNotify(MeshComp, EventReference);
+	}
+}
+
+void UfpstrueAnimNotify_AttackFinished::BranchingPointNotify(FBranchingPointNotifyPayload& Payload)
+{
+	Notify(Payload.SkelMeshComponent, Payload.SequenceAsset, MakeAttackNotifyReference(Payload));
+}
+
+void UfpstrueAnimNotifyState_AttackWindow::BranchingPointNotifyBegin(FBranchingPointNotifyPayload& Payload)
+{
+	NotifyBegin(Payload.SkelMeshComponent, Payload.SequenceAsset,
+		Payload.NotifyEvent != nullptr ? Payload.NotifyEvent->GetDuration() : 0.0f, MakeAttackNotifyReference(Payload));
+}
+
+void UfpstrueAnimNotifyState_AttackWindow::BranchingPointNotifyTick(FBranchingPointNotifyPayload& Payload, float FrameDeltaTime)
+{
+	NotifyTick(Payload.SkelMeshComponent, Payload.SequenceAsset, FrameDeltaTime, MakeAttackNotifyReference(Payload));
+}
+
+void UfpstrueAnimNotifyState_AttackWindow::BranchingPointNotifyEnd(FBranchingPointNotifyPayload& Payload)
+{
+	NotifyEnd(Payload.SkelMeshComponent, Payload.SequenceAsset, MakeAttackNotifyReference(Payload));
+}
 
 // 动画进入有效帧区间时建立采样点；同一攻击的命中标志只在事务开始时清空。
 void UfpstrueAnimNotifyState_AttackWindow::NotifyBegin(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, float TotalDuration,
@@ -433,7 +640,7 @@ void UfpstrueAnimNotifyState_AttackWindow::NotifyBegin(USkeletalMeshComponent* M
 	Super::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
 
 	// AnimNotifyState Begin 直接交给 CombatComponent，开始记录刀刃连续轨迹。
-	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp); Combat != nullptr && Combat->IsAttackNotifyCurrent(MeshComp, EventReference))
 	{
 		Combat->BeginAttackWindow();
 	}
@@ -446,7 +653,7 @@ void UfpstrueAnimNotifyState_AttackWindow::NotifyTick(USkeletalMeshComponent* Me
 	Super::NotifyTick(MeshComp, Animation, FrameDeltaTime, EventReference);
 
 	// AnimNotifyState Tick 只在有效动画区间调用，角色本身不为近战检测开启常驻 Tick。
-	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp); Combat != nullptr && Combat->IsAttackNotifyCurrent(MeshComp, EventReference))
 	{
 		Combat->UpdateAttackWindow();
 	}
@@ -459,7 +666,7 @@ void UfpstrueAnimNotifyState_AttackWindow::NotifyEnd(USkeletalMeshComponent* Mes
 	Super::NotifyEnd(MeshComp, Animation, EventReference);
 
 	// AnimNotifyState End 关闭伤害窗口，但完整攻击事务仍由结束 Notify 或保护 Timer 完成。
-	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp))
+	if (UfpstrueEnemyCombatComponent* Combat = GetCombatForNotify(MeshComp); Combat != nullptr && Combat->IsAttackNotifyCurrent(MeshComp, EventReference))
 	{
 		Combat->EndAttackWindow();
 	}

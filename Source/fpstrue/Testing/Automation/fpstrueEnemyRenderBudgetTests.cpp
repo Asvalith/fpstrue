@@ -41,6 +41,7 @@ bool FFpstrueEnemyRenderBudgetBoundaryTest::RunTest(const FString& Parameters)
 	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
 	Enemy->GetMesh()->SetCastShadow(true);
 	Enemy->GetMesh()->SetVisibleInRayTracing(true);
+	Enemy->GetMesh()->bEnableUpdateRateOptimizations = true;
 	Enemy->FinishSpawning(FTransform::Identity);
 	const auto AddOwnedMesh = [Enemy](bool bAuthoredEnabled)
 	{
@@ -89,6 +90,17 @@ bool FFpstrueEnemyRenderBudgetBoundaryTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Ray tracing count reads actual component flags"), RayTracingMeshes, ExpectedEnabled);
 	};
 	FFPEnemyRenderSignificancePolicy Policy;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, false, false, true, Policy);
+	TestEqual(TEXT("Gameplay protection refreshes offscreen bones"), Enemy->GetMesh()->VisibilityBasedAnimTickOption,
+		EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones);
+	TestFalse(TEXT("Gameplay protection disables URO independently of render budget"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
+	TestEqual(TEXT("Gameplay protection removes tick throttling"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
+	TestFalse(TEXT("Animation protection grants no extra shadow budget"), bool(Enemy->GetMesh()->CastShadow));
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, true, true, false, Policy);
+	TestTrue(TEXT("Releasing protection restores authored URO"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
+	TestEqual(TEXT("Releasing protection restores authored visibility ticking"), Enemy->GetMesh()->VisibilityBasedAnimTickOption,
+		EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered);
+	TestTrue(TEXT("Background animation interval is restored"), Enemy->GetMesh()->GetComponentTickInterval() > 0.0f);
 	const auto ApplyBudget = [Enemy, &Policy](bool bAllow)
 	{ Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Full, bAllow, bAllow, false, Policy); };
 	CheckCounts(4, 3);

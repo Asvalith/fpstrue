@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $Runner = Join-Path $PSScriptRoot 'RunRenderCostMatrix.ps1'
 $Profile = Join-Path $PSScriptRoot 'ExperimentProfiles\baseline160.json'
+. (Join-Path $PSScriptRoot 'ReadRenderCostConfig.ps1')
 $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('RenderCostConfigTests_' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $TestRoot
 $Passed = 0
@@ -20,6 +21,21 @@ function Validate([hashtable]$Parameters = @{}) {
 }
 function Check([string]$Name, [scriptblock]$Body) { & $Body; $script:Passed++; Write-Output "PASS $Name" }
 try {
+    Check 'active entry, reader and summarizer parse in the current PowerShell host' {
+        foreach ($File in @('RunRenderCostMatrix.ps1', 'ReadRenderCostConfig.ps1', 'SummarizeRenderCostMatrix.ps1')) {
+            $Tokens = $null
+            $Errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $File), [ref]$Tokens, [ref]$Errors)
+            Assert-That ($Errors.Count -eq 0) "Parser/encoding error in $File`: $($Errors.Message -join '; ')"
+        }
+    }
+    Check 'catalog and CLI expose exactly the same preset fields' {
+        $Command = Get-Command $Runner
+        foreach ($Name in $RenderCostConfigParameters) {
+            Assert-That ($Command.Parameters.ContainsKey($Name)) "Catalog setting has no CLI parameter: $Name"
+        }
+        Assert-That (($RenderCostVariantNames | Sort-Object -Unique).Count -eq $RenderCostVariantNames.Count) 'Duplicate variant names.'
+    }
     Check 'legacy defaults are unchanged' {
         $Report = Validate
         $Expected = [ordered]@{
@@ -40,6 +56,7 @@ try {
         $Report = Validate @{ ConfigFile = $Profile }
         $Settings = $Report.Configuration.Settings
         Assert-That (($Settings.Counts -join ',') -eq '160' -and ($Settings.VariantNames -join ',') -eq 'Baseline') 'Wrong baseline selection.'
+        Assert-That ($Settings.Map -eq '/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked') 'Review baseline must use the accepted baked map.'
         Assert-That ($null -eq $Settings.ScreenPercentage -and -not $Settings.CaptureTaskTrace) 'Baseline acquired a diagnostic override.'
         Assert-That ($Report.Configuration.InputConfig.SHA256 -eq (Get-FileHash -LiteralPath $Profile -Algorithm SHA256).Hash) 'Input hash mismatch.'
     }
@@ -63,6 +80,81 @@ try {
         $Report = Validate @{ ConfigFile = $Path }
         Assert-That (($Report.Configuration.Settings.VariantNames -join ',') -eq 'SplineRayTracingOn,SplineRayTracingOff') 'Spline variants rejected.'
         Assert-That ($null -eq $Report.Configuration.Settings.ScreenPercentage) 'Spline test changed screen percentage.'
+    }
+    Check 'scene acceptance is a single 0/160 run on the accepted map, not the ISM candidate' {
+        $Report = Validate @{ ConfigFile = (Join-Path $PSScriptRoot 'ExperimentProfiles\scene-acceptance.json') }
+        $Settings = $Report.Configuration.Settings
+        Assert-That (($Settings.Counts -join ',') -eq '0,160' -and $Settings.RunsPerCase -eq 1) 'Unexpected acceptance matrix.'
+        Assert-That ($Settings.WarmupSeconds -eq 20 -and $Settings.DurationSeconds -eq 180) 'Unexpected capture window.'
+        Assert-That ($Settings.Map -eq '/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked') 'Unaccepted map became the default.'
+        Assert-That (-not $Settings.CaptureTaskTrace -and $null -eq $Settings.ScreenPercentage) 'Acceptance contains a diagnostic override.'
+    }
+    Check 'unknown CLI variants cannot be silently dropped from a mixed selection' {
+        $Caught = $null
+        try { $null = Validate @{ VariantNames = @('Baseline', 'Unknown') } } catch { $Caught = $_.Exception.Message }
+        Assert-That ($Caught -eq 'VariantNames contains unsupported test variants.') 'Mixed unknown variants passed.'
+    }
+    Check 'incompatible internal resolution override fails before launching TSR or spline cases' {
+        foreach ($VariantName in @('TSRHistory200', 'TSRHistory150', 'SplineRayTracingOn', 'SplineRayTracingOff')) {
+            $Caught = $null
+            try { $null = Validate @{ VariantNames = @($VariantName); ScreenPercentage = 50 } } catch { $Caught = $_.Exception.Message }
+            Assert-That ($Caught -like 'Selected variants require the default internal resolution*') 'Conflicting resolution reached launch.'
+        }
+    }
+    Check 'all catalog variants round-trip through JSON and the dry-run plan' {
+        $Path = Write-Config (@{ SchemaVersion = 1; VariantNames = $RenderCostVariantNames } | ConvertTo-Json)
+        $Report = Validate @{ ConfigFile = $Path }
+        Assert-That ($Report.Configuration.Cases.Count -eq $RenderCostVariantNames.Count) 'A catalog variant was not resolved.'
+        foreach ($Case in $Report.Configuration.Cases) {
+            $Variant = $RenderCostCatalog.Variants | Where-Object { $_.Name -eq $Case.Definition.Name }
+            Assert-That ($Case.ExecCmds -eq (Get-RenderCostExecCommands $Variant)) 'Dry-run launch commands differ.'
+        }
+    }
+    foreach ($Variant in $RenderCostCatalog.Variants) {
+        Check "$($Variant.Name): launch/readback use one definition; missing or conflicting values fail" {
+            $Commands = (Get-RenderCostExecCommands $Variant) -split ','
+            $LogText = @(
+                foreach ($Name in $Variant.CVars.Keys) { '{0} = "{1}"' -f $Name, $Variant.CVars[$Name] }
+                'r.ScreenPercentage = "0"'
+                'r.DynamicRes.OperationMode = "0"'
+            ) -join "`n"
+            $Result = Test-RenderCostVariant $Variant $LogText 160 5 12
+            Assert-That ($Result.ConfigurationValid -and $Result.ConsumersValid) 'Matching configuration rejected.'
+            foreach ($Name in $Variant.CVars.Keys) {
+                Assert-That ($Commands -contains "$Name $($Variant.CVars[$Name])" -and $Commands -contains $Name) "Missing set/read command for $Name"
+                $Missing = ($LogText -split "`n" | Where-Object { -not $_.StartsWith("$Name =") }) -join "`n"
+                $Result = Test-RenderCostVariant $Variant $Missing 160 5 12
+                Assert-That (-not $Result.ConfigurationValid) "Missing readback accepted: $Name"
+                $Result = Test-RenderCostVariant $Variant ($LogText + "`n$Name = 999") 160 5 12
+                Assert-That (-not $Result.ConfigurationValid) "Earlier value hid a later mismatch: $Name"
+            }
+            if ($Variant.RequireDefaultResolution) {
+                $Result = Test-RenderCostVariant $Variant ($LogText + "`nr.ScreenPercentage = 50") 160 5 12
+                Assert-That (-not $Result.ConfigurationValid) 'Resolution isolation guard was lost.'
+            }
+        }
+    }
+    Check 'consumer boundaries retain strict 5/12 checks and skip them only for zero enemies' {
+        foreach ($Variant in $RenderCostCatalog.Variants) {
+            $Result = Test-RenderCostVariant $Variant '' 160 4 11
+            Assert-That ($Result.ConsumersValid -eq ($null -eq $Variant.ExpectedConsumers)) 'Consumer budget guard changed.'
+            $Result = Test-RenderCostVariant $Variant '' 0 0 0
+            Assert-That $Result.ConsumersValid 'Zero-enemy run requires enemy consumers.'
+            $Result = Test-RenderCostVariant $Variant '' 160 5 12
+            Assert-That ($Result.ConsumerOverrideValid -eq ([string]::IsNullOrEmpty($Variant.DisabledConsumer))) 'Disabled consumer was not checked.'
+            $Result = Test-RenderCostVariant $Variant '' 160 0 0
+            Assert-That $Result.ConsumerOverrideValid 'Disabled consumers should pass at zero.'
+        }
+    }
+    Check 'boolean readbacks and invariant-culture command values are preserved' {
+        Assert-That (Test-RenderCostCVar 'r.AllowOcclusionQueries = true' 'r.AllowOcclusionQueries' 1) 'True alias rejected.'
+        Assert-That (Test-RenderCostCVar 'r.AllowOcclusionQueries = false' 'r.AllowOcclusionQueries' 0) 'False alias rejected.'
+        $OldCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('de-DE')
+            $Commands = Get-RenderCostExecCommands $RenderCostCatalog.Variants[0] 66.7
+            Assert-That (($Commands -split ',') -contains 'r.ScreenPercentage 66.7') 'Locale changed command syntax.'
+        } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $OldCulture }
     }
     Check 'DryRun needs no UE/project and creates no evidence' {
         $MissingRoot = Join-Path $TestRoot 'MissingProject'
@@ -93,6 +185,35 @@ try {
     Set-Content -LiteralPath (Join-Path $MapProject 'fpstrue.uproject') -Value '{}'
     $SelectedMap = Join-Path $MapDirectory 'Selected.umap'
     Set-Content -LiteralPath $SelectedMap -Value 'Test map fingerprint input; never loaded by UE.'
+    Check 'environment serialization records plain INI text, never provider metadata' {
+        $SettingsDirectory = Join-Path $MapProject 'Saved\Config\WindowsEditor'
+        $null = New-Item -ItemType Directory -Path $SettingsDirectory -Force
+        Set-Content -LiteralPath (Join-Path $SettingsDirectory 'GameUserSettings.ini') -Value '[Test] Value=1' -Encoding UTF8
+        function Start-Process { throw 'TEST FORBIDS process launch.' }
+        function Get-Process { throw 'TEST FORBIDS process queries.' }
+        function Get-Command { return $null }
+        function git { 'test-revision' }
+        function powercfg { 'test-power-scheme' }
+        function ConvertTo-Json {
+            param([Parameter(ValueFromPipeline)]$InputObject, [int]$Depth = 2, [switch]$Compress)
+            process {
+                if ($InputObject -is [Collections.IDictionary] -and $InputObject.Contains('GameUserSettings')) {
+                    $Content = $InputObject.GameUserSettings.Content
+                    # Reject the metadata before serializing it: the old WinPS 5.1 path could run for minutes.
+                    Assert-That ($Content -is [string] -and $Content.Contains('[Test] Value=1')) 'INI text was lost.'
+                    Assert-That ($Content.PSObject.Properties.Name -notcontains 'PSDrive') 'Get-Content provider metadata leaked into the record.'
+                    $Json = Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $InputObject -Depth $Depth
+                    Assert-That ($Json.Length -lt 50000 -and $Json -notmatch 'PSProvider') 'Environment JSON expanded filesystem metadata.'
+                    throw 'TEST environment serialized without launching UE.'
+                }
+                Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $InputObject -Depth $Depth -Compress:$Compress
+            }
+        }
+        $Caught = $null
+        try { $null = & $Runner -ProjectRoot $MapProject -EditorPath $Runner -Map '/Game/Regression/Selected' -VariantNames Baseline -RunName EnvironmentPlainText }
+        catch { $Caught = $_.Exception.Message }
+        Assert-That ($Caught -eq 'TEST environment serialized without launching UE.') "Environment test did not reach its boundary: $Caught"
+    }
     Check 'fingerprints the selected package with optional CLI object/travel suffix' {
         function Start-Process { throw 'TEST FORBIDS process launch.' }
         function Get-Process { throw 'TEST FORBIDS process queries.' }

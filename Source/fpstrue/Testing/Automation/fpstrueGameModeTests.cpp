@@ -320,11 +320,11 @@ bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 	GameMode->MinimumSpawnPointCount = 1;
 	GameMode->EnemyClass = AfpstrueEnemyCharacter::StaticClass();
 	TestEqual(TEXT("Legacy wave count retained without asset"), GameMode->GetConfiguredWaveCount(), 3);
-	TestEqual(TEXT("Legacy growth retained without asset"), GameMode->GetEnemyCountForWave(2), 7);
+	TestEqual(TEXT("Legacy growth retained without asset"), GameMode->GetWaveConfig(2).EnemyCount, 7);
 	GameMode->WaveConfigs.SetNum(1);
 	GameMode->WaveConfigs[0].EnemyCount = 23;
 	TestEqual(TEXT("Legacy explicit wave count replaces linear count"), GameMode->GetConfiguredWaveCount(), 1);
-	TestEqual(TEXT("Legacy explicit enemy count is read"), GameMode->GetEnemyCountForWave(1), 23);
+	TestEqual(TEXT("Legacy explicit enemy count is read"), GameMode->GetWaveConfig(1).EnemyCount, 23);
 	UfpstrueWaveConfiguration* Config = NewObject<UfpstrueWaveConfiguration>(GameMode);
 	Config->Waves.SetNum(2);
 	Config->Waves[0].EnemyCount = 11;
@@ -333,12 +333,12 @@ bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 	Config->WaveInterval = 0.0f;
 	GameMode->WaveConfiguration = Config;
 	TestEqual(TEXT("Asset determines complete wave count"), GameMode->GetConfiguredWaveCount(), 2);
-	TestEqual(TEXT("Asset determines wave enemy count"), GameMode->GetEnemyCountForWave(2), 17);
-	TestEqual(TEXT("Invalid asset wave does not use legacy linear growth"), GameMode->GetEnemyCountForWave(3), 0);
-	TestFalse(TEXT("Missing asset class must not silently use legacy class"), bool(GameMode->GetEnemyClassForWave(1)));
+	TestEqual(TEXT("Asset determines wave enemy count"), GameMode->GetWaveConfig(2).EnemyCount, 17);
+	TestEqual(TEXT("Invalid asset wave does not use legacy linear growth"), GameMode->GetWaveConfig(3).EnemyCount, 0);
+	TestFalse(TEXT("Missing asset class must not silently use legacy class"), bool(GameMode->GetWaveConfig(1).EnemyClass));
 	Config->DefaultEnemyClass = AfpstrueEnemyCharacter::StaticClass();
-	TestTrue(TEXT("Asset default enemy class is used"), GameMode->GetEnemyClassForWave(1) == Config->DefaultEnemyClass);
-	TestFalse(TEXT("Invalid asset wave has no class even with an asset default"), bool(GameMode->GetEnemyClassForWave(3)));
+	TestTrue(TEXT("Asset default enemy class is used"), GameMode->GetWaveConfig(1).EnemyClass == Config->DefaultEnemyClass);
+	TestFalse(TEXT("Invalid asset wave has no class even with an asset default"), bool(GameMode->GetWaveConfig(3).EnemyClass));
 	TestEqual(TEXT("Asset interval is authoritative including zero"), GameMode->GetConfiguredWaveInterval(), 0.0f);
 	TStrongObjectPtr<UfpstrueGameModeTestObserver> Observer(NewObject<UfpstrueGameModeTestObserver>());
 	BindObserver(Observer.Get(), GameMode, Player);
@@ -347,6 +347,53 @@ bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Real Start publishes asset duration, not legacy value"), Observer->InitialTime, 61);
 	TestTrue(TEXT("Real asset startup reached Playing before listener ended it"), Observer->bSawRunningState);
 	TestTrue(TEXT("Listener can finish asset-configured match"), GameMode->IsFinished());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueGameModeParticipantBoundaryTest, "fpstrue.Gameplay.GameMode.ParticipantDeparture",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueGameModeParticipantBoundaryTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	AfpstrueGameMode* GameMode = nullptr;
+	AfpstrueCharacter* Player = nullptr;
+	if (!PrepareGameModeWorld(Fixture, *this, GameMode, Player))
+		return false;
+	// 不开生成/导航：验证已登记敌人的销毁/离场注销，以及玩家 EndPlay 结束对局。
+	GameMode->PlayerCharacter = Player;
+	GameMode->MatchPhase = EFPMatchPhase::Playing;
+	GameMode->RemainingTime = 30;
+	GameMode->BindPlayerDeathEvent();
+	TStrongObjectPtr<UfpstrueGameModeTestObserver> Observer(NewObject<UfpstrueGameModeTestObserver>());
+	BindObserver(Observer.Get(), GameMode, Player);
+	// 注册发生在 BeginPlay 之后，EndPlay 同时覆盖直接销毁和关卡移除；不依赖冗余 OnDestroyed 绑定。
+	FActorSpawnParameters SpawnParameters;
+	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	for (const bool bDestroy : {true, false})
+	{
+		AfpstrueEnemyCharacter* Enemy = Fixture.GetTestWorld()->SpawnActor<AfpstrueEnemyCharacter>(
+			AfpstrueEnemyCharacter::StaticClass(), FTransform(FVector(2000.0f, 0.0f, 0.0f)), SpawnParameters);
+		if (!TestNotNull(TEXT("Enemy participant"), Enemy)) return false;
+		GameMode->RegisterEnemy(Enemy);
+		const int32 EventsBeforeDeparture = Observer->AliveEvents;
+		if (bDestroy) Enemy->Destroy();
+		else Enemy->RouteEndPlay(EEndPlayReason::RemovedFromWorld);
+		TestEqual(TEXT("Both departure paths clear the registry"), GameMode->RegisteredEnemies.Num(), 0);
+		TestEqual(TEXT("Departure publishes once"), Observer->AliveEvents, EventsBeforeDeparture + 1);
+		GameMode->UnregisterEnemy(Enemy);
+		TestEqual(TEXT("Late duplicate unregister is inert"), Observer->AliveEvents, EventsBeforeDeparture + 1);
+	}
+	Player->Destroy();
+	TestTrue(TEXT("Direct player destruction ends Playing"), GameMode->IsFinished());
+	TestEqual(TEXT("Departure broadcasts one result"), Observer->ResultEvents, 1);
+	GameMode->UpdateCountdown();
+	TestEqual(TEXT("Countdown cannot finish the match again"), Observer->ResultEvents, 1);
+	GameMode->BenchmarkEnemyCountOverride = 0;
+	TestEqual(TEXT("Explicit zero enemy override remains meaningful"), GameMode->GetWaveConfig(1).EnemyCount, 0);
+	TestEqual(TEXT("Override produces one benchmark wave"), GameMode->GetConfiguredWaveCount(), 1);
+	GameMode->BenchmarkEnemyCountOverride = INDEX_NONE;
+	TestEqual(TEXT("Removing override restores authored wave count"), GameMode->GetConfiguredWaveCount(), 3);
 	return true;
 }
 

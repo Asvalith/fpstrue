@@ -1,12 +1,13 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
-    [int]$EnemyCount = 20,
-    [int]$RunsPerGroup = 2,
-    [double]$WarmupSeconds = 5,
-    [double]$DurationSeconds = 5,
+    [int]$EnemyCount = 160,
+    [int]$RunsPerGroup = 1,
+    [double]$WarmupSeconds = 10,
+    [double]$DurationSeconds = 30,
     [int]$BenchmarkSeed = 1337,
-    [ValidateSet("GlobalSkeletalAB", "EnemyOffGroups")]
-    [string]$TestMode = "GlobalSkeletalAB",
-    [string]$RunName = "SkeletalRayTracingAB_20260827"
+    [string]$RunName = "EnemyBottleneckDiagnostics_20260824",
+    [switch]$MovementFollowup
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,72 +22,18 @@ $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
 
-if (Get-Process -Name "UnrealEditor" -ErrorAction SilentlyContinue) {
-    throw "Close the running Unreal Editor before the A/B test. A second editor process would invalidate the result."
-}
+$Groups = @(
+    [PSCustomObject]@{ Name = "Baseline"; Flag = "" },
+    [PSCustomObject]@{ Name = "AttackSweepOff"; Flag = "-BenchmarkDisableAttackSweep" },
+    [PSCustomObject]@{ Name = "EnemyPawnCollisionOff"; Flag = "-BenchmarkDisableEnemyPawnCollision" },
+    [PSCustomObject]@{ Name = "PathFollowingTickOff"; Flag = "-BenchmarkDisablePathFollowingTick" },
+    [PSCustomObject]@{ Name = "CharacterMovementTickOff"; Flag = "-BenchmarkDisableCharacterMovementTick" }
+)
 
-if ($TestMode -eq "EnemyOffGroups") {
-    $Groups = @(
-        [PSCustomObject]@{
-            Name = "EnemyRayTracingOff"
-            ExecCmds = "r.RayTracing.ForceAllRayTracingEffects -1,r.RayTracing.Geometry.SkeletalMeshes 1"
-            BenchmarkSwitch = "-BenchmarkEnemyRayTracingOff"
-        },
-        [PSCustomObject]@{
-            Name = "EnemyShadowsOff"
-            ExecCmds = "r.RayTracing.ForceAllRayTracingEffects -1,r.RayTracing.Geometry.SkeletalMeshes 1"
-            BenchmarkSwitch = "-BenchmarkEnemyShadowsOff"
-        }
-    )
-}
-else {
-    $Groups = @(
-        [PSCustomObject]@{
-            Name = "Baseline"
-            ExecCmds = "r.RayTracing.ForceAllRayTracingEffects -1,r.RayTracing.Geometry.SkeletalMeshes 1"
-            BenchmarkSwitch = $null
-        },
-        [PSCustomObject]@{
-            Name = "SkeletalRayTracingOff"
-            ExecCmds = "r.RayTracing.ForceAllRayTracingEffects -1,r.RayTracing.Geometry.SkeletalMeshes 0"
-            BenchmarkSwitch = $null
-        }
-    )
-}
-
-function Get-NumericValues {
-    param(
-        [object[]]$Rows,
-        [string]$Column
-    )
-
-    $Values = foreach ($Row in $Rows) {
-        $Value = 0.0
-        if ([double]::TryParse(
-                [string]$Row.$Column,
-                [Globalization.NumberStyles]::Float,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [ref]$Value)) {
-            $Value
-        }
-    }
-
-    return @($Values)
-}
-
-function Get-Percentile {
-    param(
-        [double[]]$Values,
-        [double]$Percentile
-    )
-
-    if ($Values.Count -eq 0) {
-        return 0.0
-    }
-
-    $Sorted = @($Values | Sort-Object)
-    $Index = [Math]::Floor(($Sorted.Count - 1) * $Percentile)
-    return $Sorted[$Index]
+if ($MovementFollowup) {
+    $Groups = @($Groups | Where-Object {
+        $_.Name -in @("Baseline", "PathFollowingTickOff", "CharacterMovementTickOff")
+    })
 }
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
@@ -94,7 +41,6 @@ $ManifestRows = @()
 
 for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
     $RunGroups = @($Groups | Sort-Object { Get-Random })
-
     foreach ($Group in $RunGroups) {
         $RunId = "$($Group.Name)_Run$Run"
         $RunRoot = Join-Path $EvidenceRoot $RunId
@@ -123,13 +69,13 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             "-BenchmarkScreenshot",
             "-BenchmarkAutoQuit",
             "-csvGpuStats",
-            "-ExecCmds=`"$($Group.ExecCmds)`"",
+            '-ExecCmds="stat unit,stat streaming"',
             "-log=$LogName",
             "-ddc=InstalledNoZenLocalFallback",
             "-LocalDataCachePath=$DdcPath"
         )
-        if ($Group.BenchmarkSwitch) {
-            $Arguments += $Group.BenchmarkSwitch
+        if ($Group.Flag) {
+            $Arguments += $Group.Flag
         }
 
         Write-Output "Starting $RunId with $EnemyCount enemies"
@@ -162,8 +108,9 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
         $LogLines = Get-Content -LiteralPath $Log.FullName
         $Ready = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark ready: requested=$EnemyCount alive=$EnemyCount")
         $Stopped = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark capture stopped.")
-        if (-not $Ready -or -not $Stopped) {
-            throw "$RunId did not reach a valid capture state"
+        $DiagnosticsApplied = [bool]($LogLines | Select-String -SimpleMatch "Benchmark diagnostics applied: enemies=$EnemyCount")
+        if (-not $Ready -or -not $Stopped -or -not $DiagnosticsApplied) {
+            throw "$RunId did not reach a valid diagnostic capture state"
         }
 
         $ManifestRows += [PSCustomObject]@{
@@ -171,9 +118,9 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             Run = $Run
             EnemyCount = $EnemyCount
             BenchmarkSeed = $BenchmarkSeed
-            ExecCmds = $Group.ExecCmds
-            BenchmarkSwitch = $Group.BenchmarkSwitch
+            DisabledFlag = $Group.Flag
             Ready = $Ready
+            DiagnosticsApplied = $DiagnosticsApplied
             CaptureStopped = $Stopped
             SpawnFailures = ($LogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
             VSMQueueOverflows = ($LogLines | Select-String -SimpleMatch "Non-Nanite Marking Job Queue overflow").Count
@@ -182,53 +129,9 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             Screenshot = $ScreenshotDestination
             Log = $LogDestination
         }
-
         $ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
         Write-Output "Completed $RunId"
     }
 }
 
-$MetricNames = @(
-    "FrameTime",
-    "GameThreadTime",
-    "RenderThreadTime",
-    "GPUTime",
-    "Exclusive/GameThread/Input",
-    "Exclusive/RenderThread/EventWait/Visibility",
-    "Exclusive/RenderThread/RenderOther",
-    "GPU/RayTracingDynamicGeometry",
-    "GPU/RayTracingScene",
-    "GPU/VisibilityCommands",
-    "GPU/ShadowDepths",
-    "GPU/ShadowProjection",
-    "DrawCall/ShadowDepths",
-    "RHI/PrimitivesDrawn",
-    "RHI/DrawCalls"
-)
-$SummaryRows = @()
-
-foreach ($ManifestRow in $ManifestRows) {
-    $Rows = @(Import-Csv -LiteralPath $ManifestRow.Csv)
-
-    foreach ($MetricName in $MetricNames) {
-        $Values = @(Get-NumericValues -Rows $Rows -Column $MetricName)
-        if ($Values.Count -eq 0) {
-            continue
-        }
-
-        $SummaryRows += [PSCustomObject]@{
-            Group = $ManifestRow.Group
-            Run = $ManifestRow.Run
-            Metric = $MetricName
-            Average = ($Values | Measure-Object -Average).Average
-            P95 = Get-Percentile -Values $Values -Percentile 0.95
-            P99 = Get-Percentile -Values $Values -Percentile 0.99
-            Maximum = ($Values | Measure-Object -Maximum).Maximum
-        }
-    }
-}
-
-$SummaryPath = Join-Path $EvidenceRoot "summary.csv"
-$SummaryRows | Export-Csv -LiteralPath $SummaryPath -NoTypeInformation -Encoding UTF8
-Write-Output "Render A/B evidence is ready in $EvidenceRoot"
-Write-Output "Summary: $SummaryPath"
+& (Join-Path $ProjectRoot "Tools\SummarizeEnemyBottleneckDiagnostics.ps1") -EvidenceRoot $EvidenceRoot

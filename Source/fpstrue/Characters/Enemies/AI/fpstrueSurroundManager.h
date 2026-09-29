@@ -106,6 +106,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Shared Target", meta = (ClampMin = "25.0"))
 	float SharedTargetMoveThreshold = 200.0f;
 
+	// 位移阈值负责合并频繁变化，最大年龄负责让“小幅移动后停住”最终刷新。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Shared Target", meta = (ClampMin = "0.05"))
+	float SharedTargetMaxAge = 0.5f;
+
+	// 导航尚未生成或某些接近点投影失败时，静止目标也需要低频重试。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Navigation", meta = (ClampMin = "0.05"))
+	float NavigationRetryInterval = 0.5f;
+	// 成功投影也会过期：动态障碍/NavMesh 重建时，静止玩家不能永久复用旧接近点。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Navigation", meta = (ClampMin = "0.05"))
+	float NavigationCacheMaxAge = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Debug")
 	bool bDrawDebugSlots = false;
 
@@ -113,6 +124,7 @@ protected:
 	float DebugDrawInterval = 0.25f;
 
 private:
+	friend class FFpstrueSurroundCacheLifecycleTest;
 	// 根据内外环配置创建稳定槽位布局。
 	void BuildSlots();
 	// Timer 回调：按阈值刷新共享目标位置。
@@ -132,16 +144,20 @@ private:
 	// 调试模式下绘制已投影槽位，并以颜色区分是否占用。
 	void DrawDebugSlots();
 
-	// 缓存本局共享玩家目标，供槽位投影与敌人决策读取。
+	// 跨 Actor 的长期引用需要进入反射系统；Transient 表明缓存不会被序列化到资产或存档。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueCharacter> TargetCharacter;
 
 	FVector CachedTargetLocation = FVector::ZeroVector;
 	bool bHasSharedTargetSnapshot = false;
+	bool bNeedsNavigationRetry = false;
+	double SharedTargetSnapshotTime = 0.0;
+	double NextNavigationRetryTime = 0.0;
+	double NavigationCacheTime = 0.0;
 
-	// 槽位按连续数组遍历，反向映射定位敌人槽位，集合维护唯一攻击者。
+	// TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
-	// 敌人销毁后可能留下失效弱键，由 CleanupInvalidEntries 清理。
+	// 弱指针作为键时可能留下失效键，因此 CleanupInvalidEntries 必须负责清理。
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
 	uint64 MoveRequestBudgetFrame = MAX_uint64;

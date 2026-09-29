@@ -1,0 +1,172 @@
+{
+  "succeeded": 25,
+  "succeededWithWarnings": 16,
+  "failed": 0,
+  "notRun": 0,
+  "tests": [
+    {
+      "name": "fpstrue.AI.BehaviorTree.AssetGraphAndBindings.DefaultProjectAssets",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.AI.BehaviorTree.AssetSafety",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.AI.BehaviorTree.DefaultStructure",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.AI.BehaviorTree.RuntimeLifecycle",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.AI.Surround.CacheAndSlotOwnership",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.AI.FacingTolerance",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.AI.RotationConfig",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.LegacyCallbacksFailClosed",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.RemainingCooldownAndShotFact",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Combat.AttackProtectionAndCleanup",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Combat.ConfigurationSource",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Combat.ExplicitPlaybackAndStopReentry",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Combat.ProjectBlueprintPlaybackIntegration",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.GameMode.ParticipantDeparture",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.GameMode.StartupReentryAndCleanup",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.GameMode.WaveConfigurationAuthority",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Health.NotificationTermination",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Health.QueuedEnemyHitContext",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Health.ReentrantMutationOrder",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.AnimationSharing.StopAndSwapLifecycle",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.Benchmark.CancellationAndOwnership",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.Benchmark.LateCsvStartAfterCleanupTimeout",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.Benchmark.PauseWatchdogAndExitContract",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.Benchmark.SampleValidation",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.Significance.RenderPriorityOrder",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Performance.Significance.RenderTopKSelection",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Rendering.EnemyBudget.MeshOwnershipAndDeath",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Rendering.EnemyBudget.TierHysteresis",
+      "state": "Success"
+    }
+  ]
+}

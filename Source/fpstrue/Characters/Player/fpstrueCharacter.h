@@ -49,13 +49,13 @@ public:
 	// WeaponComponent 的 Hitscan 使用该相机确定射线起点和方向。
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 
-	//装备/卸下武器组件
-	// PickUp/WeaponComponent 装备成功后登记当前武器并通知 HUD/蓝图。
-	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
-	// 武器销毁或卸下时清空装备关系并通知 HUD。
+	// 完整卸下入口：ExpectedWeapon 防止旧回调清除新装备；不能公开只改槽位的 setter。
 	void ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent);
-	// 武器接纳换弹后统一退出瞄准/冲刺，覆盖手动与空仓自动换弹。
-	void PrepareForWeaponReload();
+	// 换弹、控制器迁移和退出生命周期共用：退出瞄准/冲刺并应用统一步速。
+	void ResetMovementModifiers();
+	// 业务资格统一入口；临时输入迁移不会把有效装备误判为永久失效。
+	bool CanMaintainEquipment() const;
+	bool CanAcceptGameplayInput() const;
 
 	//Character只暴露当前装备关系，武器运行时状态由WeaponComponent持有
 	// WeaponComponent 装备前检查玩家是否已经持有武器。
@@ -117,11 +117,9 @@ protected:
 	void Look(const FInputActionValue& Value);
 	// 每次按下切换冲刺状态；瞄准、换弹和死亡仍可强制停止冲刺。
 	void ToggleSprint();
-	// 退出冲刺并恢复正常步速。
-	void StopSprint();
 	// 检查武器与角色状态后进入瞄准，并通知蓝图表现。
 	void StartAim();
-	// 退出瞄准并恢复正常步速。
+	// 退出瞄准，按当前移动状态重新计算步速。
 	void StopAim();
 	// 把开火输入转交当前 WeaponComponent。
 	void StartWeaponFire();
@@ -165,9 +163,12 @@ protected:
 	void OnPlayerDied();
 
 private:
-	// 输入映射随 Controller/LocalPlayer 切换而迁移，与 UMG 界面本身的切换不是同一件事。
-	// 把默认 Mapping Context 添加到当前 LocalPlayer。
-	void ApplyInputMappingContexts();
+	friend class UfpstrueWeaponComponent;
+	// 仅完整装备事务能登记/释放槽位；外部不得构造只有一侧引用的半装备状态。
+	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
+	void ReleaseEquippedWeaponComponent(const UfpstrueWeaponComponent* ExpectedWeapon);
+	// MaxWalkSpeed 唯一写入口，按当前瞄准/冲刺状态计算，不依赖各出口调用顺序。
+	void ApplyMovementSpeed();
 	// 从旧 LocalPlayer 移除本角色添加的 Mapping Context。
 	void RemoveInputMappingContexts();
 
@@ -235,6 +236,12 @@ private:
 
 	//增强输入子系统的弱指针，便于移除 Mapping Context
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> BoundInputSubsystem;
+	// 保存实际添加的资产；运行中更改 DefaultMappingContext 也能移除旧映射。
+	TWeakObjectPtr<UInputMappingContext> AppliedMappingContext;
+	bool bAddedMappingContext = false;
+	bool bEndingPlay = false;
+	// 控制权迁移的同步回调期间拒绝新输入动作；不改变装备和弹药的持久状态。
+	bool bOwnerInputTransition = false;
 
 	//死亡处理标志，防止重复处理死亡事件
 	// HealthComponent 保存死亡事实；这里只防止死亡表现和广播重复执行。

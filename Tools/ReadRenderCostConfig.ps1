@@ -1,7 +1,72 @@
-# The preset contains only existing experiment parameters, never machine paths or commands.
-$RenderCostConfigParameters = @('Counts', 'RunsPerCase', 'WarmupSeconds', 'DurationSeconds',
-    'ScreenPercentage', 'PlayerHealth', 'BenchmarkSeed', 'VariantNames', 'ExpectedAvoidanceMode',
-    'CaptureTaskTrace', 'BalancedVariantOrder', 'StartTrimSeconds', 'EndTrimSeconds', 'Map')
+# Configuration mechanics only. Edit ExperimentProfiles/RenderCostCases.psd1 or a JSON preset,
+# not this reader or the process runner, when changing an experiment.
+$RenderCostCatalogPath = Join-Path $PSScriptRoot 'ExperimentProfiles/RenderCostCases.psd1'
+$RenderCostCatalog = Import-PowerShellDataFile -LiteralPath $RenderCostCatalogPath
+$RenderCostConfigParameters = @($RenderCostCatalog.Defaults.Keys | Sort-Object)
+$RenderCostVariantNames = @($RenderCostCatalog.Variants | ForEach-Object { $_.Name })
+
+function Get-CVarValue {
+    param([string]$Text, [string]$Name)
+    $Pattern = '(?im)' + [regex]::Escape($Name) + '\s*=\s*"?([^"\s]+)"?'
+    $MatchesFound = [regex]::Matches($Text, $Pattern)
+    if ($MatchesFound.Count -eq 0) { return $null }
+    # Validate and record the same FINAL echoed value. An earlier match is not sufficient.
+    return $MatchesFound[$MatchesFound.Count - 1].Groups[1].Value
+}
+
+function Test-RenderCostCVar {
+    param([string]$LogText, [string]$Name, $Expected)
+    $Actual = Get-CVarValue $LogText $Name
+    if ($null -eq $Actual) { return $false }
+    # UE may echo this boolean as either a number or a word. Other CVars retain numeric readback.
+    if ($Name -eq 'r.AllowOcclusionQueries') {
+        return $Actual -in @([string]$Expected, $(if ($Expected -eq 1) { 'true' } else { 'false' }))
+    }
+    return $Actual -eq [string]$Expected
+}
+
+function Get-RenderCostExecCommands {
+    param([hashtable]$Variant, [Nullable[double]]$ScreenPercentage)
+    $Commands = @(
+        foreach ($CVars in @($RenderCostCatalog.Capture.CommonCVars, $Variant.CVars)) {
+            foreach ($Name in @($CVars.Keys | Sort-Object)) {
+                '{0} {1}' -f $Name, ([double]$CVars[$Name]).ToString('R', [Globalization.CultureInfo]::InvariantCulture)
+            }
+        }
+        if ($null -ne $ScreenPercentage) {
+            'r.ScreenPercentage ' + ([double]$ScreenPercentage).ToString('R', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        # Always read back overrides, including newly added variants, after applying them.
+        @($RenderCostCatalog.Capture.ReadbackCVars + @($Variant.CVars.Keys) | Sort-Object -Unique)
+    )
+    return $Commands -join ','
+}
+
+function Test-RenderCostVariant {
+    param([hashtable]$Variant, [string]$LogText, [int]$Count, [int]$Shadows, [int]$RayTracing)
+    $ConfigurationValid = $true
+    foreach ($Name in $Variant.CVars.Keys) {
+        if (-not (Test-RenderCostCVar $LogText $Name $Variant.CVars[$Name])) { $ConfigurationValid = $false }
+    }
+    if ($Variant.RequireDefaultResolution) {
+        $ConfigurationValid = $ConfigurationValid -and
+            (Test-RenderCostCVar $LogText 'r.ScreenPercentage' 0) -and
+            (Test-RenderCostCVar $LogText 'r.DynamicRes.OperationMode' 0)
+    }
+    $ConsumersValid = $true
+    if ($Count -gt 0 -and $null -ne $Variant.ExpectedConsumers) {
+        $ConsumersValid = $Shadows -eq $Variant.ExpectedConsumers.Shadows -and
+            $RayTracing -eq $Variant.ExpectedConsumers.RayTracing
+    }
+    return [PSCustomObject]@{
+        ConfigurationValid = $ConfigurationValid
+        ConsumersValid = $ConsumersValid
+        ConsumerOverrideValid = ($Variant.DisabledConsumer -ne 'RayTracing' -or $RayTracing -eq 0) -and
+            ($Variant.DisabledConsumer -ne 'Shadows' -or $Shadows -eq 0)
+        OcclusionOverrideValid = -not $Variant.CVars.ContainsKey('r.AllowOcclusionQueries') -or
+            (Test-RenderCostCVar $LogText 'r.AllowOcclusionQueries' $Variant.CVars['r.AllowOcclusionQueries'])
+    }
+}
 
 function Read-RenderCostConfig {
     param([string]$Path)
@@ -24,12 +89,8 @@ function Read-RenderCostConfig {
                 if ($Value -isnot [bool]) { throw "$Name must be a JSON boolean." }
             }
             'VariantNames' {
-                $Supported = @('Baseline', 'EnemyRayTracingOff', 'EnemyShadowsOff', 'OcclusionQueriesOn',
-                    'OcclusionQueriesOff', 'HardwareQueries', 'HZBOcclusion', 'BufferedQueries2',
-                    'LumenReflectionsDS2', 'LumenScreenProbeDS32', 'OriginalRenderPolicy', 'OptimizedRenderPolicy',
-                    'TSRHistory200', 'TSRHistory150', 'SplineRayTracingOn', 'SplineRayTracingOff')
                 if ($Value -isnot [array] -or $Value.Count -eq 0 -or
-                    @($Value | Where-Object { $_ -isnot [string] -or $Supported -notcontains $_ }).Count -gt 0) {
+                    @($Value | Where-Object { $_ -isnot [string] -or $RenderCostVariantNames -notcontains $_ }).Count -gt 0) {
                     throw 'VariantNames must be a nonempty array of supported variant names.'
                 }
             }

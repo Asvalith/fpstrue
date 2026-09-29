@@ -2,6 +2,7 @@
 
 #include "Characters/Enemies/AI/fpstrueEnemyBehaviorTree.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Player/fpstrueCharacter.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -217,15 +218,23 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 
 bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard)
 {
-	if (Blackboard == nullptr ||
-		Blackboard->GetKeyType(Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor)) != UBlackboardKeyType_Object::StaticClass())
+	if (Blackboard == nullptr)
 	{
 		return false;
+	}
+	const FBlackboardEntry* TargetEntry = Blackboard->GetKey(Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor));
+	const UBlackboardKeyType_Object* TargetType = TargetEntry != nullptr ? Cast<UBlackboardKeyType_Object>(TargetEntry->KeyType) : nullptr;
+	if (TargetType == nullptr || TargetEntry->bInstanceSynced || TargetType->BaseClass == nullptr ||
+		!AfpstrueCharacter::StaticClass()->IsChildOf(TargetType->BaseClass))
+	{
+		return false; // 类型必须能接受项目玩家；目标和决策条件不得跨敌人同步。
 	}
 	for (const FName Name :
 		 {FPEnemyBlackboard::HasTarget, FPEnemyBlackboard::Attacking, FPEnemyBlackboard::InAttackRange, FPEnemyBlackboard::InChaseRange})
 	{
-		if (Blackboard->GetKeyType(Blackboard->GetKeyID(Name)) != UBlackboardKeyType_Bool::StaticClass())
+		const FBlackboardEntry* Entry = Blackboard->GetKey(Blackboard->GetKeyID(Name));
+		if (Entry == nullptr || Entry->bInstanceSynced || Entry->KeyType == nullptr ||
+			Entry->KeyType->GetClass() != UBlackboardKeyType_Bool::StaticClass())
 		{
 			return false;
 		}

@@ -1,9 +1,16 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
     [int]$EnemyCount = 160,
     [int]$RunsPerGroup = 3,
     [double]$WarmupSeconds = 10,
     [double]$DurationSeconds = 30,
-    [string]$RunName = "MovementTierAB_20260822"
+    [int]$BenchmarkSeed = 1337,
+    [string]$RunName = "EnemyOptimizationAblation_20260824",
+    [switch]$AllEnabledOnly,
+    [switch]$SignificanceOnly,
+    [switch]$UnverifiedConsumersOnly,
+    [string[]]$SelectedGroups = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,22 +19,58 @@ $ProjectRoot = "E:\ueprojrct\fpstrue_safe2"
 $Editor = "E:\program\ue554\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe"
 $Project = Join-Path $ProjectRoot "fpstrue.uproject"
 $Map = "/Game/FactoryDistrict/Maps/Demonstration"
-$DdcPath = "E:\ueprojrct\ddc"
+$DdcPath = Join-Path $ProjectRoot "Saved\DerivedDataCache"
 $EvidenceRoot = Join-Path $ProjectRoot "Saved\Profiling\$RunName"
 $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
 
 $Groups = @(
-    [PSCustomObject]@{ Name = "A_FullRate"; DisableTiering = $true },
-    [PSCustomObject]@{ Name = "B_Tiered"; DisableTiering = $false }
+    [PSCustomObject]@{ Name = "AllEnabled"; Flag = "" },
+    [PSCustomObject]@{ Name = "NoSignificance"; Flag = "-BenchmarkDisableEnemySignificance" },
+    [PSCustomObject]@{ Name = "NoAIThrottling"; Flag = "-BenchmarkDisableAIThrottling" },
+    [PSCustomObject]@{ Name = "NoAnimationOptimization"; Flag = "-BenchmarkDisableAnimationOptimizations" },
+    [PSCustomObject]@{ Name = "NoMovementTiering"; Flag = "-BenchmarkDisableMovementTiering" },
+    [PSCustomObject]@{ Name = "NoSkeletalLOD"; Flag = "-BenchmarkDisableEnemySkeletalLOD" },
+    [PSCustomObject]@{ Name = "NoAnimationTiering"; Flag = "-BenchmarkDisableEnemyAnimationTiering" },
+    [PSCustomObject]@{ Name = "NoAnimationSharing"; Flag = "-BenchmarkDisableEnemyAnimationSharing" },
+    [PSCustomObject]@{ Name = "NoShadowTiering"; Flag = "-BenchmarkDisableShadowTiering" },
+    [PSCustomObject]@{ Name = "NoRayTracingTiering"; Flag = "-BenchmarkDisableEnemyRayTracingTiering" }
 )
+
+if ($SelectedGroups.Count -gt 0) {
+    $UnknownGroups = @($SelectedGroups | Where-Object { $_ -notin $Groups.Name })
+    if ($UnknownGroups.Count -gt 0) {
+        throw "Unknown ablation groups: $($UnknownGroups -join ', ')"
+    }
+    $Groups = @($Groups | Where-Object { $_.Name -in $SelectedGroups })
+}
+elseif ($UnverifiedConsumersOnly) {
+    $Groups = @($Groups | Where-Object {
+        $_.Name -in @(
+            "AllEnabled",
+            "NoMovementTiering",
+            "NoSkeletalLOD",
+            "NoAnimationTiering",
+            "NoAnimationSharing",
+            "NoShadowTiering",
+            "NoRayTracingTiering"
+        )
+    })
+}
+elseif ($SignificanceOnly) {
+    $Groups = @($Groups | Where-Object { $_.Name -in @("AllEnabled", "NoSignificance") })
+}
+elseif ($AllEnabledOnly) {
+    $Groups = @($Groups | Where-Object { $_.Name -eq "AllEnabled" })
+}
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 $ManifestRows = @()
 
-foreach ($Group in $Groups) {
-    for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
+for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
+    $RunGroups = @($Groups | Sort-Object { Get-Random })
+    foreach ($Group in $RunGroups) {
         $RunId = "$($Group.Name)_Run$Run"
         $RunRoot = Join-Path $EvidenceRoot $RunId
         New-Item -ItemType Directory -Path $RunRoot -Force | Out-Null
@@ -51,16 +94,18 @@ foreach ($Group in $Groups) {
             "-BenchmarkEnemies=$EnemyCount",
             "-BenchmarkWarmup=$WarmupSeconds",
             "-BenchmarkDuration=$DurationSeconds",
+            "-BenchmarkSeed=$BenchmarkSeed",
             "-BenchmarkScreenshot",
             "-BenchmarkAutoQuit",
             "-csvGpuStats",
             '-ExecCmds="stat unit,stat streaming"',
             "-log=$LogName",
-            "-ddc=InstalledNoZenLocalFallback",
-            "-LocalDataCachePath=$DdcPath"
+            "-ddc=NoZenLocalFallback",
+            "-LocalDataCachePath=$DdcPath",
+            "-ShaderWorkingDir=Saved/ShaderWorkingDir"
         )
-        if ($Group.DisableTiering) {
-            $Arguments += "-BenchmarkDisableMovementTiering"
+        if ($Group.Flag) {
+            $Arguments += $Group.Flag
         }
 
         Write-Output "Starting $RunId with $EnemyCount enemies"
@@ -91,8 +136,7 @@ foreach ($Group in $Groups) {
         Copy-Item -LiteralPath $Log.FullName -Destination $LogDestination -Force
 
         $LogLines = Get-Content -LiteralPath $Log.FullName
-        $ReadyPattern = "Automated benchmark ready: requested=$EnemyCount alive=$EnemyCount"
-        $Ready = [bool]($LogLines | Select-String -SimpleMatch $ReadyPattern)
+        $Ready = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark ready: requested=$EnemyCount alive=$EnemyCount")
         $Stopped = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark capture stopped.")
         if (-not $Ready -or -not $Stopped) {
             throw "$RunId did not reach a valid capture state"
@@ -102,7 +146,8 @@ foreach ($Group in $Groups) {
             Group = $Group.Name
             Run = $Run
             EnemyCount = $EnemyCount
-            MovementTieringEnabled = -not $Group.DisableTiering
+            BenchmarkSeed = $BenchmarkSeed
+            DisabledFlag = $Group.Flag
             Ready = $Ready
             CaptureStopped = $Stopped
             SpawnFailures = ($LogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
@@ -112,9 +157,9 @@ foreach ($Group in $Groups) {
             Screenshot = $ScreenshotDestination
             Log = $LogDestination
         }
+        $ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
         Write-Output "Completed $RunId"
     }
 }
 
-$ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
-& (Join-Path $ProjectRoot "Tools\SummarizeMovementTierAB.ps1") -EvidenceRoot $EvidenceRoot
+& (Join-Path $ProjectRoot "Tools\SummarizeEnemyOptimizationAblation.ps1") -EvidenceRoot $EvidenceRoot

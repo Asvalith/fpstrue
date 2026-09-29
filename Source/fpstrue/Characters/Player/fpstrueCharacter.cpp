@@ -11,6 +11,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "InputActionValue.h"
+#include "InputMappingContext.h"
 #include "Engine/LocalPlayer.h"
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
@@ -86,14 +87,16 @@ void AfpstrueCharacter::BeginPlay()
 	const bool bHasWeapon = EquippedWeaponComponent != nullptr;
 	Mesh1P->SetHiddenInGame(!bHasWeapon, true);
 	// 初始化基础移动速度；后续只在冲刺和瞄准状态切换时修改。
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	ApplyMovementSpeed();
 }
 
 // 退出关卡、切换地图或 Actor 被销毁都会进入这里；先停止外部回调，再交给基类释放 Actor。
 void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// EndPlay 统一终止持续输入，并移除本角色添加的 Mapping Context。
-	StopWeaponFire();
+	// WeaponComponent 属于拾取 Actor，不能只停开火后等待玩家自动销毁它。
+	bEndingPlay = true;
+	ClearEquippedWeaponComponent(EquippedWeaponComponent);
+	ResetMovementModifiers();
 	RemoveInputMappingContexts();
 
 	if (HealthComponent != nullptr)
@@ -112,24 +115,26 @@ void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 //玩家控制变更（游戏开始、角色切换）
 void AfpstrueCharacter::NotifyControllerChanged()
 {
+	TGuardValue<bool> InputTransitionGuard(bOwnerInputTransition, true);
 	// Controller 变化时先清理旧控制器留下的持续输入状态。
-	StopWeaponFire();
+	if (EquippedWeaponComponent != nullptr) EquippedWeaponComponent->InterruptOwnerInput();
+	StopJumping();
+	ResetMovementModifiers();
 	RemoveInputMappingContexts();
 	//执行基类
 	Super::NotifyControllerChanged();
 
-	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
+	// Controller 变化后重新取得 LocalPlayer 的 Enhanced Input 子系统；弱引用只记录归属，不拥有它。
+	APlayerController* PlayerController = Cast<APlayerController>(Controller);
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = PlayerController != nullptr
+		? ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()) : nullptr;
+	BoundInputSubsystem = Subsystem;
+	if (Subsystem != nullptr && DefaultMappingContext != nullptr)
 	{
-		//通过当前玩家的 PlayerController 获取对应的LocalPlayer，再从LocalPlayer中找到 Enhanced Input子系统，用来管理该玩家的输入映射
-		//目的是：Controller变化后重新获取当前玩家对应的Enhanced Input管理器
-		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
-				ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
-		{
-			//保存输入管理器引用，把输入配置加载进去
-			//注意BoundInputSubsystem是弱指针
-			BoundInputSubsystem = Subsystem;
-			ApplyInputMappingContexts();
-		}
+		// 只记录自己新加的映射；移交/销毁时不能删除其他系统早已安装的相同 Context。
+		AppliedMappingContext = DefaultMappingContext.Get();
+		bAddedMappingContext = !Subsystem->HasMappingContext(DefaultMappingContext);
+		if (bAddedMappingContext) Subsystem->AddMappingContext(DefaultMappingContext, 0);
 	}
 }
 
@@ -155,62 +160,39 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		UE_LOG(LogTemplateCharacter, Error, TEXT("%s (%s): %s is not assigned."), *GetName(), *GetClass()->GetPathName(), PropertyName);
 		return false;
 	};
+	const auto BindInput = [this, EnhancedInputComponent, &IsActionAssigned](const UInputAction* Action, const TCHAR* Name,
+		ETriggerEvent Trigger, auto Handler)
+	{
+		if (IsActionAssigned(Action, Name))
+		{
+			EnhancedInputComponent->BindAction(Action, Trigger, this, Handler);
+		}
+	};
+	const auto BindHeldInput = [this, EnhancedInputComponent, &IsActionAssigned](const UInputAction* Action, const TCHAR* Name,
+		auto Start, auto Stop)
+	{
+		if (!IsActionAssigned(Action, Name)) return;
+		EnhancedInputComponent->BindAction(Action, ETriggerEvent::Started, this, Start);
+		for (ETriggerEvent Release : {ETriggerEvent::Completed, ETriggerEvent::Canceled})
+		{
+			EnhancedInputComponent->BindAction(Action, Release, this, Stop);
+		}
+	};
 
 	// 连续轴输入：Triggered 在触发条件满足期间逐帧调用；方向键一直按住时，即使值不变也持续移动。
-	if (IsActionAssigned(MoveAction, TEXT("MoveAction")))
-	{
-		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Move);
-	}
-	if (IsActionAssigned(LookAction, TEXT("LookAction")))
-	{
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AfpstrueCharacter::Look);
-	}
+	BindInput(MoveAction, TEXT("MoveAction"), ETriggerEvent::Triggered, &AfpstrueCharacter::Move);
+	BindInput(LookAction, TEXT("LookAction"), ETriggerEvent::Triggered, &AfpstrueCharacter::Look);
 
-	// 按住型输入：当前均为普通 Boolean Action，Started 开启、Completed 松开，不配置未使用的 Canceled 分支。
-	if (IsActionAssigned(JumpAction, TEXT("JumpAction")))
-	{
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
-	}
-	if (IsActionAssigned(FireAction, TEXT("FireAction")))
-	{
-		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartWeaponFire);
-		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopWeaponFire);
-	}
-	if (IsActionAssigned(AimAction, TEXT("AimAction")))
-	{
-		EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Started, this, &AfpstrueCharacter::StartAim);
-		EnhancedInputComponent->BindAction(AimAction, ETriggerEvent::Completed, this, &AfpstrueCharacter::StopAim);
-	}
+	// 按住型输入：Completed 与 Canceled 都结束动作，覆盖 Trigger 条件变化和输入被撤销。
+	BindHeldInput(JumpAction, TEXT("JumpAction"), &ACharacter::Jump, &ACharacter::StopJumping);
+	BindHeldInput(FireAction, TEXT("FireAction"), &AfpstrueCharacter::StartWeaponFire, &AfpstrueCharacter::StopWeaponFire);
+	BindHeldInput(AimAction, TEXT("AimAction"), &AfpstrueCharacter::StartAim, &AfpstrueCharacter::StopAim);
 
 	// 切换型输入：SprintAction 每次按下切换一次，不在松开时自动停止。
-	if (IsActionAssigned(SprintAction, TEXT("SprintAction")))
-	{
-		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AfpstrueCharacter::ToggleSprint);
-	}
+	BindInput(SprintAction, TEXT("SprintAction"), ETriggerEvent::Started, &AfpstrueCharacter::ToggleSprint);
 
 	// 单次命令：换弹只提交请求，完成时机由武器状态和动画 Notify 决定。
-	if (IsActionAssigned(ReloadAction, TEXT("ReloadAction")))
-	{
-		EnhancedInputComponent->BindAction(ReloadAction, ETriggerEvent::Started, this, &AfpstrueCharacter::RequestWeaponReload);
-	}
-}
-
-// Mapping Context 归 LocalPlayer 子系统所有；角色只记录自己添加过的上下文，便于换 Controller 时成对移除。
-void AfpstrueCharacter::ApplyInputMappingContexts()
-{
-	// TWeakObjectPtr 不拥有子系统，使用 Get() 读取当前仍有效的对象。
-	UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get();
-	if (Subsystem == nullptr)
-	{
-		return;
-	}
-	//从保存的 Enhanced Input 子系统中取出输入管理器，
-	// 如果有效，就把默认输入映射 DefaultMappingContext 加载进去，让玩家的按键重新生效。
-	if (DefaultMappingContext != nullptr)
-	{
-		Subsystem->AddMappingContext(DefaultMappingContext, 0);
-	}
+	BindInput(ReloadAction, TEXT("ReloadAction"), ETriggerEvent::Started, &AfpstrueCharacter::RequestWeaponReload);
 }
 
 void AfpstrueCharacter::RemoveInputMappingContexts()
@@ -218,13 +200,15 @@ void AfpstrueCharacter::RemoveInputMappingContexts()
 	// Controller 更换或角色退出时成对移除本角色添加的映射，并清空不拥有对象生命周期的弱引用。
 	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundInputSubsystem.Get())
 	{
-		if (DefaultMappingContext != nullptr)
+		if (bAddedMappingContext && AppliedMappingContext.IsValid())
 		{
-			Subsystem->RemoveMappingContext(DefaultMappingContext);
+			Subsystem->RemoveMappingContext(AppliedMappingContext.Get());
 		}
 	}
 	// 清空弱引用，防止下一次 Controller 切换误用旧子系统。
 	BoundInputSubsystem.Reset();
+	AppliedMappingContext.Reset();
+	bAddedMappingContext = false;
 }
 
 // ==================== 移动与视角输入 ====================
@@ -235,7 +219,7 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 	//获得向量
 	const FVector2D MovementVector = Value.Get<FVector2D>();
 
-	if (Controller != nullptr)
+	if (Controller != nullptr && CanAcceptGameplayInput())
 	{
 		// 有Controller，交给移动组件移动;
 		//X:左右，Y:前后
@@ -250,7 +234,7 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 	//获得向量
 	const FVector2D LookAxisVector = Value.Get<FVector2D>();
 
-	if (Controller != nullptr)
+	if (Controller != nullptr && CanAcceptGameplayInput())
 	{
 		//有Controller，交给修改旋转;
 		//X：摇头  Y：点头
@@ -261,23 +245,15 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 
 void AfpstrueCharacter::ToggleSprint()
 {
-	// 死亡、换弹和瞄准期间不能切换冲刺；其他强制中断统一调用 StopSprint。
+	// 死亡、换弹和瞄准期间不能切换冲刺；生命周期和换弹统一重置移动修饰状态。
 	const bool bWeaponReloading = EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
-	if (IsDead() || bWeaponReloading || bIsAiming)
+	if (!CanAcceptGameplayInput() || bWeaponReloading || bIsAiming)
 	{
 		return;
 	}
 	//标记状态实现sprint、speed的优化
 	bIsSprinting = !bIsSprinting;
-	GetCharacterMovement()->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
-}
-
-void AfpstrueCharacter::StopSprint()
-{
-	// 所有强制中断路径复用这里，保证冲刺标志与 CharacterMovement 速度同步恢复。
-	//停止冲刺
-	bIsSprinting = false;
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	ApplyMovementSpeed();
 }
 
 // ==================== 瞄准 ====================
@@ -286,7 +262,7 @@ void AfpstrueCharacter::StartAim()
 {
 	//检查状态避免状态冲突
 	const bool bWeaponReloading = EquippedWeaponComponent != nullptr && EquippedWeaponComponent->IsReloading();
-	if (EquippedWeaponComponent == nullptr || IsDead() || bWeaponReloading || bIsAiming)
+	if (!CanAcceptGameplayInput() || EquippedWeaponComponent == nullptr || bWeaponReloading || bIsAiming)
 	{
 		return;
 	}
@@ -294,7 +270,7 @@ void AfpstrueCharacter::StartAim()
 	//检查瞄准前置条件
 	bIsAiming = true;
 	bIsSprinting = false;
-	GetCharacterMovement()->MaxWalkSpeed = AimWalkSpeed;
+	ApplyMovementSpeed();
 	OnAimChanged(true);
 }
 
@@ -305,11 +281,11 @@ void AfpstrueCharacter::StopAim()
 	const bool bWasAiming = bIsAiming;
 	//无条件复位
 	bIsAiming = false;
+	ApplyMovementSpeed();
 
 	//原来是在瞄准的话，修改状态
 	if (bWasAiming)
 	{
-		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 		OnAimChanged(false);
 	}
 }
@@ -321,7 +297,7 @@ void AfpstrueCharacter::StopAim()
 void AfpstrueCharacter::StartWeaponFire()
 {
 	// Character 只校验装备与生存状态，弹药和武器动作互斥由 WeaponComponent 负责。
-	if (EquippedWeaponComponent != nullptr && !IsDead())
+	if (EquippedWeaponComponent != nullptr && CanAcceptGameplayInput())
 	{
 		//转入weapon
 		EquippedWeaponComponent->StartFire();
@@ -340,18 +316,34 @@ void AfpstrueCharacter::StopWeaponFire()
 
 void AfpstrueCharacter::RequestWeaponReload()
 {
-	// 请求规则只由武器判断；手动与自动换弹都在接纳后调用 PrepareForWeaponReload。
+	// 请求规则只由武器判断；手动与自动换弹都在接纳后统一重置瞄准/冲刺。
 	if (EquippedWeaponComponent != nullptr)
 	{
 		EquippedWeaponComponent->RequestReload();
 	}
 }
 
-void AfpstrueCharacter::PrepareForWeaponReload()
+void AfpstrueCharacter::ResetMovementModifiers()
 {
-	// 先恢复移动，再广播瞄准变化；蓝图回调返回后不再覆盖其新状态。
-	StopSprint();
+	// 换弹、控制权迁移和 EndPlay 共用：先清冲刺并重算步速，再广播瞄准变化。
+	// StopAim 的蓝图回调返回后不再写状态，避免覆盖监听者合法建立的新状态。
+	bIsSprinting = false;
 	StopAim();
+}
+
+bool AfpstrueCharacter::CanMaintainEquipment() const
+{
+	return !bEndingPlay && !IsActorBeingDestroyed() && !IsDead();
+}
+
+bool AfpstrueCharacter::CanAcceptGameplayInput() const
+{
+	return CanMaintainEquipment() && !bOwnerInputTransition;
+}
+
+void AfpstrueCharacter::ApplyMovementSpeed()
+{
+	GetCharacterMovement()->MaxWalkSpeed = bIsAiming ? AimWalkSpeed : (bIsSprinting ? SprintSpeed : WalkSpeed);
 }
 
 //装备枪支，可见性设置
@@ -366,7 +358,11 @@ void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* Weap
 	EquippedWeaponComponent = WeaponComponent;
 	Mesh1P->SetHiddenInGame(false, true);
 	OnEquippedWeaponChanged.Broadcast(WeaponComponent);
-	OnWeaponEquipped(WeaponComponent);
+	// 广播可同步卸下或结束角色生命周期；旧装备请求不能再发送“装备完成”表现。
+	if (!bEndingPlay && !IsDead() && EquippedWeaponComponent == WeaponComponent)
+	{
+		OnWeaponEquipped(WeaponComponent);
+	}
 }
 
 //清除枪支、禁止开火、可见性设置
@@ -377,10 +373,17 @@ void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponCompone
 		return;
 	}
 
-	EquippedWeaponComponent->DisableWeapon();
+	EquippedWeaponComponent->DetachWeapon();
+}
+
+void AfpstrueCharacter::ReleaseEquippedWeaponComponent(const UfpstrueWeaponComponent* ExpectedWeapon)
+{
+	if (EquippedWeaponComponent == nullptr || EquippedWeaponComponent != ExpectedWeapon) return;
 	EquippedWeaponComponent = nullptr;
 	Mesh1P->SetHiddenInGame(true, true);
-	OnEquippedWeaponChanged.Broadcast(nullptr);
+	StopAim();
+	// OnAimChanged 也能装备新武器；此时不要继续广播过期的空槽快照。
+	if (EquippedWeaponComponent == nullptr) OnEquippedWeaponChanged.Broadcast(nullptr);
 }
 
 // ==================== 生命与伤害事件 ====================

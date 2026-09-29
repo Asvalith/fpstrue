@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
-#include "Testing/Benchmarks/fpstrueBenchmarkConfig.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "DrawDebugHelpers.h"
@@ -56,6 +56,11 @@ void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCha
 		return;
 	}
 
+	// 槽位、许可和投影属于同一个目标；换目标不能继承上一目标的分配。
+	if (TargetCharacter != NewTargetCharacter)
+	{
+		ResetManager();
+	}
 	TargetCharacter = NewTargetCharacter;
 	if (!IsValid(TargetCharacter))
 	{
@@ -79,23 +84,34 @@ void AfpstrueSurroundManager::RefreshSharedTargetSnapshot()
 
 void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 {
-	// 位移未达到阈值时复用旧目标和旧投影，避免每个敌人每次决策都查询 NavMesh。
+	// 位移阈值、最大陈旧时间和导航重试共同限定缓存寿命。
 	if (!IsValid(TargetCharacter))
 	{
+		ResetManager();
 		return;
 	}
 
+	const double Now = GetWorld()->GetTimeSeconds();
 	const FVector CurrentTargetLocation = TargetCharacter->GetActorLocation();
 	const bool bMovedEnough =
 		FVector::DistSquared2D(CurrentTargetLocation, CachedTargetLocation) >= FMath::Square(SharedTargetMoveThreshold);
-	if (!bForce && bHasSharedTargetSnapshot && !bMovedEnough)
+	const bool bSnapshotExpired = Now - SharedTargetSnapshotTime >= FMath::Max(0.05f, SharedTargetMaxAge);
+	const bool bRetryNavigation = bNeedsNavigationRetry && Now >= NextNavigationRetryTime;
+	const bool bNavigationExpired = Now - NavigationCacheTime >= FMath::Max(0.05f, NavigationCacheMaxAge);
+	if (!bForce && bHasSharedTargetSnapshot && !bMovedEnough && !bSnapshotExpired && !bRetryNavigation && !bNavigationExpired)
 	{
 		return;
 	}
 
+	const bool bLocationChanged = !CurrentTargetLocation.Equals(CachedTargetLocation, 1.0f);
 	CachedTargetLocation = CurrentTargetLocation;
+	SharedTargetSnapshotTime = Now;
+	const bool bReproject = bForce || !bHasSharedTargetSnapshot || bLocationChanged || bRetryNavigation || bNavigationExpired;
 	bHasSharedTargetSnapshot = true;
-	RebuildProjectedSlotCache();
+	if (bReproject)
+	{
+		RebuildProjectedSlotCache();
+	}
 }
 
 void AfpstrueSurroundManager::BuildSlots()
@@ -151,7 +167,8 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 		return true;
 	};
 
-	// 目标移动超过阈值时集中投影一次；AI 决策阶段只读取缓存结果。
+	bNeedsNavigationRetry = false;
+	// 每次只集中投影一次；失败标志独立于位置快照有效性。
 	for (FfpstrueSurroundSlot& Slot : SurroundSlots)
 	{
 		Slot.bHasProjectedSlotLocation = ProjectLocation(CalculateRawSlotLocation(Slot), Slot.ProjectedSlotLocation);
@@ -159,7 +176,10 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 		const float ApproachRadius = Slot.RingIndex == 0 ? AttackApproachRadius : OuterAttackApproachRadius;
 		Slot.bHasProjectedApproachLocation =
 			ProjectLocation(CalculateRawSlotLocation(Slot, ApproachRadius), Slot.ProjectedApproachLocation);
+		bNeedsNavigationRetry |= !Slot.bHasProjectedSlotLocation || !Slot.bHasProjectedApproachLocation;
 	}
+	NextNavigationRetryTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.05f, NavigationRetryInterval);
+	NavigationCacheTime = GetWorld()->GetTimeSeconds();
 }
 
 // ==================== 稳定槽位的申请与释放 ====================
@@ -175,6 +195,12 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	const int32* AssignedSlot = EnemyToSlot.Find(EnemyKey);
+	if (AssignedSlot != nullptr && (!SurroundSlots.IsValidIndex(*AssignedSlot) ||
+		SurroundSlots[*AssignedSlot].Occupant != EnemyKey || !SurroundSlots[*AssignedSlot].bHasProjectedApproachLocation))
+	{
+		ReleaseSurroundSlot(Enemy);
+		AssignedSlot = nullptr;
+	}
 	int32 SlotIndex = AssignedSlot != nullptr ? *AssignedSlot : INDEX_NONE;
 	if (AssignedSlot == nullptr)
 	{
@@ -197,19 +223,9 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 		EnemyToSlot.Add(EnemyKey, SlotIndex);
 	}
 
-	if (!SurroundSlots.IsValidIndex(SlotIndex))
-	{
-		return false;
-	}
-
-	const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-	if (!Slot.bHasProjectedApproachLocation)
-	{
-		return false;
-	}
-
 	// 槽位和共享追踪使用同一份目标快照，避免同一决策周期混用实时位置与缓存位置。
-	OutLocation = Slot.ProjectedApproachLocation;
+	// 复用路径已校验身份/投影，新分配路径只选择有有效接近点的槽位；此处不重复检查同一结果。
+	OutLocation = SurroundSlots[SlotIndex].ProjectedApproachLocation;
 	return true;
 }
 
@@ -229,12 +245,13 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 		return;
 	}
 
-	const bool bReleasedInnerSlot = SurroundSlots.IsValidIndex(ReleasedSlotIndex) && SurroundSlots[ReleasedSlotIndex].RingIndex == 0;
-
-	if (SurroundSlots.IsValidIndex(ReleasedSlotIndex))
+	// 弱引用身份比较包含对象序号；旧映射不能清掉被重新占用的同一下标。
+	if (!SurroundSlots.IsValidIndex(ReleasedSlotIndex) || SurroundSlots[ReleasedSlotIndex].Occupant != EnemyKey)
 	{
-		SurroundSlots[ReleasedSlotIndex].Occupant.Reset();
+		return;
 	}
+	const bool bReleasedInnerSlot = SurroundSlots[ReleasedSlotIndex].RingIndex == 0;
+	SurroundSlots[ReleasedSlotIndex].Occupant.Reset();
 	if (bReleasedInnerSlot)
 	{
 		PromoteOuterOccupantToInnerSlot(ReleasedSlotIndex);
@@ -251,7 +268,7 @@ bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter*
 		return false;
 	}
 
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
 	if (!bEnableActiveAttackerBudget || BenchmarkConfig.bDisableActiveAttackerBudget)
 	{
 		return true;
@@ -291,7 +308,7 @@ void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* En
 bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 {
 	// GFrameCounter 形成无额外 Tick 的帧级计数器；战斗请求可使用预留额度，普通追击不能挤占全部预算。
-	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
+	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
 	if (!bEnableMoveRequestBudget || BenchmarkConfig.bDisableMoveToRequestBudget)
 	{
 		return true;
@@ -319,7 +336,7 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
 {
 	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
-	if (!bHasSharedTargetSnapshot)
+	if (!bHasSharedTargetSnapshot || !IsValid(TargetCharacter))
 	{
 		return false;
 	}
@@ -339,6 +356,10 @@ void AfpstrueSurroundManager::ResetManager()
 	MoveRequestsConsumedThisFrame = 0;
 	TargetCharacter = nullptr;
 	bHasSharedTargetSnapshot = false;
+	bNeedsNavigationRetry = false;
+	SharedTargetSnapshotTime = 0.0;
+	NextNavigationRetryTime = 0.0;
+	NavigationCacheTime = 0.0;
 	for (FfpstrueSurroundSlot& Slot : SurroundSlots)
 	{
 		Slot.Occupant.Reset();
@@ -359,7 +380,7 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 		}
 
 		const int32 SlotIndex = Iterator.Value();
-		if (SurroundSlots.IsValidIndex(SlotIndex))
+		if (SurroundSlots.IsValidIndex(SlotIndex) && SurroundSlots[SlotIndex].Occupant == Iterator.Key())
 		{
 			SurroundSlots[SlotIndex].Occupant.Reset();
 		}
@@ -387,12 +408,12 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 		for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
 		{
 			const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid() || !Slot.bHasProjectedSlotLocation)
+			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid() || !Slot.bHasProjectedApproachLocation)
 			{
 				continue;
 			}
 
-			const float DistanceSquared = FVector::DistSquared2D(EnemyLocation, Slot.ProjectedSlotLocation);
+			const float DistanceSquared = FVector::DistSquared2D(EnemyLocation, Slot.ProjectedApproachLocation);
 			if (DistanceSquared < BestDistanceSquared)
 			{
 				BestDistanceSquared = DistanceSquared;
@@ -413,7 +434,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 {
 	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
 	if (!SurroundSlots.IsValidIndex(InnerSlotIndex) || SurroundSlots[InnerSlotIndex].RingIndex != 0 ||
-		SurroundSlots[InnerSlotIndex].Occupant.IsValid())
+		SurroundSlots[InnerSlotIndex].Occupant.IsValid() || !SurroundSlots[InnerSlotIndex].bHasProjectedApproachLocation)
 	{
 		return;
 	}

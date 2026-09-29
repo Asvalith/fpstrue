@@ -3,11 +3,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 
-struct FFPEnemyRenderSignificancePolicy;
-
-/** Benchmark 命令行快照：集中解析所有消融开关和显著性覆盖参数。 */
-struct FPSTRUE_API FFPBenchmarkConfig
+/**
+ * Benchmark 采集配置：人数、时长、输出及采集开关。
+ * 外部实验预设维护在 Tools/ExperimentProfiles；脚本生成命令行，本类只解析一次。
+ * Runner 管理采集流程；玩法只消费 Runtime/fpstrueRuntimeOptions，不依赖本文件。
+ * 正式玩法默认配置仍由 Config/ 和玩法资产维护，不在这里修改。
+ */
+struct FPSTRUE_API FFPBenchmarkConfig : public FFPRuntimeOptions
 {
 public:
 	// 命令行是进程级只读输入，集中解析一次，避免 Gameplay 类各自维护同一组开关。
@@ -17,29 +21,8 @@ public:
 	bool HasEnemyCountOverride() const { return bHasEnemyCountOverride; }
 	// 判断自动测试是否显式要求提高玩家最大生命值。
 	bool HasPlayerHealthOverride() const { return bHasPlayerHealthOverride; }
-	// 把命令行中的可选参数覆盖到本次渲染显著性策略。
-	void ApplyEnemySignificanceOverrides(FFPEnemyRenderSignificancePolicy& InOutPolicy) const;
 
 	bool bAutoBenchmark = false;
-	bool bDisableAttackSweep = false;
-	bool bDisableEnemyPawnCollision = false;
-	bool bDisablePathFollowingTick = false;
-	bool bDisableCharacterMovementTick = false;
-	bool bDisableSkeletalMeshTick = false;
-	bool bDisableEnemySignificance = false;
-	bool bDisableMovementTiering = false;
-	bool bDisableShadowTiering = false;
-	bool bDisableEnemyRayTracing = false;
-	bool bDisableEnemyShadows = false;
-	bool bDisableAnimationOptimizations = false;
-	bool bDisableAIThrottling = false;
-	bool bDisableEnemyRenderTiering = false;
-	bool bDisableEnemySkeletalLOD = false;
-	bool bDisableEnemyAnimationTiering = false;
-	bool bDisableEnemyRayTracingTiering = false;
-	bool bDisableEnemyAnimationSharing = false;
-	bool bDisableActiveAttackerBudget = false;
-	bool bDisableMoveToRequestBudget = false;
 	bool bCollectTextureStats = false;
 	bool bTakeScreenshot = false;
 	bool bAutoQuit = false;
@@ -57,28 +40,4 @@ private:
 
 	bool bHasEnemyCountOverride = false;
 	bool bHasPlayerHealthOverride = false;
-	TOptional<float> FrustumWeight;
-	TOptional<float> ScreenCoverageWeight;
-	TOptional<float> RecentFrustumWeight;
-	TOptional<float> DistanceWeight;
-	TOptional<float> ExpandedFrustumMargin;
-	TOptional<float> RecentFrustumGraceSeconds;
-	TOptional<float> ScreenRadiusForFullScore;
-	TOptional<float> NearDistance;
-	TOptional<float> FarDistance;
-	TOptional<float> CombatPriorityGraceSeconds;
-	TOptional<float> FullEnterThreshold;
-	TOptional<float> FullExitThreshold;
-	TOptional<float> ReducedEnterThreshold;
-	TOptional<float> ReducedExitThreshold;
-	TOptional<float> DemotionDelaySeconds;
-	TOptional<float> MinimumTierHoldSeconds;
-	TOptional<int32> MaxFullRenderEnemies;
-	TOptional<int32> MaxShadowCastingEnemies;
-	TOptional<float> ShadowMaxDistance;
-	TOptional<int32> MaxRayTracingEnemies;
-	TOptional<float> RayTracingMaxDistance;
-	TOptional<int32> FullMinLOD;
-	TOptional<int32> ReducedMinLOD;
-	TOptional<int32> BackgroundMinLOD;
 };

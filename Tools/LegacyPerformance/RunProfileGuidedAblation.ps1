@@ -1,11 +1,12 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
     [int]$EnemyCount = 160,
-    [int]$RunsPerGroup = 1,
+    [int]$RunsPerGroup = 2,
     [double]$WarmupSeconds = 10,
-    [double]$DurationSeconds = 30,
+    [double]$DurationSeconds = 20,
     [int]$BenchmarkSeed = 1337,
-    [string]$RunName = "EnemyBottleneckDiagnostics_20260824",
-    [switch]$MovementFollowup
+    [string]$RunName = "ProfileGuidedAblation_20260824"
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,19 +21,12 @@ $SourceCsv = Join-Path $ProjectRoot "Saved\Profiling\CSV"
 $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
 
+# The baseline trace narrowed the candidates to movement/physics and skeletal animation.
 $Groups = @(
     [PSCustomObject]@{ Name = "Baseline"; Flag = "" },
-    [PSCustomObject]@{ Name = "AttackSweepOff"; Flag = "-BenchmarkDisableAttackSweep" },
-    [PSCustomObject]@{ Name = "EnemyPawnCollisionOff"; Flag = "-BenchmarkDisableEnemyPawnCollision" },
-    [PSCustomObject]@{ Name = "PathFollowingTickOff"; Flag = "-BenchmarkDisablePathFollowingTick" },
-    [PSCustomObject]@{ Name = "CharacterMovementTickOff"; Flag = "-BenchmarkDisableCharacterMovementTick" }
+    [PSCustomObject]@{ Name = "CharacterMovementTickOff"; Flag = "-BenchmarkDisableCharacterMovementTick" },
+    [PSCustomObject]@{ Name = "SkeletalMeshTickOff"; Flag = "-BenchmarkDisableSkeletalMeshTick" }
 )
-
-if ($MovementFollowup) {
-    $Groups = @($Groups | Where-Object {
-        $_.Name -in @("Baseline", "PathFollowingTickOff", "CharacterMovementTickOff")
-    })
-}
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 $ManifestRows = @()
@@ -67,7 +61,7 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             "-BenchmarkScreenshot",
             "-BenchmarkAutoQuit",
             "-csvGpuStats",
-            '-ExecCmds="stat unit,stat streaming"',
+            '-ExecCmds="stat unit"',
             "-log=$LogName",
             "-ddc=InstalledNoZenLocalFallback",
             "-LocalDataCachePath=$DdcPath"
@@ -133,3 +127,4 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
 }
 
 & (Join-Path $ProjectRoot "Tools\SummarizeEnemyBottleneckDiagnostics.ps1") -EvidenceRoot $EvidenceRoot
+Write-Output "Profile-guided ablation evidence is ready in $EvidenceRoot"

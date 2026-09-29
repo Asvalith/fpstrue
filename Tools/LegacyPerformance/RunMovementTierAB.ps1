@@ -1,10 +1,11 @@
+# Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
+# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
 param(
     [int]$EnemyCount = 160,
-    [int]$RunsPerGroup = 1,
+    [int]$RunsPerGroup = 3,
     [double]$WarmupSeconds = 10,
-    [double]$DurationSeconds = 20,
-    [int]$BenchmarkSeed = 1337,
-    [string]$RunName = "GTUpdateBudgetAB_20260824"
+    [double]$DurationSeconds = 30,
+    [string]$RunName = "MovementTierAB_20260822"
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,22 +21,15 @@ $SourceScreenshots = Join-Path $ProjectRoot "Saved\Screenshots\WindowsEditor"
 $SourceLogs = Join-Path $ProjectRoot "Saved\Logs"
 
 $Groups = @(
-    [PSCustomObject]@{
-        Name = "LegacyDistanceTiering"
-        Flag = "-BenchmarkDisableEnemyUpdateBudget"
-    },
-    [PSCustomObject]@{
-        Name = "GlobalUpdateBudget"
-        Flag = ""
-    }
+    [PSCustomObject]@{ Name = "A_FullRate"; DisableTiering = $true },
+    [PSCustomObject]@{ Name = "B_Tiered"; DisableTiering = $false }
 )
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 $ManifestRows = @()
 
-for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
-    $RunGroups = @($Groups | Sort-Object { Get-Random })
-    foreach ($Group in $RunGroups) {
+foreach ($Group in $Groups) {
+    for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
         $RunId = "$($Group.Name)_Run$Run"
         $RunRoot = Join-Path $EvidenceRoot $RunId
         New-Item -ItemType Directory -Path $RunRoot -Force | Out-Null
@@ -59,17 +53,16 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             "-BenchmarkEnemies=$EnemyCount",
             "-BenchmarkWarmup=$WarmupSeconds",
             "-BenchmarkDuration=$DurationSeconds",
-            "-BenchmarkSeed=$BenchmarkSeed",
             "-BenchmarkScreenshot",
             "-BenchmarkAutoQuit",
             "-csvGpuStats",
-            '-ExecCmds="stat unit"',
+            '-ExecCmds="stat unit,stat streaming"',
             "-log=$LogName",
             "-ddc=InstalledNoZenLocalFallback",
             "-LocalDataCachePath=$DdcPath"
         )
-        if ($Group.Flag) {
-            $Arguments += $Group.Flag
+        if ($Group.DisableTiering) {
+            $Arguments += "-BenchmarkDisableMovementTiering"
         }
 
         Write-Output "Starting $RunId with $EnemyCount enemies"
@@ -100,10 +93,10 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
         Copy-Item -LiteralPath $Log.FullName -Destination $LogDestination -Force
 
         $LogLines = Get-Content -LiteralPath $Log.FullName
-        $Ready = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark ready: requested=$EnemyCount alive=$EnemyCount")
+        $ReadyPattern = "Automated benchmark ready: requested=$EnemyCount alive=$EnemyCount"
+        $Ready = [bool]($LogLines | Select-String -SimpleMatch $ReadyPattern)
         $Stopped = [bool]($LogLines | Select-String -SimpleMatch "Automated benchmark capture stopped.")
-        $DiagnosticsApplied = [bool]($LogLines | Select-String -SimpleMatch "Benchmark diagnostics applied: enemies=$EnemyCount")
-        if (-not $Ready -or -not $Stopped -or -not $DiagnosticsApplied) {
+        if (-not $Ready -or -not $Stopped) {
             throw "$RunId did not reach a valid capture state"
         }
 
@@ -111,20 +104,19 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
             Group = $Group.Name
             Run = $Run
             EnemyCount = $EnemyCount
-            BenchmarkSeed = $BenchmarkSeed
-            Flag = $Group.Flag
+            MovementTieringEnabled = -not $Group.DisableTiering
             Ready = $Ready
-            DiagnosticsApplied = $DiagnosticsApplied
             CaptureStopped = $Stopped
             SpawnFailures = ($LogLines | Select-String -SimpleMatch "SpawnActor failed for enemy class").Count
+            VSMQueueOverflows = ($LogLines | Select-String -SimpleMatch "Non-Nanite Marking Job Queue overflow").Count
+            TexturePoolWarnings = ($LogLines | Select-String -Pattern "Texture streaming pool.*over budget").Count
             Csv = $CsvDestination
             Screenshot = $ScreenshotDestination
             Log = $LogDestination
         }
-        $ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
         Write-Output "Completed $RunId"
     }
 }
 
-& (Join-Path $ProjectRoot "Tools\SummarizeEnemyBottleneckDiagnostics.ps1") -EvidenceRoot $EvidenceRoot
-Write-Output "GT update-budget evidence is ready in $EvidenceRoot"
+$ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
+& (Join-Path $ProjectRoot "Tools\SummarizeMovementTierAB.ps1") -EvidenceRoot $EvidenceRoot

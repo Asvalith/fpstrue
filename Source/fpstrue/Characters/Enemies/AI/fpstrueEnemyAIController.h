@@ -62,8 +62,12 @@ public:
 
 	// 战斗目标只由 Controller 持有，EnemyCharacter 通过只读接口使用，避免双份状态漂移。
 	AfpstrueCharacter* GetTargetCharacter() const { return TargetCharacter; }
+	// 攻击开始时捕获许可来源，结束时不再从可能已变化的 Controller 上反查。
+	AfpstrueSurroundManager* GetSurroundManager() const { return SurroundManager; }
 	// Animation Sharing 等只读消费者通过这里获取当前表现状态。
 	EFPEnemyAIState GetAIState() const { return AIState; }
+	// 停止/换目标先关闭命令入口，Montage 停止回调不能在清理过程中重启攻击。
+	bool AcceptsCombatCommands() const { return CommandPhase == ECommandPhase::Accepting; }
 
 	// PathFollowing 失败时安排退避；成功到位后的朝向由下一次决策结合到达检测更新。
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
@@ -117,12 +121,37 @@ protected:
 	float FailedMoveRetryDelay = 0.5f;
 
 private:
+	friend class FFPEnemyBehaviorTreeLifecycleTest;
+	friend class FFPEnemyMoveRequestOwnershipTest;
+	enum class ECommandPhase : uint8 { Stopped, Accepting, ChangingContext, Stopping };
+	enum class EMoveGoalResult : uint8
+	{
+		Moving,
+		Arrived,
+		Deferred, // 帧预算不足，保留旧路径；不等同于不可达。
+		Unreachable,
+		InvalidContext
+	};
 	struct FDecisionContext
 	{
 		float DistanceSquared = MAX_flt;
 		float EffectiveAttackRange = 0.0f;
 		bool bInAttackRange = false;
 		bool bInChaseRange = false;
+	};
+	// 投影/部分路径等固定语义由调用点统一设置；可变语义参与请求去重。
+	struct FMoveGoalKey
+	{
+		FVector Location = FVector::ZeroVector;
+		float AcceptanceRadius = 0.0f;
+		TWeakObjectPtr<UClass> NavigationFilter;
+		bool bCombatPriority = false;
+		bool Matches(const FMoveGoalKey& Other, float DistanceTolerance) const;
+	};
+	struct FMoveFailure
+	{
+		FMoveGoalKey Goal;
+		double RetryAfter = 0.0;
 	};
 
 	// 启动唯一决策驱动；默认树和外部树不能与旧 Timer/FSM 并行运行。
@@ -140,10 +169,6 @@ private:
 	bool IsTargetUsable(const AfpstrueCharacter* Target) const;
 
 	// 叶子实现：不在这里重新建立一套高层行为优先级。
-	// 维持正在进行的攻击，并阻止同一轮继续切换移动状态。
-	bool HandleActiveAttack();
-	// 冷却或未获攻击名额时共用：有槽位则继续走，无槽位则站定面向目标。
-	void MaintainCombatPosition();
 	// 尝试获取攻击位或包围槽，并向共享位置移动。
 	bool HandleSurroundMovement();
 	// 没有专属槽位时，使用共享目标快照进行低成本追击。
@@ -151,7 +176,8 @@ private:
 
 	// 移动与朝向：沿路径行进，到位后再面向目标。
 	// 复用有效路径/到位缓存；需要刷新时先预算校验，再提交显式 MoveTo 请求并缓存投影结果。
-	void MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority);
+	EMoveGoalResult MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority);
+	void RecordMoveFailure(const FMoveGoalKey& Goal);
 	// 停止路径及地面残余移动，再切换到目标朝向；返回角色是否已转入攻击角度容差。
 	bool FaceTargetAtRest();
 	// 更新 Controller 的期望 Yaw；由 Movement 平滑旋转，并返回真实 Actor Yaw 是否对齐。
@@ -167,7 +193,8 @@ private:
 	// 归还当前敌人在 SurroundManager 中占用的槽位。
 	void ReleaseSurroundSlot();
 
-	// Possess 期间缓存敌人、目标与共享管理器，OnUnPossess 主动清空这些运行时引用。
+	// Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
+	// 让 GC 识别引用，并由 OnUnPossess 主动清空，不依赖 C++ 析构函数处理 Gameplay 状态。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;
 
@@ -182,12 +209,15 @@ private:
 	TObjectPtr<UBehaviorTree> ActiveBehaviorTree;
 
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
+	ECommandPhase CommandPhase = ECommandPhase::Stopped;
 	// 原始业务目标只用于请求去重；实际导航目标用于到达检查，避免导航投影偏移造成反复重寻路。
-	FVector LastMoveGoal = FVector::ZeroVector;
+	FMoveGoalKey LastMoveGoal;
 	FVector LastResolvedMoveGoal = FVector::ZeroVector;
-	float NextMoveRetryTime = 0.0f;
+	// 包围失败与追击失败分别记忆，fallback 不能覆写另一策略的退避。
+	FMoveFailure MoveFailures[2];
+	FAIRequestID OwnedMoveRequestId = FAIRequestID::InvalidRequest;
+	uint32 MoveRequestRevision = 0;
 	bool bHasMoveGoal = false;
-	bool bLastMoveGoalWasCombatPriority = false;
 	bool bDisableDecisionThrottlingForBenchmark = false;
 	float SignificanceDecisionMultiplier = 1.0f;
 	FDecisionContext DecisionContext;

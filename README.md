@@ -9,6 +9,7 @@
 ## 项目亮点
 
 - **组件化玩法**：角色负责输入与组件协调，武器维护射击和换弹事务，生命组件统一处理伤害与死亡，敌人 CombatComponent 维护动画攻击窗口和命中去重。
+- **动作身份与回调安全**：换弹和攻击绑定动作编号及 Montage 实例；统一处理完成、中断、超时和迟到通知，避免旧回调误结束新动作。生命组件按提交顺序派发伤害、血量与死亡事件。
 - **多敌人协作**：C++ 任务节点与可编辑行为树协作，自适应决策间隔、共享围攻槽位、并发攻击许可、MoveTo 去重、失败退避和帧级请求预算。
 - **分开调度玩法与渲染**：玩法按距离与攻击状态分级；渲染按相机信息选择 Full、阴影和骨骼光追参与者，普通敌人通过 Animation Sharing 复用姿态。
 - **C++ 算法与生命周期**：预计算优先级键、严格弱序比较、有界 Top-K；弱引用注册表、幂等注销、共享动画交换句柄回调与清理边界。
@@ -29,7 +30,30 @@
 
 这些结果验证了决策降频、移动分级、姿态共享和渲染参与限制的局部收益。历史实验采用简化 HUD、声音和玩家受伤的诊断口径；各项独立消融不相加为整帧收益。完整调查过程见[性能实验报告](Docs/Performance/EXPERIMENT_LOG.md)，逐组数据与原始文件对应关系见[实验附录](PERFORMANCE_EVIDENCE.md)。
 
-另一项关键发现来自 RT 长等待：零敌人对照、Task Trace、源码和查询开关干预共同表明，一类 `WaitForGatherDynamicMeshElements` 长等待的上游是历史遮挡查询结果同步。这使后续工作从继续削减敌人逻辑，转向 GPU 工作分解和 CPU/GPU 同步验证。具体 GPU 子阶段归因与完整玩法的最终稳定帧率仍在验收中。
+另一项关键发现来自渲染线程（Render Thread，以下简写 RT）长等待：零敌人对照、Task Trace、源码和查询开关干预共同表明，一类 `WaitForGatherDynamicMeshElements` 长等待的上游是历史遮挡查询结果同步。沿这条证据链，采用查询 Buffer2 与 Lumen 反射下采样 2，在固定镜头、160 敌人三轮平衡顺序对照中得到：
+
+| 指标 / ms | 原配置 | 组合配置 |
+| --- | ---: | ---: |
+| Frame | 14.955 | 14.279 |
+| P95 / P99 | 16.415 / 17.254 | 15.696 / 16.409 |
+| Render Thread | 14.689 | 13.160 |
+| RHI Thread | 10.597 | 11.333 |
+| GPU | 13.321 | 12.704 |
+
+Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依据整帧与尾帧的净收益保留组合。Buffer2 改变结果消费时机，反射下采样减少 GPU 工作，两项各自验证后再组合测试。
+
+场景侧进一步将 **224 段轨道、222 段道砟**的变形几何烘焙为静态网格，保留碰撞、材质、LOD 与光追参与；TSR 历史缓冲比例由 200 调整为 150。方案复测如下：
+
+| 指标 / ms | 0 敌人 | 160 敌人 |
+| --- | ---: | ---: |
+| Frame | 11.031 | 13.276 |
+| P95 / P99 | 12.329 / 13.533 | 14.817 / 16.349 |
+| Game Thread | 2.793 | 8.335 |
+| Render Thread | 10.620 | 12.218 |
+| RHI Thread | 7.798 | 10.123 |
+| GPU | 9.710 | 11.825 |
+
+测试条件：UE 5.5.4、1600×900、固定镜头、种子 1337，独立进程预热 20 秒、采集 180 秒，各一轮，无 Trace，玩家使用测试生命值。两组采集有效，期间 VSM 队列与纹理池超预算告警均为 0。这是指定版本的方案复测，与前表分别报告，不跨批次计算优化增幅。
 
 ## 玩法架构
 
@@ -71,19 +95,21 @@ GameMode 使用 `Waiting → Starting → Playing → Finished` 表达对局阶�
 - 玩家输入经过角色接口交给武器；武器检查状态、射速和弹药，执行 Hitscan，再通过 UE 伤害接口交给目标的生命组件。
 - `WeaponTrace` 与普通碰撞分开配置：敌人 Mesh 接收射击查询，胶囊不抢先阻挡该通道。
 - 换弹使用 Ready/Firing/Reloading/Disabled 状态与独立提交入口；动画通知提交弹药，结束路径处理重复通知和委托重入，角色死亡时停止武器动作与 Timer。
+- `ReloadId` 与 Mesh、AnimInstance、Montage 实例组成播放身份；手臂和枪械播放由同一事务管理。装填 Notify 校验身份后提交弹药，完成与取消统一清理，超时只解除动作锁。
 - HUD 订阅生命、弹药和对局事件；C++ 提供状态变化入口，不在 UI 回调中执行伤害或弹药结算。
 
 ### 敌人追击与近战
 
 - 行为树每轮先等待自适应间隔，再采样一次目标与距离，由 Selector 选择持续攻击、空闲、攻击/站位、包围或追击；首次等待错峰。Controller 不再运行另一套决策 Timer。
 - MoveTo 先检查目标变化与失败退避，再申请全局帧级预算；现有路径由导航、PathFollowing 和 CharacterMovement 继续执行。
+- 移动请求保存 RequestID 和提交版本，区分延后、不可达与已到达；围攻和追击分别维护退避。Combat 一次提供距离、攻击范围与可达性快照，正式攻击时实时复核。
 - 攻击先申请群体许可，再检查停稳与朝向，由 Controller 直接调用角色持有的 CombatComponent；AnimNotifyState 开启和关闭刀刃 Sweep 窗口，单次攻击命中去重。
 - 攻击阶段使用 `Idle / Windup / Active / Recovery`，只有 Active 执行伤害查询；重复打开窗口不重置刀刃历史采样，命中过的本次攻击不能重新开窗。
 - 正常结束、保护 Timer 和死亡中断共用事务清理，归还许可并清除定时任务；正常结束更新冷却，中断不伪造正常完成。
 
 默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
 
-历史 AI Decision 数据来自 Timer 版本；行为树版本需要重新测量整体决策与 BrainComponent 调度成本，不沿用旧数据宣称迁移提速。
+上表的 AI Decision 消融对应历史 Timer 版本，用于验证决策降频策略；行为树负责当前行为编排，场景复测单独记录版本与配置。
 
 ## 性能优化架构
 
@@ -140,17 +166,19 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 - 共享动画默认软引用放在项目 INI，组件蓝图可以覆盖。
 - JSON 只保存实验预设，优先级为显式命令行参数 > JSON > 脚本默认值。
 - Runner 负责规模准备、预热、CSV/Trace 采集和有效性检查；脚本保存最终参数、来源和输入指纹。
+- 运行时诊断参数与业务埋点声明集中在 `Runtime/`；`Testing/Benchmarks/` 负责采集阶段与资源管理。采集启动、有效性检查及写盘由 CoreTicker 驱动，World 暂停时也能处理超时和释放资源。
 
 配置入口与使用方式见 [CONFIGURATION.md](Docs/CONFIGURATION.md)。
 
 ## 实验进展与证据
 
-| 阶段 | 解决的问题 | 结果与后续 |
+| 阶段 | 解决的问题 | 结果与决策 |
 | --- | --- | --- |
 | 规模测试与调用链分析 | 敌人增加后，哪些工作随规模增长 | 优先定位移动与动画，区分局部计算和任务等待 |
 | 消费者重复对照 | 哪些策略确实减少了工作 | 确认决策、移动、动画共享、阴影与骨骼 RT 的局部收益 |
 | 零敌人与任务依赖追踪 | 敌人成本下降后，RT 为什么仍等待 | 追到历史遮挡查询结果同步，转向场景渲染与同步链 |
-| 查询策略和 GPU 工作分解 | 缩短等待能否改善整帧 | HZB 因整帧回退未采用；Buffer2 与 Lumen 反射下采样的组合在固定镜头三轮对照中改善 Frame/P95，动态镜头和完整玩法仍待验收 |
+| 查询策略和 GPU 工作分解 | 缩短等待能否改善整帧 | HZB 因整帧回退未采用；Buffer2 与反射下采样组合改善 Frame/P95/P99 |
+| 零敌人场景成本优化 | 场景自身的实例准备与后处理成本 | 静态样条烘焙、TSR History 150，并完成 0/160 敌人长采集 |
 
 - [完整性能实验报告](Docs/Performance/EXPERIMENT_LOG.md)：按调查阶段串联问题、实验、发现与后续决策。
 - [性能实验附录](PERFORMANCE_EVIDENCE.md)：逐组数据、异常样本、Trace 事件与本机原始文件对应关系。
@@ -169,13 +197,14 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 
 主要实现文件按调用流程排列：生命周期入口在前，业务入口和相邻辅助函数成组，结束与公共清理集中放置。EnemyCharacter 内依次是状态查询、战斗桥接、受击死亡、Gameplay 分级、Render 分级和动画共享；诊断开关放在末尾。预算统计与选择分开，阅读选择逻辑时不必穿过 CSV 计数代码。
 
-攻击判断和启动由 AIController 直接调用角色持有的 CombatComponent，不再经过 Character 的范围、条件和启动转发；攻击窗口 Notify 也与 CombatComponent 放在同一组头文件/实现文件中，形成 `AI/Notify → CombatComponent → 攻击事务与窗口检测`。通知类名与动画资产引用不变；蓝图结束攻击仍使用 Character 的 `HandleAttackFinishedNotify`。玩家和武器分别保留输入与弹药事务职责，Health 继续供玩家、敌人共用。
+攻击判断和启动由 AIController 直接调用角色持有的 CombatComponent；攻击窗口 Notify 与 CombatComponent 放在同一组头文件/实现文件中，形成 `AI/Notify → CombatComponent → 攻击事务与窗口检测`。蓝图通过 `OnAttackPlaybackRequested(AttackId)` 接入播放，原生 Montage 实例回调结束事务。武器与攻击共用 `FFPActionPlayback` 身份校验，玩家、武器和 Health 各自保留独立业务职责。
 
 | 功能 | 主要实现 |
 | --- | --- |
 | 玩家控制 | [Character](Source/fpstrue/Characters/Player/fpstrueCharacter.cpp) |
 | 武器、射击与换弹 | [WeaponComponent](Source/fpstrue/Weapons/fpstrueWeaponComponent.cpp) |
 | 通用伤害与生命 | [HealthComponent](Source/fpstrue/Characters/Shared/fpstrueHealthComponent.cpp) |
+| 动作播放身份 | [ActionPlayback](Source/fpstrue/Characters/Shared/fpstrueActionPlayback.h) |
 | 敌人 AI 与路径请求 | [EnemyAIController](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyAIController.cpp) |
 | 行为树任务与默认树 | [BehaviorTree](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyBehaviorTree.cpp) |
 | 攻击事务与命中窗口 | [EnemyCombatComponent](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.cpp) |
@@ -191,7 +220,7 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 
 环境：Unreal Engine 5.5、Visual Studio 2022、“使用 C++ 的游戏开发”工作负载及 Windows SDK。生成 Visual Studio 项目文件后，编译 `fpstrueEditor` 的 Development Editor 配置。
 
-完整开发环境的地图入口为 `/Game/FactoryDistrict/Maps/Demonstration`，由关卡或 UI 调用 `StartGameMode` 开始正式波次。公开源码需要自行配置地图、角色蓝图与资源引用。
+完整开发环境的当前地图入口为 `/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked`，由关卡或 UI 调用 `StartGameMode` 开始正式波次。公开源码需配置有使用权限的地图、角色蓝图与资源引用，接线约定见[配置说明](Docs/CONFIGURATION.md)。
 
 UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation 中运行，或使用：
 
@@ -199,19 +228,20 @@ UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation �
 & "<UE5.5目录>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<项目目录>\fpstrue.uproject" /Engine/Maps/Entry -Unattended -NullRHI -NoSplash -NoSound -ddc=NoZenLocalFallback '-LocalDataCachePath=<项目目录>\Saved\LocalDDC' '-ExecCmds=Automation RunTests fpstrue.' '-TestExit=Automation Test Queue Empty' '-ReportExportPath=<项目目录>\Saved\Automation\Regression' -Log
 ```
 
-自动化测试覆盖行为树结构与运行生命周期、真实树资产的编辑器连线、开局回调重入、配置选源、攻击阶段与清理、射击换弹、严格弱序、Top-K 等价性、共享注销、渲染档位迟滞，以及附件和尸体的渲染资格。真实资产测试仅在对应 Content 齐备时运行。NullRHI 验证代码与组件属性，画面和 GPU 性能另做实景回归。
+自动化测试覆盖行为树与运行生命周期、开局回调重入、配置选源、攻击阶段与清理、射击换弹、严格弱序、Top-K 等价性、共享注销、档位迟滞，以及附件和尸体的渲染资格。全套测试包含真实蓝图播放链，运行时需准备对应 Content；NullRHI 用于功能与组件属性回归，性能数据来自独立实景采集。
 
-当前本地验证：Development Editor 与 Development Game 目标编译通过；18 项 UE 自动化测试通过，报告位于 `Saved/Automation/StructureCleanup2/`。其中 3 项带原生测试角色缺少 Skeleton 的夹具警告，无失败项。回归包含共享注销后的句柄交换、攻击 Timer 清理、预算关闭时的资格边界，以及合并后攻击窗口 Notify 的原反射路径和 Begin/Tick/End 调用。
+完整开发环境验证：Development Editor 与 Development Game 编译通过；**41 项 UE 自动化测试全部通过，0 失败、0 未运行**，其中 16 项包含测试夹具或故障注入警告。回归覆盖真实蓝图换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 请求归属、生命值通知队列、受击解除 Tick 冷却、CSV 迟到启动与暂停超时。测试摘要见[验证记录](Docs/Testing/VALIDATION.md)。
 
-实际关卡的 160 敌人功能烟测通过，组件属性读回为 5 个投影 Mesh、12 个光追 Mesh，与当次预算一致。日志为 `Saved/Logs/StructureCleanup2160Smoke.log`。关卡中 `TargetPoint_5` 仍有生成失败日志，队列通过换点重试补齐目标数量；此轮使用 NullRHI 和测试生命值，仅核对玩法流程与预算下发，不产生 GPU 性能结论。
+实际关卡的 160 敌人功能烟测通过，组件属性读回为 5 个投影 Mesh、12 个光追 Mesh，与当次预算一致。生成队列支持换点重试；NullRHI 烟测核对玩法流程与预算下发，实景采集记录 RT/RHI/GPU 与尾帧。
 
 另用 32 敌人检查预算边界：Full 名额为 0 时，Full 与骨骼光追参与数均为 0；关闭渲染分档后，同一配置得到 32 个 Full，独立阴影/光追预算仍为 5/12。日志分别为 `Saved/Logs/EquivalentCleanupZeroFull.log` 与 `Saved/Logs/EquivalentCleanupTieringOff.log`。
 
-配置脚本另有 29 项检查，无须启动 UE：
+性能测试统一使用 `Tools/RunRenderCostMatrix.ps1`：JSON 保存采集预设，`RenderCostCases.psd1` 集中定义默认值、实验 CVar 和读回校验。配置脚本 **56 项检查通过**，无须启动 UE：
 
 ```powershell
 .\Tools\TestRenderCostConfig.ps1
 .\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\baseline160.json -ValidateOnly
+.\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\scene-acceptance.json -ValidateOnly
 ```
 
 正式采集前按[配置说明](Docs/CONFIGURATION.md)检查引擎路径、地图和生效参数。固定场景成本采集与正常生命条件下的玩法基线分别记录；Top-K 的算法验证不代替实景性能 A/B。
@@ -227,12 +257,14 @@ Source/fpstrue/
     Enemies/                敌人角色、近战组件与战斗配置
       AI/                   Controller、行为树、导航与群体战术资源
       Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
-    Shared/                 生命组件与碰撞通道
+    Shared/                 生命组件、播放身份与碰撞通道
   Weapons/                  射击、换弹、拾取与动画通知
+  Runtime/                  诊断参数快照与业务埋点声明
   Testing/
     Automation/             玩法、算法与生命周期回归
-    Benchmarks/             性能配置、采集与埋点
+    Benchmarks/             采集阶段、资源管理与产物校验
 Tools/                      实验采集、分析与配置校验
+  ExperimentProfiles/       实验定义与采集预设
 Docs/Performance/           分阶段实验记录
 PerformanceEvidence/        可公开的性能截图
 ```

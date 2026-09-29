@@ -385,6 +385,13 @@ Saved/
 # Public source repository: binary project/third-party assets stay local and are not redistributed.
 Content/
 
+# Internal study notes and local asset backups are not part of this source showcase.
+_local_asset_backup*/
+Docs/FPS_PROJECT_ENGINEERING_NOTES.md
+Docs/CODE_OWNERSHIP.md
+Docs/*SOURCE_STUDY*
+Docs/*CHECKLIST*
+
 # IDE folders
 .vs/
 .vscode/

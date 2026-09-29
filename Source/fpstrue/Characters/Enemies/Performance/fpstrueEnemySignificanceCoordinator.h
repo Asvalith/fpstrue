@@ -41,6 +41,8 @@ private:
 		EFPEnemyRenderSignificanceTier NaturalTier = EFPEnemyRenderSignificanceTier::Background;
 		EFPEnemyRenderSignificanceTier AssignedTier = EFPEnemyRenderSignificanceTier::Background;
 		bool bGameplayAnimationProtection = false;
+		bool bShadowEligible = false;
+		bool bRayTracingEligible = false;
 		bool bShouldCastShadow = false;
 		bool bShouldBeVisibleInRayTracing = false;
 	};

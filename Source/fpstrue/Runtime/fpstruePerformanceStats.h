@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 
-// 项目级 CPU/计数器声明：AI、生成和攻击模块写入，stat fpstruePerformance 与 Insights 读取。
+// 运行时埋点声明：AI、生成和攻击模块写入，stat fpstruePerformance 与 Insights/测试器读取。
 DECLARE_STATS_GROUP(TEXT("fpstrue Performance"), STATGROUP_fpstruePerformance, STATCAT_Advanced);
 
 // AI 决策自身耗时与调用量，用来区分“决策函数昂贵”和“决策触发下游工作昂贵”。
