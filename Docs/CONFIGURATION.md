@@ -1,6 +1,6 @@
 # 配置入口：玩法资产、蓝图默认值与实验预设
 
-波次、敌人近战和武器数值使用小型 Data Asset，其他角色参数与动画表现保留原蓝图入口；JSON 只管理性能实验，INI 只提供项目级动画素材默认值。没有通用配置管理器，也没有运行时热更新。
+波次、敌人近战和武器数值使用小型 Data Asset，其他角色参数与动画表现保留原蓝图入口；JSON 只管理性能实验。`DefaultGame.ini` 提供项目级动画素材默认值，`DefaultEngine.ini` 保存引擎与渲染默认参数。项目玩法配置在既有组件生命周期中读取，不逐帧访问磁盘。没有通用配置管理器，也没有运行时热更新。
 
 ## 玩法资产：整组选择一个配置来源
 
@@ -84,7 +84,9 @@ MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarr
 - 不每帧读磁盘，也不承诺游戏中改文件立即生效。
 - 配置缺失、素材加载失败或骨架不一致，沿用已有校验并回退到独立 AnimBP；此时动画共享收益会消失，需要查看日志。
 - 新素材打包时必须确认已被 Cook；仅把资源路径写进文本不能保证该资源进入安装包。
-- INI 只提供动画软引用默认值，与上面的玩法 Data Asset、行为树资产各自独立。
+- 此处 `DefaultGame.ini` 的动画配置段只提供软引用默认值，与玩法 Data Asset、行为树资产及引擎渲染配置各自独立。
+
+引擎渲染默认值另由 [DefaultEngine.ini](../Config/DefaultEngine.ini) 的 `[ConsoleVariables]` 管理，当前包含查询缓冲 `r.NumBufferedOcclusionQueries=2`、反射下采样 `r.Lumen.Reflections.DownsampleFactor=2` 和 TSR 历史缓冲 `r.TSR.History.ScreenPercentage=150`。实验案例可在测试进程中显式覆盖并读回校验，不修改玩法配置资产。
 
 ## 性能实验：一个采集入口，配置集中管理
 
