@@ -149,10 +149,6 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	{
 		if (bReuseBlackboard && Entry.EntryName != FBlackboard::KeySelf)
 		{
-			if (Entry.bInstanceSynced)
-			{
-				return false;
-			}
 			continue;
 		}
 		const UBlackboardKeyType_Object* ObjectKey = Cast<UBlackboardKeyType_Object>(Entry.KeyType);

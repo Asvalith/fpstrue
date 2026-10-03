@@ -7,23 +7,23 @@
 #include "Animation/AnimNotifyQueue.h"
 #include "Components/SkeletalMeshComponent.h"
 
-bool FFPActionPlayback::TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage)
+FAnimMontageInstance* FFPActionPlayback::TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage)
 {
-	if (InActionId == 0 || !IsValid(PlaybackMesh) || !IsValid(PlayedMontage)) return false;
+	if (InActionId == 0 || !IsValid(PlaybackMesh) || !IsValid(PlayedMontage)) return nullptr;
 	UAnimInstance* Anim = PlaybackMesh->GetAnimInstance();
 	FAnimMontageInstance* Instance = Anim != nullptr ? Anim->GetActiveInstanceForMontage(PlayedMontage) : nullptr;
-	if (Instance == nullptr || !Instance->IsActive()) return false;
+	if (Instance == nullptr || !Instance->IsActive()) return nullptr;
 	if (MontageInstanceId != INDEX_NONE)
 	{
 		return ActionId == InActionId && Mesh.Get() == PlaybackMesh && AnimInstance.Get() == Anim
-			&& Montage.Get() == PlayedMontage && MontageInstanceId == Instance->GetInstanceID();
+			&& Montage.Get() == PlayedMontage && MontageInstanceId == Instance->GetInstanceID() ? Instance : nullptr;
 	}
 	Mesh = PlaybackMesh;
 	AnimInstance = Anim;
 	Montage = PlayedMontage;
 	MontageInstanceId = Instance->GetInstanceID();
 	ActionId = InActionId;
-	return true;
+	return Instance;
 }
 
 bool FFPActionPlayback::Matches(uint32 ExpectedActionId, USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference) const

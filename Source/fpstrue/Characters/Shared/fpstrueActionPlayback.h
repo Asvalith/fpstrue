@@ -20,7 +20,7 @@ struct FPSTRUE_API FFPActionPlayback
 	uint32 ActionId = 0;
 
 	// 只能绑定调用者明确指定的 Montage；同一事务已有不同播放时拒绝覆盖。
-	bool TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage);
+	FAnimMontageInstance* TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage);
 	bool Matches(uint32 ExpectedActionId, USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference) const;
 	// 按保存的 AnimInstance、实例 ID 和资产解析播放；返回值仅供当前调用使用，不能跨回调缓存。
 	FAnimMontageInstance* GetBoundInstance() const;

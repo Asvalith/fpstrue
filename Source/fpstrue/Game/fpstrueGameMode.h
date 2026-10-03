@@ -169,7 +169,6 @@ private:
 	FfpstrueWaveConfig GetWaveConfig(int32 WaveNumber) const;
 	// 配置只选一种来源；外部资产绝不逐字段回退到旧蓝图默认值。
 	float GetConfiguredWaveInterval() const;
-	int32 GetConfiguredGameDuration() const;
 	// 推进波次编号、广播 UI 事件并启动本波生成。
 	void StartNextWave();
 	// 初始化本波的分帧生成队列。

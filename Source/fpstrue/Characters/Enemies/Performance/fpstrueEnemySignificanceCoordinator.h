@@ -56,7 +56,7 @@ private:
 	void ApplyAndRecordCandidates(const AfpstrueGameMode& OwnerGameMode, int32 FullBudgetDowngradeCount, int32 ShadowBudgetRejectedCount,
 								  int32 RayTracingBudgetRejectedCount);
 	// 修正权重、阈值、距离和名额的非法配置。
-	void SanitizePolicy();
+	void SanitizePolicy(FFPEnemyRenderSignificancePolicy& Policy);
 
 	TWeakObjectPtr<AfpstrueGameMode> GameMode;
 	bool bPolicyInitialized = false;
