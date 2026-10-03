@@ -591,7 +591,7 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	if (!World.Advance(5.2f)) return false;
 	TestFalse(TEXT("Unequipped weapon remains disabled"), Weapon->IsFiring());
 	TestFalse(TEXT("Unequipping cancels reload"), Weapon->IsReloading());
-	TestFalse(TEXT("Unequipped weapon cannot reload"), Weapon->CanReload());
+	TestFalse(TEXT("Unequipped weapon cannot reload"), Weapon->RequestReload());
 	TestEqual(TEXT("Late callbacks and timeout cannot load an unequipped weapon"), Weapon->GetCurrentAmmo(), AmmoBeforeUnequip);
 	return true;
 }
@@ -862,7 +862,10 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	const int32 PlaybackA = InstanceA->GetInstanceID();
 	FFPActionPlayback SavedPlaybackA;
 	TestNull(TEXT("Unbound playback has no instance"), SavedPlaybackA.GetBoundInstance());
-	if (!TestTrue(TEXT("Capture the explicit playback A"), SavedPlaybackA.TryBind(Weapon->GetActiveReloadId(), Arms, Montage))) return false;
+	if (!TestTrue(TEXT("Capture the explicit playback A"), SavedPlaybackA.TryBind(Weapon->GetActiveReloadId(), Arms, Montage) == InstanceA)) return false;
+	TestTrue(TEXT("Rebinding the same identity returns the same instance"),
+		SavedPlaybackA.TryBind(Weapon->GetActiveReloadId(), Arms, Montage) == InstanceA);
+	TestNull(TEXT("Anonymous binding returns no instance"), SavedPlaybackA.TryBind(0, Arms, Montage));
 	TestTrue(TEXT("Instance resolution uses the captured playback"), SavedPlaybackA.GetBoundInstance() == InstanceA);
 	Weapon->CancelReload();
 	TestTrue(TEXT("Reload B restarts the same Montage asset"), Weapon->RequestReload());
@@ -870,6 +873,7 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Engine allocated playback B"), InstanceB)) return false;
 	const int32 PlaybackB = InstanceB->GetInstanceID();
 	TestNotEqual(TEXT("The same asset gets a new playback identity"), PlaybackA, PlaybackB);
+	TestNull(TEXT("Old binding cannot adopt a new playback"), SavedPlaybackA.TryBind(Weapon->GetActiveReloadId(), Arms, Montage));
 	TestTrue(TEXT("Old binding never resolves to the new playback of the same asset"), SavedPlaybackA.GetBoundInstance() != InstanceB);
 	// An unrelated Montage on the same mesh must not replace the explicit reload binding.
 	UAnimMontage* Unrelated = NewObject<UAnimMontage>(Anim);
@@ -877,7 +881,7 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	Unrelated->SetCompositeLength(1.0f);
 	FFPActionPlayback MismatchedPlayback;
 	if (!TestTrue(TEXT("Capture current playback before testing an asset mismatch"),
-		MismatchedPlayback.TryBind(Weapon->GetActiveReloadId(), Arms, Montage))) return false;
+		MismatchedPlayback.TryBind(Weapon->GetActiveReloadId(), Arms, Montage) == InstanceB)) return false;
 	MismatchedPlayback.Montage = Unrelated;
 	TestNull(TEXT("An instance ID cannot resolve with the wrong Montage asset"), MismatchedPlayback.GetBoundInstance());
 	SavedPlaybackA.Reset();

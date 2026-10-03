@@ -34,16 +34,10 @@ constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
 constexpr float MaxTotalSpreadAngle = 45.0f;
 
-float SanitizeSpreadAngle(float Degrees)
-{
-	return FMath::IsFinite(Degrees) ? FMath::Clamp(Degrees, 0.0f, MaxTotalSpreadAngle) : 0.0f;
-}
-
-// 根据高斯分布生成散布方向，供每发 Hitscan 共用。
+// 根据高斯分布生成散布方向；唯一调用点已校验总散布角，这里只负责方向计算。
 FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
 {
 	const FVector AimDirection = Forward.GetSafeNormal();
-	SpreadAngleDegrees = SanitizeSpreadAngle(SpreadAngleDegrees);
 	if (AimDirection.IsNearlyZero() || SpreadAngleDegrees <= KINDA_SMALL_NUMBER)
 	{
 		return AimDirection;
@@ -219,7 +213,7 @@ void UfpstrueWeaponComponent::StartFire()
 
 void UfpstrueWeaponComponent::ScheduleNextShot()
 {
-	if (UWorld* World = GetWorld(); World != nullptr && IsOperational() && IsFiring() && HasAmmo())
+	if (UWorld* World = GetWorld())
 	{
 		const double Interval = 60.0 / static_cast<double>(Settings.RoundsPerMinute);
 		const float Remaining = static_cast<float>(FMath::Max(LastShotTimeSeconds + Interval - World->GetTimeSeconds(), 0.001));
@@ -328,8 +322,9 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	// 配置在首次装备时已校验并冻结，不逐发修正同一字段；运行时累计值仍需限制。
 	const float ContinuousSpreadAngle = FMath::Min(ConsecutiveShotCount * Settings.ContinuousFireSpreadStep, Settings.MaxContinuousFireSpreadAngle);
 	// 基础与连射配置各自合法不代表总和合法；总角度统一有限且不超过 45 度，避免 tan 接近 90 度。
-	const float SpreadAngle = SanitizeSpreadAngle((OwningCharacter.IsAiming() ? Settings.AimFireSpreadAngle : Settings.HipFireSpreadAngle)
-		+ ContinuousSpreadAngle);
+	const float TotalSpreadAngle = (OwningCharacter.IsAiming() ? Settings.AimFireSpreadAngle : Settings.HipFireSpreadAngle)
+		+ ContinuousSpreadAngle;
+	const float SpreadAngle = FMath::IsFinite(TotalSpreadAngle) ? FMath::Clamp(TotalSpreadAngle, 0.0f, MaxTotalSpreadAngle) : 0.0f;
 	++ConsecutiveShotCount;
 
 	// 从相机发出射击专用射线，返回第一个阻挡命中，并据骨骼名称结算点伤害。
@@ -380,17 +375,12 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
  * 因此开始事件之前必须先设置状态和 Timer；Finish 在提交事件返回后还要确认动作版本未变。
  */
 
-bool UfpstrueWeaponComponent::CanReload() const
-{
-	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
-	return CanAcceptOwnerInput() && (ActionState == EFPWeaponActionState::Ready || ActionState == EFPWeaponActionState::Firing)
-		&& GetWorld() != nullptr && CurrentAmmo < Settings.MagazineSize && ReserveAmmo > 0;
-}
-
 bool UfpstrueWeaponComponent::RequestReload()
 {
 	// Request 只开启换弹事务，不立刻搬运弹药；真正提交点由动画 Notify 决定，使数值变化与装填动作对齐。
-	if (!CanReload())
+	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
+	if (!CanAcceptOwnerInput() || (ActionState != EFPWeaponActionState::Ready && ActionState != EFPWeaponActionState::Firing)
+		|| GetWorld() == nullptr || CurrentAmmo >= Settings.MagazineSize || ReserveAmmo <= 0)
 	{
 		return false;
 	}
@@ -466,11 +456,11 @@ bool UfpstrueWeaponComponent::BindReloadMontage(int32 ReloadId, USkeletalMeshCom
 	if (!IsCurrentReload(ReloadId) || !IsOperational() || !IsValid(PlaybackMesh)
 		|| (PlaybackMesh != this && PlaybackMesh != Character->GetMesh1P())) return false;
 	FFPActionPlayback* Existing = ReloadPlaybacks.FindByPredicate([PlaybackMesh](const FFPActionPlayback& P) { return P.Mesh.Get() == PlaybackMesh; });
-	if (Existing != nullptr) return Existing->TryBind(ReloadId, PlaybackMesh, Montage);
+	if (Existing != nullptr) return Existing->TryBind(ReloadId, PlaybackMesh, Montage) != nullptr;
 	FFPActionPlayback Playback;
-	if (!Playback.TryBind(ReloadId, PlaybackMesh, Montage)) return false;
+	FAnimMontageInstance* Instance = Playback.TryBind(ReloadId, PlaybackMesh, Montage); // TryBind 后没有外部回调，实例仍有效。
+	if (Instance == nullptr) return false;
 	ReloadPlaybacks.Add(Playback);
-	FAnimMontageInstance* Instance = Playback.GetBoundInstance(); // TryBind 后没有外部回调，实例仍有效。
 	// UObject 委托弱引用组件，并把本次身份作为固定 payload 保存；回调不查询“当前动画”。
 	Instance->OnMontageEnded.BindUObject(this, &UfpstrueWeaponComponent::HandleReloadPlaybackEnded,
 		ReloadId, Playback.Mesh, Playback.MontageInstanceId);

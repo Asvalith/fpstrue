@@ -128,7 +128,6 @@ private:
 	// 根据内外环配置创建稳定槽位布局。
 	void BuildSlots();
 	// Timer 回调：按阈值刷新共享目标位置。
-	void RefreshSharedTargetSnapshot();
 	// 更新缓存位置，并同步重建全部槽位的 NavMesh 投影。
 	void UpdateSharedTargetSnapshot(bool bForce);
 	// 批量把原始槽位和接近点投影到 NavMesh。

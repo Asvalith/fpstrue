@@ -54,10 +54,10 @@ void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 
 	if (!bPolicyInitialized)
 	{
-		BenchmarkConfig.ApplyEnemySignificanceOverrides(OwnerGameMode->EnemyRenderSignificancePolicy);
-		SanitizePolicy();
+		FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
+		BenchmarkConfig.ApplyEnemySignificanceOverrides(Policy);
+		SanitizePolicy(Policy);
 		bPolicyInitialized = true;
-		const FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
 		UE_LOG(LogTemp, Display,
 			   TEXT("Enemy render significance: weights[F=%.2f S=%.2f R=%.2f D=%.2f] thresholds[full=%.2f/%.2f reduced=%.2f/%.2f] "
 					"budgets[full=%d shadow=%d rt=%d] features[tier=%d lod=%d anim=%d shadow=%d rt=%d]"),
@@ -366,16 +366,9 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 
 // ==================== 策略校验 ====================
 
-void UfpstrueEnemySignificanceCoordinator::SanitizePolicy()
+void UfpstrueEnemySignificanceCoordinator::SanitizePolicy(FFPEnemyRenderSignificancePolicy& Policy)
 {
 	// 配置可能来自 CDO、蓝图或 Benchmark 命令行；进入热路径前集中修正，Update 中不再重复做防御性分支。
-	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
-	if (OwnerGameMode == nullptr)
-	{
-		return;
-	}
-
-	FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
 	Policy.FrustumWeight = FMath::Max(Policy.FrustumWeight, 0.0f);
 	Policy.ScreenCoverageWeight = FMath::Max(Policy.ScreenCoverageWeight, 0.0f);
 	Policy.RecentFrustumWeight = FMath::Max(Policy.RecentFrustumWeight, 0.0f);

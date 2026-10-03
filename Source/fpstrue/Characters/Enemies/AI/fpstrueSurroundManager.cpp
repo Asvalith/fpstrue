@@ -70,17 +70,13 @@ void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCha
 	}
 
 	UpdateSharedTargetSnapshot(true);
-	GetWorldTimerManager().SetTimer(SharedTargetTimerHandle, this, &AfpstrueSurroundManager::RefreshSharedTargetSnapshot,
-									FMath::Max(SharedTargetRefreshInterval, 0.05f), true);
+	// Timer 回调只负责触发带位移阈值的刷新，具体缓存更新集中在下层函数。
+	GetWorldTimerManager().SetTimer(SharedTargetTimerHandle,
+		FTimerDelegate::CreateUObject(this, &AfpstrueSurroundManager::UpdateSharedTargetSnapshot, false),
+		FMath::Max(SharedTargetRefreshInterval, 0.05f), true);
 }
 
 // ==================== 共享目标与 NavMesh 投影缓存 ====================
-
-void AfpstrueSurroundManager::RefreshSharedTargetSnapshot()
-{
-	// Timer 回调只负责触发带位移阈值的刷新，具体缓存更新集中在下层函数。
-	UpdateSharedTargetSnapshot(false);
-}
 
 void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 {
@@ -142,11 +138,6 @@ void AfpstrueSurroundManager::BuildSlots()
 void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 {
 	// 同时缓存“站位点”和更靠近玩家的“攻击接近点”，AI 决策阶段不再重复 ProjectPointToNavigation。
-	if (!bHasSharedTargetSnapshot)
-	{
-		return;
-	}
-
 	const UWorld* World = GetWorld();
 	const UNavigationSystemV1* NavigationSystem =
 		World != nullptr ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
@@ -236,9 +227,8 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	{
 		return;
 	}
-	ReleaseAttackPermission(Enemy);
-
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
+	ActiveAttackers.Remove(EnemyKey);
 	int32 ReleasedSlotIndex = INDEX_NONE;
 	if (!EnemyToSlot.RemoveAndCopyValue(EnemyKey, ReleasedSlotIndex))
 	{
@@ -433,8 +423,7 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex)
 {
 	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
-	if (!SurroundSlots.IsValidIndex(InnerSlotIndex) || SurroundSlots[InnerSlotIndex].RingIndex != 0 ||
-		SurroundSlots[InnerSlotIndex].Occupant.IsValid() || !SurroundSlots[InnerSlotIndex].bHasProjectedApproachLocation)
+	if (!SurroundSlots[InnerSlotIndex].bHasProjectedApproachLocation)
 	{
 		return;
 	}

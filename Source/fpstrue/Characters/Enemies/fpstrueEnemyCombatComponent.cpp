@@ -110,27 +110,25 @@ bool UfpstrueEnemyCombatComponent::SampleAttackReach(float& OutDistanceSquared, 
 	OutDistanceSquared = FVector::DistSquared2D(EnemyLocation, TargetLocation);
 	// 距离至少覆盖双方胶囊半径，避免已经相贴却永远进入不了攻击范围。
 	OutEffectiveRange = FMath::Max(AttackRange, EnemyCapsule->GetScaledCapsuleRadius() + TargetCapsule->GetScaledCapsuleRadius() + 5.0f);
-	return OutDistanceSquared <= FMath::Square(OutEffectiveRange) && HasClearAttackPath(Target);
+	return OutDistanceSquared <= FMath::Square(OutEffectiveRange) && HasClearAttackPath(*Enemy, *Target, EnemyLocation, TargetLocation);
 }
 
-bool UfpstrueEnemyCombatComponent::HasClearAttackPath(const AfpstrueCharacter* Target) const
+bool UfpstrueEnemyCombatComponent::HasClearAttackPath(const AfpstrueEnemyCharacter& Enemy, const AfpstrueCharacter& Target,
+	const FVector& EnemyLocation, const FVector& TargetLocation) const
 {
-	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const UWorld* World = GetWorld();
-	if (Enemy == nullptr || !IsValid(Target) || World == nullptr)
+	if (World == nullptr)
 	{
 		return false;
 	}
-	const FVector EnemyLocation = Enemy->GetActorLocation();
-	const FVector TargetLocation = Target->GetActorLocation();
-	const float MaxHeightDifference = Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() +
-		Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const float MaxHeightDifference = Enemy.GetCapsuleComponent()->GetScaledCapsuleHalfHeight() +
+		Target.GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 	if (FMath::Abs(EnemyLocation.Z - TargetLocation.Z) > MaxHeightDifference)
 	{
 		return false;
 	}
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyMeleeEnvironment), false, Enemy);
-	QueryParams.AddIgnoredActor(Target);
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyMeleeEnvironment), false, &Enemy);
+	QueryParams.AddIgnoredActor(&Target);
 	return !World->LineTraceTestByChannel(EnemyLocation, TargetLocation, ECC_Visibility, QueryParams);
 }
 
@@ -168,12 +166,13 @@ bool UfpstrueEnemyCombatComponent::IsAttackReady() const
 bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 {
 	// 只有冷却、目标和事务状态均满足才开始；成功后先建立 C++ 状态，再通知蓝图播放动画。
-	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	UWorld* World = GetWorld();
-	if (Enemy == nullptr || World == nullptr || !CanStartAttack())
+	if (!CanStartAttack())
 	{
 		return false;
 	}
+	// 上面的资格检查已确认 Owner/World；提交前没有外部回调，直接使用本次有效上下文。
+	AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	UWorld* World = GetWorld();
 
 	// 建立事务本身即确保伤害窗口尚未开启，不再先关闭一次窗口。
 	AttackPhase = EFPEnemyAttackPhase::Windup;
@@ -228,7 +227,8 @@ bool UfpstrueEnemyCombatComponent::PlayAttackMontageForAttack(int64 AttackId, UA
 		return false;
 	}
 	FFPActionPlayback StartedPlayback;
-	if (!StartedPlayback.TryBind(static_cast<uint32>(AttackId), Mesh, Montage))
+	FAnimMontageInstance* Instance = StartedPlayback.TryBind(static_cast<uint32>(AttackId), Mesh, Montage);
+	if (Instance == nullptr)
 	{
 		if (AttackId == static_cast<int64>(AttackSequence)) ResetCombat();
 		return false;
@@ -240,7 +240,7 @@ bool UfpstrueEnemyCombatComponent::PlayAttackMontageForAttack(int64 AttackId, UA
 		return false;
 	}
 	AttackPlayback = StartedPlayback;
-	BindAttackPlaybackCompletion();
+	BindAttackPlaybackCompletion(*Instance);
 	return true;
 }
 
@@ -250,21 +250,20 @@ bool UfpstrueEnemyCombatComponent::BindAttackMontageForAttack(int64 AttackId, US
 	if (bStartingPlayback || bEndingPlay || !IsAttacking() || AttackId != static_cast<int64>(AttackSequence) ||
 		Enemy == nullptr || PlaybackMesh != Enemy->GetMesh()) return false;
 	const bool bAlreadyBound = AttackPlayback.IsSet();
-	if (!AttackPlayback.TryBind(AttackSequence, PlaybackMesh, Montage)) return false;
-	if (!bAlreadyBound) BindAttackPlaybackCompletion();
+	FAnimMontageInstance* Instance = AttackPlayback.TryBind(AttackSequence, PlaybackMesh, Montage);
+	if (Instance == nullptr) return false;
+	if (!bAlreadyBound) BindAttackPlaybackCompletion(*Instance);
 	return true;
 }
 
-void UfpstrueEnemyCombatComponent::BindAttackPlaybackCompletion()
+void UfpstrueEnemyCombatComponent::BindAttackPlaybackCompletion(FAnimMontageInstance& Instance)
 {
 	const FFPActionPlayback ExpectedPlayback = AttackPlayback;
-	FAnimMontageInstance* Instance = ExpectedPlayback.GetBoundInstance();
-	if (Instance == nullptr) return;
-	ScheduleAttackFailSafe(Instance);
+	ScheduleAttackFailSafe(&Instance);
 	// 只订阅明确实例，不订阅只含 Montage 资产的全局事件；同资源旧播放结束不能结束新事务。
 	// 显式 Bind 路径已有的观察回调保留，但必须在本组件提交完成/中断后通知。
-	const FOnMontageEnded PreviousObserver = Instance->OnMontageEnded;
-	Instance->OnMontageEnded.BindWeakLambda(this, [this, ExpectedPlayback, PreviousObserver](UAnimMontage* Montage, bool bInterrupted)
+	const FOnMontageEnded PreviousObserver = Instance.OnMontageEnded;
+	Instance.OnMontageEnded.BindWeakLambda(this, [this, ExpectedPlayback, PreviousObserver](UAnimMontage* Montage, bool bInterrupted)
 	{
 		if (IsAttacking() && AttackSequence == ExpectedPlayback.ActionId &&
 			AttackPlayback.MontageInstanceId == ExpectedPlayback.MontageInstanceId &&
@@ -487,7 +486,8 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	AfpstrueCharacter* TargetCharacter = AttackTarget.Get();
 	if (Enemy == nullptr || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
-		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack || !HasClearAttackPath(TargetCharacter))
+		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack ||
+		!HasClearAttackPath(*Enemy, *TargetCharacter, Enemy->GetActorLocation(), TargetCharacter->GetActorLocation()))
 	{
 		return false;
 	}

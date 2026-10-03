@@ -296,8 +296,8 @@ void AfpstrueCharacter::StopAim()
 // 这里是输入边界：Character 不直接扣弹、射线检测或改变武器动作状态，只把请求交给当前装备组件。
 void AfpstrueCharacter::StartWeaponFire()
 {
-	// Character 只校验装备与生存状态，弹药和武器动作互斥由 WeaponComponent 负责。
-	if (EquippedWeaponComponent != nullptr && CanAcceptGameplayInput())
+	// 与换弹入口一致：Character 只转发当前装备，输入资格、生存状态和动作互斥统一由武器校验。
+	if (EquippedWeaponComponent != nullptr)
 	{
 		//转入weapon
 		EquippedWeaponComponent->StartFire();

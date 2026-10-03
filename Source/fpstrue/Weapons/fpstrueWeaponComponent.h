@@ -79,6 +79,7 @@ public:
 	void StopFire();
 
 	// ==================== Reload ====================
+	// Character 在提交换弹请求前检查弹匣、备弹和动作状态。
 	// 换弹分为请求、弹药提交、结束三个阶段；取消只结束流程，不撤销已经提交的弹药。
 	// 先建立 Reloading 和兜底 Timer，再发带 ReloadId 的播放请求，蓝图选材后走显式播放接口。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
@@ -135,9 +136,6 @@ public:
 	//检查是否正在开火，供蓝图限制 Montage 重复播放；查询本身不控制动画。
 	UFUNCTION(BlueprintPure, Category = "Weapon|State")
 	bool IsFiring() const { return ActionState == EFPWeaponActionState::Firing; }
-
-	// Character 在提交换弹请求前检查弹匣、备弹和动作状态。
-	bool CanReload() const;
 
 	// ==================== Ammo Query ====================
 	//UI可查询子弹数量相关

@@ -142,9 +142,11 @@ private:
 	// 对首次命中的有效目标施加伤害，并防止同一攻击重复命中。
 	bool TryApplyAttackDamage(AActor* HitActor);
 	// 起手和命中均检查高度/墙体；命中使用事务捕获目标，不能用 Controller 后来的目标代替。
-	bool HasClearAttackPath(const AfpstrueCharacter* Target) const;
+	// 调用者校验双方并传入本次位置，距离与遮挡复用同一采样，不跨提交边界缓存。
+	bool HasClearAttackPath(const AfpstrueEnemyCharacter& Enemy, const AfpstrueCharacter& Target,
+		const FVector& EnemyLocation, const FVector& TargetLocation) const;
 	// 绑定刚捕获实例的原生完成回调；观察者在内部清理之后执行，不能承担事务收尾职责。
-	void BindAttackPlaybackCompletion();
+	void BindAttackPlaybackCompletion(FAnimMontageInstance& Instance);
 	// 未绑定时使用配置兜底，绑定后覆盖实际剩余播放时间；始终只保留一个有限的一次性 Timer。
 	void ScheduleAttackFailSafe(const FAnimMontageInstance* Playback = nullptr);
 	// 完成攻击并通知 AI 释放攻击名额。

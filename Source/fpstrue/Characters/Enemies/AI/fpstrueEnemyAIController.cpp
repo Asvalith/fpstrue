@@ -234,10 +234,10 @@ bool AfpstrueEnemyAIController::BuildDecisionContext()
 	{
 		// 平时使用 GameMode 注入的玩家；仅在缓存目标失效时安全解析，不在正常路径反复查询。
 		InitializeCombatContext(Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)), SurroundManager);
-	}
-	if (!IsTargetUsable(TargetCharacter))
-	{
-		return false;
+		if (!IsTargetUsable(TargetCharacter))
+		{
+			return false;
+		}
 	}
 
 	// 一轮只计算一次二维距离平方，并派生攻击/追击两个布尔条件，避免各分支重复开方和取位置。

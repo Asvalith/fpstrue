@@ -146,7 +146,8 @@ void AfpstrueGameMode::StartGameMode()
 
 	// 先提交完整状态，再启动协作者并广播；监听者读取到的是本局初始值。
 	CurrentWave = 0;
-	RemainingTime = GetConfiguredGameDuration();
+	RemainingTime = BenchmarkGameDurationOverride > 0 ? BenchmarkGameDurationOverride
+		: FMath::Max(WaveConfiguration != nullptr ? WaveConfiguration->GameDuration : GameDuration, 1);
 	MatchPhase = EFPMatchPhase::Playing;
 	UE_LOG(LogTemp, Display, TEXT("Game wave configuration: source=%s waves=%d duration=%d"),
 		   WaveConfiguration != nullptr ? *GetPathNameSafe(WaveConfiguration) : TEXT("GameMode Blueprint defaults"), ConfiguredWaveCount,
@@ -259,15 +260,6 @@ FfpstrueWaveConfig AfpstrueGameMode::GetWaveConfig(int32 WaveNumber) const
 float AfpstrueGameMode::GetConfiguredWaveInterval() const
 {
 	return FMath::Max(WaveConfiguration != nullptr ? WaveConfiguration->WaveInterval : WaveInterval, 0.0f);
-}
-
-int32 AfpstrueGameMode::GetConfiguredGameDuration() const
-{
-	if (BenchmarkGameDurationOverride > 0)
-	{
-		return BenchmarkGameDurationOverride;
-	}
-	return FMath::Max(WaveConfiguration != nullptr ? WaveConfiguration->GameDuration : GameDuration, 1);
 }
 
 // 推进波次编号、广播 UI 事件并启动本波生成。

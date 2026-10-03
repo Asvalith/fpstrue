@@ -164,11 +164,6 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Closing a valid window enters Recovery"), Combat->AttackPhase == EFPEnemyAttackPhase::Recovery);
 	Combat->BeginAttackWindow();
 	TestTrue(TEXT("Another window before a hit may become Active"), Combat->AttackPhase == EFPEnemyAttackPhase::Active);
-	TestTrue(TEXT("The first valid player hit commits damage"), Combat->TryApplyAttackDamage(Target));
-	TestTrue(TEXT("A committed hit closes the window"), Combat->AttackPhase == EFPEnemyAttackPhase::Recovery);
-	Combat->BeginAttackWindow();
-	TestTrue(TEXT("A hit transaction cannot reopen its window"), Combat->AttackPhase == EFPEnemyAttackPhase::Recovery);
-	TestFalse(TEXT("The same transaction cannot commit damage again"), Combat->TryApplyAttackDamage(Target));
 	// 环境规则不依赖 NavMesh：近战不可穿越阻挡 Visibility 的墙，也不能攻击明显不同楼层。
 	AActor* Wall = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Melee blocker owner"), Wall)) return false;
@@ -181,16 +176,22 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	WallBox->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	WallBox->RegisterComponent();
 	Wall->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
-	TestFalse(TEXT("Environment wall blocks melee eligibility"), Combat->HasClearAttackPath(Target));
+	TestFalse(TEXT("A wall added after attack start blocks damage"), Combat->TryApplyAttackDamage(Target));
 	float SampledDistanceSquared, SampledAttackRange;
 	TestFalse(TEXT("BT reach snapshot includes the same wall rule"), Combat->SampleAttackReach(SampledDistanceSquared, SampledAttackRange));
 	TestEqual(TEXT("Blocked snapshot still provides distance for pursuit"), SampledDistanceSquared, 40000.0f);
 	TestTrue(TEXT("Blocked snapshot still provides range for decision frequency"), SampledAttackRange >= Combat->GetConfiguredAttackRange());
 	Wall->Destroy();
 	Target->SetActorLocation(FVector(200.0f, 0.0f, 1000.0f));
-	TestFalse(TEXT("Another floor is not treated as a 2D melee target"), Combat->HasClearAttackPath(Target));
+	TestFalse(TEXT("Moving to another floor after attack start blocks damage"), Combat->TryApplyAttackDamage(Target));
+	TestFalse(TEXT("BT reach snapshot also rejects another floor"), Combat->SampleAttackReach(SampledDistanceSquared, SampledAttackRange));
 	Target->SetActorLocation(FVector(200.0f, 0.0f, 0.0f));
 	TestTrue(TEXT("A new reach sample observes the removed blocker"), Combat->SampleAttackReach(SampledDistanceSquared, SampledAttackRange));
+	TestTrue(TEXT("The first valid player hit commits damage"), Combat->TryApplyAttackDamage(Target));
+	TestTrue(TEXT("A committed hit closes the window"), Combat->AttackPhase == EFPEnemyAttackPhase::Recovery);
+	Combat->BeginAttackWindow();
+	TestTrue(TEXT("A hit transaction cannot reopen its window"), Combat->AttackPhase == EFPEnemyAttackPhase::Recovery);
+	TestFalse(TEXT("The same transaction cannot commit damage again"), Combat->TryApplyAttackDamage(Target));
 
 	Combat->EndAttackWindow();
 	AttackWindow->NotifyTick(Mesh, nullptr, 0.016f, NotifyContext);

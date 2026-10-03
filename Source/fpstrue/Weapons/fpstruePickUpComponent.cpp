@@ -40,7 +40,7 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 	//从武器 Actor 取得装备组件；随后一起校验玩家与武器是否存在。
 	UfpstrueWeaponComponent* WeaponComponent = OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 
-	if (Character == nullptr || Character->IsDead() || WeaponComponent == nullptr)
+	if (Character == nullptr || WeaponComponent == nullptr)
 	{
 		return;
 	}
