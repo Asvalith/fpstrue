@@ -365,17 +365,13 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 			return true;
 		}
 		SetAIState(EFPEnemyAIState::Attack);
-		if (!Combat->TryAttackTarget())
+		if (Combat->TryAttackTarget() || Combat->IsAttacking())
 		{
-			if (Combat->IsAttacking())
-			{
-				return true; // 动画回调同步开始了替代事务，旧请求不能归还它的名额。
-			}
-			ReleaseAttackPermission();
-			SetAIState(EFPEnemyAIState::Chase);
-			return false;
+			return true; // 请求成功或动画回调启动了替代事务，都不能归还仍在使用的名额。
 		}
-		return true;
+		ReleaseAttackPermission();
+		SetAIState(EFPEnemyAIState::Chase);
+		return false;
 	}
 	case EFPEnemyBehaviorAction::MaintainCombatPosition:
 		// 冷却和预算拒绝共用等待行为：有槽位继续走，无槽位站定；不残留 Attack 旋转策略。
@@ -539,25 +535,21 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 	LastResolvedMoveGoal = MoveRequest.GetGoalLocation();
 	bHasMoveGoal = MoveResult != EPathFollowingRequestResult::Failed;
 	OwnedMoveRequestId = MoveResult == EPathFollowingRequestResult::RequestSuccessful ? Result.MoveId : FAIRequestID::InvalidRequest;
-	if (bHasMoveGoal)
-	{
-		MoveFailures[bCombatPriority ? 1 : 0] = FMoveFailure{};
-		if (MoveResult == EPathFollowingRequestResult::AlreadyAtGoal)
-		{
-			FaceTargetAtRest();
-		}
-		else
-		{
-			// 只有接受了新移动请求才撤销站定朝向；预算拒绝不打断旧路径，也不伪造到达。
-			ApplyRotationPolicy(EFPEnemyAIState::Chase);
-		}
-	}
-	else
+	// 缓存发布后按引擎结果收口；失败、到达、移动各自只维护一次副作用和返回值。
+	if (MoveResult == EPathFollowingRequestResult::Failed)
 	{
 		RecordMoveFailure(RequestedGoal);
+		return EMoveGoalResult::Unreachable;
 	}
-	return MoveResult == EPathFollowingRequestResult::Failed ? EMoveGoalResult::Unreachable :
-		(MoveResult == EPathFollowingRequestResult::AlreadyAtGoal ? EMoveGoalResult::Arrived : EMoveGoalResult::Moving);
+	MoveFailures[bCombatPriority ? 1 : 0] = FMoveFailure{};
+	if (MoveResult == EPathFollowingRequestResult::AlreadyAtGoal)
+	{
+		FaceTargetAtRest();
+		return EMoveGoalResult::Arrived;
+	}
+	// 只有接受了新移动请求才撤销站定朝向；预算拒绝不打断旧路径，也不伪造到达。
+	ApplyRotationPolicy(EFPEnemyAIState::Chase);
+	return EMoveGoalResult::Moving;
 }
 
 void AfpstrueEnemyAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result)

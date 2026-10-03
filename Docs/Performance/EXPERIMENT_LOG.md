@@ -48,7 +48,7 @@
 
 ### 方案与实现边界
 
-在已验收的 `Demonstration_Baked` 基础上，用 `Tools/EnableSceneNanite.py` 创建独立地图 `/Game/PerformanceCandidates/Nanite_HardSurface20260929/Demonstration_Nanite`。仅复制白名单网格并切换其静态组件引用，不合并 Actor，不调整灯光、敌人、分辨率或其他画质参数。8 种资产共 454 个组件：托盘 204、通风管端部 64、通风直管 44、混凝土块 45、筒仓 42、油桶 33、车厢 21、建筑框架 1。
+在已验收的 `Demonstration_Baked` 基础上，用 `Tools/Assets/EnableSceneNanite.py` 创建独立地图 `/Game/PerformanceCandidates/Nanite_HardSurface20260929/Demonstration_Nanite`。仅复制白名单网格并切换其静态组件引用，不合并 Actor，不调整灯光、敌人、分辨率或其他画质参数。8 种资产共 454 个组件：托盘 204、通风管端部 64、通风直管 44、混凝土块 45、筒仓 42、油桶 33、车厢 21、建筑框架 1。
 
 本批限定普通静态网格 Actor、静态组件、全部不透明材质，并排除交互/附着、逐实例顶点色及已启用 Nanite 的对象。为避免同时改变光追/复杂碰撞几何，Fallback 保留 100% 三角形、相对误差 0。保存重载核对了组件变换、材质、碰撞/导航与渲染标志，回退 LOD 三角形数、Section 数和碰撞设置一致；包围盒重建最大数值误差约 `0.000031 cm`。原地图及 8 个源网格的文件 SHA256 未变。新建的 8 个网格包合计 857476 字节，不代表运行时显存增量。
 
@@ -105,7 +105,7 @@
 
 ## 2026-09-29：统一采集入口实测（当前方案复测，非新增优化收益）
 
-使用 `Tools/ExperimentProfiles/scene-acceptance.json`：已验收的 `Demonstration_Baked`、1600×900、0/160 敌人各 1 次、20 秒预热与 180 秒采集、固定视角、随机种子 1337、玩家测试生命值 1000000、不启用 Trace、不裁剪首尾。读回确认硬件查询开启、HZB=0、Buffer2、反射下采样=2、TSR History=150；未测试或启用新的 ISM 地图。
+使用 `Tools/Performance/ExperimentProfiles/scene-acceptance.json`：已验收的 `Demonstration_Baked`、1600×900、0/160 敌人各 1 次、20 秒预热与 180 秒采集、固定视角、随机种子 1337、玩家测试生命值 1000000、不启用 Trace、不裁剪首尾。读回确认硬件查询开启、HZB=0、Buffer2、反射下采样=2、TSR History=150；未测试或启用新的 ISM 地图。
 
 | 指标 | 0 敌人 | 160 敌人 |
 | --- | ---: | ---: |

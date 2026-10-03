@@ -42,7 +42,7 @@ foreach ($Name in $RenderCostConfigParameters) {
 if (-not $PSBoundParameters.ContainsKey('EditorPath')) { $EditorPath = $RenderCostCatalog.Capture.EditorPath }
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
-    $ProjectRoot = Split-Path $PSScriptRoot -Parent
+    $ProjectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 }
 if ([string]::IsNullOrWhiteSpace($DdcPath)) {
     $DdcPath = Join-Path $ProjectRoot "Saved\DerivedDataCache"
@@ -620,6 +620,6 @@ for ($Run = 1; $Run -le $RunsPerCase; ++$Run) {
     }
 }
 
-$SummaryScript = Join-Path $ProjectRoot "Tools\SummarizeRenderCostMatrix.ps1"
+$SummaryScript = Join-Path $ProjectRoot "Tools\Performance\SummarizeRenderCostMatrix.ps1"
 & $SummaryScript -EvidenceRoot $EvidenceRoot -StartTrimSeconds $StartTrimSeconds -EndTrimSeconds $EndTrimSeconds
 Write-Output "Performance matrix evidence: $EvidenceRoot"

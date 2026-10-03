@@ -1,5 +1,5 @@
 # Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
-# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
+# New captures use ../Performance/RunRenderCostMatrix.ps1 and ../Performance/ExperimentProfiles/.
 param(
     [int]$EnemyCount = 160,
     [int]$RunsPerGroup = 3,
@@ -162,4 +162,4 @@ for ($Run = 1; $Run -le $RunsPerGroup; ++$Run) {
     }
 }
 
-& (Join-Path $ProjectRoot "Tools\SummarizeEnemyOptimizationAblation.ps1") -EvidenceRoot $EvidenceRoot
+& (Join-Path $ProjectRoot "Tools\LegacyPerformance\SummarizeEnemyOptimizationAblation.ps1") -EvidenceRoot $EvidenceRoot

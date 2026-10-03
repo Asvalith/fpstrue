@@ -85,7 +85,7 @@ GameMode 使用 `Waiting → Starting → Playing → Finished` 表达对局阶�
 - 攻击阶段使用 `Idle / Windup / Active / Recovery`，只有 Active 执行伤害查询；重复打开窗口不重置刀刃历史采样，命中过的本次攻击不能重新开窗。
 - 正常结束、保护 Timer 和死亡中断共用事务清理，归还许可并清除定时任务；正常结束更新冷却，中断不伪造正常完成。
 
-默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
+默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/Gameplay/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
 
 历史 AI Decision 数据来自 Timer 版本；行为树版本需要重新测量整体决策与 BrainComponent 调度成本，不沿用旧数据宣称迁移提速。
 
@@ -139,7 +139,8 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 ### 4. 配置与实验控制
 
 - 波次配置由 `WaveConfiguration` 数据资产提供；近战配置由 `CombatConfiguration` 数据资产提供。选中资产后整组使用该来源，未配置资产的旧蓝图继续兼容，不逐字段混用。
-- `Tools/MigrateGameplayConfiguration.py` 将现有蓝图参数复制到两份资产并绑定，保留原数值；已有绑定不会被重复覆盖。`review` 保留已迁移资产，`main` 展示分支不分发这些二进制资产。
+- 武器的射速、伤害、弹药、散布、后坐力和换弹兜底由 `WeaponConfiguration` 数据资产统一提供；首次装备校验并复制参数，运行时弹药和动作身份仍由各武器独立维护。`BP_Weapon` 绑定 `/Game/Config/DA_FPWeapon_RU74`，表现资源继续由蓝图选择。
+- `Tools/Gameplay/MigrateGameplayConfiguration.py` 将现有蓝图参数复制到两份资产并绑定，保留原数值；已有绑定不会被重复覆盖。`review` 保留已迁移资产，`main` 展示分支不分发这些二进制资产。
 - AI 更新间隔、移动参数和渲染预算保留现有蓝图可编辑属性，不再复制进另一套 JSON。
 - 共享动画默认软引用放在项目 INI，组件蓝图可以覆盖。
 - JSON 只保存实验预设，优先级为显式命令行参数 > JSON > 脚本默认值。
@@ -188,7 +189,7 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 | Top-K 与预算分配 | [SignificanceCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.cpp)、[优先级键与堆](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificance.h) |
 | 动画共享接入 | [AnimationSharingCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.cpp) |
 | 波次、注册表与胜负 | [GameMode](Source/fpstrue/Game/fpstrueGameMode.cpp) |
-| 玩法配置资产 | [WaveConfiguration](Source/fpstrue/Game/fpstrueWaveConfiguration.h)、[EnemyCombatConfig](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatConfig.h) |
+| 玩法配置资产 | [WaveConfiguration](Source/fpstrue/Game/fpstrueWaveConfiguration.h)、[EnemyCombatConfig](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatConfig.h)、[WeaponConfig](Source/fpstrue/Weapons/fpstrueWeaponConfig.h) |
 | 测试与性能采集 | [Automation](Source/fpstrue/Testing/Automation/)、[Benchmarks](Source/fpstrue/Testing/Benchmarks/)、[Tools](Tools/) |
 
 ## 构建与验证
@@ -197,7 +198,7 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 
 `review` 默认打开已验收的 `/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked`，由关卡或 UI 调用 `StartGameMode` 开始正式波次。原 `/Game/FactoryDistrict/Maps/Demonstration` 保留，不覆盖旧地图。
 
-默认参数为查询 Buffer2、Lumen 反射下采样 2、TSR History 150。`Tools/ExperimentProfiles/baseline160.json` 指向同一烘焙地图；运行测试时使用该配置。脚本不带配置时仍保留历史地图默认值，不能与当前方案混用。
+默认参数为查询 Buffer2、Lumen 反射下采样 2、TSR History 150。`Tools/Performance/ExperimentProfiles/baseline160.json` 指向同一烘焙地图；运行测试时使用该配置。脚本不带配置时仍保留历史地图默认值，不能与当前方案混用。
 
 UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation 中运行，或使用：
 
@@ -213,14 +214,14 @@ UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation �
 
 另用 32 敌人检查预算边界：Full 名额为 0 时，Full 与骨骼光追参与数均为 0；关闭渲染分档后，同一配置得到 32 个 Full，独立阴影/光追预算仍为 5/12。日志分别为 `Saved/Logs/EquivalentCleanupZeroFull.log` 与 `Saved/Logs/EquivalentCleanupTieringOff.log`。
 
-性能测试统一入口为 `Tools/RunRenderCostMatrix.ps1`。采集条件放在 `Tools/ExperimentProfiles/*.json`；实验开关与读回要求集中在同目录的 `RenderCostCases.psd1`。历史启动脚本已移入 `Tools/LegacyPerformance/`，业务埋点不动。`scene-acceptance.json` 是 0/160 敌人的单轮收尾验收预设，不代表已经运行验收。
+性能测试统一入口为 `Tools/Performance/RunRenderCostMatrix.ps1`。采集条件放在 `Tools/Performance/ExperimentProfiles/*.json`；实验开关与读回要求集中在同目录的 `RenderCostCases.psd1`。历史启动脚本已移入 `Tools/LegacyPerformance/`，业务埋点不动。`scene-acceptance.json` 是 0/160 敌人的单轮收尾验收预设，不代表已经运行验收。
 
 配置脚本另有 56 项检查，无须启动 UE：
 
 ```powershell
-.\Tools\TestRenderCostConfig.ps1
-.\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\baseline160.json -ValidateOnly
-.\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\scene-acceptance.json -ValidateOnly
+.\Tools\Performance\TestRenderCostConfig.ps1
+.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\baseline160.json -ValidateOnly
+.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\scene-acceptance.json -ValidateOnly
 ```
 
 正式采集前按[配置说明](Docs/CONFIGURATION.md)检查引擎路径、地图和生效参数。固定场景成本采集与正常生命条件下的玩法基线分别记录；Top-K 的算法验证不代替实景性能 A/B。
@@ -237,14 +238,18 @@ Source/fpstrue/
       AI/                   Controller、行为树、导航与群体战术资源
       Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
     Shared/                 生命组件与碰撞通道
-  Weapons/                  射击、换弹、拾取与动画通知
+  Weapons/                  武器配置、射击、换弹、拾取与动画通知
   Runtime/                  运行时诊断参数快照与业务埋点声明
   Testing/
     Automation/             玩法、算法与生命周期回归
     Benchmarks/             采集条件、实验阶段、资源恢复与产物校验
-Tools/                      实验采集、分析与配置校验
-  ExperimentProfiles/       集中的实验定义与采集预设
-  LegacyPerformance/        历史实验启动脚本（冻结）
+Tools/                      开发与测试工具（见 Tools/README.md）
+  Gameplay/                 行为树资产生成/校验、玩法配置迁移
+  Assets/                   网格、LOD、Nanite、纹理与样条资产处理
+  Performance/              当前性能采集、Trace 导出、分析与配置校验
+    ExperimentProfiles/     集中的实验定义与采集预设
+    Charts/                 实验图表生成脚本
+  LegacyPerformance/        历史启动、汇总与固定数据分析（冻结）
 Docs/Performance/           分阶段实验记录
 PerformanceEvidence/        可公开的性能截图
 ```

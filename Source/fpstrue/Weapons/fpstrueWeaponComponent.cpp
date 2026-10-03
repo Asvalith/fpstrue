@@ -13,17 +13,6 @@
 #include "Engine/World.h"
 #include "TimerManager.h"
 
-namespace
-{
-constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
-constexpr float GaussianSpreadSigmaCount = 3.0f;
-constexpr float MaxTotalSpreadAngle = 45.0f;
-
-float SanitizeSpreadAngle(float Degrees)
-{
-	return FMath::IsFinite(Degrees) ? FMath::Clamp(Degrees, 0.0f, MaxTotalSpreadAngle) : 0.0f;
-}
-
 /*
  * 玩家武器的核心状态与射击实现。
  * 组件拥有弹药、开火/换弹互斥状态和后坐力恢复；角色只转发输入，动画通过 Notify 提交换弹，
@@ -38,6 +27,17 @@ float SanitizeSpreadAngle(float Degrees)
  * ActionState、CurrentAmmo、ReserveAmmo 和后坐力累计量都只由本组件写入；Character/HUD 通过只读接口和
  * Delegate 观察结果，从结构上避免蓝图、角色和武器各保存一份可变状态。
  */
+
+namespace
+{
+constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
+constexpr float GaussianSpreadSigmaCount = 3.0f;
+constexpr float MaxTotalSpreadAngle = 45.0f;
+
+float SanitizeSpreadAngle(float Degrees)
+{
+	return FMath::IsFinite(Degrees) ? FMath::Clamp(Degrees, 0.0f, MaxTotalSpreadAngle) : 0.0f;
+}
 
 // 根据高斯分布生成散布方向，供每发 Hitscan 共用。
 FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
@@ -64,15 +64,12 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 }
 } // namespace
 
-// 构造默认的关键骨骼集合；可随具体武器蓝图和目标骨架覆盖，不把素材名称写死在射击流程中。
-UfpstrueWeaponComponent::UfpstrueWeaponComponent()
-{
-	// 这里只提供当前 Mannequin 的默认骨骼约定；武器蓝图可针对其他目标骨架覆盖名单。
-	// 语法复习：FName 适合反复比较的标识符；初始化时构造，避免每次命中再创建 FString 并执行 ToLower。
-	CriticalHitBones = {FName(TEXT("neck_01")), FName(TEXT("head"))};
-}
-
 // ==================== Equipment ====================
+
+const FFPWeaponSettings& UfpstrueWeaponComponent::GetWeaponSettings() const
+{
+	return !bAmmoInitialized && WeaponConfiguration != nullptr ? WeaponConfiguration->Settings : Settings;
+}
 
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 {
@@ -92,27 +89,40 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		return false;
 	}
 
+	// 在挂接或发布装备事件之前整组校验，配置失败不会留下半装备或半初始化的弹药。
+	const FFPWeaponSettings& RequestedSettings = GetWeaponSettings();
+	if (!bAmmoInitialized)
+	{
+		FString Error;
+		if (!RequestedSettings.Validate(Error))
+		{
+			UE_LOG(LogTemp, Error, TEXT("Weapon configuration rejected on %s (%s): %s"),
+				*GetPathName(), *GetPathNameSafe(WeaponConfiguration), *Error);
+			return false;
+		}
+	}
+
 	USkeletalMeshComponent* TargetMesh = TargetCharacter->GetMesh1P();
-	if (TargetMesh == nullptr || GripSocketName.IsNone() || !TargetMesh->DoesSocketExist(GripSocketName))
+	if (TargetMesh == nullptr || !TargetMesh->DoesSocketExist(RequestedSettings.GripSocketName))
 	{
 		UE_LOG(LogTemp, Error, TEXT("AttachWeapon failed: character %s does not provide socket/bone %s."), *GetNameSafe(TargetCharacter),
-			   *GripSocketName.ToString());
+			   *RequestedSettings.GripSocketName.ToString());
 		return false;
 	}
 
 	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
-	if (!AttachToComponent(TargetMesh, AttachmentRules, GripSocketName))
+	if (!AttachToComponent(TargetMesh, AttachmentRules, RequestedSettings.GripSocketName))
 	{
 		return false;
 	}
 
 	// 所有外部操作成功后才提交角色引用和运行时状态，失败路径不会留下半装备状态。
 	Character = TargetCharacter;
-	MagazineSize = FMath::Max(1, MagazineSize);
 	if (!bAmmoInitialized)
 	{
-		CurrentAmmo = MagazineSize;
-		ReserveAmmo = FMath::Max(0, StartingReserveAmmo);
+		Settings = RequestedSettings;
+		CurrentAmmo = Settings.MagazineSize;
+		ReserveAmmo = Settings.StartingReserveAmmo;
 		bAmmoInitialized = true;
 	}
 	SetActionState(EFPWeaponActionState::Ready);
@@ -211,7 +221,7 @@ void UfpstrueWeaponComponent::ScheduleNextShot()
 {
 	if (UWorld* World = GetWorld(); World != nullptr && IsOperational() && IsFiring() && HasAmmo())
 	{
-		const double Interval = 60.0 / FMath::Max(static_cast<double>(RoundsPerMinute), 1.0);
+		const double Interval = 60.0 / static_cast<double>(Settings.RoundsPerMinute);
 		const float Remaining = static_cast<float>(FMath::Max(LastShotTimeSeconds + Interval - World->GetTimeSeconds(), 0.001));
 		const uint32 ScheduledRevision = ActionRevision;
 		World->GetTimerManager().SetTimer(AutomaticFireTimerHandle,
@@ -264,14 +274,14 @@ void UfpstrueWeaponComponent::Fire()
 	}
 
 	const double CurrentTimeSeconds = World->GetTimeSeconds();
-	const double FireInterval = 60.0 / FMath::Max(static_cast<double>(RoundsPerMinute), 1.0);
+	const double FireInterval = 60.0 / static_cast<double>(Settings.RoundsPerMinute);
 	if (LastShotTimeSeconds >= 0.0 && CurrentTimeSeconds - LastShotTimeSeconds + KINDA_SMALL_NUMBER < FireInterval)
 	{
 		ScheduleNextShot();
 		return;
 	}
 	// 同一个“已接受射击时间”服务射速和散布；先读取上次时间，再写入这次提交。
-	if (LastShotTimeSeconds < 0.0 || CurrentTimeSeconds - LastShotTimeSeconds > SpreadResetDelay)
+	if (LastShotTimeSeconds < 0.0 || CurrentTimeSeconds - LastShotTimeSeconds > Settings.SpreadResetDelay)
 	{
 		ConsecutiveShotCount = 0;
 	}
@@ -290,12 +300,14 @@ void UfpstrueWeaponComponent::Fire()
 	// 这是已发生的一发，而不是继续开火的许可；命中/弹药回调中断动作也不能吞掉事实事件。
 	OnWeaponFirePerformed.Broadcast();
 
-	//最后一发完成命中和表现后再退出射击状态，避免Firing残留
-	if (IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision) && !HasAmmo())
+	// 回调之后只校验一次动作归属；旧射击不能为新动作换弹或重设连射 Timer。
+	if (!IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision)) return;
+	// 最后一发完成命中和表现后再退出射击状态，避免 Firing 残留。
+	if (!HasAmmo())
 	{
 		HandleEmptyMagazine();
 	}
-	else if (IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision))
+	else
 	{
 		ScheduleNextShot();
 	}
@@ -313,10 +325,10 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 {
 	// 根据瞄准状态和连续射击次数计算散布，并在同一入口完成单射线查询。
 	// Fire 已校验本发的角色/相机；在外部伤害或表现回调之前直接使用这些依赖，不重复解析装备关系。
-	const float ContinuousSpreadAngle = FMath::Min(ConsecutiveShotCount * SanitizeSpreadAngle(ContinuousFireSpreadStep),
-		SanitizeSpreadAngle(MaxContinuousFireSpreadAngle));
+	// 配置在首次装备时已校验并冻结，不逐发修正同一字段；运行时累计值仍需限制。
+	const float ContinuousSpreadAngle = FMath::Min(ConsecutiveShotCount * Settings.ContinuousFireSpreadStep, Settings.MaxContinuousFireSpreadAngle);
 	// 基础与连射配置各自合法不代表总和合法；总角度统一有限且不超过 45 度，避免 tan 接近 90 度。
-	const float SpreadAngle = SanitizeSpreadAngle(SanitizeSpreadAngle(OwningCharacter.IsAiming() ? AimFireSpreadAngle : HipFireSpreadAngle)
+	const float SpreadAngle = SanitizeSpreadAngle((OwningCharacter.IsAiming() ? Settings.AimFireSpreadAngle : Settings.HipFireSpreadAngle)
 		+ ContinuousSpreadAngle);
 	++ConsecutiveShotCount;
 
@@ -324,7 +336,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	const FVector Start = Camera.GetComponentLocation();
 	const FVector Forward = Camera.GetForwardVector();
 	const FVector ShotDirection = SpreadAngle > 0.0f ? MakeGaussianSpreadDirection(Forward, SpreadAngle) : Forward;
-	const FVector End = Start + ShotDirection * LineTraceRange;
+	const FVector End = Start + ShotDirection * Settings.LineTraceRange;
 
 	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
@@ -339,8 +351,8 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	AActor* HitActor = HitResult.GetActor();
 	if (bHit && IsValid(HitActor))
 	{
-		const bool bCriticalHit = CriticalHitBones.Contains(HitResult.BoneName);
-		const float DamageToApply = bCriticalHit ? LineTraceHeadDamage : LineTraceDamage;
+		const bool bCriticalHit = Settings.CriticalHitBones.Contains(HitResult.BoneName);
+		const float DamageToApply = bCriticalHit ? Settings.LineTraceHeadDamage : Settings.LineTraceDamage;
 
 		UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, OwningCharacter.GetController(), GetOwner(),
 									   nullptr);
@@ -349,7 +361,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 		UPrimitiveComponent* HitComponent = HitResult.GetComponent();
 		if (IsValid(HitActor) && !HitActor->IsA<ACharacter>() && IsValid(HitComponent) && HitComponent->IsSimulatingPhysics())
 		{
-			HitComponent->AddImpulseAtLocation(ShotDirection * LineTraceImpulse, HitResult.ImpactPoint);
+			HitComponent->AddImpulseAtLocation(ShotDirection * Settings.LineTraceImpulse, HitResult.ImpactPoint);
 		}
 	}
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
@@ -372,7 +384,7 @@ bool UfpstrueWeaponComponent::CanReload() const
 {
 	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
 	return CanAcceptOwnerInput() && (ActionState == EFPWeaponActionState::Ready || ActionState == EFPWeaponActionState::Firing)
-		&& GetWorld() != nullptr && CurrentAmmo < MagazineSize && ReserveAmmo > 0;
+		&& GetWorld() != nullptr && CurrentAmmo < Settings.MagazineSize && ReserveAmmo > 0;
 }
 
 bool UfpstrueWeaponComponent::RequestReload()
@@ -388,10 +400,10 @@ bool UfpstrueWeaponComponent::RequestReload()
 	ActiveReloadId = ActiveReloadId == MAX_int32 ? 1 : ActiveReloadId + 1;
 	const int32 RequestedReloadId = ActiveReloadId;
 	// 先建立本次兜底，再广播；监听者同步 Finish/Cancel 时才能一并清除正确的 Timer。
-	const float SelectedReloadDuration = bWasEmptyReload ? EmptyReloadDuration : ReloadDuration;
+	const float SelectedReloadDuration = bWasEmptyReload ? Settings.EmptyReloadDuration : Settings.ReloadDuration;
 	// 超时 Timer 是动作锁的容错，不替代装填 Notify；动画链断开时不把失败当成补弹成功。
 	// 使用唯一超时句柄，显式播放可按真实长度延长截止点；排队的旧回调只能结束它保存的那次换弹。
-	const float Timeout = FMath::Max(0.01f, FMath::Max(SelectedReloadDuration, ReloadFailSafeDuration) + ReloadCompletionGracePeriod);
+	const float Timeout = FMath::Max(0.01f, FMath::Max(SelectedReloadDuration, Settings.ReloadFailSafeDuration) + Settings.ReloadCompletionGracePeriod);
 	GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
 		FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::EndReload, RequestedReloadId, EFPReloadEndReason::TimedOut), Timeout, false);
 	// 手动请求和空仓自动换弹共用角色互斥处理；先上 Reloading 锁，再退出瞄准，防止蓝图回调重新开火。
@@ -443,7 +455,7 @@ bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshCom
 	}
 	// 延迟开始/较长素材也有真实播放时间；兜底不能在已接纳播放正常结束前抢先超时。
 	const float Remaining = GetWorld()->GetTimerManager().GetTimerRemaining(ReloadTimerHandle);
-	const float Timeout = FMath::Max(Remaining, Duration + FMath::Max(0.0f, ReloadCompletionGracePeriod));
+	const float Timeout = FMath::Max(Remaining, Duration + Settings.ReloadCompletionGracePeriod);
 	GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
 		FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::EndReload, ReloadId, EFPReloadEndReason::TimedOut), FMath::Max(0.01f, Timeout), false);
 	return true;
@@ -458,7 +470,7 @@ bool UfpstrueWeaponComponent::BindReloadMontage(int32 ReloadId, USkeletalMeshCom
 	FFPActionPlayback Playback;
 	if (!Playback.TryBind(ReloadId, PlaybackMesh, Montage)) return false;
 	ReloadPlaybacks.Add(Playback);
-	FAnimMontageInstance* Instance = Playback.AnimInstance->GetMontageInstanceForID(Playback.MontageInstanceId);
+	FAnimMontageInstance* Instance = Playback.GetBoundInstance(); // TryBind 后没有外部回调，实例仍有效。
 	// UObject 委托弱引用组件，并把本次身份作为固定 payload 保存；回调不查询“当前动画”。
 	Instance->OnMontageEnded.BindUObject(this, &UfpstrueWeaponComponent::HandleReloadPlaybackEnded,
 		ReloadId, Playback.Mesh, Playback.MontageInstanceId);
@@ -495,7 +507,7 @@ bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 		return false;
 	}
 
-	const int32 AmmoNeeded = MagazineSize - CurrentAmmo;
+	const int32 AmmoNeeded = Settings.MagazineSize - CurrentAmmo;
 	const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
 	CurrentAmmo += AmmoToLoad;
 	ReserveAmmo -= AmmoToLoad;
@@ -559,11 +571,11 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 	}
 
 	const AfpstrueCharacter* OwningCharacter = Character.Get();
-	const float RecoilMultiplier = OwningCharacter != nullptr && OwningCharacter->IsAiming() ? AimRecoilMultiplier : 1.0f;
-	const float PitchKick = -RecoilPitch * RecoilMultiplier;
-	const float YawKick = FMath::FRandRange(-RecoilYaw, RecoilYaw) * RecoilMultiplier;
-	const float NewPitch = FMath::Clamp(AccumulatedRecoilPitch + PitchKick, -MaxAccumulatedRecoilPitch, 0.0f);
-	const float NewYaw = FMath::Clamp(AccumulatedRecoilYaw + YawKick, -MaxAccumulatedRecoilYaw, MaxAccumulatedRecoilYaw);
+	const float RecoilMultiplier = OwningCharacter != nullptr && OwningCharacter->IsAiming() ? Settings.AimRecoilMultiplier : 1.0f;
+	const float PitchKick = -Settings.RecoilPitch * RecoilMultiplier;
+	const float YawKick = FMath::FRandRange(-Settings.RecoilYaw, Settings.RecoilYaw) * RecoilMultiplier;
+	const float NewPitch = FMath::Clamp(AccumulatedRecoilPitch + PitchKick, -Settings.MaxAccumulatedRecoilPitch, 0.0f);
+	const float NewYaw = FMath::Clamp(AccumulatedRecoilYaw + YawKick, -Settings.MaxAccumulatedRecoilYaw, Settings.MaxAccumulatedRecoilYaw);
 
 	PlayerController->AddPitchInput(NewPitch - AccumulatedRecoilPitch);
 	PlayerController->AddYawInput(NewYaw - AccumulatedRecoilYaw);
@@ -573,9 +585,9 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 	if (UWorld* World = GetWorld())
 	{
 		// 延迟是“不恢复”的时间，不计入恢复步长；卡顿后的步长使用真实经过的游戏时间。
-		LastRecoilRecoveryTimeSeconds = World->GetTimeSeconds() + RecoilRecoveryDelay;
+		LastRecoilRecoveryTimeSeconds = World->GetTimeSeconds() + Settings.RecoilRecoveryDelay;
 		World->GetTimerManager().SetTimer(RecoilRecoveryTimerHandle, this, &UfpstrueWeaponComponent::UpdateRecoilRecovery,
-										  RecoilRecoveryTickInterval, true, RecoilRecoveryDelay);
+										  RecoilRecoveryTickInterval, true, Settings.RecoilRecoveryDelay);
 	}
 }
 
@@ -595,8 +607,8 @@ void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 	const double Now = World->GetTimeSeconds();
 	const float DeltaSeconds = static_cast<float>(FMath::Max(0.0, Now - LastRecoilRecoveryTimeSeconds));
 	LastRecoilRecoveryTimeSeconds = Now;
-	const float NewPitch = FMath::FInterpConstantTo(AccumulatedRecoilPitch, 0.0f, DeltaSeconds, RecoilRecoverySpeed);
-	const float NewYaw = FMath::FInterpConstantTo(AccumulatedRecoilYaw, 0.0f, DeltaSeconds, RecoilRecoverySpeed);
+	const float NewPitch = FMath::FInterpConstantTo(AccumulatedRecoilPitch, 0.0f, DeltaSeconds, Settings.RecoilRecoverySpeed);
+	const float NewYaw = FMath::FInterpConstantTo(AccumulatedRecoilYaw, 0.0f, DeltaSeconds, Settings.RecoilRecoverySpeed);
 
 	PlayerController->AddPitchInput(NewPitch - AccumulatedRecoilPitch);
 	PlayerController->AddYawInput(NewYaw - AccumulatedRecoilYaw);
@@ -662,5 +674,5 @@ void UfpstrueWeaponComponent::InterruptOwnerInput()
 void UfpstrueWeaponComponent::BroadcastAmmoChanged()
 {
 	// 弹药状态只由 WeaponComponent 写入；角色、HUD 和蓝图通过该委托读取同一份结果。
-	OnAmmoChanged.Broadcast(CurrentAmmo, MagazineSize, ReserveAmmo);
+	OnAmmoChanged.Broadcast(CurrentAmmo, Settings.MagazineSize, ReserveAmmo);
 }

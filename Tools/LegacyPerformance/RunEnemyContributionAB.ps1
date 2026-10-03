@@ -1,5 +1,5 @@
 # Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
-# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
+# New captures use ../Performance/RunRenderCostMatrix.ps1 and ../Performance/ExperimentProfiles/.
 param(
     [int]$RunsPerGroup = 3,
     [double]$WarmupSeconds = 10,

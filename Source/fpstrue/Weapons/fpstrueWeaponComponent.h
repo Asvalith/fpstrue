@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/HitResult.h"
+#include "Weapons/fpstrueWeaponConfig.h"
 #include "Characters/Shared/fpstrueActionPlayback.h"
 #include "fpstrueWeaponComponent.generated.h"
 
@@ -65,9 +66,6 @@ class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 	GENERATED_BODY()
 
 public:
-	// 设置默认关键骨骼名单；其余素材相关参数使用 UPROPERTY 默认值，可由武器蓝图覆盖。
-	UfpstrueWeaponComponent();
-
 	// ==================== Equipment ====================
 	//装备是否成功
 	bool AttachWeapon(AfpstrueCharacter* TargetCharacter);
@@ -149,7 +147,10 @@ public:
 
 	// HUD 初始化时读取弹匣容量。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
-	int32 GetMagazineSize() const { return MagazineSize; }
+	int32 GetMagazineSize() const { return GetWeaponSettings().MagazineSize; }
+
+	// 装备前读取所选配置供预览；装备后始终返回本实例快照，不因共享资产变化而改动进行中的动作。
+	const FFPWeaponSettings& GetWeaponSettings() const;
 
 	// HUD 初始化时读取剩余备弹。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
@@ -226,102 +227,13 @@ private:
 	void BroadcastAmmoChanged();
 
 	// ==================== Configuration ====================
-	// Attachment
-	// 玩家手臂骨架上的武器挂点。更换骨架时可在武器蓝图中覆盖，并在装备时校验是否存在。
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Attachment")
-	FName GripSocketName = TEXT("GripPoint");
+	// 唯一可编辑的数值入口；换弹动画、音效等表现资源仍由 BP_Weapon 选择。
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Configuration")
+	TObjectPtr<UfpstrueWeaponConfig> WeaponConfiguration;
 
-	// Fire
-	// 每分钟射击数；用于自动射击 Timer 和单发提交节流，保证两条路径使用同一射速。
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Fire", meta = (ClampMin = "1.0"))
-	float RoundsPerMinute = 600.0f;
-
-	// Trace
-	// Hitscan 射击参数
-	// 最大射线距离
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Trace", meta = (ClampMin = "1.0"))
-	float LineTraceRange = 10000.0f;
-	//冲量
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Trace", meta = (ClampMin = "0.0"))
-	float LineTraceImpulse = 10000.0f;
-
-	// Damage
-	//设置不同伤害
-	//普通部位伤害
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Damage", meta = (ClampMin = "0.0"))
-	float LineTraceDamage = 40.0f;
-	//头部伤害
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Damage", meta = (ClampMin = "0.0"))
-	float LineTraceHeadDamage = 100.0f;
-	// 当前目标骨架中视为关键命中的骨骼。数组很小，线性查询便于在蓝图中直接配置。
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Damage")
-	TArray<FName> CriticalHitBones;
-
-	// Ammo
-	//弹药参数
-	//弹匣容量
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Ammo", meta = (ClampMin = "1"))
-	int32 MagazineSize = 30;
-	//初始备弹
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0"))
-	int32 StartingReserveAmmo = 90;
-
-	// Spread
-	//散布参数
-	//腰射基础散布角
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
-	float HipFireSpreadAngle = 1.5f;
-	//ADS瞄准时基础散布角
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
-	float AimFireSpreadAngle = 0.25f;
-	//连续每开一枪额外增加多少散布
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
-	float ContinuousFireSpreadStep = 0.2f;
-	//连续射击时允许达到的最大散布
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Spread", meta = (ClampMin = "0.0", ClampMax = "45.0"))
-	float MaxContinuousFireSpreadAngle = 3.0f;
-	//停止射击多久后重置连续射击散布
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Spread", meta = (ClampMin = "0.0"))
-	float SpreadResetDelay = 0.25f;
-
-	// Recoil
-	//后坐力参数
-	//Pitch视角向上抬
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
-	float RecoilPitch = 1.0f;
-	//Yaw后坐力范围
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
-	float RecoilYaw = 0.4f;
-	//ADS状态下后坐力缩放系数
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float AimRecoilMultiplier = 0.5f;
-	//停止射击后，延迟多久开始恢复后坐力
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
-	float RecoilRecoveryDelay = 0.12f;
-	//后坐力恢复速度
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.1"))
-	float RecoilRecoverySpeed = 10.0f;
-	//最大累计垂直后坐力
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
-	float MaxAccumulatedRecoilPitch = 6.0f;
-	//最大累计水平后坐力
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
-	float MaxAccumulatedRecoilYaw = 2.0f;
-
-	// Reload Recovery
-	// 预计动画时长只用于兜底截止点：max(普通/空仓时长, FailSafeDuration) + GracePeriod。
-	// 正常装填由有身份的 Notify 提交，播放结束解除锁；超时只失败收尾，不伪造动画成功。
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
-	float ReloadDuration = 0.8f;
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
-	float EmptyReloadDuration = 1.2f;
-
-	// 兜底等待时间的下限；比预计动画长时优先使用此值，避免提前结束正常动画。
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
-	float ReloadFailSafeDuration = 5.0f;
-	// 额外加在兜底截止点上的宽限时间；不是 CommitReload 后另起的倒计时。
-	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.0"))
-	float ReloadCompletionGracePeriod = 0.1f;
+	// 首次装备复制并校验配置；之后卸下/重装只保留快照与剩余弹药。
+	// 未指定资产的原生组件使用结构体默认值，组件不再保留第二组可编辑数值。
+	FFPWeaponSettings Settings;
 
 	// ==================== Runtime State ====================
 	// Owner

@@ -97,7 +97,7 @@ GameMode 仍负责创建和挂接 BenchmarkRunner，这是组合入口。正常�
 | Development Editor / Development Game 编译 | 均通过 | UnrealBuildTool 构建输出 |
 | `Automation RunTests fpstrue.` | 精简后重新运行：41 项全部通过，0 失败、0 未运行；25 项无警告、16 项带夹具或故障注入警告 | `Saved/Automation/CodeCleanup_20260929_Final/index.json` |
 | 两份实际蓝图迁移与新进程审计 | 编译、保存、重新加载通过；ID 接线正确，旧换弹完成/取消节点及受击误接攻击完成节点已移除 | `Saved/ActionPlaybackAudit_Before.txt`、`Saved/ActionPlaybackAudit_After.txt` |
-| `Tools/TestRenderCostConfig.ps1` | 56 项通过 | 脚本控制台输出，无 UE 性能压测 |
+| `Tools/Performance/TestRenderCostConfig.ps1` | 56 项通过 | 脚本控制台输出，无 UE 性能压测 |
 | 差异格式检查 | `git diff --check` 通过 | 保留现有行尾策略，未整仓格式化 |
 
 上一轮回归修复了 UnPossess 先于 EndPlay 导致换弹误报普通取消，以及后坐力测试的 Pending Timer 时序。本轮新增测试验证了真实蓝图播放链、无身份回调拒绝、停止回调重入、双策略退避、伤害队列终止与上下文、受击解除实际 Tick 冷却、迟到 CSV 启动及暂停 watchdog。最终结果来自修复后的完整重跑，不用进程退出码代替每项断言结果。
