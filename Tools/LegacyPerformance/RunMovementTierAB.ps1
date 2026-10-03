@@ -1,5 +1,5 @@
 # Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
-# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
+# New captures use ../Performance/RunRenderCostMatrix.ps1 and ../Performance/ExperimentProfiles/.
 param(
     [int]$EnemyCount = 160,
     [int]$RunsPerGroup = 3,
@@ -119,4 +119,4 @@ foreach ($Group in $Groups) {
 }
 
 $ManifestRows | Export-Csv -LiteralPath (Join-Path $EvidenceRoot "manifest.csv") -NoTypeInformation -Encoding UTF8
-& (Join-Path $ProjectRoot "Tools\SummarizeMovementTierAB.ps1") -EvidenceRoot $EvidenceRoot
+& (Join-Path $ProjectRoot "Tools\LegacyPerformance\SummarizeMovementTierAB.ps1") -EvidenceRoot $EvidenceRoot

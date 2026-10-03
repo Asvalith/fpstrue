@@ -258,9 +258,8 @@ bool UfpstrueEnemyCombatComponent::BindAttackMontageForAttack(int64 AttackId, US
 void UfpstrueEnemyCombatComponent::BindAttackPlaybackCompletion()
 {
 	const FFPActionPlayback ExpectedPlayback = AttackPlayback;
-	UAnimInstance* Anim = ExpectedPlayback.AnimInstance.Get();
-	FAnimMontageInstance* Instance = Anim != nullptr ? Anim->GetMontageInstanceForID(ExpectedPlayback.MontageInstanceId) : nullptr;
-	if (Instance == nullptr || Instance->Montage != ExpectedPlayback.Montage.Get()) return;
+	FAnimMontageInstance* Instance = ExpectedPlayback.GetBoundInstance();
+	if (Instance == nullptr) return;
 	ScheduleAttackFailSafe(Instance);
 	// 只订阅明确实例，不订阅只含 Montage 资产的全局事件；同资源旧播放结束不能结束新事务。
 	// 显式 Bind 路径已有的观察回调保留，但必须在本组件提交完成/中断后通知。

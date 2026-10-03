@@ -1,5 +1,5 @@
 # Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
-# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
+# New captures use ../Performance/RunRenderCostMatrix.ps1 and ../Performance/ExperimentProfiles/.
 param(
     [int]$EnemyCount = 160,
     [double]$WarmupSeconds = 10,
@@ -92,5 +92,5 @@ if ($Screenshot) {
 }
 Copy-Item -LiteralPath $LogFile -Destination (Join-Path $EvidenceRoot $LogName) -Force
 
-& (Join-Path $ProjectRoot "Tools\ExportInsightsTrace.ps1") -TraceFile $TraceFile -OutputDirectory $ExportDirectory
+& (Join-Path $ProjectRoot "Tools\Performance\ExportInsightsTrace.ps1") -TraceFile $TraceFile -OutputDirectory $ExportDirectory
 Write-Output "Baseline trace and exports are ready in $EvidenceRoot"

@@ -8,12 +8,13 @@
 
 ## 项目亮点
 
-- **组件化玩法**：角色负责输入与组件协调，武器维护射击和换弹事务，生命组件统一处理伤害与死亡，敌人 CombatComponent 维护动画攻击窗口和命中去重。
-- **动作身份与回调安全**：换弹和攻击绑定动作编号及 Montage 实例；统一处理完成、中断、超时和迟到通知，避免旧回调误结束新动作。生命组件按提交顺序派发伤害、血量与死亡事件。
-- **多敌人协作**：C++ 任务节点与可编辑行为树协作，自适应决策间隔、共享围攻槽位、并发攻击许可、MoveTo 去重、失败退避和帧级请求预算。
-- **分开调度玩法与渲染**：玩法按距离与攻击状态分级；渲染按相机信息选择 Full、阴影和骨骼光追参与者，普通敌人通过 Animation Sharing 复用姿态。
-- **C++ 算法与生命周期**：预计算优先级键、严格弱序比较、有界 Top-K；弱引用注册表、幂等注销、共享动画交换句柄回调与清理边界。
-- **可重复验证**：CSV Profiler、Unreal Insights 与任务依赖追踪结合；脚本记录参数与输入指纹，自动检查实验有效性，代码边界由 UE Automation 回归。
+- **射击与近战的动作一致性**：换弹和攻击用动作编号、Mesh、AnimInstance 与 Montage 实例共同识别一次播放，统一处理完成、中断和超时；伤害、弹药与动作结束各有明确提交入口。真实蓝图回归覆盖普通/空仓换弹、旧通知拒绝和委托重入，避免迟到回调覆盖新状态。
+- **武器配置与运行状态分离**：`WeaponConfig` 集中 25 项可调参数，首次成功装备时校验并保存完整快照，蓝图继续选择动画和音效。多件武器共享配置但不共享弹药、Timer 和动作身份，测试验证非法配置拒绝、实例快照及重新装备不补弹。
+- **行为树与群体战术协作**：C++ Task 与可编辑行为树完成目标采样、分支选择和自适应等待；围攻管理器分配站位与攻击许可。MoveTo 结合去重、失败退避、帧级预算和请求身份检查，区分预算延后与不可达，避免旧完成回调干扰新请求。
+- **战斗响应与表现成本分开管理**：Gameplay 按玩家距离与战斗状态调度 AI/Movement，Render 独立限制动画、LOD、阴影与光追参与；攻击、受击时恢复必要动画并退出共享。Animation Sharing 复用普通敌人的 Idle/Moving 姿态，历史重复消融分别验证移动、动画与渲染参与限制的收益。
+- **预算选择与生命周期边界**：紧凑候选预计算优先级键，以严格弱序和有界 Top-K 选择替代完整排序；弱引用注册表、幂等注销与共享动画交换句柄处理共同约束清理。自动化验证 Top-K 等价性、迟滞、注销重入及附件/尸体的实际渲染资格。
+- **从耗时位置追到线程依赖**：零敌人对照、Task Trace、引擎源码与查询开关干预，将一类 RT 长等待追到历史遮挡查询同步，避免把等待当成动态网格计算。查询缓冲与 GPU 画质候选按整帧、P95/P99 和成本转移取舍，保留有效组合及样条静态化方案，性能数据见下表。
+- **可重复的功能与性能验证**：43 项 UE Automation 功能测试及 56 项采集配置检查通过，覆盖动作、配置、AI、生命周期和采集资源释放。性能脚本统一入口、记录参数读回与输入指纹，并区分 NullRHI 功能回归、历史消融和实景性能采集。
 
 ## 已验证的性能结果
 
@@ -107,7 +108,7 @@ GameMode 使用 `Waiting → Starting → Playing → Finished` 表达对局阶�
 - 攻击阶段使用 `Idle / Windup / Active / Recovery`，只有 Active 执行伤害查询；重复打开窗口不重置刀刃历史采样，命中过的本次攻击不能重新开窗。
 - 正常结束、保护 Timer 和死亡中断共用事务清理，归还许可并清除定时任务；正常结束更新冷却，中断不伪造正常完成。
 
-默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
+默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/Gameplay/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
 
 上表的 AI Decision 消融对应历史 Timer 版本，用于验证决策降频策略；行为树负责当前行为编排，场景复测单独记录版本与配置。
 
@@ -161,7 +162,8 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 ### 4. 配置与实验控制
 
 - 波次配置由 `WaveConfiguration` 数据资产提供；近战配置由 `CombatConfiguration` 数据资产提供。选中资产后整组使用该来源，未配置资产的旧蓝图继续兼容，不逐字段混用。
-- `Tools/MigrateGameplayConfiguration.py` 将现有蓝图参数复制到两份资产并绑定，保留原数值；已有绑定不会被重复覆盖。本地关卡已完成迁移，二进制资产仍遵守仓库的 Content 不分发规则。
+- 武器的 `WeaponConfiguration` 集中管理射速、伤害、弹药、散布、后坐力及换弹兜底等 25 项参数。首次成功装备时校验并复制完整配置；同一武器卸下再装备保留快照与剩余弹药，不补满。表现资源仍由蓝图选择。
+- `Tools/Gameplay/MigrateGameplayConfiguration.py` 和 `MigrateWeaponConfiguration.py` 提供已有配置的迁移与校验。完整开发环境保留迁移后的绑定，二进制资产仍遵守仓库的 Content 不分发规则；新建配置及旧版本迁移步骤见配置说明。
 - AI 更新间隔、移动参数和渲染预算保留现有蓝图可编辑属性，不再复制进另一套 JSON。
 - 共享动画默认软引用放在项目 INI，组件蓝图可以覆盖。
 - JSON 只保存实验预设，优先级为显式命令行参数 > JSON > 脚本默认值。
@@ -213,7 +215,7 @@ UE 插件注销采用 `RemoveAtSwap`，会同步通知被交换角色的新句�
 | Top-K 与预算分配 | [SignificanceCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.cpp)、[优先级键与堆](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificance.h) |
 | 动画共享接入 | [AnimationSharingCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.cpp) |
 | 波次、注册表与胜负 | [GameMode](Source/fpstrue/Game/fpstrueGameMode.cpp) |
-| 玩法配置资产 | [WaveConfiguration](Source/fpstrue/Game/fpstrueWaveConfiguration.h)、[EnemyCombatConfig](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatConfig.h) |
+| 玩法配置资产 | [WaveConfiguration](Source/fpstrue/Game/fpstrueWaveConfiguration.h)、[EnemyCombatConfig](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatConfig.h)、[WeaponConfig](Source/fpstrue/Weapons/fpstrueWeaponConfig.h) |
 | 测试与性能采集 | [Automation](Source/fpstrue/Testing/Automation/)、[Benchmarks](Source/fpstrue/Testing/Benchmarks/)、[Tools](Tools/) |
 
 ## 构建与验证
@@ -230,18 +232,18 @@ UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation �
 
 自动化测试覆盖行为树与运行生命周期、开局回调重入、配置选源、攻击阶段与清理、射击换弹、严格弱序、Top-K 等价性、共享注销、档位迟滞，以及附件和尸体的渲染资格。全套测试包含真实蓝图播放链，运行时需准备对应 Content；NullRHI 用于功能与组件属性回归，性能数据来自独立实景采集。
 
-完整开发环境验证：Development Editor 与 Development Game 编译通过；**41 项 UE 自动化测试全部通过，0 失败、0 未运行**，其中 16 项包含测试夹具或故障注入警告。回归覆盖真实蓝图换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 请求归属、生命值通知队列、受击解除 Tick 冷却、CSV 迟到启动与暂停超时。测试摘要见[验证记录](Docs/Testing/VALIDATION.md)。
+完整开发环境验证：Development Editor 与 Development Game 编译通过；**43 项 UE 自动化测试全部通过，0 失败、0 未运行**，其中 17 项包含测试夹具或故障注入警告。回归覆盖武器配置合法性、独立快照与重新装备、真实蓝图换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 请求归属、生命值通知队列、受击解除 Tick 冷却、CSV 迟到启动与暂停超时。测试摘要见[验证记录](Docs/Testing/VALIDATION.md)。
 
 实际关卡的 160 敌人功能烟测通过，组件属性读回为 5 个投影 Mesh、12 个光追 Mesh，与当次预算一致。生成队列支持换点重试；NullRHI 烟测核对玩法流程与预算下发，实景采集记录 RT/RHI/GPU 与尾帧。
 
 另用 32 敌人检查预算边界：Full 名额为 0 时，Full 与骨骼光追参与数均为 0；关闭渲染分档后，同一配置得到 32 个 Full，独立阴影/光追预算仍为 5/12。日志分别为 `Saved/Logs/EquivalentCleanupZeroFull.log` 与 `Saved/Logs/EquivalentCleanupTieringOff.log`。
 
-性能测试统一使用 `Tools/RunRenderCostMatrix.ps1`：JSON 保存采集预设，`RenderCostCases.psd1` 集中定义默认值、实验 CVar 和读回校验。配置脚本 **56 项检查通过**，无须启动 UE：
+性能测试统一使用 `Tools/Performance/RunRenderCostMatrix.ps1`：JSON 保存采集预设，`RenderCostCases.psd1` 集中定义默认值、实验 CVar 和读回校验。配置脚本 **56 项检查通过**，无须启动 UE：
 
 ```powershell
-.\Tools\TestRenderCostConfig.ps1
-.\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\baseline160.json -ValidateOnly
-.\Tools\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\ExperimentProfiles\scene-acceptance.json -ValidateOnly
+.\Tools\Performance\TestRenderCostConfig.ps1
+.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\baseline160.json -ValidateOnly
+.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\scene-acceptance.json -ValidateOnly
 ```
 
 正式采集前按[配置说明](Docs/CONFIGURATION.md)检查引擎路径、地图和生效参数。固定场景成本采集与正常生命条件下的玩法基线分别记录；Top-K 的算法验证不代替实景性能 A/B。
@@ -258,13 +260,18 @@ Source/fpstrue/
       AI/                   Controller、行为树、导航与群体战术资源
       Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
     Shared/                 生命组件、播放身份与碰撞通道
-  Weapons/                  射击、换弹、拾取与动画通知
+  Weapons/                  武器配置、射击、换弹、拾取与动画通知
   Runtime/                  诊断参数快照与业务埋点声明
   Testing/
     Automation/             玩法、算法与生命周期回归
     Benchmarks/             采集阶段、资源管理与产物校验
-Tools/                      实验采集、分析与配置校验
-  ExperimentProfiles/       实验定义与采集预设
+Tools/                      开发与测试工具（见 Tools/README.md）
+  Gameplay/                 行为树生成/校验与玩法配置迁移
+  Assets/                   网格、LOD、Nanite、纹理与样条资产处理
+  Performance/              性能采集、Trace 导出、分析与配置校验
+    ExperimentProfiles/     实验定义与采集预设
+    Charts/                 实验图表生成
+  LegacyPerformance/        历史实验采集与汇总
 Docs/Performance/           分阶段实验记录
 PerformanceEvidence/        可公开的性能截图
 ```

@@ -1,5 +1,5 @@
 # Historical experiment: frozen parameters/output format; see LegacyPerformance/README.md.
-# New captures use ../RunRenderCostMatrix.ps1 and ../ExperimentProfiles/.
+# New captures use ../Performance/RunRenderCostMatrix.ps1 and ../Performance/ExperimentProfiles/.
 param(
     [int[]]$Counts = @(160),
     [double]$WarmupSeconds = 15,
@@ -112,4 +112,4 @@ foreach ($Count in $Counts) {
 $Manifest = Join-Path $EvidenceRoot "manifest.csv"
 $Results | Export-Csv -LiteralPath $Manifest -NoTypeInformation -Encoding UTF8
 $Results | Format-Table -AutoSize
-& (Join-Path $ProjectRoot "Tools\SummarizePerformanceMatrix.ps1") -EvidenceRoot $EvidenceRoot
+& (Join-Path $ProjectRoot "Tools\LegacyPerformance\SummarizePerformanceMatrix.ps1") -EvidenceRoot $EvidenceRoot

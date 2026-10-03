@@ -34,11 +34,16 @@ bool FFPActionPlayback::Matches(uint32 ExpectedActionId, USkeletalMeshComponent*
 		&& Context != nullptr && MontageInstanceId == Context->MontageInstanceID;
 }
 
-void FFPActionPlayback::Stop(float BlendOutSeconds) const
+FAnimMontageInstance* FFPActionPlayback::GetBoundInstance() const
 {
 	UAnimInstance* Anim = AnimInstance.Get();
 	FAnimMontageInstance* Instance = Anim != nullptr ? Anim->GetMontageInstanceForID(MontageInstanceId) : nullptr;
-	if (Instance != nullptr && Instance->Montage == Montage.Get() && Instance->IsActive())
+	return Instance != nullptr && Instance->Montage == Montage.Get() ? Instance : nullptr;
+}
+
+void FFPActionPlayback::Stop(float BlendOutSeconds) const
+{
+	if (FAnimMontageInstance* Instance = GetBoundInstance(); Instance != nullptr && Instance->IsActive())
 	{
 		Instance->Stop(FAlphaBlend(FMath::IsFinite(BlendOutSeconds) ? FMath::Max(0.0f, BlendOutSeconds) : 0.1f), true);
 	}

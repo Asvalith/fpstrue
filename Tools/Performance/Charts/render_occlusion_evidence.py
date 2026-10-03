@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw
 from render_closeout_charts import font, NAVY, MUTED, GRID, GRAY, TEAL, ORANGE
 
 ROOT = Path(__file__).resolve().parents[3]
-OUT = Path(__file__).resolve().parent
+OUT = ROOT / "Docs/Performance/figures"
 TRACE = ROOT / "Saved/Profiling/RenderWaitTaskTrace_20260909"
 TOGGLE = ROOT / "Saved/Profiling/OcclusionQueryDiagnosis_Checked_20260909"
 ENGINE = Path("E:/program/ue554/UE_5.5/Engine/Source/Runtime")

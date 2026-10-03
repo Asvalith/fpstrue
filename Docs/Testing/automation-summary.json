@@ -1,6 +1,6 @@
 {
-  "succeeded": 25,
-  "succeededWithWarnings": 16,
+  "succeeded": 26,
+  "succeededWithWarnings": 17,
   "failed": 0,
   "notRun": 0,
   "tests": [
@@ -46,6 +46,14 @@
     },
     {
       "name": "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
+      "state": "Success"
+    },
+    {
+      "name": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
       "state": "Success"
     },
     {

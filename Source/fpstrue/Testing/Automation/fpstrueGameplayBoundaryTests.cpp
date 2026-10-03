@@ -58,7 +58,6 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -86,6 +85,7 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "Tests/AutomationCommon.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UnrealType.h"
+#include <limits>
 
 namespace FpstrueGameplayBoundaryTests
 {
@@ -209,7 +209,8 @@ struct FEnemyFacingFixture
 	}
 };
 
-UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, FAutomationTestBase& Test)
+UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, FAutomationTestBase& Test,
+	UfpstrueWeaponConfig* Configuration = nullptr)
 {
 	AfpstrueCharacter* Player = Fixture.SpawnPlayer();
 	AAIController* Controller = Fixture.Spawn<AAIController>();
@@ -243,6 +244,12 @@ UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, F
 	AActor* PickupActor = Fixture.Spawn<AActor>();
 	if (PickupActor == nullptr) return nullptr;
 	UfpstrueWeaponComponent* Weapon = NewObject<UfpstrueWeaponComponent>(PickupActor, NAME_None, RF_Transient);
+	if (Configuration != nullptr)
+	{
+		const FObjectProperty* Property = FindFProperty<FObjectProperty>(Weapon->GetClass(), TEXT("WeaponConfiguration"));
+		if (!Test.TestNotNull(TEXT("The weapon has one reflected configuration binding"), Property)) return nullptr;
+		Property->SetObjectPropertyValue_InContainer(Weapon, Configuration);
+	}
 	PickupActor->AddInstanceComponent(Weapon);
 	PickupActor->SetRootComponent(Weapon);
 	Weapon->RegisterComponent();
@@ -261,6 +268,97 @@ UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, F
 	return Fixture.Advance(0.2f) ? Weapon : nullptr;
 }
 } // namespace FpstrueGameplayBoundaryTests
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponConfigValidationTest, "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueWeaponConfigValidationTest::RunTest(const FString& Parameters)
+{
+	FString Error;
+	FFPWeaponSettings Settings;
+	TestTrue(TEXT("Native defaults are a complete valid configuration"), Settings.Validate(Error));
+	const auto Reject = [this, &Error](FFPWeaponSettings Invalid)
+	{
+		TestFalse(TEXT("Invalid tuning is rejected without clamping or mixed fallback"), Invalid.Validate(Error));
+		TestFalse(TEXT("Invalid tuning explains why"), Error.IsEmpty());
+	};
+	Settings.MagazineSize = 0; Reject(Settings);
+	Settings = {}; Settings.StartingReserveAmmo = -1; Reject(Settings);
+	Settings = {}; Settings.GripSocketName = NAME_None; Reject(Settings);
+	Settings = {}; Settings.RoundsPerMinute = 0.0f; Reject(Settings);
+	Settings = {}; Settings.LineTraceDamage = std::numeric_limits<float>::quiet_NaN(); Reject(Settings);
+	Settings = {}; Settings.RecoilRecoverySpeed = std::numeric_limits<float>::infinity(); Reject(Settings);
+	Settings = {}; Settings.HipFireSpreadAngle = 46.0f; Reject(Settings);
+	Settings = {}; Settings.AimRecoilMultiplier = 1.1f; Reject(Settings);
+	Settings = {}; Settings.ReloadFailSafeDuration = -1.0f; Reject(Settings);
+	Settings = {}; Settings.CriticalHitBones.Add(NAME_None); Reject(Settings);
+	Settings = {}; Settings.ReloadDuration = MAX_flt; Settings.ReloadCompletionGracePeriod = MAX_flt; Reject(Settings);
+	Settings = {}; Settings.CriticalHitBones.Reset();
+	TestTrue(TEXT("Weapons without critical-hit bones are allowed"), Settings.Validate(Error));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponConfigSnapshotTest, "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
+{
+	using namespace FpstrueGameplayBoundaryTests;
+	FGameplayWorld World(*this);
+	if (!World.Initialize()) return false;
+	TStrongObjectPtr<UfpstrueWeaponConfig> Config(NewObject<UfpstrueWeaponConfig>());
+	Config->Settings.MagazineSize = 5;
+	Config->Settings.StartingReserveAmmo = 10;
+	Config->Settings.LineTraceDamage = 17.0f;
+	Config->Settings.ReloadDuration = 0.2f;
+	Config->Settings.EmptyReloadDuration = 0.3f;
+	Config->Settings.ReloadFailSafeDuration = 0.4f;
+	Config->Settings.ReloadCompletionGracePeriod = 0.0f;
+	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this, Config.Get());
+	if (Weapon == nullptr) return false;
+	TestEqual(TEXT("Asset controls initial magazine"), Weapon->GetCurrentAmmo(), 4);
+	TestEqual(TEXT("Asset controls initial reserve"), Weapon->GetReserveAmmo(), 10);
+	Config->Settings.MagazineSize = 12;
+	Config->Settings.LineTraceDamage = 77.0f;
+	Config->Settings.CriticalHitBones.Add(TEXT("custom_bone"));
+	TestEqual(TEXT("Running weapon holds its original capacity"), Weapon->GetMagazineSize(), 5);
+	TestEqual(TEXT("Running weapon holds its original damage"), Weapon->GetWeaponSettings().LineTraceDamage, 17.0f);
+	TestEqual(TEXT("Bone array is independently copied"), Weapon->GetWeaponSettings().CriticalHitBones.Num(), 2);
+	UfpstrueWeaponComponent* Other = EquipWeaponWithOneSpentRound(World, *this, Config.Get());
+	if (Other == nullptr) return false;
+	TestEqual(TEXT("A newly equipped weapon sees updated tuning"), Other->GetMagazineSize(), 12);
+	TestEqual(TEXT("A second instance does not consume first instance ammo"), Weapon->GetCurrentAmmo(), 4);
+	TestTrue(TEXT("Configured reload starts"), Weapon->RequestReload());
+	if (!World.Advance(0.2f)) return false;
+	TestTrue(TEXT("Configured timeout does not finish early"), Weapon->IsReloading());
+	if (!World.Advance(0.25f)) return false;
+	TestFalse(TEXT("Configured timeout releases the action"), Weapon->IsReloading());
+	TestEqual(TEXT("Timeout cannot invent the animation commit"), Weapon->GetCurrentAmmo(), 4);
+	AfpstrueCharacter* Player = Cast<AfpstrueCharacter>(Weapon->GetAttachParent()->GetOwner());
+	Weapon->DetachWeapon();
+	if (!TestTrue(TEXT("The same weapon re-equips"), Weapon->AttachWeapon(Player))) return false;
+	TestEqual(TEXT("Re-equipping does not refill the magazine"), Weapon->GetCurrentAmmo(), 4);
+	TestEqual(TEXT("Re-equipping does not replace its configuration snapshot"), Weapon->GetMagazineSize(), 5);
+	Weapon->DetachWeapon();
+	// A fresh instance must fail before changing the player/equipment relationship.
+	AActor* Pickup = World.Spawn<AActor>();
+	if (Pickup == nullptr) return false;
+	UfpstrueWeaponComponent* InvalidWeapon = NewObject<UfpstrueWeaponComponent>(Pickup);
+	Pickup->AddInstanceComponent(InvalidWeapon);
+	InvalidWeapon->RegisterComponent();
+	const FObjectProperty* Binding = FindFProperty<FObjectProperty>(InvalidWeapon->GetClass(), TEXT("WeaponConfiguration"));
+	if (!TestNotNull(TEXT("Configuration binding exists"), Binding)) return false;
+	Binding->SetObjectPropertyValue_InContainer(InvalidWeapon, Config.Get());
+	Config->Settings.MagazineSize = 0;
+	AddExpectedError(TEXT("Weapon configuration rejected"), EAutomationExpectedErrorFlags::Contains, 1);
+	TestFalse(TEXT("Invalid config refuses equip"), InvalidWeapon->AttachWeapon(Player));
+	TestFalse(TEXT("Failed config cannot leave a half-equipped player"), Player->HasEquippedWeapon());
+	TestEqual(TEXT("Failed config cannot initialize ammunition"), InvalidWeapon->GetCurrentAmmo(), 0);
+	Config->Settings.MagazineSize = 7;
+	TestTrue(TEXT("A corrected config can retry equip before initialization"), InvalidWeapon->AttachWeapon(Player));
+	TestEqual(TEXT("Retry uses the corrected config as a whole"), InvalidWeapon->GetCurrentAmmo(), 7);
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFacingToleranceTest, "fpstrue.Gameplay.Boundaries.AI.FacingTolerance",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -762,16 +860,28 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	FAnimMontageInstance* InstanceA = Anim->GetActiveInstanceForMontage(Montage);
 	if (!TestNotNull(TEXT("Engine allocated playback A"), InstanceA)) return false;
 	const int32 PlaybackA = InstanceA->GetInstanceID();
+	FFPActionPlayback SavedPlaybackA;
+	TestNull(TEXT("Unbound playback has no instance"), SavedPlaybackA.GetBoundInstance());
+	if (!TestTrue(TEXT("Capture the explicit playback A"), SavedPlaybackA.TryBind(Weapon->GetActiveReloadId(), Arms, Montage))) return false;
+	TestTrue(TEXT("Instance resolution uses the captured playback"), SavedPlaybackA.GetBoundInstance() == InstanceA);
 	Weapon->CancelReload();
 	TestTrue(TEXT("Reload B restarts the same Montage asset"), Weapon->RequestReload());
 	FAnimMontageInstance* InstanceB = Anim->GetActiveInstanceForMontage(Montage);
 	if (!TestNotNull(TEXT("Engine allocated playback B"), InstanceB)) return false;
 	const int32 PlaybackB = InstanceB->GetInstanceID();
 	TestNotEqual(TEXT("The same asset gets a new playback identity"), PlaybackA, PlaybackB);
+	TestTrue(TEXT("Old binding never resolves to the new playback of the same asset"), SavedPlaybackA.GetBoundInstance() != InstanceB);
 	// An unrelated Montage on the same mesh must not replace the explicit reload binding.
 	UAnimMontage* Unrelated = NewObject<UAnimMontage>(Anim);
 	Unrelated->SetSkeleton(Anim->CurrentSkeleton);
 	Unrelated->SetCompositeLength(1.0f);
+	FFPActionPlayback MismatchedPlayback;
+	if (!TestTrue(TEXT("Capture current playback before testing an asset mismatch"),
+		MismatchedPlayback.TryBind(Weapon->GetActiveReloadId(), Arms, Montage))) return false;
+	MismatchedPlayback.Montage = Unrelated;
+	TestNull(TEXT("An instance ID cannot resolve with the wrong Montage asset"), MismatchedPlayback.GetBoundInstance());
+	SavedPlaybackA.Reset();
+	TestNull(TEXT("Reset removes the saved playback identity"), SavedPlaybackA.GetBoundInstance());
 	Anim->Montage_Play(Unrelated, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, false);
 	FAnimMontageInstance* UnrelatedInstance = Anim->GetActiveInstanceForMontage(Unrelated);
 	if (!TestNotNull(TEXT("The unrelated same-mesh playback exists"), UnrelatedInstance)) return false;
@@ -907,6 +1017,13 @@ bool FFpstrueWeaponAssetReloadTest::RunTest(const FString& Parameters)
 	Pickup->SetActorEnableCollision(false);
 	UfpstrueWeaponComponent* Weapon = Pickup->FindComponentByClass<UfpstrueWeaponComponent>();
 	if (!TestNotNull(TEXT("Real Blueprint contains its weapon component"), Weapon)) return false;
+	UfpstrueWeaponConfig* Config = LoadObject<UfpstrueWeaponConfig>(nullptr, TEXT("/Game/Config/DA_FPWeapon_RU74.DA_FPWeapon_RU74"));
+	const FObjectProperty* ConfigProperty = FindFProperty<FObjectProperty>(Weapon->GetClass(), TEXT("WeaponConfiguration"));
+	if (!TestNotNull(TEXT("The migrated weapon configuration is shipped"), Config)
+		|| !TestNotNull(TEXT("The real component exposes its configuration binding"), ConfigProperty)) return false;
+	TestTrue(TEXT("The real Blueprint references the migrated asset, not native fallback"), ConfigProperty->GetObjectPropertyValue_InContainer(Weapon) == Config);
+	FString ConfigurationError;
+	TestTrue(TEXT("The shipped weapon tuning passes validation"), Config->Settings.Validate(ConfigurationError));
 	const FObjectProperty* OwnerProperty = FindFProperty<FObjectProperty>(WeaponClass, TEXT("owningactor"));
 	const FIntProperty* AmmoProperty = FindFProperty<FIntProperty>(Weapon->GetClass(), TEXT("CurrentAmmo"));
 	if (!TestNotNull(TEXT("Blueprint presentation owner field exists"), OwnerProperty)

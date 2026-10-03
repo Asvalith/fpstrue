@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OUT = Path(__file__).resolve().parent
+OUT = ROOT / "Docs/Performance/figures"
 PROFILING = ROOT / "Saved" / "Profiling"
 
 NAVY = "#183249"
