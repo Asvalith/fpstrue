@@ -173,6 +173,18 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 	NavigationCacheTime = GetWorld()->GetTimeSeconds();
 }
 
+bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
+{
+	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
+	if (!bHasSharedTargetSnapshot || !IsValid(TargetCharacter))
+	{
+		return false;
+	}
+
+	OutLocation = CachedTargetLocation;
+	return true;
+}
+
 // ==================== 稳定槽位的申请与释放 ====================
 
 // 槽位位置和攻击接近点都来自同一缓存，避免 AIController 在每次决策中重复导航投影。
@@ -220,6 +232,39 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 	return true;
 }
 
+int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
+{
+	// 先扫描内环再扫描外环，并选择与敌人二维距离最近的可导航空位；槽位数固定，线性扫描成本可控。
+	for (int32 RingIndex = 0; RingIndex <= 1; ++RingIndex)
+	{
+		int32 BestSlotIndex = INDEX_NONE;
+		float BestDistanceSquared = TNumericLimits<float>::Max();
+
+		for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
+		{
+			const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
+			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid() || !Slot.bHasProjectedApproachLocation)
+			{
+				continue;
+			}
+
+			const float DistanceSquared = FVector::DistSquared2D(EnemyLocation, Slot.ProjectedApproachLocation);
+			if (DistanceSquared < BestDistanceSquared)
+			{
+				BestDistanceSquared = DistanceSquared;
+				BestSlotIndex = SlotIndex;
+			}
+		}
+
+		if (BestSlotIndex != INDEX_NONE)
+		{
+			return BestSlotIndex;
+		}
+	}
+
+	return INDEX_NONE;
+}
+
 void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 {
 	// 释放槽位时同时归还攻击许可；若释放的是内环，再尝试从外环稳定补位。
@@ -246,6 +291,47 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	{
 		PromoteOuterOccupantToInnerSlot(ReleasedSlotIndex);
 	}
+}
+
+void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex)
+{
+	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
+	if (!SurroundSlots[InnerSlotIndex].bHasProjectedApproachLocation)
+	{
+		return;
+	}
+
+	const FfpstrueSurroundSlot& InnerSlot = SurroundSlots[InnerSlotIndex];
+	const FVector InnerLocation =
+		InnerSlot.bHasProjectedSlotLocation ? InnerSlot.ProjectedSlotLocation : CalculateRawSlotLocation(InnerSlot);
+	int32 BestOuterSlotIndex = INDEX_NONE;
+	float BestDistanceSquared = TNumericLimits<float>::Max();
+
+	for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
+	{
+		const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
+		if (Slot.RingIndex == 0 || !Slot.Occupant.IsValid())
+		{
+			continue;
+		}
+
+		const float DistanceSquared = FVector::DistSquared2D(Slot.Occupant->GetActorLocation(), InnerLocation);
+		if (DistanceSquared < BestDistanceSquared)
+		{
+			BestDistanceSquared = DistanceSquared;
+			BestOuterSlotIndex = SlotIndex;
+		}
+	}
+
+	if (!SurroundSlots.IsValidIndex(BestOuterSlotIndex))
+	{
+		return;
+	}
+
+	TWeakObjectPtr<AfpstrueEnemyCharacter> PromotedEnemy = SurroundSlots[BestOuterSlotIndex].Occupant;
+	SurroundSlots[BestOuterSlotIndex].Occupant.Reset();
+	SurroundSlots[InnerSlotIndex].Occupant = PromotedEnemy;
+	EnemyToSlot.FindOrAdd(PromotedEnemy) = InnerSlotIndex;
 }
 
 // ==================== 攻击与 MoveTo 全局预算 ====================
@@ -323,19 +409,8 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 	return true;
 }
 
-bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
-{
-	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
-	if (!bHasSharedTargetSnapshot || !IsValid(TargetCharacter))
-	{
-		return false;
-	}
-
-	OutLocation = CachedTargetLocation;
-	return true;
-}
-
 // ==================== 清理、槽位选择与调试 ====================
+// 槽位选择与补位算法紧邻申请/释放入口；此处集中清理与调试。
 
 void AfpstrueSurroundManager::ResetManager()
 {
@@ -385,80 +460,6 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 			Iterator.RemoveCurrent();
 		}
 	}
-}
-
-int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
-{
-	// 先扫描内环再扫描外环，并选择与敌人二维距离最近的可导航空位；槽位数固定，线性扫描成本可控。
-	for (int32 RingIndex = 0; RingIndex <= 1; ++RingIndex)
-	{
-		int32 BestSlotIndex = INDEX_NONE;
-		float BestDistanceSquared = TNumericLimits<float>::Max();
-
-		for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
-		{
-			const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid() || !Slot.bHasProjectedApproachLocation)
-			{
-				continue;
-			}
-
-			const float DistanceSquared = FVector::DistSquared2D(EnemyLocation, Slot.ProjectedApproachLocation);
-			if (DistanceSquared < BestDistanceSquared)
-			{
-				BestDistanceSquared = DistanceSquared;
-				BestSlotIndex = SlotIndex;
-			}
-		}
-
-		if (BestSlotIndex != INDEX_NONE)
-		{
-			return BestSlotIndex;
-		}
-	}
-
-	return INDEX_NONE;
-}
-
-void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex)
-{
-	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
-	if (!SurroundSlots[InnerSlotIndex].bHasProjectedApproachLocation)
-	{
-		return;
-	}
-
-	const FfpstrueSurroundSlot& InnerSlot = SurroundSlots[InnerSlotIndex];
-	const FVector InnerLocation =
-		InnerSlot.bHasProjectedSlotLocation ? InnerSlot.ProjectedSlotLocation : CalculateRawSlotLocation(InnerSlot);
-	int32 BestOuterSlotIndex = INDEX_NONE;
-	float BestDistanceSquared = TNumericLimits<float>::Max();
-
-	for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
-	{
-		const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-		if (Slot.RingIndex == 0 || !Slot.Occupant.IsValid())
-		{
-			continue;
-		}
-
-		const float DistanceSquared = FVector::DistSquared2D(Slot.Occupant->GetActorLocation(), InnerLocation);
-		if (DistanceSquared < BestDistanceSquared)
-		{
-			BestDistanceSquared = DistanceSquared;
-			BestOuterSlotIndex = SlotIndex;
-		}
-	}
-
-	if (!SurroundSlots.IsValidIndex(BestOuterSlotIndex))
-	{
-		return;
-	}
-
-	TWeakObjectPtr<AfpstrueEnemyCharacter> PromotedEnemy = SurroundSlots[BestOuterSlotIndex].Occupant;
-	SurroundSlots[BestOuterSlotIndex].Occupant.Reset();
-	SurroundSlots[InnerSlotIndex].Occupant = PromotedEnemy;
-	EnemyToSlot.FindOrAdd(PromotedEnemy) = InnerSlotIndex;
 }
 
 FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride) const

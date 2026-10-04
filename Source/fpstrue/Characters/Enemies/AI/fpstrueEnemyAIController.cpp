@@ -203,7 +203,40 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	INC_DWORD_STAT(STAT_fpstrueAIDecisionCount);
 
 	// 一次采样同时供 Blackboard 条件和下一轮间隔复用；Selector 只负责选择叶子。
-	const bool bHasTarget = BuildDecisionContext();
+	DecisionContext = FDecisionContext{};
+	// 统一修复或拒绝敌人、目标和 Manager 上下文，保证后续决策分支可以直接使用这些引用。
+	// 不在采样任务的 ExecuteTask 内重入 StopTree；死亡入口会停止树，本轮走安全 Idle 叶子。
+	bool bHasTarget = AcceptsCombatCommands() && IsValid(ControlledEnemy) && !ControlledEnemy->IsDead();
+	if (bHasTarget)
+	{
+		if (!IsValid(SurroundManager))
+		{
+			SurroundManager = ResolveSurroundManager();
+		}
+		if (!IsTargetUsable(TargetCharacter))
+		{
+			// 平时使用 GameMode 注入的玩家；仅在缓存目标失效时安全解析，不在正常路径反复查询。
+			InitializeCombatContext(Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)), SurroundManager);
+			bHasTarget = IsTargetUsable(TargetCharacter);
+		}
+	}
+
+	// 一轮只计算一次二维距离平方，并派生攻击/追击两个布尔条件，避免各分支重复开方和取位置。
+	// 敌人和目标校验成功后才采样；叶子保留存活检查，但不重复计算距离与范围。
+	// 先用廉价距离筛选，再检查高度和环境；楼上/墙后目标应走导航分支而不是原地重复尝试攻击。
+	if (bHasTarget)
+	{
+		if (const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent())
+		{
+			DecisionContext.bInAttackRange = Combat->SampleAttackReach(DecisionContext.DistanceSquared, DecisionContext.EffectiveAttackRange);
+		}
+		else
+		{
+			DecisionContext.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), TargetCharacter->GetActorLocation());
+		}
+		DecisionContext.bInChaseRange = DecisionContext.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
+	}
+
 	NextBehaviorDecisionDelay =
 		FMath::Max(0.01f, bHasTarget ? GetNextDecisionInterval(DecisionContext) : IdleDecisionInterval * SignificanceDecisionMultiplier);
 	// 自定义树观察者也只能在完整的一轮快照发布后收到通知，避免读取半更新条件。
@@ -214,45 +247,6 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InAttackRange, DecisionContext.bInAttackRange);
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InChaseRange, DecisionContext.bInChaseRange);
 	DecisionBlackboard.ResumeObserverNotifications(true);
-}
-
-bool AfpstrueEnemyAIController::BuildDecisionContext()
-{
-	DecisionContext = FDecisionContext{};
-	// 统一修复或拒绝敌人、目标和 Manager 上下文，保证后续决策分支可以直接使用这些引用。
-	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead())
-	{
-		// 不在采样任务的 ExecuteTask 内重入 StopTree；死亡入口会停止树，本轮走安全 Idle 叶子。
-		return false;
-	}
-
-	if (!IsValid(SurroundManager))
-	{
-		SurroundManager = ResolveSurroundManager();
-	}
-	if (!IsTargetUsable(TargetCharacter))
-	{
-		// 平时使用 GameMode 注入的玩家；仅在缓存目标失效时安全解析，不在正常路径反复查询。
-		InitializeCombatContext(Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)), SurroundManager);
-		if (!IsTargetUsable(TargetCharacter))
-		{
-			return false;
-		}
-	}
-
-	// 一轮只计算一次二维距离平方，并派生攻击/追击两个布尔条件，避免各分支重复开方和取位置。
-	// 敌人和目标校验成功后才采样；叶子保留存活检查，但不重复计算距离与范围。
-	// 先用廉价距离筛选，再检查高度和环境；楼上/墙后目标应走导航分支而不是原地重复尝试攻击。
-	if (const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent())
-	{
-		DecisionContext.bInAttackRange = Combat->SampleAttackReach(DecisionContext.DistanceSquared, DecisionContext.EffectiveAttackRange);
-	}
-	else
-	{
-		DecisionContext.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), TargetCharacter->GetActorLocation());
-	}
-	DecisionContext.bInChaseRange = DecisionContext.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
-	return true;
 }
 
 float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext& Context) const
@@ -384,9 +378,27 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	case EFPEnemyBehaviorAction::Surround:
 		return HandleSurroundMovement();
 	case EFPEnemyBehaviorAction::Pursue:
+	{
 		SetAIState(EFPEnemyAIState::Chase);
-		HandleSharedPursuit();
+		// 没有专属槽位时，使用共享目标快照进行低成本追击。
+		// 没有可用环形槽位时追逐 Manager 的共享玩家位置；Manager 失效才直接读取玩家 Transform。
+		FVector SharedGoal;
+		if (SurroundManager != nullptr && SurroundManager->GetSharedTargetSnapshot(SharedGoal))
+		{
+			const float SafePursuitAcceptanceRangeMultiplier =
+				FMath::IsFinite(PursuitAcceptanceRangeMultiplier) ? FMath::Clamp(PursuitAcceptanceRangeMultiplier, 0.0f, 1.0f) : 0.8f;
+			const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
+			const float ConfiguredAttackRange = Combat != nullptr ? Combat->GetConfiguredAttackRange() : 0.0f;
+			const float PursuitAcceptanceRadius =
+				FMath::Max(MoveAcceptanceRadius, ConfiguredAttackRange * SafePursuitAcceptanceRangeMultiplier);
+			MoveToGoal(SharedGoal, PursuitAcceptanceRadius, false);
+		}
+		else
+		{
+			MoveToGoal(TargetCharacter->GetActorLocation(), MoveAcceptanceRadius, false);
+		}
 		return true;
+	}
 	default:
 		return false;
 	}
@@ -414,25 +426,6 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 		return false; // 给 BT 的共享追击后备分支机会，而不是吞掉导航失败。
 	}
 	return true; // 帧预算延后也保持当前行为，不中断有效路径。
-}
-
-void AfpstrueEnemyAIController::HandleSharedPursuit()
-{
-	// 没有可用环形槽位时追逐 Manager 的共享玩家位置；Manager 失效才直接读取玩家 Transform。
-	FVector SharedGoal;
-	if (SurroundManager != nullptr && SurroundManager->GetSharedTargetSnapshot(SharedGoal))
-	{
-		const float SafePursuitAcceptanceRangeMultiplier =
-			FMath::IsFinite(PursuitAcceptanceRangeMultiplier) ? FMath::Clamp(PursuitAcceptanceRangeMultiplier, 0.0f, 1.0f) : 0.8f;
-		const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
-		const float ConfiguredAttackRange = Combat != nullptr ? Combat->GetConfiguredAttackRange() : 0.0f;
-		const float PursuitAcceptanceRadius =
-			FMath::Max(MoveAcceptanceRadius, ConfiguredAttackRange * SafePursuitAcceptanceRangeMultiplier);
-		MoveToGoal(SharedGoal, PursuitAcceptanceRadius, false);
-		return;
-	}
-
-	MoveToGoal(TargetCharacter->GetActorLocation(), MoveAcceptanceRadius, false);
 }
 
 // ==================== 移动与朝向：请求去重 → 预算 → 到达后转向 ====================

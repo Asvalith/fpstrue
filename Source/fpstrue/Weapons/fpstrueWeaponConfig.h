@@ -96,6 +96,23 @@ struct FPSTRUE_API FFPWeaponSettings
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
 	float MaxAccumulatedRecoilYaw = 2.0f;
 
+	// Visual Recoil
+	// 纯表现参数：在 CameraManager 最终画面叠加，不改变命中散布、控制方向或动画资产。
+	// Scale 设为 0 可关闭；ADS 仅缩放本层，和控制后坐力的 AimRecoilMultiplier 独立。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float VisualRecoilScale = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AimVisualRecoilMultiplier = 0.6f;
+	// 角度单位为度，不受 Controller 的 legacy 输入倍率影响；Yaw/Roll 逐发交替方向。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "-5.0", ClampMax = "5.0"))
+	FRotator VisualRecoilRotation = FRotator(0.8, 0.15, 0.35);
+	// 很小的视野脉冲营造透视冲击，不添加畸变材质或修改后处理资产。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float VisualRecoilFOV = 0.35f;
+	// 前 15% 时间快速冲出，其余时间平滑回正；每次射击重触发，而非无限叠加。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.04", ClampMax = "0.5", Units = "s"))
+	float VisualRecoilDuration = 0.12f;
+
 	// Reload Recovery
 	// 预计动画时长只用于兜底截止点：max(普通/空仓时长, FailSafeDuration) + GracePeriod。
 	// 正常装填由有身份的 Notify 提交，播放结束解除锁；超时只失败收尾，不伪造动画成功。

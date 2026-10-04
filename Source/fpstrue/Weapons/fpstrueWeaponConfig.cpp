@@ -39,6 +39,10 @@ bool FFPWeaponSettings::Validate(FString& OutError) const
 		{TEXT("RecoilRecoverySpeed"), RecoilRecoverySpeed, 0.1f},
 		{TEXT("MaxAccumulatedRecoilPitch"), MaxAccumulatedRecoilPitch, 0.0f},
 		{TEXT("MaxAccumulatedRecoilYaw"), MaxAccumulatedRecoilYaw, 0.0f},
+		{TEXT("VisualRecoilScale"), VisualRecoilScale, 0.0f, 2.0f},
+		{TEXT("AimVisualRecoilMultiplier"), AimVisualRecoilMultiplier, 0.0f, 1.0f},
+		{TEXT("VisualRecoilFOV"), VisualRecoilFOV, 0.0f, 3.0f},
+		{TEXT("VisualRecoilDuration"), VisualRecoilDuration, 0.04f, 0.5f},
 		{TEXT("ReloadDuration"), ReloadDuration, 0.1f},
 		{TEXT("EmptyReloadDuration"), EmptyReloadDuration, 0.1f},
 		{TEXT("ReloadFailSafeDuration"), ReloadFailSafeDuration, 0.1f},
@@ -49,6 +53,14 @@ bool FFPWeaponSettings::Validate(FString& OutError) const
 		if (!FMath::IsFinite(Range.Value) || Range.Value < Range.Min || Range.Value > Range.Max)
 		{
 			OutError = FString::Printf(TEXT("%s must be finite and in [%g, %g]."), Range.Name, Range.Min, Range.Max);
+			return false;
+		}
+	}
+	for (const double Angle : {VisualRecoilRotation.Pitch, VisualRecoilRotation.Yaw, VisualRecoilRotation.Roll})
+	{
+		if (!FMath::IsFinite(Angle) || FMath::Abs(Angle) > 5.0)
+		{
+			OutError = TEXT("VisualRecoilRotation axes must be finite and within [-5, 5] degrees.");
 			return false;
 		}
 	}

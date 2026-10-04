@@ -231,15 +231,9 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 		return;
 	}
 
-	if (!Enemy->CanUseAnimationSharing())
-	{
-		SuspendEnemy(Enemy);
-		return;
-	}
-
 	USkeletalMeshComponent* CharacterMesh = Enemy->GetMesh();
 	USkeletalMesh* SkeletalMesh = CharacterMesh != nullptr ? CharacterMesh->GetSkeletalMeshAsset() : nullptr;
-	if (SkeletalMesh == nullptr || SkeletalMesh->GetSkeleton() != SharingSkeleton)
+	if (!Enemy->CanUseAnimationSharing() || SkeletalMesh == nullptr || SkeletalMesh->GetSkeleton() != SharingSkeleton)
 	{
 		SuspendEnemy(Enemy);
 		return;

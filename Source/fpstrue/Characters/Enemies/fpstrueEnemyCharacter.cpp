@@ -263,7 +263,18 @@ void AfpstrueEnemyCharacter::HandleDamageResolved(float DamageAmount, AActor* Da
 	// 先退出共享并立即恢复必要动画，再发受击表现；不等待下一轮集中采样，也不赠送阴影/光追名额。
 	SuspendAnimationSharing();
 	ApplyRenderSignificanceSettings();
-	ApplyHitReactionImpulse();
+	// 根据最近伤害方向给 CharacterMovement 添加轻量受击冲量。
+	//活着时通过 CharacterMovement 施加水平冲量，不直接切换物理模拟，保持导航移动仍可继续。
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	const bool bSkipHitImpulse = Movement == nullptr || HitReactionImpulseStrength <= 0.0f || Movement->MovementMode == MOVE_None;
+	if (!bSkipHitImpulse)
+	{
+		FVector HitDirection(LastAppliedDamage.Direction.X, LastAppliedDamage.Direction.Y, 0.0f);
+		if (HitDirection.Normalize())
+		{
+			Movement->AddImpulse(HitDirection * HitReactionImpulseStrength, true);
+		}
+	}
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
 }
 
@@ -272,24 +283,6 @@ void AfpstrueEnemyCharacter::RefreshHitAnimationProtection()
 	HitAnimationProtectionUntil = -MAX_flt;
 	ApplyRenderSignificanceSettings();
 	RefreshAnimationSharingRegistration();
-}
-
-void AfpstrueEnemyCharacter::ApplyHitReactionImpulse()
-{
-	//活着时通过 CharacterMovement 施加水平冲量，不直接切换物理模拟，保持导航移动仍可继续。
-	UCharacterMovementComponent* Movement = GetCharacterMovement();
-	if (Movement == nullptr || HitReactionImpulseStrength <= 0.0f || Movement->MovementMode == MOVE_None)
-	{
-		return;
-	}
-
-	FVector HitDirection(LastAppliedDamage.Direction.X, LastAppliedDamage.Direction.Y, 0.0f);
-	if (!HitDirection.Normalize())
-	{
-		return;
-	}
-
-	Movement->AddImpulse(HitDirection * HitReactionImpulseStrength, true);
 }
 
 void AfpstrueEnemyCharacter::HandleDeath()
@@ -454,13 +447,9 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 		NewTier = EFPEnemySignificanceTier::Reduced;
 	}
 
-	ApplySignificanceTier(NewTier);
-}
-
-void AfpstrueEnemyCharacter::ApplySignificanceTier(EFPEnemySignificanceTier NewTier)
-{
+	// 应用 Gameplay Tier，并把决策倍率传给 AIController。
 	// 档位未变化立即返回；变化时一次性下发 Movement Tick 间隔和 AI 决策倍率。
-	if (IsDead() || SignificanceTier == NewTier)
+	if (SignificanceTier == NewTier)
 	{
 		return;
 	}

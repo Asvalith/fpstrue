@@ -68,8 +68,10 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "Animation/AnimNotifyQueue.h"
 #include "Animation/ActiveMontageInstanceScope.h"
 #include "Animation/Skeleton.h"
-#include "Weapons/fpstrueAnimNotify_ReloadCommit.h"
+#include "Weapons/fpstrueWeaponCameraShake.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Camera/CameraModifier_CameraShake.h"
 #include "Components/BoxComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/SkeletalMesh.h"
@@ -895,6 +897,8 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	UnrelatedNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(UnrelatedInstance->GetInstanceID());
 	TestFalse(TEXT("The unrelated playback cannot commit ammunition"), Weapon->CommitReloadFromNotify(Arms, UnrelatedNotify));
 	TStrongObjectPtr<UfpstrueAnimNotify_ReloadCommit> Notify(NewObject<UfpstrueAnimNotify_ReloadCommit>());
+	TestEqual(TEXT("Reload notify keeps its serialized class identity after source consolidation"),
+		Notify->GetClass()->GetPathName(), FString(TEXT("/Script/fpstrue.fpstrueAnimNotify_ReloadCommit")));
 	FAnimNotifyEventReference OldNotify(nullptr, Montage);
 	OldNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(PlaybackA);
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
@@ -1106,6 +1110,7 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	APlayerController* Controller = World.Spawn<APlayerController>();
 	if (Controller == nullptr) return false;
 	Controller->Possess(Player);
+	Controller->SetViewTarget(Player);
 	Controller->SetActorTickEnabled(false);
 	Player->GetCharacterMovement()->SetComponentTickEnabled(false);
 	Controller->RotationInput = FRotator::ZeroRotator;
@@ -1113,6 +1118,26 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	Weapon->StopFire();
 	const double Kick = Controller->RotationInput.Pitch;
 	if (!TestFalse(TEXT("The real PlayerController received recoil input"), FMath::IsNearlyZero(Kick))) return false;
+	APlayerCameraManager* CameraManager = Controller->PlayerCameraManager;
+	if (!TestNotNull(TEXT("The local player owns a camera manager"), CameraManager)) return false;
+	UCameraModifier_CameraShake* ShakeModifier = Cast<UCameraModifier_CameraShake>(CameraManager->FindCameraModifierByClass(UCameraModifier_CameraShake::StaticClass()));
+	if (!TestNotNull(TEXT("Camera shake modifier exists"), ShakeModifier)) return false;
+	TArray<FActiveCameraShakeInfo> ActiveShakes;
+	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
+	if (!TestEqual(TEXT("A real shot starts one visual recoil; releasing fire preserves its short return"), ActiveShakes.Num(), 1)) return false;
+	UCameraShakeBase* VisualShake = ActiveShakes[0].ShakeInstance;
+	if (!TestTrue(TEXT("Weapon uses its isolated visual recoil class"), VisualShake->IsA<UfpstrueWeaponCameraShake>())) return false;
+	const FTransform AimTransform = Player->GetFirstPersonCameraComponent()->GetComponentTransform();
+	const FRotator ControlRotation = Controller->GetControlRotation();
+	const FRotator RotationInput = Controller->RotationInput;
+	FMinimalViewInfo VisualPOV;
+	VisualPOV.Location = AimTransform.GetLocation();
+	VisualPOV.Rotation = AimTransform.Rotator();
+	VisualShake->UpdateAndApplyCameraShake(0.02f, 1.0f, VisualPOV);
+	TestFalse(TEXT("The shot visibly changes final POV"), VisualPOV.Rotation.Equals(AimTransform.Rotator()));
+	TestTrue(TEXT("Visual recoil does not rotate or move the hitscan camera"), AimTransform.Equals(Player->GetFirstPersonCameraComponent()->GetComponentTransform()));
+	TestTrue(TEXT("Visual recoil does not write control rotation"), ControlRotation.Equals(Controller->GetControlRotation()));
+	TestTrue(TEXT("Visual recoil does not add control input"), RotationInput.Equals(Controller->RotationInput));
 	// Direct test calls occur outside World::Tick: arm TimerManager's pending timer at zero elapsed time
 	// before simulating the hitch, otherwise that hitch is spent registering (not running) the timer.
 	if (!World.AdvanceSingleFrame(0.0f)) return false;
@@ -1123,6 +1148,23 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	if (!World.AdvanceSingleFrame(0.14f)) return false;
 	TestEqual(TEXT("The hitch advances exactly 140ms of game time"), World.GetWorld()->GetTimeSeconds() - RecoveryStartTime, 0.14, 0.0001);
 	TestEqual(TEXT("Recovery integrates elapsed time, excluding the configured delay"), Controller->RotationInput.Pitch / Kick, 0.8, 0.025);
+	Weapon->StartFire();
+	Weapon->StopFire();
+	ActiveShakes.Reset(); // UE 的查询接口向输出数组追加，不能把上次快照算成仍在播放的实例。
+	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
+	TestEqual(TEXT("Repeated fire never stacks visual recoil instances"), ActiveShakes.Num(), 1);
+	if (ActiveShakes.Num() == 1) TestTrue(TEXT("Repeated fire reuses the running instance"), ActiveShakes[0].ShakeInstance == VisualShake);
+	Weapon->InterruptOwnerInput();
+	ActiveShakes.Reset();
+	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
+	TestEqual(TEXT("Losing owner input removes weapon visual recoil"), ActiveShakes.Num(), 0);
+	if (!World.Advance(0.2f)) return false;
+	Weapon->StartFire();
+	Weapon->StopFire();
+	Weapon->DisableWeapon();
+	ActiveShakes.Reset();
+	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
+	TestEqual(TEXT("Disable/death leaves no weapon visual recoil"), ActiveShakes.Num(), 0);
 	return true;
 }
 

@@ -367,6 +367,11 @@ bool FFpstrueGameModeParticipantBoundaryTest::RunTest(const FString& Parameters)
 	GameMode->BindPlayerDeathEvent();
 	TStrongObjectPtr<UfpstrueGameModeTestObserver> Observer(NewObject<UfpstrueGameModeTestObserver>());
 	BindObserver(Observer.Get(), GameMode, Player);
+	// 空出生点只跳过本波生成，不阻断后续波次调度；合并波次入口后仍需保持这一边界。
+	GameMode->StartNextWave();
+	TestEqual(TEXT("An empty spawn-point list still advances the wave"), GameMode->CurrentWave, 1);
+	TestTrue(TEXT("An empty spawn-point list still schedules the next wave"), GameMode->GetWorldTimerManager().TimerExists(GameMode->WaveTimerHandle));
+	TestFalse(TEXT("An empty spawn-point list does not start a spawn timer"), GameMode->GetWorldTimerManager().TimerExists(GameMode->SpawnTimerHandle));
 	// 注册发生在 BeginPlay 之后，EndPlay 同时覆盖直接销毁和关卡移除；不依赖冗余 OnDestroyed 绑定。
 	FActorSpawnParameters SpawnParameters;
 	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;

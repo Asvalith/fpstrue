@@ -290,7 +290,46 @@ void AfpstrueGameMode::StartNextWave()
 	}
 
 	//生成当前波次的敌人，分帧生成由 SpawnNextQueuedEnemy 处理。
-	SpawnCurrentWave();
+	// 初始化本波的分帧生成队列。
+	//分帧生成敌人
+	{
+		// 这里准备队列并立即生成首个敌人，其余由 Timer 每次消费一个，平滑创建尖峰。
+		//性能分析：记录本次队列准备和首个生成调用的耗时，不是整波跨帧历时；后续生成另有相同 Stat 和独立 Trace 作用域。
+		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_SpawnCurrentWave);
+		SCOPE_CYCLE_COUNTER(STAT_fpstrueWaveSpawnTime);
+		// 运行时状态检查：游戏未开始或没有可用出生点时不再生成新波次。
+		// 运行状态已在波次广播后确认；出生点为空只跳过本波生成，仍保留后续波次调度。
+		if (!SpawnPoints.IsEmpty())
+		{
+			// 清空上波的生成队列，避免残留点位和类引用影响本波生成。
+			ClearSpawnQueue();
+			// 随机化出生点顺序，避免每波敌人都从同一位置开始生成。
+			QueuedSpawnPoints = SpawnPoints;
+			for (int32 Index = QueuedSpawnPoints.Num() - 1; Index > 0; --Index)
+			{
+				const int32 SwapIndex = FMath::RandRange(0, Index);
+				QueuedSpawnPoints.Swap(Index, SwapIndex);
+			}
+
+			// 计算本波敌人数量和类引用，供 SpawnNextQueuedEnemy 使用。
+			const FfpstrueWaveConfig Wave = GetWaveConfig(CurrentWave);
+			PendingEnemySpawnCount = Wave.EnemyCount;
+			QueuedEnemyClass = Wave.EnemyClass;
+
+			//立即生成首个敌人，后续由 Timer 分帧生成。
+			SpawnNextQueuedEnemy();
+			//生成第一个后启用定时器
+			if (IsRunning() && PendingEnemySpawnCount > 0)
+			{
+				// 卡顿后不在同一帧补跑多次 Spawn；Timer 间隔本身不保证“每帧最多一次”。
+				FTimerManagerTimerParameters TimerParameters;
+				TimerParameters.bLoop = true;
+				TimerParameters.bMaxOncePerFrame = true;
+				GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy,
+					FMath::Max(SpawnInterval, 0.01f), TimerParameters);
+			}
+		}
+	}
 
 	// 未到最后一波时安排下一波；当前模式以存活到倒计时结束为胜利条件。
 	if (IsRunning() && CurrentWave < ConfiguredWaveCount)
@@ -305,48 +344,6 @@ void AfpstrueGameMode::StartNextWave()
 		{
 			WaveTimerHandle = GetWorldTimerManager().SetTimerForNextTick(this, &AfpstrueGameMode::StartNextWave);
 		}
-	}
-}
-
-//分帧生成敌人
-void AfpstrueGameMode::SpawnCurrentWave()
-{
-	// 这里准备队列并立即生成首个敌人，其余由 Timer 每次消费一个，平滑创建尖峰。
-	//性能分析：记录本次队列准备和首个生成调用的耗时，不是整波跨帧历时；后续生成另有相同 Stat 和独立 Trace 作用域。
-	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_SpawnCurrentWave);
-	SCOPE_CYCLE_COUNTER(STAT_fpstrueWaveSpawnTime);
-	// 运行时状态检查：游戏未开始或没有可用出生点时不再生成新波次。
-	if (!IsRunning() || SpawnPoints.IsEmpty())
-	{
-		return;
-	}
-
-	// 清空上波的生成队列，避免残留点位和类引用影响本波生成。
-	ClearSpawnQueue();
-	// 随机化出生点顺序，避免每波敌人都从同一位置开始生成。
-	QueuedSpawnPoints = SpawnPoints;
-	for (int32 Index = QueuedSpawnPoints.Num() - 1; Index > 0; --Index)
-	{
-		const int32 SwapIndex = FMath::RandRange(0, Index);
-		QueuedSpawnPoints.Swap(Index, SwapIndex);
-	}
-
-	// 计算本波敌人数量和类引用，供 SpawnNextQueuedEnemy 使用。
-	const FfpstrueWaveConfig Wave = GetWaveConfig(CurrentWave);
-	PendingEnemySpawnCount = Wave.EnemyCount;
-	QueuedEnemyClass = Wave.EnemyClass;
-
-	//立即生成首个敌人，后续由 Timer 分帧生成。
-	SpawnNextQueuedEnemy();
-	//生成第一个后启用定时器
-	if (IsRunning() && PendingEnemySpawnCount > 0)
-	{
-		// 卡顿后不在同一帧补跑多次 Spawn；Timer 间隔本身不保证“每帧最多一次”。
-		FTimerManagerTimerParameters TimerParameters;
-		TimerParameters.bLoop = true;
-		TimerParameters.bMaxOncePerFrame = true;
-		GetWorldTimerManager().SetTimer(SpawnTimerHandle, this, &AfpstrueGameMode::SpawnNextQueuedEnemy,
-			FMath::Max(SpawnInterval, 0.01f), TimerParameters);
 	}
 }
 
@@ -663,16 +660,6 @@ void AfpstrueGameMode::BindPlayerDeathEvent()
 	}
 }
 
-void AfpstrueGameMode::UnbindPlayerDeathEvent()
-{
-	// 结算和 EndPlay 都显式解绑，避免生命周期末尾继续收到玩家事件。
-	if (PlayerCharacter != nullptr)
-	{
-		PlayerCharacter->OnPlayerDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
-		PlayerCharacter->OnEndPlay.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerEndPlay);
-	}
-}
-
 void AfpstrueGameMode::UpdateCountdown()
 {
 	// 一秒 Timer 驱动倒计时并广播变化；HUD只在事件到达时刷新，不进行逐帧函数绑定。
@@ -684,9 +671,13 @@ void AfpstrueGameMode::UpdateCountdown()
 	RemainingTime = FMath::Max(RemainingTime - 1, 0);
 	OnRemainingTimeChanged.Broadcast(RemainingTime);
 
-	if (IsRunning() && (!IsPlayerAlive() || RemainingTime <= 0))
+	if (IsRunning())
 	{
-		FinishGame(IsPlayerAlive());
+		const bool bPlayerAlive = IsPlayerAlive();
+		if (!bPlayerAlive || RemainingTime <= 0)
+		{
+			FinishGame(bPlayerAlive);
+		}
 	}
 }
 
@@ -735,22 +726,6 @@ void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 	OnGameResult.Broadcast(bPlayerWon);
 }
 
-void AfpstrueGameMode::StopActiveEnemies()
-{
-	// 对局结束时停止所有仍存活 AI；只冻结行为，不在遍历过程中直接销毁 Actor。
-	const TArray<TWeakObjectPtr<AfpstrueEnemyCharacter>> EnemiesToStop = RegisteredEnemies.Array();
-	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : EnemiesToStop)
-	{
-		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
-		{
-			if (AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
-			{
-				EnemyController->StopAI();
-			}
-		}
-	}
-}
-
 void AfpstrueGameMode::StopGameplay()
 {
 	// 先提交终态；下方清理触发的同步回调不得重新生成敌人或再次结算。
@@ -771,8 +746,27 @@ void AfpstrueGameMode::StopGameplay()
 	{
 		BenchmarkRunner->Cancel();
 	}
-	UnbindPlayerDeathEvent();
-	StopActiveEnemies();
+	// 退出或结算时解除玩家死亡事件。
+	// 结算和 EndPlay 都显式解绑，避免生命周期末尾继续收到玩家事件。
+	if (PlayerCharacter != nullptr)
+	{
+		PlayerCharacter->OnPlayerDeathReported.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerDied);
+		PlayerCharacter->OnEndPlay.RemoveDynamic(this, &AfpstrueGameMode::HandlePlayerEndPlay);
+	}
+
+	// 游戏结束时停止所有仍存活敌人的 AI。
+	// 对局结束时停止所有仍存活 AI；只冻结行为，不在遍历过程中直接销毁 Actor。
+	const TArray<TWeakObjectPtr<AfpstrueEnemyCharacter>> EnemiesToStop = RegisteredEnemies.Array();
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : EnemiesToStop)
+	{
+		if (AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get())
+		{
+			if (AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+			{
+				EnemyController->StopAI();
+			}
+		}
+	}
 	if (SurroundManager)
 	{
 		SurroundManager->ResetManager();

@@ -55,6 +55,10 @@ public:
 	void SetSignificanceDecisionMultiplier(float NewMultiplier);
 
 	// BT 采样节点的唯一入口，一轮距离和范围计算结果写入 Blackboard。
+	// 单轮采样：解析引用、计算快照和下轮间隔。
+	// 校验并解析敌人、目标和管理器，再汇总距离与攻击/追击范围，供本轮决策复用。
+	// 返回是否有有效目标；失败时清空采样，清理与停路统一由 Idle 叶子处理。
+	// 合并后，有效性随快照写入 Blackboard，不再通过独立函数返回。
 	void RefreshBehaviorDecision(UBlackboardComponent& DecisionBlackboard);
 	// BT 叶子节点执行桥；不在 Controller 中再次选择高层行为。
 	bool ExecuteBehaviorAction(EFPEnemyBehaviorAction Action);
@@ -157,10 +161,6 @@ private:
 	// 启动唯一决策驱动；默认树和外部树不能与旧 Timer/FSM 并行运行。
 	void StartBehaviorLogic();
 
-	// 单轮采样：解析引用、计算快照和下轮间隔。
-	// 校验并解析敌人、目标和管理器，再汇总距离与攻击/追击范围，供本轮决策复用。
-	// 返回是否有有效目标；失败时清空采样，清理与停路统一由 Idle 叶子处理。
-	bool BuildDecisionContext();
 	// 根据状态、距离和 Significance 返回下一次决策间隔。
 	float GetNextDecisionInterval(const FDecisionContext& Context) const;
 	// 返回共享包围管理器，供槽位和预算逻辑使用。
@@ -171,8 +171,6 @@ private:
 	// 叶子实现：不在这里重新建立一套高层行为优先级。
 	// 尝试获取攻击位或包围槽，并向共享位置移动。
 	bool HandleSurroundMovement();
-	// 没有专属槽位时，使用共享目标快照进行低成本追击。
-	void HandleSharedPursuit();
 
 	// 移动与朝向：沿路径行进，到位后再面向目标。
 	// 复用有效路径/到位缓存；需要刷新时先预算校验，再提交显式 MoveTo 请求并缓存投影结果。

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/HitResult.h"
 #include "Weapons/fpstrueWeaponConfig.h"
@@ -12,6 +13,7 @@
 class AfpstrueCharacter;
 class APlayerController;
 class UCameraComponent;
+class UCameraShakeBase;
 class UAnimInstance;
 class UAnimMontage;
 class UWorld;
@@ -219,6 +221,8 @@ private:
 	void UpdateRecoilRecovery();
 	// 停止恢复 Timer 并清空累计后坐力。
 	void ClearRecoilState();
+	// 视觉后坐力独立收尾；不停止角色受伤等其他来源的 CameraShake。
+	void StopVisualRecoil();
 
 	// ==================== Runtime Helpers ====================
 	//弹药改变后统一广播给UI
@@ -276,10 +280,26 @@ private:
 	float AccumulatedRecoilPitch = 0.0f;
 	float AccumulatedRecoilYaw = 0.0f;
 	double LastRecoilRecoveryTimeSeconds = 0.0;
+	TWeakObjectPtr<UCameraShakeBase> VisualRecoilShake;
 
 	// Recovery / Timers
 	// Timer 延后在 Game Thread 回调，不是 Worker 并行任务；EndPlay 时统一清理句柄。
 	FTimerHandle AutomaticFireTimerHandle;
 	FTimerHandle ReloadTimerHandle;
 	FTimerHandle RecoilRecoveryTimerHandle;
+};
+
+/** 换弹提交点：在动画指定帧把备弹真正转移到弹匣。 */
+UCLASS(meta = (DisplayName = "Reload Commit"))
+class FPSTRUE_API UfpstrueAnimNotify_ReloadCommit : public UAnimNotify
+{
+	GENERATED_BODY()
+
+public:
+	// 找到武器后校验通知的 Montage 实例身份，再提交对应换弹事务。
+	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,const FAnimNotifyEventReference& EventReference) override;
+	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload) override;
+
+	// 返回动画编辑器中显示的 Notify 名称。
+	virtual FString GetNotifyName_Implementation() const override;
 };

@@ -171,8 +171,6 @@ private:
 	float GetConfiguredWaveInterval() const;
 	// 推进波次编号、广播 UI 事件并启动本波生成。
 	void StartNextWave();
-	// 初始化本波的分帧生成队列。
-	void SpawnCurrentWave();
 	// Timer 每次只生成一个敌人，降低集中 Spawn 峰值。
 	void SpawnNextQueuedEnemy();
 	// 在给定出生点附近寻找可导航位置，生成敌人并注入 AI 上下文。
@@ -200,14 +198,10 @@ private:
 	bool IsPlayerAlive() const;
 	// 订阅玩家死亡事件，使 GameMode 能结束对局。
 	void BindPlayerDeathEvent();
-	// 退出或结算时解除玩家死亡事件。
-	void UnbindPlayerDeathEvent();
 	// 每秒减少倒计时，并向 HUD 广播最新值。
 	void UpdateCountdown();
 	// 只执行一次胜负结算，停止 AI 并广播结果。
 	void FinishGame(bool bPlayerWon);
-	// 游戏结束时停止所有仍存活敌人的 AI。
-	void StopActiveEnemies();
 	// 结算与 EndPlay 共用：清理倒计时、波次、生成和性能协调器 Timer，再停止 AI、解绑玩家。
 	void StopGameplay();
 

@@ -131,8 +131,6 @@ private:
 	friend class FFpstrueEnemyCombatStateConfigTest;
 	friend class FFpstrueEnemyAttackPlaybackTest;
 	friend class FFpstrueEnemyAttackAssetIntegrationTest;
-	// 只在 BeginPlay 选一次参数来源，热路径继续读取原有字段。
-	void ApplyCombatConfiguration();
 	// 返回强类型 Owner，供内部战斗逻辑使用。
 	AfpstrueEnemyCharacter* GetEnemy() const;
 	// 从骨骼 Socket 读取本帧武器根部和尖端位置。

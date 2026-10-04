@@ -1,11 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Weapons/fpstrueWeaponComponent.h"
+#include "Weapons/fpstrueWeaponCameraShake.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueCollisionChannels.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/ActiveMontageInstanceScope.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifyQueue.h"
 #include "Components/PrimitiveComponent.h"
@@ -153,6 +156,7 @@ void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
 	if (NewState == EFPWeaponActionState::Disabled)
 	{
 		ClearRecoilState();
+		StopVisualRecoil();
 		ConsecutiveShotCount = 0;
 	}
 	if (ActionState == NewState)
@@ -209,21 +213,6 @@ void UfpstrueWeaponComponent::StartFire()
 
 	SetActionState(EFPWeaponActionState::Firing);
 	Fire();
-}
-
-void UfpstrueWeaponComponent::ScheduleNextShot()
-{
-	if (UWorld* World = GetWorld())
-	{
-		const double Interval = 60.0 / static_cast<double>(Settings.RoundsPerMinute);
-		const float Remaining = static_cast<float>(FMath::Max(LastShotTimeSeconds + Interval - World->GetTimeSeconds(), 0.001));
-		const uint32 ScheduledRevision = ActionRevision;
-		World->GetTimerManager().SetTimer(AutomaticFireTimerHandle,
-			FTimerDelegate::CreateWeakLambda(this, [this, ScheduledRevision]()
-			{
-				if (IsCurrentAction(EFPWeaponActionState::Firing, ScheduledRevision)) Fire();
-			}), Remaining, false);
-	}
 }
 
 void UfpstrueWeaponComponent::StopFire()
@@ -304,6 +293,21 @@ void UfpstrueWeaponComponent::Fire()
 	else
 	{
 		ScheduleNextShot();
+	}
+}
+
+void UfpstrueWeaponComponent::ScheduleNextShot()
+{
+	if (UWorld* World = GetWorld())
+	{
+		const double Interval = 60.0 / static_cast<double>(Settings.RoundsPerMinute);
+		const float Remaining = static_cast<float>(FMath::Max(LastShotTimeSeconds + Interval - World->GetTimeSeconds(), 0.001));
+		const uint32 ScheduledRevision = ActionRevision;
+		World->GetTimerManager().SetTimer(AutomaticFireTimerHandle,
+			FTimerDelegate::CreateWeakLambda(this, [this, ScheduledRevision]()
+			{
+				if (IsCurrentAction(EFPWeaponActionState::Firing, ScheduledRevision)) Fire();
+			}), Remaining, false);
 	}
 }
 
@@ -480,6 +484,45 @@ void UfpstrueWeaponComponent::HandleReloadPlaybackEnded(UAnimMontage*, bool bInt
 	else if (ReloadPlaybacks.IsEmpty()) EndReload(ReloadId, EFPReloadEndReason::Completed);
 }
 
+// 换弹装填帧携带原始 Montage 播放身份；旧动画通知不能通过“当前装备”提交新一轮换弹。
+void UfpstrueAnimNotify_ReloadCommit::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
+											 const FAnimNotifyEventReference& EventReference)
+{
+	Super::Notify(MeshComp, Animation, EventReference);
+
+	if (MeshComp == nullptr)
+	{
+		return;
+	}
+
+	// 语法复习：UE Cast 只做 UObject 继承关系检查；两个无继承关系的组件之间 Cast 永远失败。
+	// MeshComp 是播放动画的骨骼组件，应从它的 Owner 取得装备关系。
+	UfpstrueWeaponComponent* WeaponComponent = Cast<UfpstrueWeaponComponent>(MeshComp);
+	if (const AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(MeshComp->GetOwner()))
+	{
+		WeaponComponent = Character->GetEquippedWeaponComponent();
+	}
+
+	if (WeaponComponent != nullptr)
+	{
+		WeaponComponent->CommitReloadFromNotify(MeshComp, EventReference);
+	}
+}
+
+void UfpstrueAnimNotify_ReloadCommit::BranchingPointNotify(FBranchingPointNotifyPayload& Payload)
+{
+	// UE 的默认桥接会丢弃 MontageInstanceID；显式携带，Queued/BranchingPoint 使用同一身份校验。
+	FAnimNotifyEventReference EventReference(Payload.NotifyEvent, Payload.SequenceAsset);
+	EventReference.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(Payload.MontageInstanceID);
+	Notify(Payload.SkelMeshComponent, Payload.SequenceAsset, EventReference);
+}
+
+FString UfpstrueAnimNotify_ReloadCommit::GetNotifyName_Implementation() const
+{
+	// 为动画编辑器提供可读名称，不参与运行时换弹状态判断。
+	return TEXT("Reload Commit");
+}
+
 bool UfpstrueWeaponComponent::CommitReloadFromNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference)
 {
 	const bool bMatchesPlayback = ReloadPlaybacks.ContainsByPredicate([this, PlaybackMesh, &EventReference](const FFPActionPlayback& Playback)
@@ -572,6 +615,21 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 	AccumulatedRecoilPitch = NewPitch;
 	AccumulatedRecoilYaw = NewYaw;
 
+	// 控制后坐力与散布保持原样；本层只影响最终 POV，绕过 CameraBoom 对短脉冲的平滑。
+	// 不使用 Initializer：UE 对带 Initializer 的单实例 shake 会重建，无法保留连发回弹。
+	if (PlayerController->IsLocalController() && PlayerController->PlayerCameraManager != nullptr
+		&& PlayerController->GetViewTarget() == OwningCharacter && Settings.VisualRecoilScale > 0.0f)
+	{
+		const float VisualScale = Settings.VisualRecoilScale
+			* (OwningCharacter->IsAiming() ? Settings.AimVisualRecoilMultiplier : 1.0f);
+		UCameraShakeBase* Shake = PlayerController->PlayerCameraManager->StartCameraShake(UfpstrueWeaponCameraShake::StaticClass(), VisualScale);
+		if (Shake != nullptr)
+		{
+			CastChecked<UfpstrueWeaponRecoilPattern>(Shake->GetRootShakePattern())->Configure(Settings);
+			VisualRecoilShake = Shake;
+		}
+	}
+
 	if (UWorld* World = GetWorld())
 	{
 		// 延迟是“不恢复”的时间，不计入恢复步长；卡顿后的步长使用真实经过的游戏时间。
@@ -624,6 +682,15 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 	LastRecoilRecoveryTimeSeconds = 0.0;
 }
 
+void UfpstrueWeaponComponent::StopVisualRecoil()
+{
+	if (UCameraShakeBase* Shake = VisualRecoilShake.Get())
+	{
+		if (APlayerCameraManager* CameraManager = Shake->GetCameraManager()) CameraManager->StopCameraShake(Shake, true);
+	}
+	VisualRecoilShake.Reset();
+}
+
 // ==================== 生命周期结束与公共清理 ====================
 
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -658,6 +725,7 @@ void UfpstrueWeaponComponent::InterruptOwnerInput()
 	TGuardValue<bool> InputTransitionGuard(bInterruptingOwnerInput, true);
 	StopFire();
 	ClearRecoilState();
+	StopVisualRecoil();
 	CancelReload();
 }
 

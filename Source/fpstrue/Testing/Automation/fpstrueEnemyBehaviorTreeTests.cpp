@@ -192,7 +192,27 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	TestTrue(TEXT("Near target enters attack range"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InAttackRange));
 	First->InitializeCombatContext(nullptr, nullptr);
+	UBlackboardComponent* DecisionBlackboard = First->GetBlackboardComponent();
+	const FBlackboard::FKey TargetKey = DecisionBlackboard->GetKeyID(FPEnemyBlackboard::TargetActor);
+	const float ExpectedIdleDecisionDelay = FMath::Max(0.01f, First->IdleDecisionInterval * First->SignificanceDecisionMultiplier);
+	int32 InvalidSnapshotNotifications = 0;
+	const FDelegateHandle SnapshotObserver = DecisionBlackboard->RegisterObserver(TargetKey, First,
+		FOnBlackboardChangeNotification::CreateLambda([&](const UBlackboardComponent& Blackboard, FBlackboard::FKey ChangedKey)
+		{
+			++InvalidSnapshotNotifications;
+			TestEqual(TEXT("Target observer receives the changed target key"), ChangedKey, TargetKey);
+			TestNull(TEXT("Observer sees the cleared target"), Blackboard.GetValueAsObject(FPEnemyBlackboard::TargetActor));
+			for (const FName Key :
+				 {FPEnemyBlackboard::HasTarget, FPEnemyBlackboard::Attacking, FPEnemyBlackboard::InAttackRange, FPEnemyBlackboard::InChaseRange})
+			{
+				TestFalse(TEXT("Observer sees every decision flag already cleared"), Blackboard.GetValueAsBool(Key));
+			}
+			TestEqual(TEXT("Idle interval is ready before observer notification"), First->GetBehaviorDecisionDelay(), ExpectedIdleDecisionDelay);
+			return EBlackboardNotificationResult::ContinueObserving;
+		}));
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	DecisionBlackboard->UnregisterObserver(TargetKey, SnapshotObserver);
+	TestEqual(TEXT("Invalid refresh publishes one complete target snapshot"), InvalidSnapshotNotifications, 1);
 	TestNull(TEXT("Invalid sample clears old target"), First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
 	TestFalse(TEXT("Invalid sample clears old attack range"),
 			  First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InAttackRange));

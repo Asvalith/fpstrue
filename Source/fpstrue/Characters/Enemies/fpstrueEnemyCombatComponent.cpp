@@ -49,23 +49,7 @@ void UfpstrueEnemyCombatComponent::BeginPlay()
 {
 	// 配置先于冷却初始化：开局满足其他条件时可以立即攻击。
 	Super::BeginPlay();
-	ApplyCombatConfiguration();
-	if (const UWorld* World = GetWorld())
-	{
-		LastAttackTime = World->GetTimeSeconds() - AttackInterval;
-	}
-}
-
-void UfpstrueEnemyCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-	// 退出时清理事务和 Timer；迟到 Notify 在无事务时成为无操作。
-	bEndingPlay = true;
-	ResetCombat();
-	Super::EndPlay(EndPlayReason);
-}
-
-void UfpstrueEnemyCombatComponent::ApplyCombatConfiguration()
-{
+	// 只在 BeginPlay 选一次参数来源，热路径继续读取原有字段。
 	if (CombatConfiguration != nullptr)
 	{
 		AttackRange = CombatConfiguration->AttackRange;
@@ -83,6 +67,18 @@ void UfpstrueEnemyCombatComponent::ApplyCombatConfiguration()
 	UE_LOG(LogTemp, Log, TEXT("EnemyCombatConfig Owner=%s Source=%s Range=%.1f Damage=%.1f Interval=%.2f Samples=%d"),
 		   *GetNameSafe(GetOwner()), CombatConfiguration != nullptr ? *CombatConfiguration->GetPathName() : TEXT("BlueprintDefaults"),
 		   AttackRange, AttackDamage, AttackInterval, WeaponTraceSampleCount);
+	if (const UWorld* World = GetWorld())
+	{
+		LastAttackTime = World->GetTimeSeconds() - AttackInterval;
+	}
+}
+
+void UfpstrueEnemyCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// 退出时清理事务和 Timer；迟到 Notify 在无事务时成为无操作。
+	bEndingPlay = true;
+	ResetCombat();
+	Super::EndPlay(EndPlayReason);
 }
 
 AfpstrueEnemyCharacter* UfpstrueEnemyCombatComponent::GetEnemy() const
@@ -221,13 +217,10 @@ bool UfpstrueEnemyCombatComponent::PlayAttackMontageForAttack(int64 AttackId, UA
 	USkeletalMeshComponent* Mesh = Enemy->GetMesh();
 	UAnimInstance* Anim = Mesh->GetAnimInstance();
 	// UE 5.5 的 true 只停止同 SlotGroup 的播放：保留原攻击/受击互斥，不影响其他组。
-	if (Anim == nullptr || Anim->Montage_Play(Montage, PlayRate, EMontagePlayReturnType::MontageLength, 0.0f, true) <= 0.0f)
-	{
-		if (AttackId == static_cast<int64>(AttackSequence)) ResetCombat();
-		return false;
-	}
+	const bool bPlayFailed = Anim == nullptr ||
+		Anim->Montage_Play(Montage, PlayRate, EMontagePlayReturnType::MontageLength, 0.0f, true) <= 0.0f;
 	FFPActionPlayback StartedPlayback;
-	FAnimMontageInstance* Instance = StartedPlayback.TryBind(static_cast<uint32>(AttackId), Mesh, Montage);
+	FAnimMontageInstance* Instance = bPlayFailed ? nullptr : StartedPlayback.TryBind(static_cast<uint32>(AttackId), Mesh, Montage);
 	if (Instance == nullptr)
 	{
 		if (AttackId == static_cast<int64>(AttackSequence)) ResetCombat();

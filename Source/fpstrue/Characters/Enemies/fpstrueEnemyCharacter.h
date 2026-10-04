@@ -226,8 +226,6 @@ private:
 	AfpstrueCharacter* GetCombatTarget() const;
 	// 攻击前恢复全速动画/LOD，结束后重新应用性能档位。
 	void SetAttackAnimationPriority(bool bHighPriority);
-	// 根据最近伤害方向给 CharacterMovement 添加轻量受击冲量。
-	void ApplyHitReactionImpulse();
 	// 布娃娃启用后的下一帧施加死亡冲量。
 	void ApplyDeathImpulse();
 	// 受击保护有自己的截止时间，即使协调器停用，也不会永久锁在全速动画。
@@ -241,8 +239,6 @@ private:
 	void UnregisterFromSignificanceManager();
 	// Significance Manager 回调：把距离分数转换为 Gameplay Tier。
 	void ApplySignificance(float Significance);
-	// 应用 Gameplay Tier，并把决策倍率传给 AIController。
-	void ApplySignificanceTier(EFPEnemySignificanceTier NewTier);
 	// 根据 Gameplay Tier 调整 CharacterMovement Tick 间隔。
 	void ApplyGameplaySignificanceIntervals();
 
