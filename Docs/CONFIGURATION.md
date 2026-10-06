@@ -99,10 +99,10 @@ MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarr
 | 公共默认值、分辨率、Trace 通道、隔离与超时设置 | `Tools/Performance/ExperimentProfiles/RenderCostCases.psd1` 的 `Defaults` / `Capture` |
 | 每个实验的开关、CVar、消费者数量与分辨率限制 | 同文件的 `Variants`；CVar 同时生成启动命令和读回检查 |
 | 运行时诊断开关与策略覆盖的唯一解析入口 | `Source/fpstrue/Runtime/fpstrueRuntimeOptions.h/.cpp` |
-| 预热、时长、人数、输出等采集条件 | `Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkConfig.h/.cpp`；复用运行时快照，不重复解析上述开关 |
+| 预热、时长、人数、输出等采集条件 | `Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkRunner.h/.cpp` 内的 `FFPBenchmarkConfig`；复用运行时快照，不重复解析上述开关 |
 | 游戏内等待生成、预热、采集、校验与退出 | `Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkRunner.h/.cpp` |
 
-业务埋点仍留在对应业务函数，声明集中在 `Source/fpstrue/Runtime/fpstruePerformanceStats.h`；正常玩法不依赖 `Testing/Benchmarks` 的参数实现。正式玩法默认值继续由 `Config/` 和玩法配置资产管理，不混入实验配置。`ReadRenderCostConfig.ps1` 只负责读取、校验和生成命令，`SummarizeRenderCostMatrix.ps1` 只负责汇总已有采集结果。
+业务埋点仍留在对应业务函数，声明集中在 `Source/fpstrue/Runtime/fpstrueRuntimeOptions.h`；正常玩法不依赖 `Testing/Benchmarks` 的参数实现。正式玩法默认值继续由 `Config/` 和玩法配置资产管理，不混入实验配置。`ReadRenderCostConfig.ps1` 只负责读取、校验和生成命令，`SummarizeRenderCostMatrix.ps1` 只负责汇总已有采集结果。
 
 `Tools/Performance/ExperimentProfiles/baseline160.json` 保存 160 敌人、3 轮、15 秒预热、30 秒采集的常规 Baseline 方案。它不代表已通过性能验收，也不改变项目默认画质；ScreenPercentage 为 null，表示不额外覆盖内部渲染比例。
 

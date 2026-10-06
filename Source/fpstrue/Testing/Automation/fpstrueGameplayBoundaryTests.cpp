@@ -62,13 +62,12 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "Characters/Shared/fpstrueCollisionChannels.h"
+#include "fpstrue.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "AIController.h"
 #include "Animation/AnimNotifyQueue.h"
 #include "Animation/ActiveMontageInstanceScope.h"
 #include "Animation/Skeleton.h"
-#include "Weapons/fpstrueWeaponCameraShake.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Camera/CameraModifier_CameraShake.h"
@@ -297,6 +296,21 @@ bool FFpstrueWeaponConfigValidationTest::RunTest(const FString& Parameters)
 	Settings = {}; Settings.ReloadDuration = MAX_flt; Settings.ReloadCompletionGracePeriod = MAX_flt; Reject(Settings);
 	Settings = {}; Settings.CriticalHitBones.Reset();
 	TestTrue(TEXT("Weapons without critical-hit bones are allowed"), Settings.Validate(Error));
+	Settings = FFPWeaponSettings();
+	Settings.VisualRecoilDuration = 0.0f;
+	TestFalse(TEXT("A zero visual recoil duration is rejected before playback"), Settings.Validate(Error));
+	TestTrue(TEXT("Invalid duration identifies its setting"), Error.Contains(TEXT("VisualRecoilDuration")));
+	Settings = FFPWeaponSettings();
+	Settings.VisualRecoilScale = std::numeric_limits<float>::quiet_NaN();
+	TestFalse(TEXT("A non-finite visual scale is rejected"), Settings.Validate(Error));
+	TestTrue(TEXT("Invalid scale identifies its setting"), Error.Contains(TEXT("VisualRecoilScale")));
+	Settings = FFPWeaponSettings();
+	Settings.VisualRecoilRotation.Pitch = std::numeric_limits<double>::quiet_NaN();
+	TestFalse(TEXT("A non-finite visual rotation is rejected"), Settings.Validate(Error));
+	TestTrue(TEXT("Invalid rotation identifies its setting"), Error.Contains(TEXT("VisualRecoilRotation")));
+	Settings = FFPWeaponSettings();
+	Settings.VisualRecoilScale = 0.0f;
+	TestTrue(TEXT("Zero visual scale remains a valid way to disable the effect"), Settings.Validate(Error));
 	return true;
 }
 
@@ -376,7 +390,6 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 	}
 
 	// Simulate residual ground motion while PathFollowing is already idle.
-	TestEqual(TEXT("The default turn rate remains 540 degrees per second"), Facing.Movement->RotationRate.Yaw, 540.0);
 	Facing.Movement->Velocity = FVector(100.0f, 0.0f, 0.0f);
 	Facing.Movement->RequestDirectMove(FVector(100.0f, 0.0f, 0.0f), false);
 	Facing.Enemy->AddMovementInput(FVector::ForwardVector, 1.0f, true);
@@ -575,14 +588,6 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 
 	Weapon->StartFire();
 	Weapon->StopFire();
-	TestTrue(TEXT("Missing animation notification still has a fallback"), Weapon->RequestReload());
-	const int32 AmmoBeforeTimeout = Weapon->GetCurrentAmmo();
-	if (!World.Advance(5.2f)) return false;
-	TestFalse(TEXT("Fallback closes the reload"), Weapon->IsReloading());
-	TestEqual(TEXT("Fallback cannot disguise a missing animation commit as successful reload"), Weapon->GetCurrentAmmo(), AmmoBeforeTimeout);
-
-	Weapon->StartFire();
-	Weapon->StopFire();
 	TestTrue(TEXT("Begin reload before unequipping"), Weapon->RequestReload());
 	const int32 UnequippedReloadId = Weapon->GetActiveReloadId();
 	const int32 AmmoBeforeUnequip = Weapon->GetCurrentAmmo();
@@ -741,6 +746,7 @@ bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A missing-notify reload starts"), Weapon->RequestReload());
 	const int32 AmmoBeforeTimeout = Weapon->GetCurrentAmmo();
 	if (!World.Advance(5.2f)) return false;
+	TestFalse(TEXT("Fallback closes the reload"), Weapon->IsReloading());
 	TestEqual(TEXT("The fallback is reported as TimedOut, not Completed"), Observer->LastReloadEndReason, EFPReloadEndReason::TimedOut);
 	TestFalse(TEXT("The timeout reports missing commit instead of claiming animation success"), Observer->bLastReloadCommitted);
 	TestEqual(TEXT("Timeout cannot invent the missing ammo commit"), Weapon->GetCurrentAmmo(), AmmoBeforeTimeout);

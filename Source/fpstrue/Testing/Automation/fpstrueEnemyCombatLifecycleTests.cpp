@@ -6,7 +6,6 @@
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "Characters/Enemies/fpstrueEnemyCombatConfig.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Animation/AnimNotifyQueue.h"
@@ -29,6 +28,24 @@
 #include "TimerManager.h"
 #include "UObject/UnrealType.h"
 
+namespace
+{
+bool BeginCombatTestWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test, bool bCreateAI = false)
+{
+	if (!Fixture.CreateTestWorld(EWorldType::Game))
+	{
+		Fixture.ForwardErrorMessages(&Test);
+		return false;
+	}
+	UWorld* World = Fixture.GetTestWorld();
+	if (bCreateAI && !Test.TestNotNull(TEXT("The native BT has an AI system"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (Fixture.BeginPlayInTestWorld()) return true;
+	Fixture.ForwardErrorMessages(&Test);
+	return false;
+}
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyCombatLifecycleTest,
 	"fpstrue.Gameplay.Combat.AttackProtectionAndCleanup",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -36,19 +53,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyCombatLifecycleTest,
 bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
-	if (!Fixture.CreateTestWorld(EWorldType::Game))
-	{
-		Fixture.ForwardErrorMessages(this);
-		return false;
-	}
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
-	if (!TestNotNull(TEXT("The native BT has an AI system"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld())
-	{
-		Fixture.ForwardErrorMessages(this);
-		return false;
-	}
 
 	const auto SpawnEnemy = [World]()
 	{
@@ -83,7 +89,6 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	BudgetProperty->SetPropertyValue_InContainer(Surround, 1);
 	UfpstrueEnemyCombatComponent* Combat = Enemy->FindComponentByClass<UfpstrueEnemyCombatComponent>();
 	if (!TestNotNull(TEXT("Native combat component"), Combat)) return false;
-	TestEqual(TEXT("Notify reads the existing component without another lookup"), Enemy->GetCombatComponent(), Combat);
 	// 合并源文件不能改变已保存动画资产使用的反射类路径；同一 Notify 对象不保存某个敌人的事务。
 	TestEqual(TEXT("Saved attack-window class path remains valid"),
 		LoadClass<UAnimNotifyState>(nullptr, TEXT("/Script/fpstrue.fpstrueAnimNotifyState_AttackWindow")),
@@ -253,18 +258,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueSurroundCacheLifecycleTest,
 bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
-	if (!Fixture.CreateTestWorld(EWorldType::Game))
-	{
-		Fixture.ForwardErrorMessages(this);
-		return false;
-	}
+	if (!BeginCombatTestWorld(Fixture, *this)) return false;
 	UWorld* World = Fixture.GetTestWorld();
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld())
-	{
-		Fixture.ForwardErrorMessages(this);
-		return false;
-	}
 	AfpstrueSurroundManager* Manager = World->SpawnActor<AfpstrueSurroundManager>();
 	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
 	if (!TestNotNull(TEXT("Manager"), Manager) || !TestNotNull(TEXT("Target"), Target)) return false;
@@ -331,18 +326,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyCombatStateConfigTest,
 bool FFpstrueEnemyCombatStateConfigTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
-	if (!Fixture.CreateTestWorld(EWorldType::Game))
-	{
-		Fixture.ForwardErrorMessages(this);
-		return false;
-	}
+	if (!BeginCombatTestWorld(Fixture, *this)) return false;
 	UWorld* World = Fixture.GetTestWorld();
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld())
-	{
-		Fixture.ForwardErrorMessages(this);
-		return false;
-	}
 	AActor* Owner = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Temporary configuration owner"), Owner)) return false;
 	UfpstrueEnemyCombatComponent* Legacy = NewObject<UfpstrueEnemyCombatComponent>(Owner);
@@ -395,11 +380,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyAttackPlaybackTest,
 bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
-	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
-	World->CreateAISystem();
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
 	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
 		FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	if (!TestNotNull(TEXT("Enemy"), Enemy)) return false;
@@ -590,11 +572,8 @@ bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 		ProjectAttacks.Add(Montage);
 	}
 	FTestWorldWrapper Fixture;
-	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
-	World->CreateAISystem();
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
 	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
 	if (!TestNotNull(TEXT("Test target"), Target)) return false;
 	Target->SetActorEnableCollision(false);

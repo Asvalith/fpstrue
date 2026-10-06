@@ -7,7 +7,7 @@
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.h"
-#include "Runtime/fpstruePerformanceStats.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/TargetPoint.h"

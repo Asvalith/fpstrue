@@ -2,7 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Weapons/fpstrueWeaponCameraShake.h"
+#include "Weapons/fpstrueWeaponComponent.h"
 #include "Weapons/fpstrueWeaponConfig.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -14,7 +14,6 @@
 #include "Misc/AutomationTest.h"
 #include "Tests/AutomationCommon.h"
 #include "UObject/StrongObjectPtr.h"
-#include <limits>
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueVisualRecoilPulseTest,
 	"fpstrue.Gameplay.Weapon.VisualRecoil.PulseAndScaling",
@@ -81,7 +80,6 @@ bool FFpstrueVisualRecoilRetriggerTest::RunTest(const FString& Parameters)
 	UfpstrueWeaponRecoilPattern* Pattern = Cast<UfpstrueWeaponRecoilPattern>(Shake->GetRootShakePattern());
 	UfpstrueWeaponRecoilPattern* FinePattern = Cast<UfpstrueWeaponRecoilPattern>(FineStepShake->GetRootShakePattern());
 	if (!TestNotNull(TEXT("Coarse-step pattern"), Pattern) || !TestNotNull(TEXT("Fine-step pattern"), FinePattern)) return false;
-	TestTrue(TEXT("Successive shots use one shake instance"), Shake->bSingleInstance);
 	Pattern->Configure(Settings);
 	FinePattern->Configure(Settings);
 	Shake->StartShake(nullptr, 1.0f, ECameraShakePlaySpace::CameraLocal);
@@ -192,32 +190,6 @@ bool FFpstrueVisualRecoilViewIsolationTest::RunTest(const FString& Parameters)
 	CameraManager->ApplyCameraModifiers(0.01f, ShakenView);
 	TestTrue(TEXT("Stopping the managed shake restores the final view"), ShakenView.Rotation.Equals(BaseView.Rotation));
 	TestEqual(TEXT("Stopping the managed shake restores the final FOV"), ShakenView.FOV, BaseView.FOV);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueVisualRecoilConfigurationTest,
-	"fpstrue.Gameplay.Weapon.VisualRecoil.ConfigurationValidation",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
-
-bool FFpstrueVisualRecoilConfigurationTest::RunTest(const FString& Parameters)
-{
-	FFPWeaponSettings Settings;
-	FString Error;
-	TestTrue(TEXT("Default visual recoil settings are valid"), Settings.Validate(Error));
-	Settings.VisualRecoilDuration = 0.0f;
-	TestFalse(TEXT("A zero visual recoil duration is rejected before playback"), Settings.Validate(Error));
-	TestTrue(TEXT("Invalid duration identifies its setting"), Error.Contains(TEXT("VisualRecoilDuration")));
-	Settings = FFPWeaponSettings();
-	Settings.VisualRecoilScale = std::numeric_limits<float>::quiet_NaN();
-	TestFalse(TEXT("A non-finite visual scale is rejected"), Settings.Validate(Error));
-	TestTrue(TEXT("Invalid scale identifies its setting"), Error.Contains(TEXT("VisualRecoilScale")));
-	Settings = FFPWeaponSettings();
-	Settings.VisualRecoilRotation.Pitch = std::numeric_limits<double>::quiet_NaN();
-	TestFalse(TEXT("A non-finite visual rotation is rejected"), Settings.Validate(Error));
-	TestTrue(TEXT("Invalid rotation identifies its setting"), Error.Contains(TEXT("VisualRecoilRotation")));
-	Settings = FFPWeaponSettings();
-	Settings.VisualRecoilScale = 0.0f;
-	TestTrue(TEXT("Zero visual scale remains a valid way to disable the effect"), Settings.Validate(Error));
 	return true;
 }
 

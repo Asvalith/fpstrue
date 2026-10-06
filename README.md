@@ -18,21 +18,22 @@
 - **覆盖 UI、玩法调度与场景渲染的性能优化**：为 UMG 提供事件驱动刷新接口；Gameplay 与 Render 分别评分，通过决策降频、移动分级、Animation Sharing 和阴影/光追预算减少重复工作，战斗时恢复必要更新。有界 Top-K、数据快照和缓冲复用降低调度开销；场景侧结合查询缓冲、反射下采样、静态样条烘焙、TSR 与纹理流送治理，按整帧和尾帧选择方案。具体收益与证据分级见下文。
 - **生命周期与资源清理治理**：死亡、销毁和 EndPlay 共用清理入口，停止 AI、移动和 Timer，释放委托、站位、攻击许可与共享动画注册。弱引用注册表、幂等注销及回调重入保护约束对象失效边界；尸体保留需要的表现，撤销不必要的阴影和光追参与。
 - **配置抽离，便于策划调参与测试**：波次、近战和武器参数集中到配置资产，蓝图选择表现资源；武器首次装备校验并保存配置快照，共享配置不共享弹药等运行状态。性能实验预设和控制开关集中管理，便于调整规模、预算与采集条件，避免修改参数时穿透业务代码。
-- **自动化功能回归与性能测试流程**：43 项 UE Automation 测试及 56 项采集配置检查通过，覆盖射击换弹、配置、AI、生命周期和测试资源释放。性能脚本串联场景准备、预热、采集、有效性校验与报告汇总，记录参数读回和输入指纹；功能回归与实景性能采集分开执行，支持修改后的重复验证。
+- **自动化功能回归与性能测试流程**：46 项 UE Automation 测试及 56 项采集配置检查通过，覆盖射击换弹、配置、AI、生命周期和测试资源释放。性能脚本串联场景准备、预热、采集、有效性校验与报告汇总，记录参数读回和输入指纹；功能回归与实景性能采集分开执行，支持修改后的重复验证。
 
 ## 目录结构
 
 ```text
 Config/                     引擎、输入、碰撞与默认资源配置
 Source/fpstrue/
+  fpstrue.h/.cpp            主模块、共享播放身份与碰撞通道
   Game/                     波次、生成、注册表与结算
   Characters/
     Player/                 玩家控制
     Enemies/                敌人角色、近战组件与战斗配置
       AI/                   Controller、行为树、导航与群体战术资源
       Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
-    Shared/                 生命组件、播放身份与碰撞通道
-  Weapons/                  武器配置、射击、换弹、拾取与动画通知
+    Shared/                 生命组件
+  Weapons/                  武器配置、射击、换弹、视觉后坐力、拾取与动画通知
   Runtime/                  诊断参数快照与业务埋点声明
   Testing/
     Automation/             玩法、算法与生命周期回归
@@ -327,7 +328,7 @@ Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依
 | 玩家控制 | [Character](Source/fpstrue/Characters/Player/fpstrueCharacter.cpp) |
 | 武器、射击与换弹 | [WeaponComponent](Source/fpstrue/Weapons/fpstrueWeaponComponent.cpp) |
 | 通用伤害与生命 | [HealthComponent](Source/fpstrue/Characters/Shared/fpstrueHealthComponent.cpp) |
-| 动作播放身份 | [ActionPlayback](Source/fpstrue/Characters/Shared/fpstrueActionPlayback.h) |
+| 动作播放身份与碰撞通道 | [模块公共定义](Source/fpstrue/fpstrue.h)、[播放身份实现](Source/fpstrue/fpstrue.cpp) |
 | 敌人 AI 与路径请求 | [EnemyAIController](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyAIController.cpp) |
 | 行为树任务与默认树 | [BehaviorTree](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyBehaviorTree.cpp) |
 | 攻击事务与命中窗口 | [EnemyCombatComponent](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.cpp) |
@@ -336,7 +337,7 @@ Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依
 | Top-K 与预算分配 | [SignificanceCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.cpp)、[优先级键与堆](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificance.h) |
 | 动画共享接入 | [AnimationSharingCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.cpp) |
 | 波次、注册表与胜负 | [GameMode](Source/fpstrue/Game/fpstrueGameMode.cpp) |
-| 玩法配置资产 | [WaveConfiguration](Source/fpstrue/Game/fpstrueWaveConfiguration.h)、[EnemyCombatConfig](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatConfig.h)、[WeaponConfig](Source/fpstrue/Weapons/fpstrueWeaponConfig.h) |
+| 玩法配置资产 | [波次配置（GameMode 内）](Source/fpstrue/Game/fpstrueGameMode.h)、[近战配置（CombatComponent 内）](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.h)、[WeaponConfig](Source/fpstrue/Weapons/fpstrueWeaponConfig.h) |
 | 场景静态化与资产核验 | [样条烘焙](Tools/Assets/BakeStaticLandscapeSplines.py)、[烘焙核验](Tools/Assets/VerifyBakedLandscapeSplines.py)、[资产审计工具](Tools/Assets/) |
 | 引擎渲染默认配置 | [DefaultEngine.ini](Config/DefaultEngine.ini) |
 | 测试与性能采集 | [Automation](Source/fpstrue/Testing/Automation/)、[Benchmarks](Source/fpstrue/Testing/Benchmarks/)、[Tools](Tools/) |
@@ -357,7 +358,7 @@ UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation �
 
 自动化测试覆盖行为树结构与运行生命周期、真实树资产的编辑器连线、开局回调重入、配置选源、攻击阶段与清理、射击换弹、严格弱序、Top-K 等价性、共享注销、渲染档位迟滞，以及附件和尸体的渲染资格。真实资产测试仅在对应 Content 齐备时运行。NullRHI 验证代码与组件属性，画面和 GPU 性能另做实景回归。
 
-完整开发环境验证：Development Editor 与 Development Game 编译通过；**43 项 UE 自动化测试全部通过，0 失败、0 未运行**，其中 17 项包含测试夹具或故障注入警告。回归覆盖武器配置合法性、独立快照与重新装备、真实蓝图换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 请求归属、生命值通知队列、受击解除 Tick 冷却、CSV 迟到启动与暂停超时。报告位于 `Saved/Automation/WeaponConfiguration/`，日志为 `Saved/Logs/WeaponConfig*.log`。`BP_Weapon`、`enemy_BP` 已迁移到明确动作编号的播放入口；迁移备份和旧回归报告继续保留，职责及边界见[代码职责与动作生命周期](Docs/CODE_OWNERSHIP.md)。NullRHI 功能测试不代替画面与性能验收。
+开发环境验证：Development Editor 编译通过；**46 项 UE 自动化测试全部通过，0 失败、0 未运行**，其中 17 项包含测试夹具或故障注入警告。回归覆盖武器配置合法性、独立快照与重新装备、真实蓝图换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 请求归属、生命值通知队列、受击解除 Tick 冷却、CSV 迟到启动与暂停超时。报告位于 `Saved/Automation/TestCleanup/`，日志为 `Saved/Logs/TestCleanupAutomation.log`。`BP_Weapon`、`enemy_BP` 已迁移到明确动作编号的播放入口；迁移备份和旧回归报告继续保留，职责及边界见[代码职责与动作生命周期](Docs/CODE_OWNERSHIP.md)。NullRHI 功能测试不代替画面与性能验收。
 
 实际关卡的 160 敌人功能烟测通过，组件属性读回为 5 个投影 Mesh、12 个光追 Mesh，与当次预算一致。日志为 `Saved/Logs/StructureCleanup2160Smoke.log`。关卡中 `TargetPoint_5` 仍有生成失败日志，队列通过换点重试补齐目标数量；此轮使用 NullRHI 和测试生命值，仅核对玩法流程与预算下发，不产生 GPU 性能结论。
 

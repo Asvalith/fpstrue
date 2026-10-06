@@ -3,7 +3,7 @@
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Runtime/fpstrueRuntimeOptions.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Shared/fpstrueCollisionChannels.h"
+#include "fpstrue.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"

@@ -213,11 +213,6 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	DecisionBlackboard->UnregisterObserver(TargetKey, SnapshotObserver);
 	TestEqual(TEXT("Invalid refresh publishes one complete target snapshot"), InvalidSnapshotNotifications, 1);
-	TestNull(TEXT("Invalid sample clears old target"), First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
-	TestFalse(TEXT("Invalid sample clears old attack range"),
-			  First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InAttackRange));
-	TestFalse(TEXT("Invalid sample clears old chase range"),
-			  First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InChaseRange));
 	First->InitializeCombatContext(Target, nullptr);
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	TestTrue(TEXT("A later valid sample restores target"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));

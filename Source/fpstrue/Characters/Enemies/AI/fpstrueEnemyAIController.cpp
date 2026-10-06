@@ -9,7 +9,6 @@
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "Runtime/fpstruePerformanceStats.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "AITypes.h"
 #include "Engine/World.h"

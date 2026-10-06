@@ -21,7 +21,7 @@
 | `Runtime/fpstrueRuntimeOptions` | 运行时诊断开关和策略覆盖的只读启动快照 | 不启动测试、不锁输入、不写 CSV |
 | `Testing/Benchmarks/` | 实验阶段、测试条件、采集资源及产物校验 | 不成为正常玩法读取配置的依赖 |
 
-GameMode 仍负责创建和挂接 BenchmarkRunner，这是组合入口。正常玩法类只依赖 `Runtime` 参数；`BenchmarkConfig` 复用同一份运行时快照，额外保存预热、时长、人数和输出等采集条件，不重复解析诊断开关。业务埋点保留在业务函数，声明移至 `Runtime/fpstruePerformanceStats.h`。
+GameMode 仍负责创建和挂接 BenchmarkRunner，这是组合入口。正常玩法类只依赖 `Runtime` 参数；`BenchmarkRunner` 内的 `FFPBenchmarkConfig` 复用同一份运行时快照，额外保存预热、时长、人数和输出等采集条件，不重复解析诊断开关。业务埋点保留在业务函数，声明移至 `Runtime/fpstrueRuntimeOptions.h`。
 
 后续精简以本轮开始时的工作区为基准：`Source/fpstrue` 的 C++/头文件/构建规则共 14,517 → 13,813 行、60 → 54 个文件（含注释和空行）。其中玩法及运行时代码减少 212 行，测试器减少 109 行，移除一次性迁移工具 415 行；回归测试增加 32 行。合并输入绑定与动作重置、波次配置解析、攻击空间采样和采集轮询；保留身份、重入及资源归还检查，补充其职责、时序与清理注释，没有新增管理层。
 

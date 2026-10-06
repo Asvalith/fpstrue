@@ -1,7 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "Characters/Enemies/fpstrueEnemyCombatConfig.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
@@ -10,7 +9,7 @@
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifyQueue.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Runtime/fpstruePerformanceStats.h"
+#include "Runtime/fpstrueRuntimeOptions.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
