@@ -16,6 +16,9 @@
 #include "Kismet/GameplayStatics.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavFilters/NavigationQueryFilter.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AISenseConfig_Sight.h"
+#include "Perception/AISense_Sight.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 
@@ -48,6 +51,35 @@ CSV_DEFINE_CATEGORY(fpstrueAI, true);
 AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	UAIPerceptionComponent* Perception = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("EnemyPerception"));
+	SetPerceptionComponent(*Perception);
+	UAISenseConfig_Sight* Sight = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("EnemySight"));
+	Sight->SightRadius = 4500.0f;
+	Sight->LoseSightRadius = 5000.0f;
+	Sight->PeripheralVisionAngleDegrees = 80.0f;
+	Sight->SetMaxAge(0.0f); // 搜索期限由 Controller 管理，不与刺激老化混用。
+	Sight->DetectionByAffiliation.bDetectEnemies = true;
+	Sight->DetectionByAffiliation.bDetectFriendlies = false;
+	Sight->DetectionByAffiliation.bDetectNeutrals = false;
+	Perception->ConfigureSense(*Sight);
+	Perception->SetDominantSense(UAISense_Sight::StaticClass());
+	Perception->OnTargetPerceptionUpdated.AddDynamic(this, &ThisClass::HandleTargetPerceptionUpdated);
+}
+
+ETeamAttitude::Type AfpstrueEnemyAIController::GetTeamAttitudeTowards(const AActor& Other) const
+{
+	// 本 Demo 只发现玩家；在 Sight 建立查询对之前排除其他敌人，避免群体互相做视觉测试。
+	return Other.IsA<AfpstrueCharacter>() ? ETeamAttitude::Hostile : ETeamAttitude::Neutral;
+}
+
+void AfpstrueEnemyAIController::GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const
+{
+	if (const APawn* ViewedPawn = GetPawn())
+	{
+		OutLocation = ViewedPawn->GetPawnViewLocation();
+		OutRotation = ViewedPawn->GetActorRotation(); // 视觉跟随真实朝向，不使用到位转向时缓存的 ControlRotation。
+	}
+	else Super::GetActorEyesViewPoint(OutLocation, OutRotation);
 }
 
 void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
@@ -86,6 +118,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 	}
 
 	SurroundManager = ResolveSurroundManager();
+	GetPerceptionComponent()->RequestStimuliListenerUpdate();
 	StartBehaviorLogic();
 }
 
@@ -116,9 +149,16 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 	{
 		return; // 清理期间不接受外部回调重新注入上下文。
 	}
-	if (TargetCharacter != NewTargetCharacter || SurroundManager != NewSurroundManager)
+	// 无效/死亡目标统一视为撤销；恢复追击必须由同一个上下文入口重新注入。
+	if (!IsTargetUsable(NewTargetCharacter)) NewTargetCharacter = nullptr;
+	const bool bContextChanged = TargetCharacter != NewTargetCharacter || SurroundManager != NewSurroundManager;
+	if (bContextChanged)
 	{
 		CommandPhase = ECommandPhase::ChangingContext;
+		bTargetVisible = false;
+		TargetForgetTime = 0.0;
+		LastKnownTargetLocation = FVector::ZeroVector;
+		GetPerceptionComponent()->ForgetAll();
 		if (ControlledEnemy != nullptr && ControlledEnemy->GetCombatComponent() != nullptr)
 		{
 			ControlledEnemy->GetCombatComponent()->ResetCombat();
@@ -134,6 +174,12 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 	TargetCharacter = NewTargetCharacter;
 	SurroundManager = NewSurroundManager;
 	CommandPhase = IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() ? ECommandPhase::Accepting : ECommandPhase::Stopped;
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), AcceptsCombatCommands() && TargetCharacter != nullptr);
+	if (TargetCharacter == nullptr)
+	{
+		SetAIState(ControlledEnemy != nullptr && ControlledEnemy->IsDead() ? EFPEnemyAIState::Dead : EFPEnemyAIState::Idle);
+	}
+	if (bContextChanged) RequestBehaviorDecision();
 }
 
 void AfpstrueEnemyAIController::ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick)
@@ -151,12 +197,46 @@ void AfpstrueEnemyAIController::SetSignificanceDecisionMultiplier(float NewMulti
 	const float SafeMultiplier = FMath::IsFinite(NewMultiplier) ? FMath::Max(1.0f, NewMultiplier) : 1.0f;
 	const bool bPromoted = SafeMultiplier < SignificanceDecisionMultiplier;
 	SignificanceDecisionMultiplier = SafeMultiplier;
-	if (bPromoted && BrainComponent != nullptr && BrainComponent->IsRunning())
+	if (bPromoted)
 	{
 		// 提升玩法重要性时取消旧的远距等待；进入近战不能继续耗尽原 Background 长间隔。
-		NextBehaviorDecisionDelay = FMath::Max(0.01f, AttackDecisionInterval);
-		BrainComponent->RestartLogic();
+		RequestBehaviorDecision();
 	}
+}
+
+void AfpstrueEnemyAIController::RequestBehaviorDecision()
+{
+	if (AcceptsCombatCommands() && BrainComponent != nullptr && BrainComponent->IsRunning())
+	{
+		FAIMessage::Send(BrainComponent, FAIMessage(FPEnemyDecisionWake, this, true));
+	}
+}
+
+void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
+{
+	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead() ||
+		Actor != TargetCharacter || !IsTargetUsable(TargetCharacter) ||
+		Stimulus.Type != UAISense::GetSenseID<UAISense_Sight>()) return;
+	const bool bWasVisible = bTargetVisible;
+	if (Stimulus.WasSuccessfullySensed())
+	{
+		bTargetVisible = true;
+		LastKnownTargetLocation = Stimulus.StimulusLocation;
+		TargetForgetTime = 0.0;
+	}
+	else if (bWasVisible)
+	{
+		// 先撤销实时目标资格，再停止旧攻击；停止 Montage 的回调也不能继续攻击隐藏玩家。
+		bTargetVisible = false;
+		TargetForgetTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.0f, TargetMemorySeconds);
+		DecisionContext = FDecisionContext{};
+		if (UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent()) Combat->ResetCombat();
+		if (!AcceptsCombatCommands() || Actor != TargetCharacter) return;
+		ReleaseSurroundSlot();
+		StopMovementIfNeeded();
+		// 失败刺激的位置可能来自当前真实目标；不覆盖最后一次成功发现的位置，也不反复续期。
+	}
+	if (bWasVisible != bTargetVisible) RequestBehaviorDecision();
 }
 
 // ==================== 启动唯一行为树 ====================
@@ -215,9 +295,11 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 		if (!IsTargetUsable(TargetCharacter))
 		{
 			// 平时使用 GameMode 注入的玩家；仅在缓存目标失效时安全解析，不在正常路径反复查询。
-			InitializeCombatContext(Cast<AfpstrueCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)), SurroundManager);
-			bHasTarget = IsTargetUsable(TargetCharacter);
+			// 此处只撤销失效上下文，不从全局玩家索引重新绑定，避免清空目标后又偷偷恢复追击。
+			InitializeCombatContext(nullptr, SurroundManager);
+			bHasTarget = false;
 		}
+		bHasTarget = bHasTarget && (bTargetVisible || GetWorld()->GetTimeSeconds() < TargetForgetTime);
 	}
 
 	// 一轮只计算一次二维距离平方，并派生攻击/追击两个布尔条件，避免各分支重复开方和取位置。
@@ -225,22 +307,29 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	// 先用廉价距离筛选，再检查高度和环境；楼上/墙后目标应走导航分支而不是原地重复尝试攻击。
 	if (bHasTarget)
 	{
-		if (const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent())
+		if (bTargetVisible) LastKnownTargetLocation = GetPerceptionComponent()->GetActorLocation(*TargetCharacter);
+		const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
+		if (bTargetVisible && Combat != nullptr)
 		{
 			DecisionContext.bInAttackRange = Combat->SampleAttackReach(DecisionContext.DistanceSquared, DecisionContext.EffectiveAttackRange);
 		}
 		else
 		{
-			DecisionContext.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), TargetCharacter->GetActorLocation());
+			DecisionContext.DistanceSquared = FVector::DistSquared2D(ControlledEnemy->GetActorLocation(), LastKnownTargetLocation);
 		}
 		DecisionContext.bInChaseRange = DecisionContext.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
 	}
 
 	NextBehaviorDecisionDelay =
 		FMath::Max(0.01f, bHasTarget ? GetNextDecisionInterval(DecisionContext) : IdleDecisionInterval * SignificanceDecisionMultiplier);
+	if (bHasTarget && !bTargetVisible)
+	{
+		NextBehaviorDecisionDelay = FMath::Min(NextBehaviorDecisionDelay, static_cast<float>(TargetForgetTime - GetWorld()->GetTimeSeconds()));
+	}
 	// 自定义树观察者也只能在完整的一轮快照发布后收到通知，避免读取半更新条件。
 	DecisionBlackboard.PauseObserverNotifications();
-	DecisionBlackboard.SetValueAsObject(FPEnemyBlackboard::TargetActor, bHasTarget ? TargetCharacter.Get() : nullptr);
+	// 搜索只提供位置记忆；不把隐藏玩家的 Actor 暴露给自定义 Blackboard 消费者。
+	DecisionBlackboard.SetValueAsObject(FPEnemyBlackboard::TargetActor, bHasTarget && bTargetVisible ? TargetCharacter.Get() : nullptr);
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::HasTarget, bHasTarget);
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::Attacking, bHasTarget && ControlledEnemy->IsAttacking());
 	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InAttackRange, DecisionContext.bInAttackRange);
@@ -318,6 +407,8 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	{
 		return false;
 	}
+	// 失去视觉后只允许 Pursue 使用位置记忆，旧快照不能继续攻击或消费实时包围槽。
+	if (!bTargetVisible && (Action != EFPEnemyBehaviorAction::Pursue || GetWorld()->GetTimeSeconds() >= TargetForgetTime)) return false;
 
 	switch (Action)
 	{
@@ -381,21 +472,18 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 		SetAIState(EFPEnemyAIState::Chase);
 		// 没有专属槽位时，使用共享目标快照进行低成本追击。
 		// 没有可用环形槽位时追逐 Manager 的共享玩家位置；Manager 失效才直接读取玩家 Transform。
-		FVector SharedGoal;
-		if (SurroundManager != nullptr && SurroundManager->GetSharedTargetSnapshot(SharedGoal))
+		// 感知约束：隐藏时或共享快照不可用时改用成功视觉记录，不直接读取玩家当前 Transform。
+		FVector Goal = LastKnownTargetLocation;
+		float AcceptanceRadius = MoveAcceptanceRadius;
+		if (bTargetVisible && SurroundManager != nullptr && SurroundManager->GetSharedTargetSnapshot(Goal))
 		{
 			const float SafePursuitAcceptanceRangeMultiplier =
 				FMath::IsFinite(PursuitAcceptanceRangeMultiplier) ? FMath::Clamp(PursuitAcceptanceRangeMultiplier, 0.0f, 1.0f) : 0.8f;
 			const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
 			const float ConfiguredAttackRange = Combat != nullptr ? Combat->GetConfiguredAttackRange() : 0.0f;
-			const float PursuitAcceptanceRadius =
-				FMath::Max(MoveAcceptanceRadius, ConfiguredAttackRange * SafePursuitAcceptanceRangeMultiplier);
-			MoveToGoal(SharedGoal, PursuitAcceptanceRadius, false);
+			AcceptanceRadius = FMath::Max(MoveAcceptanceRadius, ConfiguredAttackRange * SafePursuitAcceptanceRangeMultiplier);
 		}
-		else
-		{
-			MoveToGoal(TargetCharacter->GetActorLocation(), MoveAcceptanceRadius, false);
-		}
+		MoveToGoal(Goal, AcceptanceRadius, false);
 		return true;
 	}
 	default:
@@ -562,6 +650,12 @@ void AfpstrueEnemyAIController::OnMoveCompleted(FAIRequestID RequestID, const FP
 
 bool AfpstrueEnemyAIController::FaceTargetAtRest()
 {
+	if (!bTargetVisible)
+	{
+		StopMovementIfNeeded(true);
+		ApplyRotationPolicy(EFPEnemyAIState::Idle);
+		return false; // 到最后已知位置后等待重新发现，不再转向隐藏玩家。
+	}
 	// 停路和停速度不是同一个动作：加速度寻路模式可能在 StopMovement 后继续制动。
 	// 只在地面进入站定朝向；不清空腾空角色的重力速度，也不把跳跃当成到位。
 	UCharacterMovementComponent* Movement = ControlledEnemy != nullptr ? ControlledEnemy->GetCharacterMovement() : nullptr;
@@ -582,7 +676,7 @@ bool AfpstrueEnemyAIController::FaceTargetAtRest()
 bool AfpstrueEnemyAIController::UpdateFacingTarget()
 {
 	// 仅站定/攻击时离散刷新期望朝向，移动阶段的连续转向交给 CharacterMovement。
-	if (ControlledEnemy == nullptr || !IsTargetUsable(TargetCharacter))
+	if (ControlledEnemy == nullptr || GetTargetCharacter() == nullptr)
 	{
 		return false;
 	}
@@ -639,6 +733,11 @@ void AfpstrueEnemyAIController::StopAI()
 {
 	if (CommandPhase == ECommandPhase::Stopping) return;
 	CommandPhase = ECommandPhase::Stopping;
+	bTargetVisible = false;
+	TargetForgetTime = 0.0;
+	LastKnownTargetLocation = FVector::ZeroVector;
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), false);
+	GetPerceptionComponent()->ForgetAll();
 	// 先停行为树，再停止导航和清理资源；否则下一次 BT 唤醒可能重新发起 MoveTo。
 	// 敌人死亡、解除占有和对局结束都走同一收口，确保路径、行为树、槽位和攻击名额不会只清理一部分。
 	if (BrainComponent != nullptr)

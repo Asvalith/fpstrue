@@ -60,6 +60,7 @@ EBTNodeResult::Type UfpstrueBTTask_DecisionWait::ExecuteTask(UBehaviorTreeCompon
 	// 每轮使用采样阶段根据最新距离和状态计算的间隔；首次执行则使用 Controller 的随机错峰延迟。
 	// 无控制器时仍等待，避免错误树在同一帧无限失败重启。
 	SetNextTickTime(NodeMemory, Controller != nullptr ? Controller->GetBehaviorDecisionDelay() : 1.0f);
+	WaitForMessage(OwnerComp, FPEnemyDecisionWake);
 	return EBTNodeResult::InProgress;
 }
 

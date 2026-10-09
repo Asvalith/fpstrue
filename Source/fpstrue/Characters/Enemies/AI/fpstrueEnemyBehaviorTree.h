@@ -32,6 +32,8 @@ namespace FPEnemyBlackboard
 	inline const FName InChaseRange(TEXT("InChaseRange"));
 }
 
+inline const FName FPEnemyDecisionWake(TEXT("FPEnemyDecisionWake"));
+
 /** 一轮只采样一次目标与距离；后续装饰器仅读 Blackboard，不重复查询 Actor。 */
 UCLASS()
 class FPSTRUE_API UfpstrueBTTask_SampleDecision : public UBTTaskNode

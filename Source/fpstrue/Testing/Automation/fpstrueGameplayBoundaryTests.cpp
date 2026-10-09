@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Testing/Automation/fpstrueReloadReentryObserver.h"
+#include "Testing/Automation/fpstrueTestObservers.h"
 #include "Weapons/fpstrueWeaponComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Animation/AnimInstance.h"
@@ -82,6 +82,8 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "GameFramework/WorldSettings.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AISense_Sight.h"
 #include "ReferenceSkeleton.h"
 #include "Tests/AutomationCommon.h"
 #include "UObject/StrongObjectPtr.h"
@@ -90,6 +92,18 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 
 namespace FpstrueGameplayBoundaryTests
 {
+bool ReportVisibleEnemyTarget(AfpstrueEnemyAIController* Controller, AfpstrueCharacter* Target, FAutomationTestBase& Test)
+{
+	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
+	if (!Test.TestNotNull(TEXT("Facing fixture has the real sight listener"), Perception)) return false;
+	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(),
+		Controller->GetPawn()->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	Stimulus.SetWantsNotifyOnlyOnValueChange(false);
+	Perception->RegisterStimulus(Target, Stimulus);
+	Perception->ProcessStimuli();
+	return true;
+}
+
 // FTestWorldWrapper is the engine's own temporary-world fixture. Its destructor
 // ends play, removes its world context, destroys its world and restores GFrameCounter.
 // No editor map, project GameMode, blueprint, asset file or global CVar is modified.
@@ -204,6 +218,7 @@ struct FEnemyFacingFixture
 		}
 		Controller->Possess(Enemy);
 		Controller->InitializeCombatContext(Target, nullptr);
+		if (!ReportVisibleEnemyTarget(Controller, Target, Test)) return false;
 		// Possess restarts Character movement; set the ground-mode fixture afterwards.
 		Movement->SetMovementMode(MOVE_Walking);
 		return Test.TestTrue(TEXT("The native target is in attack range"), Enemy->IsTargetInAttackRange());

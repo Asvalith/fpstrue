@@ -5,6 +5,7 @@
 #include "Misc/AutomationTest.h"
 #include "Characters/Enemies/AI/fpstrueEnemyBehaviorTree.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "BehaviorTree/BehaviorTree.h"
@@ -15,12 +16,20 @@
 #include "BehaviorTree/Composites/BTComposite_Sequence.h"
 #include "BehaviorTree/Composites/BTComposite_Selector.h"
 #include "BrainComponent.h"
+#include "Components/BoxComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameModeBase.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
+#include "InputAction.h"
+#include "Kismet/GameplayStatics.h"
 #include "Tests/AutomationCommon.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AIPerceptionSystem.h"
+#include "Perception/AISense_Sight.h"
+#include "UObject/UnrealType.h"
 
 #if WITH_EDITOR
 #include "BehaviorTreeGraphNode.h"
@@ -28,8 +37,24 @@
 #include "EdGraph/EdGraphPin.h"
 #include "Engine/Blueprint.h"
 #include "Misc/PackageName.h"
-#include "UObject/UnrealType.h"
 #endif
+
+namespace
+{
+bool ReportBehaviorSightStimulus(AfpstrueEnemyAIController* Controller, AActor* Target, bool bSensed,
+	const FVector& StimulusLocation, FAutomationTestBase& Test)
+{
+	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
+	if (!Test.TestNotNull(TEXT("Behavior fixture has the real sight listener"), Perception)) return false;
+	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), bSensed ? 1.0f : 0.0f, StimulusLocation,
+		Controller->GetPawn()->GetActorLocation(), bSensed ? FAIStimulus::SensingSucceeded : FAIStimulus::SensingFailed);
+	// 重复失败也经过组件回调，才能验证 Controller 不会延长已经开始的记忆期限。
+	Stimulus.SetWantsNotifyOnlyOnValueChange(false);
+	Perception->RegisterStimulus(Target, Stimulus);
+	Perception->ProcessStimuli();
+	return true;
+}
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeStructureTest, "fpstrue.AI.BehaviorTree.DefaultStructure",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -172,6 +197,17 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 		!TestNotNull(TEXT("Second Blackboard"), Second->GetBlackboardComponent()))
 		return false;
 	TestTrue(TEXT("Possess starts the behavior brain"), First->GetBrainComponent()->IsRunning());
+	TestNull(TEXT("Combat context injection alone does not discover a player"), First->GetTargetCharacter());
+	const float OriginalIdleInterval = First->IdleDecisionInterval;
+	First->IdleDecisionInterval = 10.0f;
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestFalse(TEXT("Unseen injected player is absent from the decision snapshot"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	TestFalse(TEXT("Unseen player cannot start an attack"), First->ExecuteBehaviorAction(EFPEnemyBehaviorAction::TryAttack));
+	TestTrue(TEXT("Player affiliation is hostile before sight queries are built"),
+		First->GetTeamAttitudeTowards(*Target) == ETeamAttitude::Hostile);
+	TestTrue(TEXT("Other enemies are excluded from hostile sight queries"),
+		First->GetTeamAttitudeTowards(*SecondEnemy) == ETeamAttitude::Neutral);
 	for (int32 Frame = 0; Frame < 40; ++Frame)
 	{
 		if (!Fixture.TickTestWorld(0.01f))
@@ -180,6 +216,13 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 			return false;
 		}
 	}
+	TestFalse(TEXT("The running tree also keeps an undiscovered player absent"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
+	if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+	TestTrue(TEXT("Sight message wakes a ten-second idle wait for the next tree sample"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	First->IdleDecisionInterval = OriginalIdleInterval;
 	TestTrue(TEXT("Actual tree sample populated target"),
 			 First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor) == Target);
 	TestFalse(TEXT("Another controller does not inherit target"),
@@ -187,11 +230,90 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Far target chooses Idle branch"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InChaseRange));
 	TestTrue(TEXT("Idle leaf executed"), First->GetAIState() == EFPEnemyAIState::Idle);
 
+	AfpstrueSurroundManager* SharedManager = World->SpawnActor<AfpstrueSurroundManager>();
+	if (!TestNotNull(TEXT("Search fixture has a live shared target manager"), SharedManager)) return false;
+	First->InitializeCombatContext(Target, SharedManager);
+	First->TargetMemorySeconds = 0.25f;
+	Target->SetActorLocation(FVector(1200.0f, 0.0f, 0.0f));
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	const FVector RememberedLocation = First->LastKnownTargetLocation;
+	const FVector HiddenLocation(300000.0f, 50000.0f, 0.0f);
+	Target->SetActorLocation(HiddenLocation);
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestTrue(TEXT("Sampling before a new sight result cannot copy an unseen target movement"),
+		First->LastKnownTargetLocation.Equals(RememberedLocation));
+	SharedManager->SetTargetCharacter(Target);
+	FVector SharedLocation;
+	TestTrue(TEXT("Manager independently knows the hidden player's new position"),
+		SharedManager->GetSharedTargetSnapshot(SharedLocation) && SharedLocation.Equals(HiddenLocation));
+	if (!ReportBehaviorSightStimulus(First, Target, false, HiddenLocation, *this)) return false;
+	const double OriginalForgetTime = First->TargetForgetTime;
+	TestFalse(TEXT("Sight loss immediately revokes live target visibility"), First->bTargetVisible);
+	TestNull(TEXT("Gameplay consumers cannot obtain the hidden player"), First->GetTargetCharacter());
+	TestTrue(TEXT("Failure stimulus does not replace the last successful location"),
+		First->LastKnownTargetLocation.Equals(RememberedLocation));
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestTrue(TEXT("Sight loss retains a bounded search decision"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	TestNull(TEXT("Search snapshot does not expose the hidden player's Actor"),
+		First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
+	TestFalse(TEXT("Search snapshot cannot reuse a previous attack-range decision"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InAttackRange));
+	TestTrue(TEXT("Search distance is measured against the frozen location"),
+		FMath::IsNearlyEqual(First->DecisionContext.DistanceSquared,
+			static_cast<float>(FVector::DistSquared2D(FirstEnemy->GetActorLocation(), RememberedLocation))));
+	for (const EFPEnemyBehaviorAction Action : {EFPEnemyBehaviorAction::TryAttack, EFPEnemyBehaviorAction::SustainAttack,
+		EFPEnemyBehaviorAction::MaintainCombatPosition, EFPEnemyBehaviorAction::Surround})
+	{
+		TestFalse(TEXT("Hidden player cannot drive attacks or shared surround actions"), First->ExecuteBehaviorAction(Action));
+	}
+	First->SetControlRotation(FRotator(0.0f, 37.0f, 0.0f));
+	const FRotator RotationBeforeSearch = First->GetControlRotation();
+	TestFalse(TEXT("Hidden player cannot update the live facing direction"), First->UpdateFacingTarget());
+	TestFalse(TEXT("Arriving at remembered position cannot face the hidden player"), First->FaceTargetAtRest());
+	TestTrue(TEXT("Search preserves control rotation instead of looking at the live target"),
+		First->GetControlRotation().Equals(RotationBeforeSearch));
+	TestTrue(TEXT("Search can request pursuit of its remembered position"), First->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Pursue));
+	// 临时世界没有 NavMesh；真实寻路失败记录携带提交目标，可以区分记忆位置与 Manager 的实时位置。
+	TestTrue(TEXT("Search navigation uses remembered location instead of Manager snapshot"),
+		First->MoveFailures[0].Goal.Location.Equals(RememberedLocation));
+	if (!Fixture.TickTestWorld(0.1f)) { Fixture.ForwardErrorMessages(this); return false; }
+	if (!ReportBehaviorSightStimulus(First, Target, false, HiddenLocation + FVector(10000.0f, 0.0f, 0.0f), *this)) return false;
+	TestEqual(TEXT("Repeated failure cannot renew the search deadline"), First->TargetForgetTime, OriginalForgetTime);
+	TestTrue(TEXT("Repeated failure cannot move the search location"), First->LastKnownTargetLocation.Equals(RememberedLocation));
+	if (!Fixture.TickTestWorld(0.2f)) { Fixture.ForwardErrorMessages(this); return false; }
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestFalse(TEXT("Expired memory removes the search decision"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	TestFalse(TEXT("Expired memory cannot submit another pursuit"), First->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Pursue));
+	Target->SetActorLocation(FVector(1300.0f, 0.0f, 0.0f));
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestTrue(TEXT("Rediscovery restores the real target and its newly seen position"),
+		First->GetTargetCharacter() == Target && First->LastKnownTargetLocation.Equals(Target->GetActorLocation()));
+	TestEqual(TEXT("Rediscovery cancels the old memory deadline"), First->TargetForgetTime, 0.0);
+	First->InitializeCombatContext(Target, nullptr);
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
+
 	// 单轮采样由一个入口构建；目标失效时不能留下上轮的近战条件。
 	Target->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	TestTrue(TEXT("Near target enters attack range"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InAttackRange));
+	APlayerController* LocalPlayer = World->SpawnActor<APlayerController>();
+	if (!TestNotNull(TEXT("A local player remains present while combat target is revoked"), LocalPlayer)) return false;
+	for (const FName ActionName : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+		TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+	{
+		FObjectPropertyBase* ActionProperty = FindFProperty<FObjectPropertyBase>(Target->GetClass(), ActionName);
+		if (!TestNotNull(TEXT("The native local player has its input action property"), ActionProperty)) return false;
+		ActionProperty->SetObjectPropertyValue_InContainer(Target, NewObject<UInputAction>(Target));
+	}
+	LocalPlayer->Possess(Target);
+	First->AIState = EFPEnemyAIState::Chase;
 	First->InitializeCombatContext(nullptr, nullptr);
+	TestTrue(TEXT("Revoking a target immediately returns the enemy to Idle"), First->GetAIState() == EFPEnemyAIState::Idle);
 	UBlackboardComponent* DecisionBlackboard = First->GetBlackboardComponent();
 	const FBlackboard::FKey TargetKey = DecisionBlackboard->GetKeyID(FPEnemyBlackboard::TargetActor);
 	const float ExpectedIdleDecisionDelay = FMath::Max(0.01f, First->IdleDecisionInterval * First->SignificanceDecisionMultiplier);
@@ -213,15 +335,61 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	DecisionBlackboard->UnregisterObserver(TargetKey, SnapshotObserver);
 	TestEqual(TEXT("Invalid refresh publishes one complete target snapshot"), InvalidSnapshotNotifications, 1);
+	First->RefreshBehaviorDecision(*DecisionBlackboard);
+	TestNull(TEXT("A later decision does not silently reacquire the local player"), First->GetTargetCharacter());
+	TestFalse(TEXT("A local player alone cannot restore a revoked combat target"), DecisionBlackboard->GetValueAsBool(FPEnemyBlackboard::HasTarget));
 	First->InitializeCombatContext(Target, nullptr);
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestFalse(TEXT("Reinjecting the same player starts an undiscovered context"),
+		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	TestTrue(TEXT("A later valid sample restores target"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	UGameplayStatics::ApplyDamage(Target, 10000.0f, nullptr, nullptr, nullptr);
+	if (!TestTrue(TEXT("The local target actually died"), Target->IsDead())) return false;
+	First->RefreshBehaviorDecision(*DecisionBlackboard);
+	TestNull(TEXT("A dead local player is removed from the combat context"), First->GetTargetCharacter());
+	TestFalse(TEXT("Death clears the Blackboard target condition"), DecisionBlackboard->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	TestTrue(TEXT("Target loss idles the enemy without permanently stopping its tree"),
+		First->GetAIState() == EFPEnemyAIState::Idle && First->GetBrainComponent()->IsRunning());
+	AfpstrueCharacter* Replacement = World->SpawnActor<AfpstrueCharacter>();
+	if (!TestNotNull(TEXT("An explicitly injected replacement target exists"), Replacement)) return false;
+	Replacement->SetActorEnableCollision(false);
+	Replacement->SetActorLocation(FVector(100000.0f, 0.0f, 0.0f));
+	Replacement->GetCharacterMovement()->SetComponentTickEnabled(false);
+	First->InitializeCombatContext(Replacement, nullptr);
+	if (!ReportBehaviorSightStimulus(First, Replacement, true, Replacement->GetActorLocation(), *this)) return false;
+	First->RefreshBehaviorDecision(*DecisionBlackboard);
+	TestTrue(TEXT("Sight discovery restores the explicitly injected replacement target"),
+		DecisionBlackboard->GetValueAsObject(FPEnemyBlackboard::TargetActor) == Replacement);
+	if (!TestTrue(TEXT("The replacement target is actually destroyed"), Replacement->Destroy())) return false;
+	First->RefreshBehaviorDecision(*DecisionBlackboard);
+	TestNull(TEXT("A destroyed target is removed from the combat context"), First->GetTargetCharacter());
+	for (const FName Key :
+		{FPEnemyBlackboard::HasTarget, FPEnemyBlackboard::Attacking, FPEnemyBlackboard::InAttackRange, FPEnemyBlackboard::InChaseRange})
+	{
+		TestFalse(TEXT("A destroyed target leaves no decision flags"), DecisionBlackboard->GetValueAsBool(Key));
+	}
 	AfpstrueEnemyAIController* UnpossessedController = World->SpawnActor<AfpstrueEnemyAIController>();
 	if (!TestNotNull(TEXT("Unpossessed controller"), UnpossessedController)) return false;
 	TestTrue(TEXT("Missing controlled pawn is an invalid move context"),
 		UnpossessedController->MoveToGoal(FVector::ZeroVector, 15.0f, true) ==
 		AfpstrueEnemyAIController::EMoveGoalResult::InvalidContext);
+	AfpstrueCharacter* StoppedProbe = World->SpawnActor<AfpstrueCharacter>();
+	if (!TestNotNull(TEXT("A queued sight event has a live target when AI stops"), StoppedProbe)) return false;
+	StoppedProbe->SetActorEnableCollision(false);
+	StoppedProbe->GetCharacterMovement()->SetComponentTickEnabled(false);
+	First->InitializeCombatContext(StoppedProbe, nullptr);
+	UAIPerceptionComponent* FirstPerception = First->GetPerceptionComponent();
+	FAIStimulus QueuedSight(*GetDefault<UAISense_Sight>(), 1.0f, StoppedProbe->GetActorLocation(),
+		FirstEnemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	FirstPerception->RegisterStimulus(StoppedProbe, QueuedSight);
 	First->StopAI();
+	// ForgetAll 不清空已排队刺激；真实组件仍派发它，停止状态必须拒绝恢复旧命令入口。
+	FirstPerception->ProcessStimuli();
+	TestFalse(TEXT("A late queued sight event cannot restore stopped visibility"), First->bTargetVisible);
+	TestEqual(TEXT("A late queued sight event cannot create a stopped memory deadline"), First->TargetForgetTime, 0.0);
+	TestTrue(TEXT("A late queued sight event cannot restore a stopped search location"), First->LastKnownTargetLocation.IsZero());
 	TestFalse(TEXT("StopAI stops behavior brain"), First->GetBrainComponent()->IsRunning());
 	TestNull(TEXT("StopAI clears blackboard target"), First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
 	for (const FName Key :
@@ -235,6 +403,69 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestNull(TEXT("A new Possess does not retain old combat target"), First->GetTargetCharacter());
 	TestNull(TEXT("Reused Blackboard does not retain old target"),
 			 First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemySightOcclusionTest, "fpstrue.AI.Perception.SightOcclusionAndFacing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFPEnemySightOcclusionTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Sight test world has an AI system"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
+		AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("Real sight observer Pawn"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AActor* Wall = World->SpawnActor<AActor>();
+	if (!TestNotNull(TEXT("Real sight controller"), Controller) || !TestNotNull(TEXT("Real sight target"), Target)
+		|| !TestNotNull(TEXT("Sight blocking actor"), Wall)) return false;
+	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	Target->SetActorLocation(FVector(1000.0f, 0.0f, 0.0f));
+	UBoxComponent* WallBox = NewObject<UBoxComponent>(Wall);
+	Wall->AddInstanceComponent(WallBox);
+	Wall->SetRootComponent(WallBox);
+	WallBox->SetBoxExtent(FVector(40.0f, 300.0f, 300.0f));
+	WallBox->SetCollisionResponseToAllChannels(ECR_Block);
+	WallBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WallBox->RegisterComponent();
+	Wall->SetActorLocation(FVector(500.0f, 0.0f, 100.0f));
+	Controller->Possess(Enemy);
+	Controller->InitializeCombatContext(Target, nullptr);
+	Controller->SetControlRotation(FRotator(0.0f, 180.0f, 0.0f));
+	UAIPerceptionSystem* PerceptionSystem = UAIPerceptionSystem::GetCurrent(World);
+	if (!TestNotNull(TEXT("Real sight system"), PerceptionSystem)) return false;
+	PerceptionSystem->RegisterSourceForSenseClass(UAISense_Sight::StaticClass(), *Target);
+	const auto TickUntilVisible = [&](bool bExpectedVisible)
+	{
+		for (int32 Frame = 0; Frame < 100; ++Frame)
+		{
+			if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+			if ((Controller->GetTargetCharacter() == Target) == bExpectedVisible) return true;
+		}
+		return false;
+	};
+	// 不注入 Stimulus：真实 Sight 必须根据 Pawn 当前朝向、Visibility 线段和组件事件建立可见状态。
+	if (!TestTrue(TEXT("Open sight uses the actual Pawn facing, not the controller's desired yaw"), TickUntilVisible(true))) return false;
+	WallBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	if (!TestTrue(TEXT("A real blocking wall removes live target visibility"), TickUntilVisible(false))) return false;
+	TestNull(TEXT("Wall-hidden Actor is unavailable to gameplay consumers"), Controller->GetTargetCharacter());
+	WallBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (!TestTrue(TEXT("Removing the wall rediscovers the target"), TickUntilVisible(true))) return false;
+	Enemy->SetActorRotation(FRotator(0.0f, 180.0f, 0.0f));
+	if (!TestTrue(TEXT("Turning the actual Pawn away loses a target outside its sight cone"), TickUntilVisible(false))) return false;
+	Enemy->SetActorRotation(FRotator::ZeroRotator);
+	TestTrue(TEXT("Turning back rediscovers a target through the real sight system"), TickUntilVisible(true));
+	Controller->StopAI();
 	return true;
 }
 

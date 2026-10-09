@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Testing/Automation/fpstrueGameModeTestObserver.h"
+#include "Testing/Automation/fpstrueTestObservers.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Game/fpstrueGameMode.h"
 #include "Kismet/GameplayStatics.h"

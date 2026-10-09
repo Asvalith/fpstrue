@@ -11,6 +11,7 @@ class AfpstrueEnemyCharacter;
 class AfpstrueSurroundManager;
 class UBehaviorTree;
 class UBlackboardComponent;
+struct FAIStimulus;
 enum class EFPEnemyBehaviorAction : uint8;
 
 // 当前行为的只读表现状态；行为选择由 BehaviorTree 拥有，Animation Sharing 只读消费。
@@ -44,6 +45,8 @@ public:
 	virtual void OnUnPossess() override;
 	// 世界退出时停止行为树并清理管理器引用。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual ETeamAttitude::Type GetTeamAttitudeTowards(const AActor& Other) const override;
+	virtual void GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const override;
 
 	// 由 GameMode 注入玩家目标和全局包围管理器，避免每个 AI 自行查找。
 	void InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager);
@@ -65,7 +68,10 @@ public:
 	float GetBehaviorDecisionDelay() const { return NextBehaviorDecisionDelay; }
 
 	// 战斗目标只由 Controller 持有，EnemyCharacter 通过只读接口使用，避免双份状态漂移。
-	AfpstrueCharacter* GetTargetCharacter() const { return TargetCharacter; }
+	AfpstrueCharacter* GetTargetCharacter() const
+	{
+		return AcceptsCombatCommands() && bTargetVisible && IsTargetUsable(TargetCharacter) ? TargetCharacter.Get() : nullptr;
+	}
 	// 攻击开始时捕获许可来源，结束时不再从可能已变化的 Controller 上反查。
 	AfpstrueSurroundManager* GetSurroundManager() const { return SurroundManager; }
 	// Animation Sharing 等只读消费者通过这里获取当前表现状态。
@@ -124,6 +130,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.1"))
 	float FailedMoveRetryDelay = 0.5f;
 
+	// 丢失视觉后只追最后已知位置；期限由决策采样检查，不新增搜索 Tick 或 Timer。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0"))
+	float TargetMemorySeconds = 5.0f;
+
 private:
 	friend class FFPEnemyBehaviorTreeLifecycleTest;
 	friend class FFPEnemyMoveRequestOwnershipTest;
@@ -160,6 +170,10 @@ private:
 
 	// 启动唯一决策驱动；默认树和外部树不能与旧 Timer/FSM 并行运行。
 	void StartBehaviorLogic();
+	// 消息只排队唤醒当前等待节点，不从感知回调中重入行为树。
+	void RequestBehaviorDecision();
+	UFUNCTION()
+	void HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus);
 
 	// 根据状态、距离和 Significance 返回下一次决策间隔。
 	float GetNextDecisionInterval(const FDecisionContext& Context) const;
@@ -198,6 +212,11 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueCharacter> TargetCharacter;
+
+	// 玩家引用是候选身份，不代表知道其位置；丢失时不再读取真实 Transform 或共享目标快照。
+	FVector LastKnownTargetLocation = FVector::ZeroVector;
+	double TargetForgetTime = 0.0;
+	bool bTargetVisible = false;
 
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;

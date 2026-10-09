@@ -1,4 +1,4 @@
-#include "Testing/Automation/fpstrueHealthMutationTestObserver.h"
+#include "Testing/Automation/fpstrueTestObservers.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Kismet/GameplayStatics.h"
 
