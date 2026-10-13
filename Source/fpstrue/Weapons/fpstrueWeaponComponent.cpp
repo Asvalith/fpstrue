@@ -62,11 +62,13 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 
 // ==================== Equipment ====================
 
+// 装备前返回所选配置以供预览，首次装备后返回冻结快照，避免共享资产改动影响当前动作。
 const FFPWeaponSettings& UfpstrueWeaponComponent::GetWeaponSettings() const
 {
 	return !bAmmoInitialized && WeaponConfiguration != nullptr ? WeaponConfiguration->Settings : Settings;
 }
 
+// 完整装备入口：校验角色、配置和挂点，挂接成功后登记双方关系，重装不补满弹药。
 bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 {
 	// 任何前置条件失败都不修改双方状态，挂接成功后才提交关系；重新装备不补满弹药。
@@ -112,6 +114,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		return false;
 	}
 
+	// ★【重要边界】[状态提交] 先完成配置校验和挂接，再提交装备关系；重装只复用已有弹药，不重复初始化。
 	// 所有外部操作成功后才提交角色引用和运行时状态，失败路径不会留下半装备状态。
 	Character = TargetCharacter;
 	if (!bAmmoInitialized)
@@ -123,6 +126,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	}
 	SetActionState(EFPWeaponActionState::Ready);
 	TargetCharacter->SetEquippedWeaponComponent(this);
+	// ★【重要边界】[回调重入] 装备通知会同步执行监听者；返回后必须复核双方关系，不能沿用广播前的成功判断。
 	// 装备广播可同步卸下/销毁角色；只有双方关系仍成立才发布弹药或让拾取物消费成功。
 	if (!IsOperational() || Character.Get() != TargetCharacter)
 	{
@@ -133,6 +137,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	return IsOperational() && Character.Get() == TargetCharacter;
 }
 
+// 幂等卸下武器：先停止本组件动作，再释放双方关系，回调不能重复进入卸下事务。
 void UfpstrueWeaponComponent::DetachWeapon()
 {
 	if (bDetaching) return;
@@ -149,6 +154,7 @@ void UfpstrueWeaponComponent::DetachWeapon()
 
 // ==================== Action State / Rules ====================
 
+// 动作状态唯一切换入口；清理离开状态的计时与播放记录，并推进版本使旧回调失效。
 void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
 {
 	// 禁用清理独立于上一个动作；重复 Disable 也清理残留，不在各生命周期出口复制规则。
@@ -177,10 +183,12 @@ void UfpstrueWeaponComponent::SetActionState(EFPWeaponActionState NewState)
 	}
 	bReloadAmmoCommitted = false;
 	ReloadPlaybacks.Reset();
+	// ★【重要边界】[异步身份] 每次真实状态切换推进版本；已清计时器不能代替回调自身的版本校验。
 	ActionState = NewState;
 	++ActionRevision;
 }
 
+// 判断武器是否仍与存活角色正确装备且未禁用；生命周期失效与临时输入中断分开处理。
 bool UfpstrueWeaponComponent::IsOperational() const
 {
 	// 汇总装备关系与角色生命周期；已经卸下的组件不能再接受射击或装填。
@@ -190,11 +198,13 @@ bool UfpstrueWeaponComponent::IsOperational() const
 		&& OwningCharacter->GetEquippedWeaponComponent() == this;
 }
 
+// 核对状态、动作版本和装备资格，防止同步通知返回后旧调用栈继续推进新动作。
 bool UfpstrueWeaponComponent::IsCurrentAction(EFPWeaponActionState ExpectedState, uint32 ExpectedRevision) const
 {
 	return ActionState == ExpectedState && ActionRevision == ExpectedRevision && IsOperational();
 }
 
+// 在装备资格之外检查角色输入和组件内部迁移保护，拒绝清理或播放变化期间的新动作。
 bool UfpstrueWeaponComponent::CanAcceptOwnerInput() const
 {
 	return IsOperational() && Character->CanAcceptGameplayInput() && !bInterruptingOwnerInput && !bChangingReloadPlayback;
@@ -202,6 +212,7 @@ bool UfpstrueWeaponComponent::CanAcceptOwnerInput() const
 
 // ==================== Fire System ====================
 
+// 仅从 Ready 接纳开火输入，先提交 Firing 状态，再执行第一发。
 void UfpstrueWeaponComponent::StartFire()
 {
 	// StartFire 只提交 Ready -> Firing；首次和后续每一发的有效性统一由 Fire 校验。
@@ -214,6 +225,7 @@ void UfpstrueWeaponComponent::StartFire()
 	Fire();
 }
 
+// 只结束正在进行的连射；松开扳机不能解除换弹或重新启用已禁用武器。
 void UfpstrueWeaponComponent::StopFire()
 {
 	// 只退出 Firing；松开扳机不能解除 Reloading/Disabled。
@@ -223,6 +235,7 @@ void UfpstrueWeaponComponent::StopFire()
 	}
 }
 
+// 一次射击的提交入口：校验射速与装备，先扣弹并命中结算，再发事件和安排下一发。
 void UfpstrueWeaponComponent::Fire()
 {
 	// 每发射击的提交顺序固定为“校验 -> 扣弹 -> 表现/伤害”，保证一次请求最多结算一次弹药。
@@ -270,6 +283,7 @@ void UfpstrueWeaponComponent::Fire()
 	LastShotTimeSeconds = CurrentTimeSeconds;
 
 	const uint32 FiringRevision = ActionRevision;
+	// ★【重要边界】[状态提交] 扣弹和本发命中先成为事实，再通知表现；回调可以中断后续连射，不能撤销这一发。
 	// 先完成扣弹与命中结算，再通知 HUD/开火表现；监听者重入不能取消一发已扣弹的命中。
 	--CurrentAmmo;
 	FireLineTrace(*World, *OwningCharacter, *Camera);
@@ -282,6 +296,7 @@ void UfpstrueWeaponComponent::Fire()
 	// 这是已发生的一发，而不是继续开火的许可；命中/弹药回调中断动作也不能吞掉事实事件。
 	OnWeaponFirePerformed.Broadcast();
 
+	// ★【重要边界】[回调重入] 回调可能卸枪、死亡或开始新动作；旧射击栈只有身份仍匹配才安排下一发。
 	// 回调之后只校验一次动作归属；旧射击不能为新动作换弹或重设连射 Timer。
 	if (!IsCurrentAction(EFPWeaponActionState::Firing, FiringRevision)) return;
 	// 最后一发完成命中和表现后再退出射击状态，避免 Firing 残留。
@@ -295,6 +310,7 @@ void UfpstrueWeaponComponent::Fire()
 	}
 }
 
+// 按上一发的实际时间安排剩余冷却；回调保存动作版本，取消后的旧计时不能继续开枪。
 void UfpstrueWeaponComponent::ScheduleNextShot()
 {
 	if (UWorld* World = GetWorld())
@@ -310,6 +326,7 @@ void UfpstrueWeaponComponent::ScheduleNextShot()
 	}
 }
 
+// 空仓共用入口：尝试进入统一换弹流程，不能换弹时停止连射。
 void UfpstrueWeaponComponent::HandleEmptyMagazine()
 {
 	if (!RequestReload())
@@ -318,6 +335,7 @@ void UfpstrueWeaponComponent::HandleEmptyMagazine()
 	}
 }
 
+// 按当前瞄准和连射散布执行一条 Hitscan，结算部位伤害及物理冲量，再报告弹道结果。
 void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& OwningCharacter, UCameraComponent& Camera)
 {
 	// 根据瞄准状态和连续射击次数计算散布，并在同一入口完成单射线查询。
@@ -378,6 +396,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
  * 因此开始事件之前必须先设置状态和 Timer；Finish 在提交事件返回后还要确认动作版本未变。
  */
 
+// 接纳手动或空仓换弹：建立事务编号与兜底计时，再请求蓝图播放，不立即装弹。
 bool UfpstrueWeaponComponent::RequestReload()
 {
 	// Request 只开启换弹事务，不立刻搬运弹药；真正提交点由动画 Notify 决定，使数值变化与装填动作对齐。
@@ -389,6 +408,7 @@ bool UfpstrueWeaponComponent::RequestReload()
 	}
 
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
+	// ★【重要边界】[状态提交] 换弹先建立动作锁、事务编号和超时，再触发瞄准退出及蓝图播放，禁止暴露半初始化状态。
 	SetActionState(EFPWeaponActionState::Reloading);
 	ActiveReloadId = ActiveReloadId == MAX_int32 ? 1 : ActiveReloadId + 1;
 	const int32 RequestedReloadId = ActiveReloadId;
@@ -412,17 +432,20 @@ bool UfpstrueWeaponComponent::RequestReload()
 	return true;
 }
 
+// 诊断旧的无身份装弹调用；保留反射兼容入口，但拒绝替旧通知借用当前换弹编号。
 bool UfpstrueWeaponComponent::CommitReload()
 {
 	UE_LOG(LogTemp, Warning, TEXT("Legacy identityless CommitReload rejected on %s. Use a saved ReloadId or native ReloadCommit notify."), *GetPathName());
 	return false;
 }
 
+// 核对当前 Reloading 状态及事务编号；装备资格在具体播放或提交入口另行检查。
 bool UfpstrueWeaponComponent::IsCurrentReload(int32 ReloadId) const
 {
 	return ReloadId != INDEX_NONE && IsReloading() && ActiveReloadId == ReloadId;
 }
 
+// 显式播放并绑定本次换弹的手臂或武器 Montage；失败结束事务，较长播放延长兜底等待。
 bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* Montage, float PlayRate)
 {
 	if (!IsCurrentReload(ReloadId) || !IsOperational() || bChangingReloadPlayback) return false;
@@ -437,6 +460,7 @@ bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshCom
 		return false;
 	}
 	// 保留原蓝图的同组互斥：UE 的 true 停同一 Montage Group，不停其他组的表现。
+	// ★【重要边界】[回调重入] 播放会打断旧 Montage 并触发回调；随后绑定再次校验本次事务，不仅判断播放返回值。
 	const float Duration = Anim->Montage_Play(Montage, PlayRate, EMontagePlayReturnType::Duration, 0.0f, true);
 	if (Duration <= 0.0f || !BindReloadMontage(ReloadId, PlaybackMesh, Montage))
 	{
@@ -454,6 +478,7 @@ bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshCom
 	return true;
 }
 
+// 登记明确的活动播放实例并接管结束委托；同 Mesh 已有不同播放时拒绝覆盖。
 bool UfpstrueWeaponComponent::BindReloadMontage(int32 ReloadId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* Montage)
 {
 	if (!IsCurrentReload(ReloadId) || !IsOperational() || !IsValid(PlaybackMesh)
@@ -470,6 +495,7 @@ bool UfpstrueWeaponComponent::BindReloadMontage(int32 ReloadId, USkeletalMeshCom
 	return true;
 }
 
+// 处理本次已绑定实例的结束：任一中断取消换弹，最后一个自然结束时完成换弹。
 void UfpstrueWeaponComponent::HandleReloadPlaybackEnded(UAnimMontage*, bool bInterrupted,
 	int32 ReloadId, TWeakObjectPtr<USkeletalMeshComponent> PlaybackMesh, int32 InstanceId)
 {
@@ -508,20 +534,24 @@ void UfpstrueAnimNotify_ReloadCommit::Notify(USkeletalMeshComponent* MeshComp, U
 	}
 }
 
+// 保留分支点的原始 Montage 实例编号，再转入与普通 Notify 共用的装弹校验。
 void UfpstrueAnimNotify_ReloadCommit::BranchingPointNotify(FBranchingPointNotifyPayload& Payload)
 {
+	// ★【重要边界】[异步身份] 分支点必须传递原始播放实例编号；装填的即时执行不等于可以省略来源校验。
 	// UE 的默认桥接会丢弃 MontageInstanceID；显式携带，Queued/BranchingPoint 使用同一身份校验。
 	FAnimNotifyEventReference EventReference(Payload.NotifyEvent, Payload.SequenceAsset);
 	EventReference.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(Payload.MontageInstanceID);
 	Notify(Payload.SkelMeshComponent, Payload.SequenceAsset, EventReference);
 }
 
+// 返回动画编辑器显示名称，不读取或修改换弹事务。
 FString UfpstrueAnimNotify_ReloadCommit::GetNotifyName_Implementation() const
 {
 	// 为动画编辑器提供可读名称，不参与运行时换弹状态判断。
 	return TEXT("Reload Commit");
 }
 
+// 先核对 Notify 的 Mesh、AnimInstance 与播放实例，匹配后才提交当前换弹编号。
 bool UfpstrueWeaponComponent::CommitReloadFromNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference)
 {
 	const bool bMatchesPlayback = ReloadPlaybacks.ContainsByPredicate([this, PlaybackMesh, &EventReference](const FFPActionPlayback& Playback)
@@ -531,8 +561,10 @@ bool UfpstrueWeaponComponent::CommitReloadFromNotify(USkeletalMeshComponent* Pla
 	return bMatchesPlayback && CommitReloadForTransaction(ActiveReloadId);
 }
 
+// 按弹匣缺口与备弹量转移一次弹药；先标记已提交再通知 HUD，防止回调重复装弹。
 bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 {
+	// ★【重要边界】[结算去重] 当前事务、装备资格和单次提交标记共同保护装弹；重复通知不能再次搬运备弹。
 	// bReloadAmmoCommitted 是单次提交保护：同一轮换弹的重复 Notify 只会第一次搬运弹药。
 	if (!IsCurrentReload(ReloadId) || bReloadAmmoCommitted || !IsOperational())
 	{
@@ -549,26 +581,31 @@ bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 	return true;
 }
 
+// 诊断旧的无身份完成调用；正常结束必须来源于已绑定实例或保存的事务编号。
 void UfpstrueWeaponComponent::FinishReload()
 {
 	UE_LOG(LogTemp, Warning, TEXT("Legacy identityless FinishReload rejected on %s. Use PlayReloadMontage or a saved ReloadId."), *GetPathName());
 }
 
+// 同步取消当前换弹；延迟回调应使用保存编号的 CancelReloadForTransaction。
 void UfpstrueWeaponComponent::CancelReload()
 {
 	CancelReloadForTransaction(GetActiveReloadId());
 }
 
+// 请求正常完成指定换弹，统一入口可补交尚未提交的弹药并清理动作。
 void UfpstrueWeaponComponent::FinishReloadForTransaction(int32 ReloadId)
 {
 	EndReload(ReloadId, EFPReloadEndReason::Completed);
 }
 
+// 请求取消指定换弹；旧编号无效，取消不补弹也不撤销已提交弹药。
 void UfpstrueWeaponComponent::CancelReloadForTransaction(int32 ReloadId)
 {
 	EndReload(ReloadId, EFPReloadEndReason::Cancelled);
 }
 
+// 统一收口换弹完成、中断、超时和禁用；失效旧事务并停止旧播放后再发布结束事件。
 void UfpstrueWeaponComponent::EndReload(int32 ReloadId, EFPReloadEndReason Reason)
 {
 	// 取消只收尾：装填帧之前不补弹，装填帧之后保留已转移的弹药。
@@ -581,6 +618,7 @@ void UfpstrueWeaponComponent::EndReload(int32 ReloadId, EFPReloadEndReason Reaso
 	}
 	const bool bCommitted = bReloadAmmoCommitted;
 	const TArray<FFPActionPlayback, TInlineAllocator<2>> EndedPlaybacks = ReloadPlaybacks;
+	// ★【重要边界】[生命周期] 先失效旧状态，再停止其动画，最后广播结束；Stop 触发的旧回调不能再次结算换弹。
 	SetActionState(Reason != EFPReloadEndReason::Disabled && IsOperational()
 		? EFPWeaponActionState::Ready : EFPWeaponActionState::Disabled);
 	{
@@ -594,6 +632,7 @@ void UfpstrueWeaponComponent::EndReload(int32 ReloadId, EFPReloadEndReason Reaso
 
 // ==================== Recoil System ====================
 
+// 应用本发受限控制后坐力及独立画面脉冲，再建立真实游戏时间驱动的恢复计时。
 void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 {
 	// 本发后坐力先累加到受限范围，再启动固定频率的恢复 Timer；瞄准时使用较小倍率。
@@ -638,6 +677,7 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 	}
 }
 
+// 按计时回调之间的实际游戏时间逐步抵消累计后坐力，装备失效或恢复完成时停止。
 void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 {
 	// 每次 Timer 回调只恢复一小步，并把相邻两次累计值的差量写入 Controller 视角。
@@ -668,6 +708,7 @@ void UfpstrueWeaponComponent::UpdateRecoilRecovery()
 	}
 }
 
+// 清除控制后坐力恢复计时和累计量，不负责停止其他来源的镜头效果。
 void UfpstrueWeaponComponent::ClearRecoilState()
 {
 	// 停止恢复 Timer 并归零累计量，供恢复完成、角色死亡和组件退出共同调用。
@@ -681,6 +722,7 @@ void UfpstrueWeaponComponent::ClearRecoilState()
 	LastRecoilRecoveryTimeSeconds = 0.0;
 }
 
+// 只停止本武器保存的画面脉冲，保留受击等其他来源的 CameraShake。
 void UfpstrueWeaponComponent::StopVisualRecoil()
 {
 	if (UCameraShakeBase* Shake = VisualRecoilShake.Get())
@@ -692,6 +734,7 @@ void UfpstrueWeaponComponent::StopVisualRecoil()
 
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+// 配置单实例视觉震动和自定义 Pattern，让连发重触发而不是无限叠加震动层。
 UfpstrueWeaponCameraShake::UfpstrueWeaponCameraShake(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -699,6 +742,7 @@ UfpstrueWeaponCameraShake::UfpstrueWeaponCameraShake(const FObjectInitializer& O
 	SetRootShakePattern(CreateDefaultSubobject<UfpstrueWeaponRecoilPattern>(TEXT("WeaponRecoilPattern")));
 }
 
+// 复制当前武器的视觉峰值与时长，保持画面表现和控制后坐力、散射各自独立。
 void UfpstrueWeaponRecoilPattern::Configure(const FFPWeaponSettings& Settings)
 {
 	// 武器首次装备已校验配置。这里仅复制视觉参数，不能读取/修改散布或控制后坐力累计值。
@@ -707,12 +751,14 @@ void UfpstrueWeaponRecoilPattern::Configure(const FFPWeaponSettings& Settings)
 	Duration = Settings.VisualRecoilDuration;
 }
 
+// 告知引擎使用自定义时长；脉冲由本 Pattern 的经过时间与完成判断自行收尾。
 void UfpstrueWeaponRecoilPattern::GetShakePatternInfoImpl(FCameraShakeInfo& OutInfo) const
 {
 	// 时长由每件武器的配置决定，脉冲自行计时和收尾，避免再叠一层引擎淡入淡出。
 	OutInfo.Duration = FCameraShakeDuration::Custom();
 }
 
+// 重触发时从当前偏移继续脉冲，新播放从零开始；交替侧倾不扰动子弹的随机序列。
 void UfpstrueWeaponRecoilPattern::StartShakePatternImpl(const FCameraShakePatternStartParams& Params)
 {
 	// 重触发从当前偏移冲向本发峰值，不先跳回零；新实例/回收实例从零开始。
@@ -726,6 +772,7 @@ void UfpstrueWeaponRecoilPattern::StartShakePatternImpl(const FCameraShakePatter
 	Side = -Side;
 }
 
+// 前段快速冲向峰值、后段平滑回正，仅向最终画面输出旋转与 FOV 偏移。
 void UfpstrueWeaponRecoilPattern::UpdateShakePatternImpl(const FCameraShakePatternUpdateParams& Params, FCameraShakePatternUpdateResult& OutResult)
 {
 	if (bStopped) return;
@@ -750,6 +797,7 @@ void UfpstrueWeaponRecoilPattern::UpdateShakePatternImpl(const FCameraShakePatte
 	OutResult.FOV = CurrentFOV;
 }
 
+// 强制停止脉冲并归零视觉偏移，供死亡、卸下与控制权迁移清理使用。
 void UfpstrueWeaponRecoilPattern::StopShakePatternImpl(const FCameraShakePatternStopParams& Params)
 {
 	// 仅供死亡、卸下、失去控制等强制中断；正常松开扳机让最后一发自行回正。
@@ -760,14 +808,17 @@ void UfpstrueWeaponRecoilPattern::StopShakePatternImpl(const FCameraShakePattern
 
 // ==================== 生命周期结束与公共清理 ====================
 
+// 组件退出时先阻止新动作，通过完整卸枪入口清理计时和装备关系，再执行父类退出。
 void UfpstrueWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// ★【重要边界】[生命周期] 先拒绝新动作，再走完整卸枪清理；只清 Timer 不能解除双方装备关系和视觉状态。
 	// 组件退出前清理所有 Timer，并通知角色解除装备关系，避免留下跨生命周期的回调和悬空关系。
 	bEndingPlay = true;
 	DetachWeapon();
 	Super::EndPlay(EndPlayReason);
 }
 
+// 死亡或卸下时永久禁用动作；若正在换弹，携带 Disabled 原因走统一结束入口。
 void UfpstrueWeaponComponent::DisableWeapon()
 {
 	// 死亡、卸下和 EndPlay 共用强制中断；先禁用，再清理，后续回调不能恢复 Ready。
@@ -779,6 +830,7 @@ void UfpstrueWeaponComponent::DisableWeapon()
 	SetActionState(EFPWeaponActionState::Disabled);
 }
 
+// 控制权迁移只终止旧输入的持续动作与后坐力；角色仍有效时保留装备和弹药。
 void UfpstrueWeaponComponent::InterruptOwnerInput()
 {
 	AfpstrueCharacter* OwningCharacter = Character.Get();
@@ -788,6 +840,7 @@ void UfpstrueWeaponComponent::InterruptOwnerInput()
 		return;
 	}
 	// Character 自己管理 ADS/冲刺输入资格；武器只拥有本模块清理期间的重入边界。
+	// ★【重要边界】[生命周期] 临时丢失输入只清持续动作，不销毁装备或弹药；角色真正失效才转入永久禁用。
 	// 不能直接让 IsOperational 返回 false，否则 CancelReload 会把临时中断误变成永久 Disabled。
 	TGuardValue<bool> InputTransitionGuard(bInterruptingOwnerInput, true);
 	StopFire();
@@ -796,6 +849,7 @@ void UfpstrueWeaponComponent::InterruptOwnerInput()
 	CancelReload();
 }
 
+// 发布已经提交的弹药快照，HUD 和蓝图只观察结果，不在此重复结算。
 void UfpstrueWeaponComponent::BroadcastAmmoChanged()
 {
 	// 弹药状态只由 WeaponComponent 写入；角色、HUD 和蓝图通过该委托读取同一份结果。

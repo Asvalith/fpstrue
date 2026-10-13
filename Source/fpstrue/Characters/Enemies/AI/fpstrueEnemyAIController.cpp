@@ -48,6 +48,7 @@ CSV_DEFINE_CATEGORY(fpstrueAI, true);
 
 // ==================== 生命周期入口与外部上下文 ====================
 
+// 创建视觉感知组件并关闭 Controller Actor Tick；高层决策由行为树间隔任务驱动。
 AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -66,12 +67,14 @@ AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 	Perception->OnTargetPerceptionUpdated.AddDynamic(this, &ThisClass::HandleTargetPerceptionUpdated);
 }
 
+// 提供视觉系统的阵营筛选：只发现玩家，避免大量敌人之间建立无用的感知查询对。
 ETeamAttitude::Type AfpstrueEnemyAIController::GetTeamAttitudeTowards(const AActor& Other) const
 {
 	// 本 Demo 只发现玩家；在 Sight 建立查询对之前排除其他敌人，避免群体互相做视觉测试。
 	return Other.IsA<AfpstrueCharacter>() ? ETeamAttitude::Hostile : ETeamAttitude::Neutral;
 }
 
+// 输出实际 Pawn 视点与朝向，防止视觉范围跟随陈旧的 Controller 转向目标。
 void AfpstrueEnemyAIController::GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const
 {
 	if (const APawn* ViewedPawn = GetPawn())
@@ -82,6 +85,7 @@ void AfpstrueEnemyAIController::GetActorEyesViewPoint(FVector& OutLocation, FRot
 	else Super::GetActorEyesViewPoint(OutLocation, OutRotation);
 }
 
+// 接管有效敌人后重建请求归属、恢复 RVO 并启动行为树；死亡或错误 Pawn 走统一停止出口。
 void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 {
 	// Possess 是 AI 生命周期入口：解析受控敌人、清空移动缓存，再启动错峰的行为树。
@@ -95,6 +99,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 		return;
 	}
 
+	// 新 Pawn 从空闲上下文开始，旧请求的完成回调不能接管新的移动缓存。
 	AIState = EFPEnemyAIState::Idle;
 	CommandPhase = ECommandPhase::Accepting;
 	DecisionContext = FDecisionContext{};
@@ -122,6 +127,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 	StartBehaviorLogic();
 }
 
+// 解除占有前停掉决策和攻击、归还群体资源，再释放本次 Pawn 的强引用。
 void AfpstrueEnemyAIController::OnUnPossess()
 {
 	// 先停树和导航并归还群体资源，再清空引用，防止下一次 Possess 消费旧目标。
@@ -134,6 +140,7 @@ void AfpstrueEnemyAIController::OnUnPossess()
 	Super::OnUnPossess();
 }
 
+// 世界退出复用 StopAI 清理，并释放行为树模板引用。
 void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 退出世界前停止行为树并归还群体资源；Pawn 自身销毁和关卡切换都走同一清理路径。
@@ -142,6 +149,7 @@ void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason
 	Super::EndPlay(EndPlayReason);
 }
 
+// 注入候选玩家和共享管理器；上下文变化时先撤销旧攻击与移动，再按存活状态开放新命令。
 void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager)
 {
 	// Controller 只保存敌人决策上下文；共享包围目标由 GameMode 统一初始化。
@@ -154,6 +162,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 	const bool bContextChanged = TargetCharacter != NewTargetCharacter || SurroundManager != NewSurroundManager;
 	if (bContextChanged)
 	{
+		// ★【重要边界】[状态提交] 先关闭旧上下文的命令入口，再停止攻击和导航，清理回调不能重启旧行为。
 		CommandPhase = ECommandPhase::ChangingContext;
 		bTargetVisible = false;
 		TargetForgetTime = 0.0;
@@ -166,11 +175,13 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 		ReleaseSurroundSlot();
 		StopMovementIfNeeded();
 		DecisionContext = FDecisionContext{};
+		// ★【重要边界】[回调重入] 清理可同步触发 StopAI；返回后确认仍在换上下文，才允许发布新目标。
 		if (CommandPhase != ECommandPhase::ChangingContext)
 		{
 			return; // 同步回调调用了 StopAI，外层不能把已经停止的上下文重新激活。
 		}
 	}
+	// 旧上下文清理完成后才发布新引用；持有玩家身份不代表已经通过视觉获得位置。
 	TargetCharacter = NewTargetCharacter;
 	SurroundManager = NewSurroundManager;
 	CommandPhase = IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() ? ECommandPhase::Accepting : ECommandPhase::Stopped;
@@ -182,6 +193,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 	if (bContextChanged) RequestBehaviorDecision();
 }
 
+// 仅用于性能消融，改变 PathFollowing 的组件更新开关，不改正式玩法策略。
 void AfpstrueEnemyAIController::ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick)
 {
 	// 仅供破坏性诊断测量 PathFollowing 成本上界；正式玩法和完整基线不会传入关闭开关。
@@ -191,6 +203,7 @@ void AfpstrueEnemyAIController::ApplyBenchmarkPathFollowingTickOverride(bool bDi
 	}
 }
 
+// 安全应用玩法重要性倍率；频率提升时唤醒旧等待，非紧急行为才会被降频。
 void AfpstrueEnemyAIController::SetSignificanceDecisionMultiplier(float NewMultiplier)
 {
 	// Significance 只放大非紧急状态的下一轮决策间隔，倍率最低为 1，不能反向提高频率。
@@ -204,6 +217,7 @@ void AfpstrueEnemyAIController::SetSignificanceDecisionMultiplier(float NewMulti
 	}
 }
 
+// 向运行中的行为树发送唤醒消息，不在外部回调里同步执行整轮决策。
 void AfpstrueEnemyAIController::RequestBehaviorDecision()
 {
 	if (AcceptsCombatCommands() && BrainComponent != nullptr && BrainComponent->IsRunning())
@@ -212,6 +226,7 @@ void AfpstrueEnemyAIController::RequestBehaviorDecision()
 	}
 }
 
+// 更新当前玩家的可见性；丢失视觉只保留最后成功发现的位置，并及时停止攻击和包围。
 void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
 	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead() ||
@@ -226,6 +241,7 @@ void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAI
 	}
 	else if (bWasVisible)
 	{
+		// ★【重要边界】[状态提交] 丢失视觉先撤销实时目标资格，只保留最后成功发现的位置；失败刺激不更新隐藏玩家坐标。
 		// 先撤销实时目标资格，再停止旧攻击；停止 Montage 的回调也不能继续攻击隐藏玩家。
 		bTargetVisible = false;
 		TargetForgetTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.0f, TargetMemorySeconds);
@@ -241,6 +257,7 @@ void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAI
 
 // ==================== 启动唯一行为树 ====================
 
+// 校验配置树及黑板契约，必要时回退原生默认树；随机首轮等待用于分散群体决策峰值。
 void AfpstrueEnemyAIController::StartBehaviorLogic()
 {
 	UWorld* World = GetWorld();
@@ -273,6 +290,7 @@ void AfpstrueEnemyAIController::StartBehaviorLogic()
 
 // ==================== 单轮采样：校验上下文 → 距离快照 → 更新间隔 ====================
 
+// 为本轮行为树生成一次完整决策快照：有效目标、距离、范围及下一轮等待时间统一发布。
 void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& DecisionBlackboard)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyAI_SampleDecision);
@@ -320,6 +338,7 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 		DecisionContext.bInChaseRange = DecisionContext.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
 	}
 
+	// 计算下一轮等待，记忆追击不能等过遗忘期限才结束。
 	NextBehaviorDecisionDelay =
 		FMath::Max(0.01f, bHasTarget ? GetNextDecisionInterval(DecisionContext) : IdleDecisionInterval * SignificanceDecisionMultiplier);
 	if (bHasTarget && !bTargetVisible)
@@ -327,6 +346,7 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 		NextBehaviorDecisionDelay = FMath::Min(NextBehaviorDecisionDelay, static_cast<float>(TargetForgetTime - GetWorld()->GetTimeSeconds()));
 	}
 	// 自定义树观察者也只能在完整的一轮快照发布后收到通知，避免读取半更新条件。
+	// ★【重要边界】[状态提交] 黑板整轮快照写完才恢复通知，装饰器和观察者不能消费半更新条件。
 	DecisionBlackboard.PauseObserverNotifications();
 	// 搜索只提供位置记忆；不把隐藏玩家的 Actor 暴露给自定义 Blackboard 消费者。
 	DecisionBlackboard.SetValueAsObject(FPEnemyBlackboard::TargetActor, bHasTarget && bTargetVisible ? TargetCharacter.Get() : nullptr);
@@ -337,6 +357,7 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	DecisionBlackboard.ResumeObserverNotifications(true);
 }
 
+// 近战保持快速响应，其他状态按距离与重要性降频；返回本轮之后使用的间隔。
 float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext& Context) const
 {
 	// 战斗响应优先于 Significance 降频；Reduced/Background 倍率只放大追击、远距和 Idle 间隔。
@@ -369,12 +390,14 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext&
 	return ChaseDecisionInterval * SignificanceDecisionMultiplier;
 }
 
+// 在共享管理器引用缺失时查找关卡中的管理器，不为每个敌人创建独立群体资源。
 AfpstrueSurroundManager* AfpstrueEnemyAIController::ResolveSurroundManager() const
 {
 	// 仅在注入失败或引用失效时兜底查找关卡中的唯一 Manager。
 	return Cast<AfpstrueSurroundManager>(UGameplayStatics::GetActorOfClass(this, AfpstrueSurroundManager::StaticClass()));
 }
 
+// 仅检查候选玩家是否有效且存活；是否可见由感知状态另行约束。
 bool AfpstrueEnemyAIController::IsTargetUsable(const AfpstrueCharacter* Target) const
 {
 	// 目标必须存在且存活；死亡后的停止、槽位释放由上层统一处理。
@@ -383,6 +406,7 @@ bool AfpstrueEnemyAIController::IsTargetUsable(const AfpstrueCharacter* Target) 
 
 // ==================== 叶子执行：BT 选择行为，Controller 执行动作 ====================
 
+// 执行行为树已经选定的叶子动作；返回失败让 Selector 尝试后备分支，不另建第二套高层决策。
 bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Action)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyAI_ExecuteBehaviorAction);
@@ -491,6 +515,7 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	}
 }
 
+// 消费共享接近点并请求移动；不可达时释放槽位并允许后备追击，预算延后则保留当前路径。
 bool AfpstrueEnemyAIController::HandleSurroundMovement()
 {
 	// Controller 不计算全局站位，只消费 SurroundManager 已缓存并投影到 NavMesh 的接近点。
@@ -517,6 +542,7 @@ bool AfpstrueEnemyAIController::HandleSurroundMovement()
 
 // ==================== 移动与朝向：请求去重 → 预算 → 到达后转向 ====================
 
+// 比较会影响寻路结果的请求语义及三维位置容差，用于避免重复提交同一目标。
 bool AfpstrueEnemyAIController::FMoveGoalKey::Matches(const FMoveGoalKey& Other, float DistanceTolerance) const
 {
 	return bCombatPriority == Other.bCombatPriority && NavigationFilter == Other.NavigationFilter &&
@@ -524,6 +550,7 @@ bool AfpstrueEnemyAIController::FMoveGoalKey::Matches(const FMoveGoalKey& Other,
 		FVector::DistSquared(Location, Other.Location) < FMath::Square(FMath::Max(1.0f, DistanceTolerance));
 }
 
+// 包围和追击各自记录失败退避，在目标没有明显变化时暂缓重复寻路。
 void AfpstrueEnemyAIController::RecordMoveFailure(const FMoveGoalKey& Goal)
 {
 	FMoveFailure& Failure = MoveFailures[Goal.bCombatPriority ? 1 : 0];
@@ -531,6 +558,7 @@ void AfpstrueEnemyAIController::RecordMoveFailure(const FMoveGoalKey& Goal)
 	Failure.RetryAfter = GetWorld()->GetTimeSeconds() + FMath::Max(FailedMoveRetryDelay, 0.1f);
 }
 
+// 先复用路径或到位缓存，再查失败退避与全局预算；只对真正需要刷新的目标提交独立 MoveTo。
 AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal(
 	const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority)
 {
@@ -568,6 +596,7 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 		return EMoveGoalResult::Unreachable;
 	}
 
+	// 复用未命中时，先检查目标级失败退避；帧预算限制的是新请求数量，不共享敌人的路径。
 	const UWorld* World = GetWorld();
 	const FMoveFailure& Failure = MoveFailures[bCombatPriority ? 1 : 0];
 	if (World->GetTimeSeconds() < Failure.RetryAfter && RequestedGoal.Matches(Failure.Goal, PathRefreshDistance))
@@ -599,6 +628,7 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 	}
 	if (MoveRequestRevision != SubmittingRevision || !AcceptsCombatCommands()) return EMoveGoalResult::Deferred;
 
+	// 为本敌人构造完整请求；包围点已集中投影，普通追击点仍让引擎投影。
 	FAIMoveRequest MoveRequest(GoalLocation);
 	MoveRequest.SetUsePathfinding(true);
 	MoveRequest.SetAllowPartialPath(true);
@@ -608,6 +638,7 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 	MoveRequest.SetReachTestIncludesAgentRadius(true);
 	MoveRequest.SetCanStrafe(false);
 	const FPathFollowingRequestResult Result = MoveTo(MoveRequest);
+	// ★【重要边界】[回调重入] MoveTo 可能同步结束旧请求；只有提交版本和命令入口仍有效，才缓存本次结果。
 	if (MoveRequestRevision != SubmittingRevision || !AcceptsCombatCommands()) return EMoveGoalResult::Deferred;
 	const EPathFollowingRequestResult::Type MoveResult = Result.Code;
 	LastMoveGoal = RequestedGoal;
@@ -632,9 +663,11 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 	return EMoveGoalResult::Moving;
 }
 
+// 只接收当前拥有的异步导航结果，旧请求不能撤销新路径；失败时安排目标级退避。
 void AfpstrueEnemyAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result)
 {
 	// 只处理拥有的异步请求。MoveTo 内的同步失败/AlreadyAtGoal 由返回值提交，不在回调抢写尚未发布的缓存。
+	// ★【重要边界】[异步身份] 完成回调必须匹配当前拥有的 RequestID，旧导航结果不能清掉新请求归属。
 	if (OwnedMoveRequestId.IsValid() && RequestID == OwnedMoveRequestId)
 	{
 		OwnedMoveRequestId = FAIRequestID::InvalidRequest;
@@ -648,6 +681,7 @@ void AfpstrueEnemyAIController::OnMoveCompleted(FAIRequestID RequestID, const FP
 	Super::OnMoveCompleted(RequestID, Result);
 }
 
+// 仅在地面停稳后切换面向目标，并返回真实角色朝向是否达标；隐藏目标不能继续被实时跟踪。
 bool AfpstrueEnemyAIController::FaceTargetAtRest()
 {
 	if (!bTargetVisible)
@@ -673,6 +707,7 @@ bool AfpstrueEnemyAIController::FaceTargetAtRest()
 	return UpdateFacingTarget();
 }
 
+// 更新玩家方向对应的期望 Yaw，并以实际 Actor Yaw 判断攻击转向是否完成。
 bool AfpstrueEnemyAIController::UpdateFacingTarget()
 {
 	// 仅站定/攻击时离散刷新期望朝向，移动阶段的连续转向交给 CharacterMovement。
@@ -697,6 +732,7 @@ bool AfpstrueEnemyAIController::UpdateFacingTarget()
 	return YawError <= FMath::Clamp(AttackFacingToleranceDegrees, 0.0f, 90.0f);
 }
 
+// 仅在表现状态改变时提交状态及旋转策略，保持动画消费者读取同一份状态。
 void AfpstrueEnemyAIController::SetAIState(EFPEnemyAIState NewState)
 {
 	// 状态变化只在 Controller 内提交，并在同一位置更新旋转策略，避免决策分支各自修改朝向产生抖动。
@@ -709,6 +745,7 @@ void AfpstrueEnemyAIController::SetAIState(EFPEnemyAIState NewState)
 	ApplyRotationPolicy(NewState);
 }
 
+// 按行进、站定或攻击阶段选定唯一旋转来源，避免移动方向与 Controller 朝向互相争抢。
 void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget)
 {
 	// 把状态到旋转来源的映射集中设置，防止 MoveTo 与面向玩家同时争夺角色朝向。
@@ -729,9 +766,11 @@ void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bo
 
 // ==================== 停止与公共清理 ====================
 
+// 先关闭命令入口，再停止感知、行为树、导航和攻击，最后清空黑板与群体资源；允许重复调用。
 void AfpstrueEnemyAIController::StopAI()
 {
 	if (CommandPhase == ECommandPhase::Stopping) return;
+	// ★【重要边界】[生命周期] 停止时先禁止新命令，再停感知、行为树、移动和攻击，最后清目标、黑板与槽位。
 	CommandPhase = ECommandPhase::Stopping;
 	bTargetVisible = false;
 	TargetForgetTime = 0.0;
@@ -750,6 +789,7 @@ void AfpstrueEnemyAIController::StopAI()
 		// StopAI 是完整业务停止：先取消旧攻击，归还其捕获的许可，再清 Controller 上下文。
 		ControlledEnemy->GetCombatComponent()->ResetCombat();
 	}
+	// 生产者已经停止，清掉目标和完整快照，避免下次启动复用旧条件。
 	TargetCharacter = nullptr;
 	ReleaseSurroundSlot();
 	DecisionContext = FDecisionContext{};
@@ -772,6 +812,7 @@ void AfpstrueEnemyAIController::StopAI()
 	CommandPhase = ECommandPhase::Stopped;
 }
 
+// 按需撤销移动归属与缓存；只有导航实际运行时才提交停止请求。
 void AfpstrueEnemyAIController::StopMovementIfNeeded(bool bPreserveMoveGoal)
 {
 	// 只有 PathFollowing 正在运行时才提交 StopMovement；按调用场景决定是否保留目标缓存。
@@ -789,6 +830,7 @@ void AfpstrueEnemyAIController::StopMovementIfNeeded(bool bPreserveMoveGoal)
 	}
 }
 
+// 把当前敌人的攻击名额交回管理器；重复释放不新增副作用。
 void AfpstrueEnemyAIController::ReleaseAttackPermission()
 {
 	// 攻击结束、失败、死亡和解除占有均可调用，Manager 的 TSet 保证重复释放无副作用。
@@ -798,6 +840,7 @@ void AfpstrueEnemyAIController::ReleaseAttackPermission()
 	}
 }
 
+// 归还本敌人的稳定槽位，让管理器按需安排外环补位。
 void AfpstrueEnemyAIController::ReleaseSurroundSlot()
 {
 	// 将敌人与稳定槽位的映射交还给群体 Manager，并触发可能的外环补位。

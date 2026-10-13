@@ -2,6 +2,8 @@
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Kismet/GameplayStatics.h"
 
+// 这些测试验证生命事务与通知顺序；不以无渲染测试世界代替受击、布娃娃或 GPU 画面验收。
+// 在伤害通知内提交两项后续修改，检查组件能否在当前事务通知完后按顺序执行。
 void UfpstrueHealthMutationTestObserver::OnDamage(float Amount, AActor* Causer, AController* Instigator)
 {
 	if (bResetDuringDamage && Health.IsValid())
@@ -12,6 +14,7 @@ void UfpstrueHealthMutationTestObserver::OnDamage(float Amount, AActor* Causer, 
 	}
 }
 
+// 保存每次广播的值；按测试开关构造重置、交替最大生命值或二次伤害。
 void UfpstrueHealthMutationTestObserver::OnHealth(float Value)
 {
 	HealthSnapshots.Add(Value);
@@ -27,6 +30,7 @@ void UfpstrueHealthMutationTestObserver::OnHealth(float Value)
 	}
 }
 
+// 只记录死亡次数，避免接收者本身改变被测死亡结算行为。
 void UfpstrueHealthMutationTestObserver::OnDeath()
 {
 	++Deaths;
@@ -60,8 +64,10 @@ bool BeginHealthTestWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueHealthMutationTest, "fpstrue.Gameplay.Health.ReentrantMutationOrder",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证伤害/血量广播中的同步重入会排队，且死亡通知不会被监听者的重置吞掉。
 bool FFpstrueHealthMutationTest::RunTest(const FString& Parameters)
 {
+	// 准备独立测试世界、生产生命组件和可重入的反射接收者。
 	FTestWorldWrapper Fixture;
 	if (!BeginHealthTestWorld(Fixture, *this)) return false;
 	UWorld* World = Fixture.GetTestWorld();
@@ -77,12 +83,14 @@ bool FFpstrueHealthMutationTest::RunTest(const FString& Parameters)
 	Health->OnHealthChanged.AddDynamic(Observer.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
 	Health->OnDeath.AddDynamic(Observer.Get(), &UfpstrueHealthMutationTestObserver::OnDeath);
 
+	// 致死伤害的监听者请求重置和再次扣血：先完成死亡，再依次处理后续事务。
 	Observer->bResetDuringDamage = true;
 	UGameplayStatics::ApplyDamage(Owner, 100.0f, nullptr, nullptr, nullptr);
 	TestEqual(TEXT("A reset in Damage cannot swallow the committed death"), Observer->Deaths, 1);
 	TestTrue(TEXT("Snapshots are damage, queued reset, queued damage"), Observer->HealthSnapshots == TArray<float>({0.0f, 100.0f, 90.0f}));
 	TestEqual(TEXT("Nested damage applies after queued reset"), Health->GetHealth(), 90.0f);
 
+	// 新生命会话中再次构造致死重入，并检查死亡后的额外伤害不会重复结算。
 	Health->ResetHealth();
 	Observer->HealthSnapshots.Reset();
 	Observer->bDamageDuringHealthChange = true;
@@ -97,6 +105,7 @@ bool FFpstrueHealthMutationTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueHealthTerminationTest, "fpstrue.Gameplay.Health.NotificationTermination",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证无变化的重置能收敛，恶意交替修改受事务数量上限限制，后续独立请求仍可运行。
 bool FFpstrueHealthTerminationTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -111,12 +120,14 @@ bool FFpstrueHealthTerminationTest::RunTest(const FString& Parameters)
 	TStrongObjectPtr<UfpstrueHealthMutationTestObserver> Observer(NewObject<UfpstrueHealthMutationTestObserver>());
 	Observer->Health = Health;
 	Health->OnHealthChanged.AddDynamic(Observer.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
+	// 相同数值的反复重置不再广播，避免普通监听者形成无限通知循环。
 	Observer->bAlwaysResetDuringHealthChange = true;
 	UGameplayStatics::ApplyDamage(Owner, 10.0f, nullptr, nullptr, nullptr);
 	TestTrue(TEXT("An unconditional Reset listener reaches a fixed point"), Observer->HealthSnapshots == TArray<float>({90.0f, 100.0f}));
 	Health->ResetHealth();
 	TestEqual(TEXT("A no-op reset publishes no change"), Observer->HealthSnapshots.Num(), 2);
 	TestEqual(TEXT("Ordinary repeated Reset needs no guard rejection"), Health->GetRejectedMutationCount(), 0);
+	// 交替最大生命值永不自然收敛：检查达到上限后拒绝新请求并输出诊断。
 	Observer->bAlwaysResetDuringHealthChange = false;
 	Observer->bAlternateMaximumDuringHealthChange = true;
 	Observer->HealthSnapshots.Reset();
@@ -133,6 +144,7 @@ bool FFpstrueHealthTerminationTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyQueuedDamageContextTest, "fpstrue.Gameplay.Health.QueuedEnemyHitContext",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证受击立即保护骨骼更新，并确认排队伤害不会覆盖真正致死命中的部位、方向和位置。
 bool FFpstrueEnemyQueuedDamageContextTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -146,6 +158,7 @@ bool FFpstrueEnemyQueuedDamageContextTest::RunTest(const FString& Parameters)
 	Enemy->FinishSpawning(FTransform::Identity);
 	UfpstrueHealthComponent* Health = Enemy->FindComponentByClass<UfpstrueHealthComponent>();
 	if (!TestNotNull(TEXT("Enemy health"), Health)) return false;
+	// 先让低频网格进入真实冷却，再施加伤害；不等待全局协调器也必须及时恢复动画更新。
 	FFPEnemyRenderSignificancePolicy Policy;
 	Policy.CombatPriorityGraceSeconds = 0.05f;
 	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, false, false, false, Policy);
@@ -166,6 +179,7 @@ bool FFpstrueEnemyQueuedDamageContextTest::RunTest(const FString& Parameters)
 	if (!Fixture.TickTestWorld(0.1f)) return false;
 	TestTrue(TEXT("Local protection expires even without a coordinator"), Enemy->GetMesh()->GetComponentTickInterval() > 0.0f);
 
+	// 从首个伤害回调排入 B、C 两次命中；B 致死后 C 不应替换死亡表现所需的命中信息。
 	TArray<FName> AppliedBones;
 	bool bQueueHits = true;
 	const FDelegateHandle Handle = Health->OnDamageResolved.AddLambda(
@@ -180,6 +194,7 @@ bool FFpstrueEnemyQueuedDamageContextTest::RunTest(const FString& Parameters)
 			UGameplayStatics::ApplyPointDamage(Enemy, 1.0f, -FVector::ForwardVector, HitC, nullptr, nullptr, nullptr);
 		});
 	UGameplayStatics::ApplyDamage(Enemy, 1.0f, nullptr, nullptr, nullptr);
+	// 移除测试委托后断言致死上下文；这里检查数据身份，不检查最终布娃娃画面。
 	Health->OnDamageResolved.Remove(Handle);
 	TestTrue(TEXT("B is lethal; C was queued but cannot replace the lethal context"), Enemy->IsDead());
 	TestTrue(TEXT("Only A and lethal B are resolved"), AppliedBones == TArray<FName>({NAME_None, TEXT("hit_B")}));

@@ -42,6 +42,7 @@ AfpstrueGameMode::AfpstrueGameMode()
 		CreateDefaultSubobject<UfpstrueEnemyAnimationSharingCoordinator>(TEXT("EnemyAnimationSharingCoordinator"));
 }
 
+// 进入关卡后仅检查自动采集请求；正常游玩仍由关卡或 UI 显式调用开局入口。
 void AfpstrueGameMode::BeginPlay()
 {
 	// 普通游玩等待关卡/UI显式开始；只有命令行要求自动基准时才由 Runner 代为启动。
@@ -53,6 +54,7 @@ void AfpstrueGameMode::BeginPlay()
 	}
 }
 
+// 对局对象退出时停止玩法生产者并解除全部敌人登记，不在拆世界期间发布胜负 UI。
 void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	//停Timer、停止敌人、清空注册表、解绑玩家死亡事件、重置群体管理器
@@ -63,6 +65,7 @@ void AfpstrueGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+// 开局装配的唯一入口；占有 Starting 阶段，校验完整配置与玩家后提交 Playing，再启动生成。
 void AfpstrueGameMode::StartGameMode()
 {
 	// 所有不可恢复的配置错误都在创建 Timer/敌人前失败，避免只启动了一半的对局状态。
@@ -71,6 +74,7 @@ void AfpstrueGameMode::StartGameMode()
 	{
 		return;
 	}
+	// ★【重要边界】[状态提交] 先占有 Starting，再创建会触发 BeginPlay 的协作者；同步重入不能开启第二局。
 	MatchPhase = EFPMatchPhase::Starting;
 
 	// 选中外部资产后不静默回退到旧蓝图；所有实际波次在创建 Timer/敌人前完成校验。
@@ -148,6 +152,7 @@ void AfpstrueGameMode::StartGameMode()
 	CurrentWave = 0;
 	RemainingTime = BenchmarkGameDurationOverride > 0 ? BenchmarkGameDurationOverride
 		: FMath::Max(WaveConfiguration != nullptr ? WaveConfiguration->GameDuration : GameDuration, 1);
+	// ★【重要边界】[状态提交] 波次和时长先准备完整再提交 Playing；初始通知读取的是已生效状态。
 	MatchPhase = EFPMatchPhase::Playing;
 	UE_LOG(LogTemp, Display, TEXT("Game wave configuration: source=%s waves=%d duration=%d"),
 		   WaveConfiguration != nullptr ? *GetPathNameSafe(WaveConfiguration) : TEXT("GameMode Blueprint defaults"), ConfiguredWaveCount,
@@ -230,6 +235,7 @@ int32 AfpstrueGameMode::GetConfiguredWaveCount() const
 	return WaveConfigs.IsEmpty() ? TotalWaves : WaveConfigs.Num();
 }
 
+// 从唯一配置来源解析本波敌人类和数量；压测仅覆盖数量，缺失资产波次不混用旧配置。
 FfpstrueWaveConfig AfpstrueGameMode::GetWaveConfig(int32 WaveNumber) const
 {
 	// 类型与数量成对解析，避免两个查询各自选择数据源。只在没有资产时支持旧式线性增长。
@@ -257,6 +263,7 @@ FfpstrueWaveConfig AfpstrueGameMode::GetWaveConfig(int32 WaveNumber) const
 	return Wave;
 }
 
+// 读取所选配置的非负波次间隔；零间隔由调度入口解释为下一帧。
 float AfpstrueGameMode::GetConfiguredWaveInterval() const
 {
 	return FMath::Max(WaveConfiguration != nullptr ? WaveConfiguration->WaveInterval : WaveInterval, 0.0f);
@@ -483,6 +490,7 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 		return false;
 	}
 
+	// 每次外部生命周期回调后复核本局与新敌人；未登记对象也必须在失败时停止自动启动的 AI。
 	const auto CanActivateSpawnedEnemy = [this, SpawnedEnemy]()
 	{
 		if (IsRunning() && IsValid(SpawnedEnemy) && !SpawnedEnemy->IsDead())
@@ -527,6 +535,7 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 		SpawnedEnemy->Destroy();
 		return false;
 	}
+	// ★【重要边界】[回调重入] 控制器创建/目标注入可同步终止对局或杀死敌人，返回后必须复核再登记。
 	EnemyController->InitializeCombatContext(PlayerCharacter, SurroundManager);
 	if (!CanActivateSpawnedEnemy())
 	{
@@ -538,6 +547,7 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 	return true;
 }
 
+// 停止分帧生成并释放本波队列、类引用和重试游标，供波次准备、结算和退出复用。
 void AfpstrueGameMode::ClearSpawnQueue()
 {
 	// 停止分帧生成并清空队列游标，供结算、退出和重新开始统一收口。
@@ -551,6 +561,7 @@ void AfpstrueGameMode::ClearSpawnQueue()
 
 // ==================== 敌人注册表与协调器连接 ====================
 
+// 登记有效存活敌人并连接死亡、EndPlay 和共享动画；同一敌人只能计数一次。
 void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	// 只登记 BeginPlay 完成的存活敌人：Death 负责逻辑死亡，EndPlay 覆盖包括 Destroy 在内的全部离场。
@@ -577,6 +588,7 @@ void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 	}
 }
 
+// 死亡与离场共用的幂等注销入口；只有实际移除登记后才断开协作关系并更新计数。
 void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	// 无论敌人通过死亡还是直接销毁离场，都在这里解除委托、协调器关系并更新存活计数。
@@ -587,6 +599,7 @@ void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy)
 	}
 
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
+	// ★【重要边界】[生命周期] 弱注册表不拥有敌人；只有实际移除成功才清理和广播，迟到注销不能重复计数。
 	if (RegisteredEnemies.Remove(EnemyKey) == 0)
 	{
 		return;
@@ -599,6 +612,7 @@ void AfpstrueGameMode::UnregisterEnemy(AfpstrueEnemyCharacter* Enemy)
 	}
 }
 
+// 仅解除已知敌人的委托和共享动画关系，不自行删除注册表或广播数量变化。
 void AfpstrueGameMode::DisconnectEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	Enemy->OnEnemyDeathReported.RemoveDynamic(this, &AfpstrueGameMode::UnregisterEnemy);
@@ -610,6 +624,7 @@ void AfpstrueGameMode::DisconnectEnemy(AfpstrueEnemyCharacter* Enemy)
 	Enemy->SetAnimationSharingCoordinator(nullptr);
 }
 
+// 兜底删除失效弱键，防止数量与调度容量虚高；正常离场仍优先由 EndPlay 主动注销。
 void AfpstrueGameMode::PruneInvalidEnemyRegistrations()
 {
 	// OnEndPlay 是主清理路径；这里仅兜底清除已经无法解引用的弱键，避免 Num() 和预算容量长期虚高。
@@ -628,9 +643,11 @@ void AfpstrueGameMode::PruneInvalidEnemyRegistrations()
 	}
 }
 
+// 先移出整个注册集合，再逐个断开外部关系，避免清理回调重入破坏遍历。
 void AfpstrueGameMode::ClearEnemyRegistrations()
 {
 	// 先摘下集合，再执行可能重入的外部清理；旧清理不能破坏遍历器或新登记项。
+	// ★【重要边界】[回调重入] 先摘下旧注册集合再断开外部关系，清理回调不能破坏遍历或误删后续登记。
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> EndingEnemies = MoveTemp(RegisteredEnemies);
 	RegisteredEnemies.Reset();
 	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : EndingEnemies)
@@ -644,12 +661,14 @@ void AfpstrueGameMode::ClearEnemyRegistrations()
 
 // ==================== 游戏状态、事件与计时器 ====================
 
+// 读取当前玩家的有效性和生命组件死亡事实，不在 GameMode 维护第二份血量。
 bool AfpstrueGameMode::IsPlayerAlive() const
 {
 	// 对局胜负只读取玩家角色的统一死亡查询，不自行缓存第二份生命状态。
 	return IsValid(PlayerCharacter) && !PlayerCharacter->IsDead();
 }
 
+// 唯一订阅当前玩家死亡与离场，支持伤害死亡和直接移出世界两条对局结束路径。
 void AfpstrueGameMode::BindPlayerDeathEvent()
 {
 	// 使用 AddUniqueDynamic 防止重复开始流程导致同一死亡回调被绑定多次。
@@ -660,6 +679,7 @@ void AfpstrueGameMode::BindPlayerDeathEvent()
 	}
 }
 
+// 每秒发布剩余时间；通知返回后仍在运行才检查存活和到时胜负。
 void AfpstrueGameMode::UpdateCountdown()
 {
 	// 一秒 Timer 驱动倒计时并广播变化；HUD只在事件到达时刷新，不进行逐帧函数绑定。
@@ -681,12 +701,14 @@ void AfpstrueGameMode::UpdateCountdown()
 	}
 }
 
+// 将直接销毁、关卡移除等敌人离场转入统一注销，避免只处理逻辑死亡而漏登记。
 void AfpstrueGameMode::HandleEnemyEndPlay(AActor* EndingActor, EEndPlayReason::Type EndPlayReason)
 {
 	// UE 先执行 EndPlay 再广播 OnDestroyed；此处已完成清理，不需要第二套销毁回调。
 	UnregisterEnemy(Cast<AfpstrueEnemyCharacter>(EndingActor));
 }
 
+// 仅将当前参与玩家的死亡结算为失败，忽略其他角色或已结束对局的通知。
 void AfpstrueGameMode::HandlePlayerDied(AfpstrueCharacter* DeadPlayer)
 {
 	// 只响应当前登记玩家的死亡事件，避免无关角色结束本局游戏。
@@ -696,6 +718,7 @@ void AfpstrueGameMode::HandlePlayerDied(AfpstrueCharacter* DeadPlayer)
 	}
 }
 
+// 区分玩家被销毁与整体世界退出：前者失败结算，后者仅停止玩法不再创建结果 UI。
 void AfpstrueGameMode::HandlePlayerEndPlay(AActor* EndingActor, EEndPlayReason::Type EndPlayReason)
 {
 	if (!IsRunning() || EndingActor != PlayerCharacter)
@@ -713,6 +736,7 @@ void AfpstrueGameMode::HandlePlayerEndPlay(AActor* EndingActor, EEndPlayReason::
 	}
 }
 
+// 只发布一次胜负结果；先冻结计时、生成与 AI，再通知 UI 和其他模块。
 void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 {
 	// 结算只允许一次：先冻结生成、计时与 AI，再广播最终结果，避免 UI 收到结果后世界状态仍继续变化。
@@ -726,9 +750,11 @@ void AfpstrueGameMode::FinishGame(bool bPlayerWon)
 	OnGameResult.Broadcast(bPlayerWon);
 }
 
+// 结算和退出共用的收口入口；先提交终态，再停止调度、解绑玩家并归还群体战术资源。
 void AfpstrueGameMode::StopGameplay()
 {
 	// 先提交终态；下方清理触发的同步回调不得重新生成敌人或再次结算。
+	// ★【重要边界】[状态提交] Finished 必须先于 Timer/AI/动画清理和结果广播，清理中的重入不能复活对局。
 	MatchPhase = EFPMatchPhase::Finished;
 	// 先阻止倒计时、生成和性能协调器继续产生回调，再取消可能仍在进行的基准采集。
 	GetWorldTimerManager().ClearTimer(CountdownTimerHandle);

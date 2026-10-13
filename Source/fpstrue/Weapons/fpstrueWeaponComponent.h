@@ -101,15 +101,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReload();
 
+	// 返回当前换弹编号；只供即时查询，延迟回调必须保存启动时取得的编号。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	int32 GetActiveReloadId() const { return IsReloading() ? ActiveReloadId : INDEX_NONE; }
 
+	// 提交指定事务的装弹，至多转移一次；旧编号不能借用当前换弹。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool CommitReloadForTransaction(int32 ReloadId);
 
+	// 正常结束指定事务；需要时补交一次弹药，再统一清理动画和动作锁。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void FinishReloadForTransaction(int32 ReloadId);
 
+	// 中断指定事务，只结束流程，不补弹也不撤销此前已提交的弹药。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void CancelReloadForTransaction(int32 ReloadId);
 
@@ -199,8 +203,11 @@ private:
 	bool IsCurrentAction(EFPWeaponActionState ExpectedState, uint32 ExpectedRevision) const;
 	// 射击和换弹规则读取弹匣是否还有弹药。
 	bool HasAmmo() const { return CurrentAmmo > 0; }
+	// 验证换弹状态和事务编号；装备有效性由具体播放或提交入口另行检查。
 	bool IsCurrentReload(int32 ReloadId) const;
+	// 按结束原因收口一次换弹；先失效旧状态和委托，再停止旧播放并发结束事件。
 	void EndReload(int32 ReloadId, EFPReloadEndReason Reason);
+	// 只接收已绑定实例的结束；全部自然结束才成功，任一中断立即取消本次换弹。
 	void HandleReloadPlaybackEnded(UAnimMontage* Montage, bool bInterrupted,
 		int32 ReloadId, TWeakObjectPtr<USkeletalMeshComponent> PlaybackMesh, int32 InstanceId);
 
@@ -302,13 +309,19 @@ class FPSTRUE_API UfpstrueWeaponRecoilPattern : public UCameraShakePattern
 	GENERATED_BODY()
 
 public:
+	// 从当前武器配置复制视觉脉冲参数，不改变控制旋转、弹药或命中方向。
 	void Configure(const FFPWeaponSettings& Settings);
 
 private:
+	// 向相机系统声明自定义时长，实际计时、回正和完成由本 Pattern 自己计算。
 	virtual void GetShakePatternInfoImpl(FCameraShakeInfo& OutInfo) const override;
+	// 新射击或重触发时从当前画面偏移继续脉冲，避免连发累积多层 Shake。
 	virtual void StartShakePatternImpl(const FCameraShakePatternStartParams& Params) override;
+	// 按经过时间输出旋转和 FOV 偏移；只作用于 CameraManager 最终画面。
 	virtual void UpdateShakePatternImpl(const FCameraShakePatternUpdateParams& Params, FCameraShakePatternUpdateResult& OutResult) override;
+	// 主动停止或单次脉冲耗尽后，允许相机系统回收该播放。
 	virtual bool IsFinishedImpl() const override { return bStopped || Elapsed >= Duration; }
+	// 强制停止并归零脉冲；正常松开扳机不会走此清理入口。
 	virtual void StopShakePatternImpl(const FCameraShakePatternStopParams& Params) override;
 
 	FRotator PeakRotation = FRotator::ZeroRotator;
@@ -330,6 +343,7 @@ class FPSTRUE_API UfpstrueWeaponCameraShake : public UCameraShakeBase
 	GENERATED_BODY()
 
 public:
+	// 创建单实例视觉脉冲 Pattern，连发复用同一类 Shake 而非无限叠加实例。
 	UfpstrueWeaponCameraShake(const FObjectInitializer& ObjectInitializer);
 };
 
@@ -342,6 +356,7 @@ class FPSTRUE_API UfpstrueAnimNotify_ReloadCommit : public UAnimNotify
 public:
 	// 找到武器后校验通知的 Montage 实例身份，再提交对应换弹事务。
 	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,const FAnimNotifyEventReference& EventReference) override;
+	// 将 Branching Point 的原始播放实例编号转为同一身份校验入口，不猜测当前播放。
 	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload) override;
 
 	// 返回动画编辑器中显示的 Notify 名称。

@@ -38,6 +38,7 @@
  * 人数/生命值用独立存在标志区分未传参与显式赋值，其余参数保留默认值。
  */
 
+// 集中返回进程级采集配置，后续消费者不会各自重复解析或修改参数。
 const FFPBenchmarkConfig& FFPBenchmarkConfig::Get()
 {
 	// 采集器共享同一份配置；运行时覆盖由基类快照提供，不重新解析。
@@ -45,6 +46,7 @@ const FFPBenchmarkConfig& FFPBenchmarkConfig::Get()
 	return Config;
 }
 
+// 复用玩法启动覆盖快照，仅额外解析采集人数、时长、资源报告和输出参数。
 FFPBenchmarkConfig::FFPBenchmarkConfig()
 	: FFPRuntimeOptions(FFPRuntimeOptions::Get())
 {
@@ -119,6 +121,7 @@ constexpr double ProfilerTimeoutSeconds = 30.0;
 TSharedPtr<FFPBenchmarkCsvCapture> OutstandingCsvCapture;
 bool bProcessBenchmarkConsumed = false;
 
+// 将结果枚举转成稳定日志标记，供人工排查与外部批处理读取。
 const TCHAR* ResultName(EFPBenchmarkResult Result)
 {
 	switch (Result)
@@ -151,12 +154,14 @@ void DisableTickForCapture(UActorComponent* Component, bool bDisable, bool& bWas
 
 // ==================== 生命周期与测试入口 ====================
 
+// 禁用组件逐帧 Tick；场景阶段用 World Timer，采集资源轮询用 CoreTicker。
 UfpstrueBenchmarkRunner::UfpstrueBenchmarkRunner()
 {
 	// 准备/预热使用世界 Timer；采集和写盘由独立 Watchdog 推进，不启用组件 Tick。
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
+// 仅自动测试参数存在时接管开局；一个进程只接纳一次，防止复用已改变的随机流和 World。
 void UfpstrueBenchmarkRunner::StartIfRequested(AfpstrueGameMode* InGameMode)
 {
 	// 只有 -AutoBenchmark 存在时接管开局；普通游玩不会进入任何测试专用流程。
@@ -171,6 +176,7 @@ void UfpstrueBenchmarkRunner::StartIfRequested(AfpstrueGameMode* InGameMode)
 			HasOutstandingCsvLease());
 		return;
 	}
+	// 先占有本进程运行资格并提交阶段，再挂接回调；重复入口不能排入第二次开局。
 	bProcessBenchmarkConsumed = true;
 	GameMode = InGameMode;
 	++RunId;
@@ -180,23 +186,28 @@ void UfpstrueBenchmarkRunner::StartIfRequested(AfpstrueGameMode* InGameMode)
 	ScheduleStage(Phase, &UfpstrueBenchmarkRunner::BeginBenchmark, 0.0f);
 }
 
+// Idle、未消耗进程运行机会且无遗留 CSV 租约三者同时满足，才允许首次启动。
 bool UfpstrueBenchmarkRunner::CanStartFreshRun() const
 {
 	return Phase == EFPBenchmarkPhase::Idle && !bProcessBenchmarkConsumed && !HasOutstandingCsvLease();
 }
 
+// CSV 排队或写盘未结束时持续占有租约，不按业务超时自行视为可用。
 bool UfpstrueBenchmarkRunner::HasOutstandingCsvLease()
 {
 	return OutstandingCsvCapture.IsValid() && OutstandingCsvCapture->State != FFPBenchmarkCsvCapture::EState::Released;
 }
 
+// 建立弱绑定 CoreTicker 检查，世界暂停仍可收尾；这是回调调度，不是新建工作线程。
 void UfpstrueBenchmarkRunner::StartWatchdog()
 {
 	if (WatchdogHandle.IsValid()) return;
+	// ★【重要边界】[生命周期] World Timer 只管准备/预热；CoreTicker 独立推进采集清理，世界暂停也不能困住资源。
 	WatchdogHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateWeakLambda(this,
 		[this](float) { return TickWatchdog(); }), 0.25f);
 }
 
+// 按阶段统一轮询 Profiler 并检查真实时间超时，世界 Timer 只负责准备和预热。
 bool UfpstrueBenchmarkRunner::TickWatchdog()
 {
 	if (bEndingPlay || Phase == EFPBenchmarkPhase::Idle || Phase == EFPBenchmarkPhase::Finished)
@@ -230,6 +241,7 @@ bool UfpstrueBenchmarkRunner::TickWatchdog()
 	return !bEndingPlay && Phase != EFPBenchmarkPhase::Finished;
 }
 
+// 排入世界计时器并捕获运行编号、预期阶段；取消和状态流转能拒绝过期回调。
 void UfpstrueBenchmarkRunner::ScheduleStage(EFPBenchmarkPhase ExpectedPhase, FStageCallback Callback, float Delay, bool bLoop)
 {
 	if (UWorld* World = GetWorld(); World != nullptr && !bEndingPlay)
@@ -237,8 +249,10 @@ void UfpstrueBenchmarkRunner::ScheduleStage(EFPBenchmarkPhase ExpectedPhase, FSt
 		FTimerManager& Timers = World->GetTimerManager();
 		Timers.ClearTimer(StageTimerHandle);
 		const uint64 ScheduledRun = RunId;
+		// 弱绑定只处理对象存活；额外检查编号和阶段，才保证业务取消后旧操作不会继续。
 		FTimerDelegate Delegate = FTimerDelegate::CreateWeakLambda(this, [this, ScheduledRun, ExpectedPhase, Callback]()
 		{
+			// ★【重要边界】[异步身份] 弱绑定只保证对象仍在；RunId、阶段和退出标记共同拒绝旧轮次回调。
 			if (RunId == ScheduledRun && Phase == ExpectedPhase && !bEndingPlay)
 			{
 				(this->*Callback)();
@@ -258,6 +272,7 @@ void UfpstrueBenchmarkRunner::ScheduleStage(EFPBenchmarkPhase ExpectedPhase, FSt
 	}
 }
 
+// 先推进版本，再清除世界 Timer，使尚未返回的同步回调也失去继续推进的资格。
 void UfpstrueBenchmarkRunner::ClearStageTimers()
 {
 	++RunId;
@@ -267,6 +282,7 @@ void UfpstrueBenchmarkRunner::ClearStageTimers()
 	}
 }
 
+// 恢复本次实验修改的场景覆盖、输入和诊断组件；不改正式配置，也不接管后来替换的角色。
 void UfpstrueBenchmarkRunner::ReleaseSceneOwnership()
 {
 	if (AfpstrueGameMode* OwnerGameMode = GameMode.Get())
@@ -280,6 +296,7 @@ void UfpstrueBenchmarkRunner::ReleaseSceneOwnership()
 	}
 	bOwnsDurationOverride = false;
 	// 只回收本次运行取得的输入层与原始视点，不修改后来接管玩家的 Controller。
+	// ★【重要边界】[资源所有权] 只撤销本次加入的一层输入锁和仍属于本次的视点，不覆盖其他系统或新控制器。
 	if (bBenchmarkInputLocked)
 	{
 		if (APlayerController* PlayerController = LockedController.Get())
@@ -308,6 +325,7 @@ void UfpstrueBenchmarkRunner::ReleaseSceneOwnership()
 	RemovedInputComponent.Reset();
 	PreviousViewTarget.Reset();
 
+	// 仅恢复曾保存的存活对象，死亡后的移动/碰撞关闭不能被实验清理重新开启。
 	const FFPBenchmarkConfig& BenchmarkConfig = FFPBenchmarkConfig::Get();
 	for (const FDiagnosticState& State : DiagnosticStates)
 	{
@@ -343,6 +361,7 @@ void UfpstrueBenchmarkRunner::ReleaseSceneOwnership()
 	DiagnosticStates.Reset();
 }
 
+// 将人工取消和对局提前结束区分为不同结果；已进入写盘的流程继续回收，不重复发起取消。
 void UfpstrueBenchmarkRunner::Cancel()
 {
 	if (Phase == EFPBenchmarkPhase::Idle || Phase == EFPBenchmarkPhase::Finished ||
@@ -356,6 +375,7 @@ void UfpstrueBenchmarkRunner::Cancel()
 		bGameplayEnded ? TEXT("gameplay ended before the requested capture completed") : TEXT("cancel requested"));
 }
 
+// 对象退出时撤销 UObject 回调和场景控制，迟到 CSV 与 Trace 清理由不持有对象的回调继续处理。
 void UfpstrueBenchmarkRunner::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// EndPlay 不安排新的世界 Timer；排队中的 CSV 首帧租约仍负责回收尚未真正启动的采集。
@@ -377,6 +397,7 @@ void UfpstrueBenchmarkRunner::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (bTraceActive && !bTraceStopRequested)
 	{
 		const FString OwnedTrace = TraceOutputPath;
+		// 只重试停止仍属于本次目的路径的 Trace；不捕获 Runner，避免关卡销毁后访问对象。
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([OwnedTrace](float)
 		{
 			return FTraceAuxiliary::GetTraceDestinationString() == OwnedTrace && !FTraceAuxiliary::Stop();
@@ -389,6 +410,7 @@ void UfpstrueBenchmarkRunner::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 // ==================== 场景准备与预热 ====================
 
+// 固定种子并启动正常 Gameplay，再设置测试专用人数、时限、血量和输入隔离。
 void UfpstrueBenchmarkRunner::BeginBenchmark()
 {
 	Phase = EFPBenchmarkPhase::Preparing;
@@ -427,6 +449,7 @@ void UfpstrueBenchmarkRunner::BeginBenchmark()
 		return;
 	}
 
+	// 可选高血量仍走真实生命组件和受伤流程；通知可能同步改变对局，之后必须复核阶段。
 	if (BenchmarkConfig.HasPlayerHealthOverride())
 	{
 		if (UfpstrueHealthComponent* HealthComponent = OwnerGameMode->PlayerCharacter->GetHealthComponent())
@@ -446,6 +469,7 @@ void UfpstrueBenchmarkRunner::BeginBenchmark()
 		return;
 	}
 
+	// 保存视点和本次输入所有权后暂时锁定真实输入，正常移动组件及战斗伤害仍保持工作。
 	if (APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0))
 	{
 		LockedController = PlayerController;
@@ -490,6 +514,7 @@ void UfpstrueBenchmarkRunner::BeginBenchmark()
 	ScheduleStage(Phase, &UfpstrueBenchmarkRunner::WaitForBenchmarkReady, 0.25f, true);
 }
 
+// 等分帧生成完成后锁存稳态人数，应用诊断并做首次门禁，通过后才进入预热。
 void UfpstrueBenchmarkRunner::WaitForBenchmarkReady()
 {
 	// 等待分帧生成队列清空后再开始预热，使稳态数据不混入批量 Spawn 尖峰。
@@ -521,6 +546,7 @@ void UfpstrueBenchmarkRunner::WaitForBenchmarkReady()
 	UE_LOG(LogTemp, Display, TEXT("Automated benchmark ready: requested=%d alive=%d warmup=%.1fs"), BenchmarkConfig.EnemyCount,
 		   OwnerGameMode->RegisteredEnemies.Num(), BenchmarkConfig.WarmupSeconds);
 
+	// 资源报告和截图会扰动开销，安排在正式窗口之前，由后续预热隔离影响。
 	if (BenchmarkConfig.bCollectTextureStats)
 	{
 		UKismetSystemLibrary::ExecuteConsoleCommand(this, TEXT("DumpTextureStreamingStats"));
@@ -539,6 +565,7 @@ void UfpstrueBenchmarkRunner::WaitForBenchmarkReady()
 
 // ==================== 正式采集与消融快照 ====================
 
+// 预热后验证场景与 Profiler 空闲状态，提交采集请求；请求时刻不是 CSV 实际首帧。
 void UfpstrueBenchmarkRunner::StartCapture()
 {
 	// 只读消费者快照，不能在预热完成后重新施加另一套配置。
@@ -555,6 +582,7 @@ void UfpstrueBenchmarkRunner::StartCapture()
 		Finish(EFPBenchmarkResult::Failed, TEXT("profiler is already owned by another capture"));
 		return;
 	}
+	// Trace 先建立文件会话，CSV 首帧确认后才标记正式分析区域，避免把启动准备计入窗口。
 	if (!BenchmarkConfig.TraceFile.IsEmpty())
 	{
 		if (!FTraceAuxiliary::Start(FTraceAuxiliary::EConnectionType::File, *BenchmarkConfig.TraceFile,
@@ -567,6 +595,7 @@ void UfpstrueBenchmarkRunner::StartCapture()
 		TraceOutputPath = FTraceAuxiliary::GetTraceDestinationString();
 		UE_LOG(LogTemp, Display, TEXT("Automated benchmark Insights trace started: %s"), *TraceOutputPath);
 	}
+	// 生产提交器调用真实 BeginCapture；实际启动由租约中的首帧回调确认。
 	RequestCsvCapture([](const FString& Filename) { FCsvProfiler::Get()->BeginCapture(-1, FString(), Filename); });
 	ClearStageTimers();
 	Phase = EFPBenchmarkPhase::StartingCapture;
@@ -576,14 +605,17 @@ void UfpstrueBenchmarkRunner::StartCapture()
 #endif
 }
 
+// 在提交前建立进程级 CSV 租约和首帧监听，即使 Runner 已取消也能回收迟到启动。
 void UfpstrueBenchmarkRunner::RequestCsvCapture(TFunctionRef<void(const FString&)> SubmitStart)
 {
 #if CSV_PROFILER
 	check(!HasOutstandingCsvLease());
 	CsvCapture = MakeShared<FFPBenchmarkCsvCapture>();
 	CsvCapture->Filename = FString::Printf(TEXT("AutomatedBenchmark_%s.csv"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	// ★【重要边界】[资源所有权] 提交 BeginCapture 前先取得进程级租约；Runner/World 销毁不会取消底层排队启动。
 	OutstandingCsvCapture = CsvCapture;
 	const TSharedRef<FFPBenchmarkCsvCapture> Capture = CsvCapture.ToSharedRef();
+	// 首帧回调仅接纳本次文件；已取消的排队采集一旦启动，立即 EndCapture 并等待其写盘。
 	Capture->FirstFrameHandle = FCsvProfiler::Get()->OnCSVProfileFirstFrame().AddLambda([Capture]()
 	{
 		FCsvProfiler* Profiler = FCsvProfiler::Get();
@@ -594,6 +626,7 @@ void UfpstrueBenchmarkRunner::RequestCsvCapture(TFunctionRef<void(const FString&
 			Capture->State = FFPBenchmarkCsvCapture::EState::Capturing;
 			Profiler->OnCSVProfileFirstFrame().Remove(Capture->FirstFrameHandle);
 			Capture->FirstFrameHandle.Reset();
+			// ★【重要边界】[异步身份] 迟到首帧只按本次文件身份处理；已取消则立即停止，不误停外部采集。
 			if (bCancelLateStart)
 			{
 				Capture->WriteComplete = Profiler->EndCapture();
@@ -602,8 +635,10 @@ void UfpstrueBenchmarkRunner::RequestCsvCapture(TFunctionRef<void(const FString&
 		}
 	});
 	// 不持有 UObject，也不依赖 World Tick。失败的业务已可结束，但租约要等真实产物写完才释放。
+	// 独立资源回调只持有租约，写盘 Future 就绪后才释放进程占用，不依赖世界或对象存活。
 	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Capture](float)
 	{
+		// ★【重要边界】[资源所有权] 请求停止不等于资源可复用；写盘 Future 真正就绪后才释放 CSV 进程租约。
 		if (Capture->State == FFPBenchmarkCsvCapture::EState::StopRequested &&
 			Capture->WriteComplete.IsValid() && Capture->WriteComplete.IsReady())
 		{
@@ -617,6 +652,7 @@ void UfpstrueBenchmarkRunner::RequestCsvCapture(TFunctionRef<void(const FString&
 #endif
 }
 
+// 收到本次 CSV 的真实首帧确认后复核场景，从确认阶段开始计时并标记 Trace 分析区域。
 void UfpstrueBenchmarkRunner::PollCaptureStart()
 {
 	if (CsvCapture.IsValid() && CsvCapture->State == FFPBenchmarkCsvCapture::EState::Capturing)
@@ -626,6 +662,7 @@ void UfpstrueBenchmarkRunner::PollCaptureStart()
 			Finish(EFPBenchmarkResult::InvalidSample, TEXT("state changed while starting profilers"));
 			return;
 		}
+		// ★【重要边界】[验收边界] 必须收到本次 CSV 的真实首帧确认并通过场景复核，才开始正式采集计时。
 		Phase = EFPBenchmarkPhase::Capturing;
 		if (bTraceActive)
 		{
@@ -642,6 +679,7 @@ void UfpstrueBenchmarkRunner::PollCaptureStart()
 	}
 }
 
+// 采集中持续验证人数、视点和消费者状态，并确认输出仍由本次流程拥有。
 void UfpstrueBenchmarkRunner::PollCapture()
 {
 	const bool bCaptureEnded = FPlatformTime::Seconds() >= PhaseDeadline;
@@ -659,6 +697,7 @@ void UfpstrueBenchmarkRunner::PollCapture()
 		return;
 	}
 #endif
+	// 时长到达只表示窗口完成；Completed 先作为候选结果，后续仍需写盘和文件检查。
 	if (bCaptureEnded)
 	{
 		UE_LOG(LogTemp, Display, TEXT("Automated benchmark capture stopped."));
@@ -666,6 +705,7 @@ void UfpstrueBenchmarkRunner::PollCapture()
 	}
 }
 
+// 预热前保存并关闭显式指定的消费者，正式基线不传这些破坏性关闭项。
 void UfpstrueBenchmarkRunner::ApplyDiagnosticOverrides()
 {
 	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
@@ -769,6 +809,7 @@ UfpstrueBenchmarkRunner::FEnemySnapshot UfpstrueBenchmarkRunner::ReadEnemySnapsh
 	return Snapshot;
 }
 
+// 使用验证同一份快照输出开关和档位；额外单次读回尸体 Mesh，区分存活与死亡消费者。
 void UfpstrueBenchmarkRunner::LogConsumerSnapshot(const FEnemySnapshot& Snapshot) const
 {
 	const AfpstrueGameMode* OwnerGameMode = GameMode.Get();
@@ -824,6 +865,7 @@ void UfpstrueBenchmarkRunner::LogConsumerSnapshot(const FEnemySnapshot& Snapshot
 		AliveMeshes, AliveShadowMeshes, AliveRayTracingMeshes, CorpseMeshes, CorpseShadowMeshes, CorpseRayTracingMeshes);
 }
 
+// 接纳空场景或完整单一避让模式；有 Crowd 组件但没有有效代理不能算启用成功。
 bool UfpstrueBenchmarkRunner::IsAvoidanceConfigurationValid(int32 Enemies, int32 RVO, int32 Crowd, int32 ValidCrowd)
 {
 	// 空场景本来就没有避让消费者，不能被当成错误配置；非空场景要求完整的一套实现。
@@ -832,6 +874,7 @@ bool UfpstrueBenchmarkRunner::IsAvoidanceConfigurationValid(int32 Enemies, int32
 		(Enemies > 0 && RVO == 0 && Crowd == Enemies && ValidCrowd == Enemies);
 }
 
+// 记录人数曾经偏离目标的事实，防止中途替换敌人后相同总数掩盖样本变化。
 void UfpstrueBenchmarkRunner::HandleEnemyCountChanged(int32 AliveEnemies)
 {
 	// 锁存中途变化，即使采集结束前人数又恢复，也不能把替换过的样本判为稳定。
@@ -841,6 +884,7 @@ void UfpstrueBenchmarkRunner::HandleEnemyCountChanged(int32 AliveEnemies)
 	}
 }
 
+// 检查对局、玩家、敌人数、避让和诊断状态；起始详细日志复用同一份采样结果。
 bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* ValidationPhase, bool bLogSuccess, bool bLogConsumers) const
 {
 	const AfpstrueGameMode* OwnerGameMode = GameMode.Get();
@@ -854,6 +898,7 @@ bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* ValidationPhas
 	const bool bEnemyCountValid = ExpectedEnemyCount != INDEX_NONE && Snapshot.Enemies == ExpectedEnemyCount &&
 		!bPopulationChanged && Snapshot.bRegistryValid;
 	const bool bAvoidanceValid = IsAvoidanceConfigurationValid(Snapshot.Enemies, Snapshot.RVO, Snapshot.Crowd, Snapshot.ValidCrowd);
+	// 校验输入锁仍属于同一 Controller/Pawn/视点，同时限制位置和转向漂移，不只检查人数。
 	const APlayerController* PlayerController = LockedController.Get();
 	const FVector CurrentPlayerLocation = Player != nullptr ? Player->GetActorLocation() : FVector::ZeroVector;
 	const FRotator CurrentControlRotation = PlayerController != nullptr ? PlayerController->GetControlRotation() : FRotator::ZeroRotator;
@@ -874,6 +919,7 @@ bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* ValidationPhas
 		HealthComponent != nullptr && !HealthComponent->IsDead() && bEnemyCountValid && bViewTransformValid &&
 		bAvoidanceValid && Snapshot.bDiagnosticStateValid;
 
+	// 成功可选择静默，失败始终输出门禁证据；只有有效样本才输出消费者快照。
 	if (bStateValid && bLogSuccess)
 	{
 		UE_LOG(LogTemp, Display,
@@ -898,10 +944,12 @@ bool UfpstrueBenchmarkRunner::ValidateBenchmarkState(const TCHAR* ValidationPhas
 
 // ==================== 采集结束与进程退出 ====================
 
+// 撤销阶段回调、记录业务结果并交还场景，随后等待异步产物完成，不立即宣布成功。
 void UfpstrueBenchmarkRunner::Finish(EFPBenchmarkResult InResult, const TCHAR* Reason)
 {
 	ClearStageTimers();
 	Result = InResult;
+	// ★【重要边界】[状态提交] 先使旧阶段失效并进入 Flushing，再停采集/归还场景；候选 Completed 还不是最终成功。
 	Phase = EFPBenchmarkPhase::Flushing;
 	StopActiveProfilers();
 	ReleaseSceneOwnership();
@@ -910,12 +958,14 @@ void UfpstrueBenchmarkRunner::Finish(EFPBenchmarkResult InResult, const TCHAR* R
 	StartWatchdog();
 }
 
+// 幂等请求停止本次拥有的 Profiler；尚未开始的 CSV 标记迟到取消，不能直接释放租约。
 void UfpstrueBenchmarkRunner::StopActiveProfilers()
 {
 #if CSV_PROFILER
 	if (CsvCapture.IsValid())
 	{
 		FCsvProfiler* Csv = FCsvProfiler::Get();
+		// ★【重要边界】[资源所有权] 尚未启动的 CSV 只能标记迟到取消，不能假定 EndCapture 已撤销排队请求。
 		if (CsvCapture->State == FFPBenchmarkCsvCapture::EState::StartRequested)
 		{
 			CsvCapture->State = FFPBenchmarkCsvCapture::EState::CancelPendingStart;
@@ -928,6 +978,7 @@ void UfpstrueBenchmarkRunner::StopActiveProfilers()
 		}
 	}
 #endif
+	// Trace 路径必须仍属于本次运行；外部替换时拒收样本，不停止新所有者的采集。
 	if (bTraceActive && !bTraceStopRequested)
 	{
 		if (FTraceAuxiliary::GetTraceDestinationString() != TraceOutputPath)
@@ -947,11 +998,13 @@ void UfpstrueBenchmarkRunner::StopActiveProfilers()
 	}
 }
 
+// 等待真实写盘和会话关闭，再检查非空文件；超时进入失败隔离，但不放弃遗留资源清理。
 void UfpstrueBenchmarkRunner::PollArtifacts()
 {
 	StopActiveProfilers();
 	const bool bCsvFinished = !CsvCapture.IsValid() || (CsvCapture->WriteComplete.IsValid() && CsvCapture->WriteComplete.IsReady());
 	const bool bTraceFinished = !bTraceActive || (bTraceStopRequested && !FTraceAuxiliary::IsConnected());
+	// 尚未回收的资源继续保留租约；Quarantined 只隔离失败运行，不伪造写盘完成。
 	if (!bCsvFinished || !bTraceFinished)
 	{
 		if (Phase != EFPBenchmarkPhase::Quarantined && FPlatformTime::Seconds() >= PhaseDeadline)
@@ -971,6 +1024,8 @@ void UfpstrueBenchmarkRunner::PollArtifacts()
 		UE_LOG(LogTemp, Display, TEXT("Automated benchmark Insights trace stopped."));
 	}
 	// bCsvFinished 已确认 Future 可读；租约仅由独立 Ticker 释放，Runner 不维护第二套释放路径。
+	// Future 已可读后再获取实际路径；文件存在且非空是 Runner 成功的最后一道产物门禁。
+	// ★【重要边界】[验收边界] 写盘完成且产物非空才允许发布 Completed；Runner 成功后仍需外部脚本样本门禁。
 	const FString CsvPath = CsvCapture.IsValid() ? CsvCapture->WriteComplete.Get() : FString();
 	const bool bCsvArtifactValid = !CsvPath.IsEmpty() && IFileManager::Get().FileSize(*CsvPath) > 0;
 	const bool bTraceArtifactValid = TraceOutputPath.IsEmpty() || IFileManager::Get().FileSize(*TraceOutputPath) > 0;
@@ -991,6 +1046,7 @@ void UfpstrueBenchmarkRunner::PollArtifacts()
 	ExitBenchmark();
 }
 
+// 映射脚本约定的退出码，区分有效窗口、样本拒收、失败、取消和目标不支持。
 uint8 UfpstrueBenchmarkRunner::GetResultExitCode(EFPBenchmarkResult InResult)
 {
 	// 与外部批处理约定：0 仅表示 Runner 完成；最终样本仍须通过脚本离线校验。
@@ -1005,6 +1061,7 @@ uint8 UfpstrueBenchmarkRunner::GetResultExitCode(EFPBenchmarkResult InResult)
 	}
 }
 
+// 仅在显式自动退出的独立游戏进程请求结束，不关闭编辑器或 PIE 宿主。
 void UfpstrueBenchmarkRunner::ExitBenchmark()
 {
 	if (!FFPBenchmarkConfig::Get().bAutoQuit) return;

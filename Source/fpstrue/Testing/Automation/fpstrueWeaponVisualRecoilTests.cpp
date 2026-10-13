@@ -15,12 +15,15 @@
 #include "Tests/AutomationCommon.h"
 #include "UObject/StrongObjectPtr.h"
 
+// 本组检查 CameraShake 的数学结果与视图隔离；实际手感、清晰度和 GPU 开销仍需运行时观察。
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueVisualRecoilPulseTest,
 	"fpstrue.Gameplay.Weapon.VisualRecoil.PulseAndScaling",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证单发产生旋转/FOV 脉冲，瞄准缩小脉冲，结束或立即停止后不残留偏移。
 bool FFpstrueVisualRecoilPulseTest::RunTest(const FString& Parameters)
 {
+	// 使用相同配置准备腰射和瞄准两种原生镜头震动，不依赖武器蓝图动画。
 	const FFPWeaponSettings Settings;
 	TStrongObjectPtr<UfpstrueWeaponCameraShake> HipShake(NewObject<UfpstrueWeaponCameraShake>());
 	TStrongObjectPtr<UfpstrueWeaponCameraShake> AimShake(NewObject<UfpstrueWeaponCameraShake>());
@@ -33,6 +36,7 @@ bool FFpstrueVisualRecoilPulseTest::RunTest(const FString& Parameters)
 	HipShake->StartShake(nullptr, Settings.VisualRecoilScale, ECameraShakePlaySpace::CameraLocal);
 	AimShake->StartShake(nullptr, Settings.VisualRecoilScale * Settings.AimVisualRecoilMultiplier, ECameraShakePlaySpace::CameraLocal);
 
+	// 在相同时间采样最终视图，比较旋转、FOV 与位置不变的边界。
 	FMinimalViewInfo BaseView;
 	BaseView.Location = FVector(110.0, -40.0, 70.0);
 	BaseView.Rotation = FRotator::ZeroRotator;
@@ -51,6 +55,7 @@ bool FFpstrueVisualRecoilPulseTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Aiming reduces the FOV pulse"),
 		FMath::Abs(AimView.FOV - BaseView.FOV) < FMath::Abs(HipView.FOV - BaseView.FOV));
 
+	// 推进到自然结束，再测试强制停止；二者都应恢复未修改的基础视图。
 	HipView = BaseView;
 	HipShake->UpdateAndApplyCameraShake(Settings.VisualRecoilDuration * 2.0f, 1.0f, HipView);
 	TestTrue(TEXT("A single pulse finishes without a gameplay timer"), HipShake->IsFinished());
@@ -72,6 +77,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueVisualRecoilRetriggerTest,
 	"fpstrue.Gameplay.Weapon.VisualRecoil.RetriggerAndStepSize",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证震动按经过时间计算，连续重新触发保持连续且有界，最后一发结束后可归零。
 bool FFpstrueVisualRecoilRetriggerTest::RunTest(const FString& Parameters)
 {
 	const FFPWeaponSettings Settings;
@@ -90,6 +96,7 @@ bool FFpstrueVisualRecoilRetriggerTest::RunTest(const FString& Parameters)
 	BaseView.FOV = 90.0f;
 	FMinimalViewInfo CoarseView = BaseView;
 	FMinimalViewInfo FineView = BaseView;
+	// 同一总时长分别一次更新与六次更新，排除震动结果依赖帧率的错误。
 	const float Elapsed = Settings.VisualRecoilDuration * 0.6f;
 	Shake->UpdateAndApplyCameraShake(Elapsed, 1.0f, CoarseView);
 	for (int32 Step = 0; Step < 6; ++Step)
@@ -111,6 +118,7 @@ bool FFpstrueVisualRecoilRetriggerTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Retriggering preserves the current visible FOV"),
 		FMath::IsNearlyEqual(RestartView.FOV, CoarseView.FOV, 0.002f));
 
+	// 模拟连发 24 次，检查重触发不会无限叠加，同时最后一发仍有可见输出。
 	bool bBurstRemainsBounded = true;
 	FMinimalViewInfo BurstView = BaseView;
 	for (int32 Shot = 0; Shot < 24; ++Shot)
@@ -141,6 +149,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueVisualRecoilViewIsolationTest,
 	"fpstrue.Gameplay.Weapon.VisualRecoil.ViewIsolation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证视觉后坐力只修改最终渲染视图，不反写控制旋转或用于射线的相机组件方向。
 bool FFpstrueVisualRecoilViewIsolationTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -171,6 +180,7 @@ bool FFpstrueVisualRecoilViewIsolationTest::RunTest(const FString& Parameters)
 	FMinimalViewInfo BaseView;
 	Camera->GetCameraView(0.0f, BaseView);
 
+	// 通过真实 CameraManager 应用修改器，记录视图输出和游戏计算数据的分离。
 	UCameraShakeBase* Shake = CameraManager->StartCameraShake(UfpstrueWeaponCameraShake::StaticClass(), 1.0f);
 	if (!TestNotNull(TEXT("The camera manager accepts visual recoil"), Shake)) return false;
 	UfpstrueWeaponRecoilPattern* Pattern = Cast<UfpstrueWeaponRecoilPattern>(Shake->GetRootShakePattern());
@@ -185,6 +195,7 @@ bool FFpstrueVisualRecoilViewIsolationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The hitscan forward vector is unchanged"), Camera->GetForwardVector().Equals(ShotForward));
 	TestTrue(TEXT("The camera manager reuses the same shake for another shot"),
 		CameraManager->StartCameraShake(UfpstrueWeaponCameraShake::StaticClass(), 1.0f) == Shake);
+	// 验证连发复用同一震动对象，停止后也不留下视图旋转或 FOV 偏移。
 	CameraManager->StopCameraShake(Shake, true);
 	ShakenView = BaseView;
 	CameraManager->ApplyCameraModifiers(0.01f, ShakenView);

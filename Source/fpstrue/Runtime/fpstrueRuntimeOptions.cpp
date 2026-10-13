@@ -29,12 +29,14 @@ template <typename TValue> void ApplyOptionalValue(const TOptional<TValue>& Over
 }
 } // namespace
 
+// 函数静态对象只解析一次命令行，玩法消费者共享同一份只读启动配置。
 const FFPRuntimeOptions& FFPRuntimeOptions::Get()
 {
 	static const FFPRuntimeOptions Options;
 	return Options;
 }
 
+// 解析诊断开关与可选预算参数，不加载玩法资产，也不创建性能采集器。
 FFPRuntimeOptions::FFPRuntimeOptions()
 {
 	const TCHAR* CommandLine = FCommandLine::Get();
@@ -86,9 +88,11 @@ FFPRuntimeOptions::FFPRuntimeOptions()
 	BackgroundMinLOD = ParseOptionalValue<int32>(CommandLine, TEXT("EnemySigBackgroundMinLOD="));
 }
 
+// 把本进程显式启动参数投影到渲染策略；未设置项和资产中已禁用的功能保持原样。
 void FFPRuntimeOptions::ApplyEnemySignificanceOverrides(FFPEnemyRenderSignificancePolicy& InOutPolicy) const
 {
 	// 未出现在命令行中的字段保持蓝图或 C++ 默认值，避免测试配置污染正式配置。
+	// ★【重要边界】[配置契约] 启动诊断只覆盖本进程显式参数，不写回资产/INI；关闭碰撞、移动或攻击的消融结果不能当正式玩法收益。
 	ApplyOptionalValue(FrustumWeight, InOutPolicy.FrustumWeight);
 	ApplyOptionalValue(ScreenCoverageWeight, InOutPolicy.ScreenCoverageWeight);
 	ApplyOptionalValue(RecentFrustumWeight, InOutPolicy.RecentFrustumWeight);

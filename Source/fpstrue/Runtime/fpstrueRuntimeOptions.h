@@ -46,9 +46,12 @@ struct FFPEnemyRenderSignificancePolicy;
  */
 struct FPSTRUE_API FFPRuntimeOptions
 {
+	// 首次使用时读取进程命令行，后续只返回同一份只读启动快照，不支持运行中改参。
 	static const FFPRuntimeOptions& Get();
+	// 仅覆盖显式提供的数值及关闭开关，不将诊断参数写回资产或 INI。
 	void ApplyEnemySignificanceOverrides(FFPEnemyRenderSignificancePolicy& InOutPolicy) const;
 
+	// 消融开关只用于分离消费者成本；关闭碰撞、移动或攻击不能视为可交付玩法优化。
 	bool bDisableAttackSweep = false;
 	bool bDisableEnemyPawnCollision = false;
 	bool bDisablePathFollowingTick = false;
@@ -70,7 +73,9 @@ struct FPSTRUE_API FFPRuntimeOptions
 	bool bDisableMoveToRequestBudget = false;
 
 private:
+	// 集中解析启动参数；缺省数值保持为空，区分“未指定”和“显式设置为零”。
 	FFPRuntimeOptions();
+	// 可选覆盖值保留资产默认配置，最终由协调器在启动时统一校验。
 	TOptional<float> FrustumWeight;
 	TOptional<float> ScreenCoverageWeight;
 	TOptional<float> RecentFrustumWeight;

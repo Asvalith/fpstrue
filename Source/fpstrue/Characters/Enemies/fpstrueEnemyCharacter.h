@@ -264,11 +264,13 @@ private:
 	bool bAuthoredUpdateRateOptimizations = false;
 	EVisibilityBasedAnimTickOption AuthoredAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 	bool bRegisteredWithSignificanceManager = false;
+	// Gameplay 档位控制 AI/移动节奏；自然 Render 档位经过滞回，再由全局预算决定最终档位。
 	EFPEnemySignificanceTier SignificanceTier = EFPEnemySignificanceTier::Full;
 	EFPEnemyRenderSignificanceTier NaturalRenderSignificanceTier = EFPEnemyRenderSignificanceTier::Full;
 	EFPEnemyRenderSignificanceTier RenderSignificanceTier = EFPEnemyRenderSignificanceTier::Full;
 	EFPEnemyRenderSignificanceTier PendingRenderDemotionTier = EFPEnemyRenderSignificanceTier::Full;
 	float RenderSignificanceScore = 1.0f;
+	// 视锥历史只服务渲染评分；战斗和受击历史只保护动画，不混入渲染优先级。
 	float LastPrimaryFrustumTime = -MAX_flt;
 	float LastCombatRelevantTime = -MAX_flt;
 	float HitAnimationProtectionUntil = -MAX_flt;
@@ -276,6 +278,7 @@ private:
 	float LastNaturalRenderTierChangeTime = 0.0f;
 	float PendingRenderDemotionStartTime = -MAX_flt;
 	bool bRenderShouldCastShadow = true;
+	// 诊断关闭和正常预算分开保存；最终组件资格还要与资产原始许可取交集。
 	bool bDisableEnemyShadowsForBenchmark = false;
 	bool bDisableEnemyRayTracingForBenchmark = false;
 	bool bHasRenderSignificancePolicy = false;
@@ -283,6 +286,7 @@ private:
 	bool bGameplayAnimationProtection = false;
 	int32 AppliedMinimumLOD = INDEX_NONE;
 	FFPEnemyRenderSignificancePolicy LastRenderSignificancePolicy;
+	// 缓存弱组件引用及首次登记时的资产许可，避免每轮遍历附件或丢失原始禁用设置。
 	struct FRenderBudgetMesh
 	{
 		TWeakObjectPtr<UMeshComponent> Mesh;
@@ -295,6 +299,7 @@ private:
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
 
+	// 普通受击快照随结算更新；击杀快照在死亡入口冻结，供下一 Tick 的布娃娃冲量使用。
 	FFPDamageContext LastAppliedDamage;
 	FFPDamageContext DeathDamageContext;
 };

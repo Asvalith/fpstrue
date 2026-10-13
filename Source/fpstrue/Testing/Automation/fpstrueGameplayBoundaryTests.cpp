@@ -6,6 +6,9 @@
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 
+// 本文件检查输入、装备、射击和换弹的业务边界；资产集成用例也不替代完整 AnimBP 姿态或 GPU 验收。
+// ★【重要边界】[验收边界] 真实 Montage 的身份/通知测试不等于整套 AnimBP 姿态或画面验收，NullRHI 也不能证明 GPU 收益。
+// 记录弹药通知时的真实播放状态，并可同步禁用武器，模拟通知监听者改变动作状态。
 void UfpstrueReloadReentryObserver::HandleAmmoChanged(int32 CurrentAmmo, int32 MagazineSize, int32 ReserveAmmo)
 {
 	++CallbackCount;
@@ -23,6 +26,7 @@ void UfpstrueReloadReentryObserver::HandleAmmoChanged(int32 CurrentAmmo, int32 M
 	}
 }
 
+// 在装备成功通知中立即卸下武器，验证外层 Attach 返回前会再次核对装备关系。
 void UfpstrueReloadReentryObserver::HandleEquippedWeaponChanged(UfpstrueWeaponComponent* EquippedWeapon)
 {
 	if (bUnequipOnEquipped && EquippedWeapon != nullptr && Player.IsValid())
@@ -31,11 +35,13 @@ void UfpstrueReloadReentryObserver::HandleEquippedWeaponChanged(UfpstrueWeaponCo
 	}
 }
 
+// 统计已经提交的单发事实；即使后续监听者取消动作，这个事实也不应被吞掉。
 void UfpstrueReloadReentryObserver::HandleFirePerformed()
 {
 	++FireEventCount;
 }
 
+// 保存换弹结束结果，并可立即请求新动作，检查旧事务清理不能覆盖回调中新建的状态。
 void UfpstrueReloadReentryObserver::HandleReloadEnded(int32 ReloadId, EFPReloadEndReason Reason, bool bAmmoCommitted)
 {
 	++ReloadEndCount;
@@ -48,6 +54,7 @@ void UfpstrueReloadReentryObserver::HandleReloadEnded(int32 ReloadId, EFPReloadE
 	}
 }
 
+// 响应生产播放命令，用该命令携带的换弹编号播放和绑定测试动画，不临时读取另一次编号。
 void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId, bool bWasEmptyReload)
 {
 	if (Weapon.IsValid() && ReloadAnimInstance.IsValid() && ReloadMontage.IsValid())
@@ -92,6 +99,7 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 
 namespace FpstrueGameplayBoundaryTests
 {
+// 通过真实感知组件建立可见目标，避免朝向测试绕过当前 AI 的感知门禁。
 bool ReportVisibleEnemyTarget(AfpstrueEnemyAIController* Controller, AfpstrueCharacter* Target, FAutomationTestBase& Test)
 {
 	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
@@ -110,8 +118,10 @@ bool ReportVisibleEnemyTarget(AfpstrueEnemyAIController* Controller, AfpstrueCha
 class FGameplayWorld
 {
 public:
+	// 保留自动化断言接收者，由夹具负责测试世界的创建、推进和退出。
 	explicit FGameplayWorld(FAutomationTestBase& InTest) : Test(InTest) {}
 
+	// 创建临时 Game 世界并使用空 GameMode/真实 AI 系统，不启动项目的波次玩法。
 	bool Initialize()
 	{
 		if (!Test.TestNotNull(TEXT("An engine is available for the temporary world"), GEngine))
@@ -137,9 +147,12 @@ public:
 		return true;
 	}
 
+	// 只返回当前夹具拥有的世界，避免借用编辑器已有地图状态。
 	UWorld* GetWorld() const { return Wrapper.GetTestWorld(); }
+	// 按给定经过时间推进一帧，用于计时器积压和卡顿场景。
 	bool AdvanceSingleFrame(float DeltaSeconds) { return Wrapper.TickTestWorld(DeltaSeconds); }
 
+	// 按小步推进真实世界计时器和行为树，保证事件顺序而不伪造回调结果。
 	bool Advance(float DurationSeconds)
 	{
 		// Small explicit steps advance real timers and behavior-tree tasks, including
@@ -156,6 +169,7 @@ public:
 		return true;
 	}
 
+	// 生成原生 Actor 并记录创建失败；AlwaysSpawn 只隔离本夹具无关的出生碰撞。
 	template <typename TActor>
 	TActor* Spawn(const FTransform& Transform = FTransform::Identity)
 	{
@@ -166,6 +180,7 @@ public:
 		return Actor;
 	}
 
+	// 创建玩家并关闭自动移动/碰撞，后续测试显式控制位置或输入前态。
 	AfpstrueCharacter* SpawnPlayer(const FVector& Location = FVector::ZeroVector)
 	{
 		AfpstrueCharacter* Player = Spawn<AfpstrueCharacter>(FTransform(Location));
@@ -183,12 +198,14 @@ private:
 	FTestWorldWrapper Wrapper;
 };
 
+// 为站定转身测试保存真实 Enemy/Controller/Movement，复用装配而不复制角度判定实现。
 struct FEnemyFacingFixture
 {
 	AfpstrueEnemyCharacter* Enemy = nullptr;
 	AfpstrueEnemyAIController* Controller = nullptr;
 	UCharacterMovementComponent* Movement = nullptr;
 
+	// 生成敌人与可见玩家、建立 Controller 上下文，然后固定地面模式与初始朝向。
 	bool Initialize(FGameplayWorld& Fixture, FAutomationTestBase& Test, float ActorYaw, const FVector& TargetLocation)
 	{
 		AfpstrueCharacter* Target = Fixture.SpawnPlayer(TargetLocation);
@@ -225,6 +242,7 @@ struct FEnemyFacingFixture
 	}
 };
 
+// 经真实装备和开火入口准备少一发子弹的武器；临时骨骼只提供挂接前提，不模拟换弹结果。
 UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, FAutomationTestBase& Test,
 	UfpstrueWeaponConfig* Configuration = nullptr)
 {
@@ -288,11 +306,13 @@ UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, F
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponConfigValidationTest, "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查整份武器配置校验能拒绝无效数量、空插槽和非有限值，同时允许明确禁用视觉效果。
 bool FFpstrueWeaponConfigValidationTest::RunTest(const FString& Parameters)
 {
 	FString Error;
 	FFPWeaponSettings Settings;
 	TestTrue(TEXT("Native defaults are a complete valid configuration"), Settings.Validate(Error));
+	// 无效配置必须整体拒绝并说明原因，不能靠静默裁剪或混用默认字段修补。
 	const auto Reject = [this, &Error](FFPWeaponSettings Invalid)
 	{
 		TestFalse(TEXT("Invalid tuning is rejected without clamping or mixed fallback"), Invalid.Validate(Error));
@@ -332,6 +352,7 @@ bool FFpstrueWeaponConfigValidationTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponConfigSnapshotTest, "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证首次装备复制配置快照，重装备不补弹/热改参数，非法配置在改动装备关系前整体失败。
 bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -349,6 +370,7 @@ bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
 	if (Weapon == nullptr) return false;
 	TestEqual(TEXT("Asset controls initial magazine"), Weapon->GetCurrentAmmo(), 4);
 	TestEqual(TEXT("Asset controls initial reserve"), Weapon->GetReserveAmmo(), 10);
+	// 改资产后旧实例保持快照，新实例才读新值；实例弹药彼此独立。
 	Config->Settings.MagazineSize = 12;
 	Config->Settings.LineTraceDamage = 77.0f;
 	Config->Settings.CriticalHitBones.Add(TEXT("custom_bone"));
@@ -359,6 +381,7 @@ bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
 	if (Other == nullptr) return false;
 	TestEqual(TEXT("A newly equipped weapon sees updated tuning"), Other->GetMagazineSize(), 12);
 	TestEqual(TEXT("A second instance does not consume first instance ammo"), Weapon->GetCurrentAmmo(), 4);
+	// 不发动画通知时只能超时解锁，不能凭超时补弹；随后重装备仍保留原快照和弹药。
 	TestTrue(TEXT("Configured reload starts"), Weapon->RequestReload());
 	if (!World.Advance(0.2f)) return false;
 	TestTrue(TEXT("Configured timeout does not finish early"), Weapon->IsReloading());
@@ -394,6 +417,7 @@ bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFacingToleranceTest, "fpstrue.Gameplay.Boundaries.AI.FacingTolerance",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 通过真实行为树验证站定清除残余移动、15 度含边界的攻击容差和跨 +/-180 度的角度差。
 bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -461,6 +485,7 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyRotationConfigTest, "fpstrue.Gameplay.Boundaries.AI.RotationConfig",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证蓝图在 BeginPlay 前配置的转身速度被采用，非法负值只使用生产安全下限。
 bool FFpstrueEnemyRotationConfigTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -494,6 +519,7 @@ bool FFpstrueEnemyRotationConfigTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueAnimationDefaultsConfigTest, "fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 只验证 INI 到原生默认对象的动画软引用配置，不加载动画或宣称共享动画表现已通过。
 bool FFpstrueAnimationDefaultsConfigTest::RunTest(const FString& Parameters)
 {
 	const UfpstrueEnemyAnimationSharingCoordinator* Defaults = GetDefault<UfpstrueEnemyAnimationSharingCoordinator>();
@@ -518,6 +544,7 @@ bool FFpstrueAnimationDefaultsConfigTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueHitscanDamageTest, "fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 经单发射线与真实生命组件检查命中扣血一次、未命中仍扣弹且不额外伤害。
 bool FFpstrueHitscanDamageTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -554,6 +581,7 @@ bool FFpstrueHitscanDamageTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A single shot consumes exactly one round"), Weapon->GetCurrentAmmo(), AmmoBeforeShot - 1);
 	TestEqual(TEXT("A blocking hit applies native body damage once"), Health->GetHealth(), 60.0f);
 
+	// 关闭靶子阻挡后再次发射：只改变命中条件，不改变武器与弹药逻辑。
 	TargetBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	if (!World.Advance(0.2f))
 	{
@@ -569,6 +597,7 @@ bool FFpstrueHitscanDamageTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadTransitionsTest, "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 覆盖换弹打断连射、提交前/后取消的不同弹药结果，以及卸下武器后的迟到通知和保护计时器。
 bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -577,6 +606,7 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this);
 	if (Weapon == nullptr) return false;
 
+	// 连射进入换弹后旧开火 Timer 不得继续扣弹，重复请求也不能解除换弹锁。
 	Weapon->StartFire();
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
 	const int32 ReserveBefore = Weapon->GetReserveAmmo();
@@ -595,6 +625,7 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Cancellation before commit does not load ammunition"), Weapon->GetCurrentAmmo(), AmmoBefore);
 	TestEqual(TEXT("Cancelled fallback does not spend reserve"), Weapon->GetReserveAmmo(), ReserveBefore);
 
+	// 提交前取消不补弹；提交后取消保留已经转移的弹药，总量必须守恒。
 	TestTrue(TEXT("Reload can restart after cancellation"), Weapon->RequestReload());
 	TestTrue(TEXT("The new reload commits once"), Weapon->CommitReloadForTransaction(Weapon->GetActiveReloadId()));
 	Weapon->CancelReload();
@@ -604,6 +635,7 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	Weapon->StartFire();
 	Weapon->StopFire();
 	TestTrue(TEXT("Begin reload before unequipping"), Weapon->RequestReload());
+	// 保存被卸下时的旧编号，之后结束/取消/超时都不能继续装弹或开火。
 	const int32 UnequippedReloadId = Weapon->GetActiveReloadId();
 	const int32 AmmoBeforeUnequip = Weapon->GetCurrentAmmo();
 	CastChecked<AfpstrueCharacter>(Weapon->GetAttachParent()->GetOwner())->ClearEquippedWeaponComponent(Weapon);
@@ -621,6 +653,7 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueAutoReloadConflictTest, "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证真实连射耗尽弹匣后自动换弹，并通过同一角色速度策略退出瞄准与冲刺。
 bool FFpstrueAutoReloadConflictTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -651,6 +684,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadFinishReentryTest,
 	"fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证装弹只提交一次，且弹药广播中禁用武器后，旧 Finish 返回不能重新写回 Ready。
 bool FFpstrueReloadFinishReentryTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -684,6 +718,7 @@ bool FFpstrueReloadFinishReentryTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Finish closes the initial reload transaction"), Weapon->IsReloading());
 	Weapon->OnAmmoChanged.RemoveDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
 
+	// 先完成普通换弹，再用真实射击准备重入场景，避免未提交弹药掩盖错误。
 	Weapon->StartFire();
 	Weapon->StopFire();
 	if (!TestEqual(TEXT("A real shot prepares the reentrant reload"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize() - 1)
@@ -722,6 +757,7 @@ bool FFpstrueReloadFinishReentryTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadIdentityTest, "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查换弹 A/B 编号隔离与结束原因，拒绝无绑定动画通知，区分完成与超时解锁。
 bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -758,6 +794,7 @@ bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 
 	Weapon->StartFire();
 	Weapon->StopFire();
+	// 缺少装弹通知的保护结束必须报告 TimedOut，而不是假装动画成功并补发装弹。
 	TestTrue(TEXT("A missing-notify reload starts"), Weapon->RequestReload());
 	const int32 AmmoBeforeTimeout = Weapon->GetCurrentAmmo();
 	if (!World.Advance(5.2f)) return false;
@@ -771,6 +808,7 @@ bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueExternalEquipmentLifetimeTest, "fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查武器仍归拾取 Actor 所有时的装备重入与玩家退出清理，防止外部武器成为活动孤儿。
 bool FFpstrueExternalEquipmentLifetimeTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -791,6 +829,7 @@ bool FFpstrueExternalEquipmentLifetimeTest::RunTest(const FString& Parameters)
 	TestNull(TEXT("Unequip removes physical attachment"), Weapon->GetAttachParent());
 	TestFalse(TEXT("Unequip clears the character slot"), Player->HasEquippedWeapon());
 
+	// 装备广播中同步卸下，Attach 必须报告失败并且不保留半完成关系。
 	TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
 	Observer->Player = Player;
 	Observer->bUnequipOnEquipped = true;
@@ -805,6 +844,7 @@ bool FFpstrueExternalEquipmentLifetimeTest::RunTest(const FString& Parameters)
 	Weapon->OnWeaponReloadEnded.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleReloadEnded);
 	TestTrue(TEXT("Reload starts before player destruction"), Weapon->RequestReload());
 	const int32 DestroyedOwnerReloadId = Weapon->GetActiveReloadId();
+	// 玩家销毁不会自动销毁独立拾取 Actor；角色 EndPlay 必须主动关闭并脱离外部武器。
 	AActor* PickupActor = Weapon->GetOwner();
 	Player->Destroy();
 	TestTrue(TEXT("The independently owned pickup Actor remains alive"), IsValid(PickupActor));
@@ -822,6 +862,7 @@ bool FFpstrueExternalEquipmentLifetimeTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueShotCooldownReentryTest, "fpstrue.Gameplay.Boundaries.Weapon.RemainingCooldownAndShotFact",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查快速松开再按使用剩余射速间隔，且已扣弹的一枪即使被回调禁用也会发布事实。
 bool FFpstrueShotCooldownReentryTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -842,6 +883,7 @@ bool FFpstrueShotCooldownReentryTest::RunTest(const FString& Parameters)
 
 	TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
 	Observer->Weapon = Weapon;
+	// 在弹药通知内禁用武器，随后既要有一次已发射事件，又不能残留后续连射回调。
 	Observer->bDisableWeaponOnAmmoChanged = true;
 	Weapon->OnAmmoChanged.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
 	Weapon->OnWeaponFirePerformed.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleFirePerformed);
@@ -857,6 +899,7 @@ bool FFpstrueShotCooldownReentryTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadMontageIdentityTest, "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证同一 Montage 重播的实例 ID 隔离，旧 Notify/分支点无法提交新换弹，无关播放不被停止。
 bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -920,6 +963,7 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	TStrongObjectPtr<UfpstrueAnimNotify_ReloadCommit> Notify(NewObject<UfpstrueAnimNotify_ReloadCommit>());
 	TestEqual(TEXT("Reload notify keeps its serialized class identity after source consolidation"),
 		Notify->GetClass()->GetPathName(), FString(TEXT("/Script/fpstrue.fpstrueAnimNotify_ReloadCommit")));
+	// 排队 Notify 与 Branching Point 统一走实例身份校验，当前播放的重复通知仍最多提交一次。
 	FAnimNotifyEventReference OldNotify(nullptr, Montage);
 	OldNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(PlaybackA);
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
@@ -944,6 +988,7 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadLegacyCallbackTest, "fpstrue.Gameplay.Boundaries.Weapon.LegacyCallbacksFailClosed",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查旧无参换弹接口输出诊断并拒绝执行，不能借当前编号把迟到回调套到新事务上。
 bool FFpstrueReloadLegacyCallbackTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -971,6 +1016,7 @@ bool FFpstrueReloadLegacyCallbackTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadPlaybackFailureTest, "fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查播放失败立即解锁且不补弹，取消只停止所绑定实例，真实自然结束可完成当前换弹。
 bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -990,6 +1036,7 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 	if (!World.Advance(5.2f)) return false;
 	TestEqual(TEXT("No fallback succeeds after playback failure"), Observer->ReloadEndCount, 1);
 
+	// 用真实原生动画实例重试播放，分别检查取消与自然结束的弹药和动作结果。
 	USkeletalMeshComponent* Arms = CastChecked<USkeletalMeshComponent>(Weapon->GetAttachParent());
 	UAnimInstance* Anim = NewObject<UAnimInstance>(Arms);
 	Arms->AnimScriptInstance = Anim;
@@ -1024,6 +1071,7 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponAssetReloadTest, "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 加载真实武器蓝图和配置，覆盖普通/空仓的双 Montage 桥、播放中提交及弹药守恒。
 bool FFpstrueWeaponAssetReloadTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -1070,6 +1118,7 @@ bool FFpstrueWeaponAssetReloadTest::RunTest(const FString& Parameters)
 	TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
 	Weapon->OnAmmoChanged.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
 	Weapon->OnWeaponReloadEnded.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleReloadEnded);
+	// 两种弹匣前态必须各自选对手臂/武器资产，且一组双播放仅广播一次事务结束。
 	for (const bool bEmpty : {false, true})
 	{
 		const FString Suffix = bEmpty ? TEXT("Reload_Empty_Montage") : TEXT("Reload_Montage");
@@ -1108,6 +1157,7 @@ bool FFpstrueWeaponAssetReloadTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueRecoilElapsedTimeTest, "fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 经真实武器和 PlayerController 检查后坐力按经过时间恢复、视觉震动隔离，以及控制权退出清理。
 bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -1146,6 +1196,7 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	TArray<FActiveCameraShakeInfo> ActiveShakes;
 	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
 	if (!TestEqual(TEXT("A real shot starts one visual recoil; releasing fire preserves its short return"), ActiveShakes.Num(), 1)) return false;
+	// 实际一枪应只创建一个视觉震动；最终 POV 可变化，但射线相机与控制输入不受视觉震动反写。
 	UCameraShakeBase* VisualShake = ActiveShakes[0].ShakeInstance;
 	if (!TestTrue(TEXT("Weapon uses its isolated visual recoil class"), VisualShake->IsA<UfpstrueWeaponCameraShake>())) return false;
 	const FTransform AimTransform = Player->GetFirstPersonCameraComponent()->GetComponentTransform();
@@ -1175,6 +1226,7 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
 	TestEqual(TEXT("Repeated fire never stacks visual recoil instances"), ActiveShakes.Num(), 1);
 	if (ActiveShakes.Num() == 1) TestTrue(TEXT("Repeated fire reuses the running instance"), ActiveShakes[0].ShakeInstance == VisualShake);
+	// 控制权中断与死亡/禁用都必须移除自有镜头效果，不能留下持续晃动实例。
 	Weapon->InterruptOwnerInput();
 	ActiveShakes.Reset();
 	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
@@ -1192,6 +1244,7 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueOwnerInputTransitionTest, "fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查临时输入迁移期间拒绝结束通知重入，普通取消允许接续，新 Controller 接管后可重新动作。
 bool FFpstrueOwnerInputTransitionTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
@@ -1223,6 +1276,7 @@ bool FFpstrueOwnerInputTransitionTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Normal reload-end continuation remains permitted"), Observer->bReloadRestartAccepted);
 	TestNotEqual(TEXT("The normal continuation has its own identity"), Weapon->GetActiveReloadId(), PreviousReload);
 
+	// 实际 UnPossess 同样关闭迁移窗口内的新动作；迁移结束后不应永久禁用装备。
 	Observer->bFireOnReloadEnd = true;
 	Player->GetController()->UnPossess();
 	TestFalse(TEXT("Actual UnPossess rejects reload reentry during controller migration"), Observer->bReloadRestartAccepted);

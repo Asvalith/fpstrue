@@ -55,6 +55,7 @@ public:
 	void ResetMovementModifiers();
 	// 业务资格统一入口；临时输入迁移不会把有效装备误判为永久失效。
 	bool CanMaintainEquipment() const;
+	// 在装备资格之外排除控制权迁移期间的输入；迁移不会永久禁用当前武器。
 	bool CanAcceptGameplayInput() const;
 
 	//Character只暴露当前装备关系，武器运行时状态由WeaponComponent持有
@@ -166,6 +167,7 @@ private:
 	friend class UfpstrueWeaponComponent;
 	// 仅完整装备事务能登记/释放槽位；外部不得构造只有一侧引用的半装备状态。
 	void SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent);
+	// 只释放仍与 ExpectedWeapon 对应的装备关系，旧卸枪回调不能清掉新武器。
 	void ReleaseEquippedWeaponComponent(const UfpstrueWeaponComponent* ExpectedWeapon);
 	// MaxWalkSpeed 唯一写入口，按当前瞄准/冲刺状态计算，不依赖各出口调用顺序。
 	void ApplyMovementSpeed();

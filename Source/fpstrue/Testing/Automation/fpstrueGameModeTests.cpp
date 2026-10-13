@@ -7,6 +7,7 @@
 
 TFunction<void(AfpstrueSpawnReentryTestEnemy&)> AfpstrueSpawnReentryTestEnemy::OnTestBeginPlay;
 
+// 真实敌人初始化完成后执行注入回调，暴露 SpawnActor 返回前可能发生的同步结算。
 void AfpstrueSpawnReentryTestEnemy::BeginPlay()
 {
 	Super::BeginPlay();
@@ -14,6 +15,7 @@ void AfpstrueSpawnReentryTestEnemy::BeginPlay()
 		OnTestBeginPlay(*this);
 }
 
+// 提供确定性的可投影点；这里只替代导航投影，不宣称验证真实地图的可达性。
 bool AfpstrueSpawnTestNavigation::ProjectPoint(const FVector& Point, FNavLocation& OutLocation, const FVector& Extent,
 											   FSharedConstNavQueryFilter Filter, const UObject* Querier) const
 {
@@ -21,6 +23,7 @@ bool AfpstrueSpawnTestNavigation::ProjectPoint(const FVector& Point, FNavLocatio
 	return true;
 }
 
+// 初次倒计时通知中记录状态，再按场景请求重开或死亡，检查启动事务的重入边界。
 void UfpstrueGameModeTestObserver::HandleTime(int32 RemainingTime)
 {
 	if (TimeEvents++ == 0)
@@ -40,6 +43,7 @@ void UfpstrueGameModeTestObserver::HandleTime(int32 RemainingTime)
 	}
 }
 
+// 波次通知可立即致死玩家；旧启动调用栈随后不能继续生成敌人。
 void UfpstrueGameModeTestObserver::HandleWave(int32 CurrentWave, int32 TotalWaves)
 {
 	++WaveEvents;
@@ -50,10 +54,12 @@ void UfpstrueGameModeTestObserver::HandleWave(int32 CurrentWave, int32 TotalWave
 	}
 }
 
+// 记录人数变化广播次数，用于区分真实离场和迟到的重复注销。
 void UfpstrueGameModeTestObserver::HandleAlive(int32 AliveEnemies)
 {
 	++AliveEvents;
 }
+// 只统计结算广播次数，检查多条终止路径汇合时仍只结算一次。
 void UfpstrueGameModeTestObserver::HandleResult(bool bPlayerWon)
 {
 	++ResultEvents;
@@ -135,6 +141,7 @@ bool PrepareGameModeWorld(FTestWorldWrapper& Wrapper, FAutomationTestBase& Test,
 	return true;
 }
 
+// 将反射观察者挂到生产动态委托，测试真实同步广播而非手工调用观察者。
 void BindObserver(UfpstrueGameModeTestObserver* Observer, AfpstrueGameMode* GameMode, AfpstrueCharacter* Player)
 {
 	Observer->GameMode = GameMode;
@@ -149,6 +156,7 @@ void BindObserver(UfpstrueGameModeTestObserver* Observer, AfpstrueGameMode* Game
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueGameModeStartupTest, "fpstrue.Gameplay.GameMode.StartupReentryAndCleanup",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 覆盖启动广播重入、生成期间终止和结束清理；无地图夹具不替代 NavMesh 或动画画面验收。
 bool FFpstrueGameModeStartupTest::RunTest(const FString& Parameters)
 {
 	// 正常启动、初始时间广播中死亡、首波广播中死亡分别覆盖三种调用边界。
@@ -227,6 +235,7 @@ bool FFpstrueGameModeStartupTest::RunTest(const FString& Parameters)
 			TestEqual(TEXT("Terminated initial event does not continue to wave broadcasts"), Observer->WaveEvents, Scenario == 1 ? 0 : 2);
 		}
 
+		// 所有启动分支最终都必须清空计时器、绑定和队列，重复结束/开始不能复活旧对局。
 		TestTrue(TEXT("Match is finished"), GameMode->IsFinished());
 		TestFalse(TEXT("Finished and running cannot both be true"), GameMode->IsRunning());
 		TestEqual(TEXT("Finish clears pending spawn count"), GameMode->PendingEnemySpawnCount, 0);
@@ -270,6 +279,7 @@ bool FFpstrueGameModeStartupTest::RunTest(const FString& Parameters)
 		TWeakObjectPtr<AfpstrueSpawnReentryTestEnemy> SpawnedEnemy;
 		TWeakObjectPtr<AfpstrueEnemyAIController> SpawnedController;
 		bool bBrainWasRunningBeforeCallback = false;
+		// 在实际 BeginPlay 中结束对局或杀死当前敌人，检验生成后复核与控制器清理。
 		AfpstrueSpawnReentryTestEnemy::OnTestBeginPlay = [&](AfpstrueSpawnReentryTestEnemy& Enemy)
 		{
 			SpawnedEnemy = &Enemy;
@@ -308,6 +318,7 @@ bool FFpstrueGameModeStartupTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWaveConfigurationTest, "fpstrue.Gameplay.GameMode.WaveConfigurationAuthority",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证选用波次资产后整份配置具有唯一权威，不会将缺失字段悄悄拼接到旧参数。
 bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper World;
@@ -325,6 +336,7 @@ bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 	GameMode->WaveConfigs[0].EnemyCount = 23;
 	TestEqual(TEXT("Legacy explicit wave count replaces linear count"), GameMode->GetConfiguredWaveCount(), 1);
 	TestEqual(TEXT("Legacy explicit enemy count is read"), GameMode->GetWaveConfig(1).EnemyCount, 23);
+	// 同时配置旧字段和新资产，用冲突值证明波数、数量、类型、间隔和时长真正来自资产。
 	UfpstrueWaveConfiguration* Config = NewObject<UfpstrueWaveConfiguration>(GameMode);
 	Config->Waves.SetNum(2);
 	Config->Waves[0].EnemyCount = 11;
@@ -342,6 +354,7 @@ bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Asset interval is authoritative including zero"), GameMode->GetConfiguredWaveInterval(), 0.0f);
 	TStrongObjectPtr<UfpstrueGameModeTestObserver> Observer(NewObject<UfpstrueGameModeTestObserver>());
 	BindObserver(Observer.Get(), GameMode, Player);
+	// 走真实启动入口读取资产时长，再由初始通知结束对局，避免无导航生成干扰本用例。
 	Observer->bKillOnInitialTime = true;
 	GameMode->StartGameMode();
 	TestEqual(TEXT("Real Start publishes asset duration, not legacy value"), Observer->InitialTime, 61);
@@ -353,6 +366,7 @@ bool FFpstrueWaveConfigurationTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueGameModeParticipantBoundaryTest, "fpstrue.Gameplay.GameMode.ParticipantDeparture",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证敌人销毁/关卡离场只注销一次，玩家销毁会结束对局，零敌人测试覆盖仍是有效配置。
 bool FFpstrueGameModeParticipantBoundaryTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -389,11 +403,13 @@ bool FFpstrueGameModeParticipantBoundaryTest::RunTest(const FString& Parameters)
 		GameMode->UnregisterEnemy(Enemy);
 		TestEqual(TEXT("Late duplicate unregister is inert"), Observer->AliveEvents, EventsBeforeDeparture + 1);
 	}
+	// 玩家直接销毁也必须结束对局；迟到倒计时不能重复结果广播。
 	Player->Destroy();
 	TestTrue(TEXT("Direct player destruction ends Playing"), GameMode->IsFinished());
 	TestEqual(TEXT("Departure broadcasts one result"), Observer->ResultEvents, 1);
 	GameMode->UpdateCountdown();
 	TestEqual(TEXT("Countdown cannot finish the match again"), Observer->ResultEvents, 1);
+	// 区分明确的零敌人覆盖和未设置覆盖，避免把空场景误恢复为作者默认波次。
 	GameMode->BenchmarkEnemyCountOverride = 0;
 	TestEqual(TEXT("Explicit zero enemy override remains meaningful"), GameMode->GetWaveConfig(1).EnemyCount, 0);
 	TestEqual(TEXT("Override produces one benchmark wave"), GameMode->GetConfiguredWaveCount(), 1);

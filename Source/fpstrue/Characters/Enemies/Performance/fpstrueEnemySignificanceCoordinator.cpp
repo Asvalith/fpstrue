@@ -36,6 +36,7 @@ UfpstrueEnemySignificanceCoordinator::UfpstrueEnemySignificanceCoordinator()
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
+// 从 GameMode 取得配置和敌人集合，首次启动先应用诊断覆盖并校验，再建立集中采样 Timer。
 void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 {
 	// GameMode 只提供策略配置和敌人注册表；本组件拥有校验、集中更新、Top-K 选择及预算应用流程。
@@ -74,6 +75,7 @@ void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
 										   FMath::Max(OwnerGameMode->EnemySignificanceUpdateInterval, 0.1f), true, 0.1f);
 }
 
+// 停止后续采样，不替代敌人自身的死亡、组件退出和共享注销流程。
 void UfpstrueEnemySignificanceCoordinator::Stop()
 {
 	// 对局结束时停止下一轮集中采样；敌人自己的死亡/组件清理由各自生命周期负责。
@@ -83,6 +85,7 @@ void UfpstrueEnemySignificanceCoordinator::Stop()
 	}
 }
 
+// 关卡或组件退出时清除本组件拥有的采样 Timer，然后交给引擎完成退出。
 void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 组件退出前复用 Stop，保证关卡切换时 Timer 不再访问旧 GameMode。
@@ -146,6 +149,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	const FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
 
 	// 采样阶段不改组件状态，确保所有敌人使用同一帧的观察条件；这也是“统一时钟”的含义。
+	// ★【重要边界】[预算保护] Gameplay 评分控制决策和移动，Render 快照控制表现预算；统一采样时刻不代表共享评分或高层行为。
 	TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
 	Candidates.Reset();
 	Candidates.Reserve(OwnerGameMode->RegisteredEnemies.Num());
@@ -180,7 +184,9 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 
 	// 三类预算复用同一个小型堆。默认名额不超过内联容量，避免为 Top-K 额外申请堆内存；
 	// 配置超过内联容量时 TArray 仍可正常扩展。比较阶段只读取预计算的纯数值 PriorityKey。
+	// ★【重要边界】[预算保护] 先收齐候选再用纯数值 Top-K 分配名额，不在 Actor 采样过程中按注册先后抢预算。
 	TArray<FFPEnemyRenderTopKEntry, TInlineAllocator<32>> TopKHeap;
+	// 每种预算单独过滤资格并复用同一堆；返回候选总数，便于统计因名额不足被拒绝的数量。
 	const auto SelectTopK = [&Candidates, &TopKHeap](int32 RequestedCount, const auto& IsEligible)
 	{
 		TopKHeap.Reset();
@@ -249,11 +255,13 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		ShadowBudgetRejectedCount = EligibleShadowCount - TopKHeap.Num();
 	}
 
+	// ★【重要边界】[线程交接] 预算选择完成后在当前游戏线程统一写回组件；候选裸指针只用于本轮同步处理，不作为 Worker 或跨轮数据。
 	ApplyAndRecordCandidates(*OwnerGameMode, FullBudgetDowngradeCount, ShadowBudgetRejectedCount, RayTracingBudgetRejectedCount);
 	// 不跨轮保存非拥有 Actor 指针，仅保留临时数组的分配容量。
 	Candidates.Reset();
 }
 
+// 应用本轮已确定的三类预算，并读回组件标志和档位写入 CSV；统计结果不参与本轮决策。
 void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const AfpstrueGameMode& OwnerGameMode, int32 FullBudgetDowngradeCount,
 																	int32 ShadowBudgetRejectedCount, int32 RayTracingBudgetRejectedCount)
 {
@@ -282,6 +290,7 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 	float ScreenCoverageFactorSum = 0.0f;
 	float RecentFrustumFactorSum = 0.0f;
 	float DistanceFactorSum = 0.0f;
+	// 逐个提交策略后立即读回：区分敌人数、受管 Mesh 数和 CPU 预测 LOD，避免混用口径。
 	for (const FEnemyRenderCandidate& Candidate : Candidates)
 	{
 		Candidate.Enemy->ApplyRenderSignificanceTier(Candidate.AssignedTier, Candidate.bShouldCastShadow,
@@ -320,6 +329,7 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 		DistanceFactorSum += Candidate.Sample.DistanceFactor;
 	}
 
+	// 以本轮全部存活候选为分母记录均值；没有候选时仍写零，避免沿用上一轮数据。
 	const float CandidateCount = static_cast<float>(Candidates.Num());
 	const float InverseCandidateCount = CandidateCount > 0.0f ? 1.0f / CandidateCount : 0.0f;
 	CSV_CUSTOM_STAT(fpstrueSignificance, AliveEnemies, Candidates.Num(), ECsvCustomStatOp::Set);
@@ -366,6 +376,7 @@ void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(const Afpstr
 
 // ==================== 策略校验 ====================
 
+// 在进入更新热路径前统一修正配置，保持阈值、距离和最低 LOD 的顺序关系。
 void UfpstrueEnemySignificanceCoordinator::SanitizePolicy(FFPEnemyRenderSignificancePolicy& Policy)
 {
 	// 配置可能来自 CDO、蓝图或 Benchmark 命令行；进入热路径前集中修正，Update 中不再重复做防御性分支。
@@ -386,6 +397,7 @@ void UfpstrueEnemySignificanceCoordinator::SanitizePolicy(FFPEnemyRenderSignific
 	Policy.FarDistance = FMath::Max(Policy.FarDistance, Policy.NearDistance + 1.0f);
 	Policy.CombatPriorityGraceSeconds = FMath::Max(Policy.CombatPriorityGraceSeconds, 0.0f);
 
+	// 入档与出档阈值分开，保留滞回区间，减少临界视角下反复升降档。
 	Policy.FullEnterThreshold = FMath::Clamp(Policy.FullEnterThreshold, 0.0f, 1.0f);
 	Policy.FullExitThreshold = FMath::Clamp(Policy.FullExitThreshold, 0.0f, Policy.FullEnterThreshold);
 	Policy.ReducedEnterThreshold = FMath::Clamp(Policy.ReducedEnterThreshold, 0.0f, Policy.FullExitThreshold);
@@ -393,6 +405,7 @@ void UfpstrueEnemySignificanceCoordinator::SanitizePolicy(FFPEnemyRenderSignific
 	Policy.DemotionDelaySeconds = FMath::Max(Policy.DemotionDelaySeconds, 0.0f);
 	Policy.MinimumTierHoldSeconds = FMath::Max(Policy.MinimumTierHoldSeconds, 0.0f);
 
+	// 名额允许为零；低档位的最低 LOD 不得反而比高档位更精细。
 	Policy.MaxFullRenderEnemies = FMath::Max(Policy.MaxFullRenderEnemies, 0);
 	Policy.MaxShadowCastingEnemies = FMath::Max(Policy.MaxShadowCastingEnemies, 0);
 	Policy.ShadowMaxDistance = FMath::Max(Policy.ShadowMaxDistance, 0.0f);

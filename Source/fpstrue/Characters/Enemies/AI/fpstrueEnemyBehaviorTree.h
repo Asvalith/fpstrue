@@ -40,7 +40,9 @@ class FPSTRUE_API UfpstrueBTTask_SampleDecision : public UBTTaskNode
 {
 	GENERATED_BODY()
 public:
+	// 为编辑器中的单次采样节点设置可读名称。
 	UfpstrueBTTask_SampleDecision();
+	// 将 Controller 的单轮快照写入黑板；缺少 Controller 或黑板时返回失败。
 	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 };
 
@@ -50,7 +52,9 @@ class FPSTRUE_API UfpstrueBTTask_EnemyAction : public UBTTaskNode
 {
 	GENERATED_BODY()
 public:
+	// 初始化叶子动作节点的显示名称，不保存某个敌人的运行状态。
 	UfpstrueBTTask_EnemyAction();
+	// 调用当前 Controller 执行已配置动作，并把执行结果交给行为树选择后备分支。
 	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 
 	UPROPERTY(EditAnywhere, Category = "Enemy")
@@ -63,9 +67,12 @@ class FPSTRUE_API UfpstrueBTTask_DecisionWait : public UBTTaskNode
 {
 	GENERATED_BODY()
 public:
+	// 启用行为树的间隔 Tick，等待期间不重复采样距离和目标。
 	UfpstrueBTTask_DecisionWait();
+	// 按本敌人的决策间隔进入等待，也接受外部事件发来的提前唤醒消息。
 	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 protected:
+	// 等待时间到达后完成潜伏任务，使行为树继续进入采样节点。
 	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
 };
 
@@ -75,6 +82,7 @@ class FPSTRUE_API UfpstrueBTDecorator_DecisionFlag : public UBTDecorator_Blackbo
 {
 	GENERATED_BODY()
 public:
+	// 设置黑板布尔条件及期望值，禁用等待期间基于旧快照的分支中止。
 	void Configure(FName KeyName, bool bExpectedValue);
 };
 

@@ -41,6 +41,7 @@
 
 namespace
 {
+// 经真实感知组件派发成功/失败刺激，保留回调链；只固定输入，不替代 Controller 的处理逻辑。
 bool ReportBehaviorSightStimulus(AfpstrueEnemyAIController* Controller, AActor* Target, bool bSensed,
 	const FVector& StimulusLocation, FAutomationTestBase& Test)
 {
@@ -59,6 +60,7 @@ bool ReportBehaviorSightStimulus(AfpstrueEnemyAIController* Controller, AActor* 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeStructureTest, "fpstrue.AI.BehaviorTree.DefaultStructure",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+// 检查默认树的黑板类型、等待/采样顺序和攻击失败后的站位分支，不把生成树等同于运行验收。
 bool FFPEnemyBehaviorTreeStructureTest::RunTest(const FString& Parameters)
 {
 	UBehaviorTree* Tree = NewObject<UBehaviorTree>();
@@ -84,6 +86,7 @@ bool FFPEnemyBehaviorTreeStructureTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("Conditional branches are guarded by Blackboard"), Selector->Children[Index].Decorators.Num(), 1);
 	}
+	// 攻击尝试失败必须有站位维护兜底，避免敌人因许可不足而停止整个决策循环。
 	UBTComposite_Selector* Combat = Cast<UBTComposite_Selector>(Selector->Children[3].ChildComposite);
 	if (!TestNotNull(TEXT("Combat fallback is another Selector"), Combat))
 		return false;
@@ -99,6 +102,7 @@ bool FFPEnemyBehaviorTreeStructureTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeAssetSafetyTest, "fpstrue.AI.BehaviorTree.AssetSafety",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+// 验证建树工具只填充兼容的空资产，保留设计师内容，并拒绝错误类型或跨敌人共享的状态键。
 bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 {
 	UBehaviorTree* Tree = NewObject<UBehaviorTree>();
@@ -116,6 +120,7 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 			 UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(AnotherTree, Blackboard));
 	TestTrue(TEXT("Reusing a Blackboard preserves original key instances"),
 			 Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor)].KeyType == OriginalTargetKey);
+	// 分别破坏目标类型、独立实例状态和必需键，验证黑板校验覆盖这些实际接线错误。
 	UBlackboardKeyType_Object* TargetType = CastChecked<UBlackboardKeyType_Object>(
 		Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor)].KeyType);
 	UClass* OriginalBaseClass = TargetType->BaseClass;
@@ -130,6 +135,7 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 	Blackboard->Keys.RemoveAt(Blackboard->Keys.Num() - 1);
 	TestFalse(TEXT("Missing required key is rejected"), FPHasEnemyBlackboardSchema(Blackboard));
 
+	// 已有自定义键的资产不得被默认模板覆盖，拒绝后也不能留下半成品树。
 	UBehaviorTree* UnconfiguredTree = NewObject<UBehaviorTree>();
 	UBlackboardData* DesignerBlackboard = NewObject<UBlackboardData>(UnconfiguredTree);
 	FBlackboardEntry& DesignerKey = DesignerBlackboard->Keys.AddDefaulted_GetRef();
@@ -146,6 +152,7 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeLifecycleTest, "fpstrue.AI.BehaviorTree.RuntimeLifecycle",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+// 运行真实行为树，检查个体黑板隔离、感知唤醒、失去目标的记忆和 StopAI/重新 Possess 边界。
 bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -164,6 +171,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 		Fixture.ForwardErrorMessages(this);
 		return false;
 	}
+	// 只关闭无关移动/碰撞，保留真实 Pawn、Controller、Brain 和 Blackboard 初始化链。
 	const auto SpawnEnemy = [World]()
 	{
 		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
@@ -189,6 +197,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector(100000.0f, 0.0f, 0.0f));
 	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	// 注入玩家身份不是发现玩家位置：感知成功之前树和攻击入口都应保持无目标。
 	First->Possess(FirstEnemy);
 	Second->Possess(SecondEnemy);
 	First->InitializeCombatContext(Target, nullptr);
@@ -218,6 +227,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	}
 	TestFalse(TEXT("The running tree also keeps an undiscovered player absent"),
 		First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	// 感知消息应立即唤醒长 Idle 等待，且只更新当前敌人的黑板。
 	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
 	if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
 	TestTrue(TEXT("Sight message wakes a ten-second idle wait for the next tree sample"),
@@ -230,6 +240,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Far target chooses Idle branch"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InChaseRange));
 	TestTrue(TEXT("Idle leaf executed"), First->GetAIState() == EFPEnemyAIState::Idle);
 
+	// 管理器知道隐藏玩家的实时位置，但失去视线的个体只能追最后一次看见的位置。
 	AfpstrueSurroundManager* SharedManager = World->SpawnActor<AfpstrueSurroundManager>();
 	if (!TestNotNull(TEXT("Search fixture has a live shared target manager"), SharedManager)) return false;
 	First->InitializeCombatContext(Target, SharedManager);
@@ -248,6 +259,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Manager independently knows the hidden player's new position"),
 		SharedManager->GetSharedTargetSnapshot(SharedLocation) && SharedLocation.Equals(HiddenLocation));
 	if (!ReportBehaviorSightStimulus(First, Target, false, HiddenLocation, *this)) return false;
+	// 丢失视线立即撤销目标 Actor、攻击和实时朝向；保留有限记忆但不泄露隐藏位置。
 	const double OriginalForgetTime = First->TargetForgetTime;
 	TestFalse(TEXT("Sight loss immediately revokes live target visibility"), First->bTargetVisible);
 	TestNull(TEXT("Gameplay consumers cannot obtain the hidden player"), First->GetTargetCharacter());
@@ -278,6 +290,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	// 临时世界没有 NavMesh；真实寻路失败记录携带提交目标，可以区分记忆位置与 Manager 的实时位置。
 	TestTrue(TEXT("Search navigation uses remembered location instead of Manager snapshot"),
 		First->MoveFailures[0].Goal.Location.Equals(RememberedLocation));
+	// 重复失败刺激不能续期；记忆过期停止搜索，重新看见才恢复实时目标。
 	if (!Fixture.TickTestWorld(0.1f)) { Fixture.ForwardErrorMessages(this); return false; }
 	if (!ReportBehaviorSightStimulus(First, Target, false, HiddenLocation + FVector(10000.0f, 0.0f, 0.0f), *this)) return false;
 	TestEqual(TEXT("Repeated failure cannot renew the search deadline"), First->TargetForgetTime, OriginalForgetTime);
@@ -318,6 +331,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	const FBlackboard::FKey TargetKey = DecisionBlackboard->GetKeyID(FPEnemyBlackboard::TargetActor);
 	const float ExpectedIdleDecisionDelay = FMath::Max(0.01f, First->IdleDecisionInterval * First->SignificanceDecisionMultiplier);
 	int32 InvalidSnapshotNotifications = 0;
+	// 从黑板键通知内部读整份状态，验证先提交所有决策字段、再统一发布通知。
 	const FDelegateHandle SnapshotObserver = DecisionBlackboard->RegisterObserver(TargetKey, First,
 		FOnBlackboardChangeNotification::CreateLambda([&](const UBlackboardComponent& Blackboard, FBlackboard::FKey ChangedKey)
 		{
@@ -345,6 +359,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	TestTrue(TEXT("A later valid sample restores target"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	// 目标死亡和销毁应撤销决策，但不永久停止树；显式注入新目标后仍能重新发现。
 	UGameplayStatics::ApplyDamage(Target, 10000.0f, nullptr, nullptr, nullptr);
 	if (!TestTrue(TEXT("The local target actually died"), Target->IsDead())) return false;
 	First->RefreshBehaviorDecision(*DecisionBlackboard);
@@ -375,6 +390,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Missing controlled pawn is an invalid move context"),
 		UnpossessedController->MoveToGoal(FVector::ZeroVector, 15.0f, true) ==
 		AfpstrueEnemyAIController::EMoveGoalResult::InvalidContext);
+	// 先将成功刺激排队再 StopAI，确保迟到的真实回调不能重新打开命令入口。
 	AfpstrueCharacter* StoppedProbe = World->SpawnActor<AfpstrueCharacter>();
 	if (!TestNotNull(TEXT("A queued sight event has a live target when AI stops"), StoppedProbe)) return false;
 	StoppedProbe->SetActorEnableCollision(false);
@@ -397,6 +413,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	{
 		TestFalse(TEXT("StopAI clears every decision flag"), First->GetBlackboardComponent()->GetValueAsBool(Key));
 	}
+	// 重用 Controller/Blackboard 时必须启动新上下文，而不是继承上一轮目标。
 	First->UnPossess();
 	First->Possess(FirstEnemy);
 	TestTrue(TEXT("A new Possess restarts behavior brain"), First->GetBrainComponent()->IsRunning());
@@ -409,6 +426,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemySightOcclusionTest, "fpstrue.AI.Perception.SightOcclusionAndFacing",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 不注入刺激：用真实 Sight、墙体碰撞与 Pawn 朝向验证看见、遮挡、转身和重新发现。
 bool FFPEnemySightOcclusionTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -445,6 +463,7 @@ bool FFPEnemySightOcclusionTest::RunTest(const FString& Parameters)
 	UAIPerceptionSystem* PerceptionSystem = UAIPerceptionSystem::GetCurrent(World);
 	if (!TestNotNull(TEXT("Real sight system"), PerceptionSystem)) return false;
 	PerceptionSystem->RegisterSourceForSenseClass(UAISense_Sight::StaticClass(), *Target);
+	// 给真实感知系统有限更新窗口，等待目标可见性达到预期；超出窗口视为失败。
 	const auto TickUntilVisible = [&](bool bExpectedVisible)
 	{
 		for (int32 Frame = 0; Frame < 100; ++Frame)
@@ -473,6 +492,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyMoveRequestOwnershipTest,
 	"fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查真实 MoveTo 失败的独立退避、即时到达缓存和旧请求 ID 过滤，含完成回调内 StopAI 重入。
 bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -496,6 +516,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	int32 SubmittedCompletions = 0;
 	FAIRequestID FirstFailedId = FAIRequestID::InvalidRequest;
 	bool bStopDuringCompletion = false;
+	// 记录引擎分配的完成请求，并可在同步完成广播中关闭 AI，检验外层返回后的身份复核。
 	const FDelegateHandle Observer = Following->OnRequestFinished.AddLambda([&](FAIRequestID Id, const FPathFollowingResult& Result)
 	{
 		++SubmittedCompletions;
@@ -517,6 +538,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 		Controller->MoveToGoal(Unreachable, 75.0f, false);
 	}
 	TestEqual(TEXT("Alternating fallback cannot overwrite the other strategy's backoff"), SubmittedCompletions, 2);
+	// 不同楼层和接受半径是不同请求；不能被旧失败的退避错误压制。
 	const FVector OtherFloor = Unreachable + FVector(0.0, 0.0, 500.0);
 	Controller->MoveToGoal(OtherFloor, 15.0f, true);
 	TestEqual(TEXT("A different floor is a different navigation request"), SubmittedCompletions, 3);
@@ -526,6 +548,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 		Controller->MoveToGoal(Controller->GetNavAgentLocation(), 15.0f, true) == EMoveResult::Arrived);
 	TestTrue(TEXT("Immediate success publishes an arrival cache after callbacks"), Controller->bHasMoveGoal);
 	const auto ArrivalGoal = Controller->LastMoveGoal;
+	// 模拟迟到的旧失败，只允许其对应请求失效，不能清掉更新的到达缓存。
 	Controller->OnMoveCompleted(FirstFailedId, FPathFollowingResult(EPathFollowingResult::Invalid));
 	TestTrue(TEXT("Delayed old failure cannot invalidate newer arrival cache"), Controller->bHasMoveGoal);
 	TestTrue(TEXT("Delayed completion preserves new goal semantics"), Controller->LastMoveGoal.Matches(ArrivalGoal, 1.0f));
@@ -534,6 +557,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("StopAI inside synchronous completion closes command gate"), Controller->AcceptsCombatCommands());
 	TestFalse(TEXT("Outer MoveTo return cannot restore stopped cache"), Controller->bHasMoveGoal);
 	TestFalse(TEXT("Outer MoveTo return cannot restore stopped request ownership"), Controller->OwnedMoveRequestId.IsValid());
+	// 解除本用例的完成监听，后续世界清理不再访问局部测试状态。
 	Following->OnRequestFinished.Remove(Observer);
 	return true;
 }
@@ -545,6 +569,7 @@ namespace FPEnemyBehaviorAssetTests
 const TCHAR* const Packages[] = {TEXT("/Game/FirstPerson/AI/BT_FPEnemy"), TEXT("/Game/FirstPerson/AI/BB_FPEnemy"), TEXT("/Game/FirstPerson/AI/BP_FPEnemyAIController"),
 								 TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP")};
 
+// 只读取已保存的反射引用，检查蓝图默认对象和编辑器节点实际指向哪些资产。
 UObject* ReadObjectProperty(const UObject* Object, FName Name)
 {
 	const FObjectPropertyBase* Property = Object != nullptr ? FindFProperty<FObjectPropertyBase>(Object->GetClass(), Name) : nullptr;
@@ -555,6 +580,7 @@ UObject* ReadObjectProperty(const UObject* Object, FName Name)
 IMPLEMENT_COMPLEX_AUTOMATION_TEST(FFPEnemyBehaviorTreeAssetGraphTest, "fpstrue.AI.BehaviorTree.AssetGraphAndBindings",
 								  EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
+// 仅当所有可选项目资产存在时枚举资产用例；缺资产明确跳过，不能借原生回退伪装验收。
 void FFPEnemyBehaviorTreeAssetGraphTest::GetTests(TArray<FString>& OutBeautifiedNames, TArray<FString>& OutTestCommands) const
 {
 	// UE simple-test 返回 true 会被算作通过。缺少可选二进制资产时不枚举子测试，并明确记录 SKIP。
@@ -574,6 +600,7 @@ void FFPEnemyBehaviorTreeAssetGraphTest::GetTests(TArray<FString>& OutBeautified
 	OutTestCommands.Add(TEXT("DefaultProjectAssets"));
 }
 
+// 校验真实保存的 BT/BB/蓝图引用，以及运行树与可编辑图的节点、装饰器和连线一致性。
 bool FFPEnemyBehaviorTreeAssetGraphTest::RunTest(const FString& Parameters)
 {
 	UBehaviorTree* Tree = LoadObject<UBehaviorTree>(nullptr, TEXT("/Game/FirstPerson/AI/BT_FPEnemy.BT_FPEnemy"));
@@ -654,6 +681,7 @@ bool FFPEnemyBehaviorTreeAssetGraphTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Editor Root node was restored"), EditorRoot))
 		return false;
 	TestEqual(TEXT("Every runtime node has a matching editable graph node"), RuntimeToGraph.Num(), RuntimeNodes.Num());
+	// 在实际编辑器输出引脚上查找父子连线，不用运行树结构代替图接线检查。
 	const auto HasGraphEdge = [](const UEdGraphNode* Parent, const UEdGraphNode* Child)
 	{
 		if (Parent == nullptr || Child == nullptr)
@@ -671,6 +699,7 @@ bool FFPEnemyBehaviorTreeAssetGraphTest::RunTest(const FString& Parameters)
 		return false;
 	};
 	TestTrue(TEXT("Editor Root is connected to the runtime root"), HasGraphEdge(EditorRoot, RuntimeToGraph.FindRef(Tree->RootNode)));
+	// 逐条映射运行时父子关系，并确认装饰器与图的 SubNode 共用保存的实例。
 	for (const UBTNode* Node : RuntimeNodes)
 	{
 		if (const UBTCompositeNode* Composite = Cast<UBTCompositeNode>(Node))

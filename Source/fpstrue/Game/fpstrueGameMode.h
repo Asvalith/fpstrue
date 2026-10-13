@@ -94,9 +94,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Game")
 	int32 GetRemainingTime() const { return RemainingTime; }
 
+	// 只在正式 Playing 阶段允许生成、计时和玩法请求；Starting 不等于已经开局。
 	UFUNCTION(BlueprintPure, Category = "Game")
 	bool IsRunning() const { return MatchPhase == EFPMatchPhase::Playing; }
 
+	// 查询对局是否已进入终态，避免死亡、超时和退出路径重复发布胜负结果。
 	UFUNCTION(BlueprintPure, Category = "Game")
 	bool IsFinished() const { return MatchPhase == EFPMatchPhase::Finished; }
 

@@ -45,7 +45,9 @@ public:
 	virtual void OnUnPossess() override;
 	// 世界退出时停止行为树并清理管理器引用。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	// 只将项目玩家视为敌对目标，其他 Actor 不参与本敌人的视觉目标查询。
 	virtual ETeamAttitude::Type GetTeamAttitudeTowards(const AActor& Other) const override;
+	// 视觉观察点使用 Pawn 视点及真实朝向；没有 Pawn 时使用引擎默认实现。
 	virtual void GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const override;
 
 	// 由 GameMode 注入玩家目标和全局包围管理器，避免每个 AI 自行查找。
@@ -65,6 +67,7 @@ public:
 	void RefreshBehaviorDecision(UBlackboardComponent& DecisionBlackboard);
 	// BT 叶子节点执行桥；不在 Controller 中再次选择高层行为。
 	bool ExecuteBehaviorAction(EFPEnemyBehaviorAction Action);
+	// 返回上轮采样确定的等待时间，首次启动时则为随机错峰延迟。
 	float GetBehaviorDecisionDelay() const { return NextBehaviorDecisionDelay; }
 
 	// 战斗目标只由 Controller 持有，EnemyCharacter 通过只读接口使用，避免双份状态漂移。
@@ -160,6 +163,7 @@ private:
 		float AcceptanceRadius = 0.0f;
 		TWeakObjectPtr<UClass> NavigationFilter;
 		bool bCombatPriority = false;
+		// 位置在刷新容差内且接受半径、导航过滤器和优先级一致，才属于同一移动请求。
 		bool Matches(const FMoveGoalKey& Other, float DistanceTolerance) const;
 	};
 	struct FMoveFailure
@@ -172,6 +176,7 @@ private:
 	void StartBehaviorLogic();
 	// 消息只排队唤醒当前等待节点，不从感知回调中重入行为树。
 	void RequestBehaviorDecision();
+	// 只处理当前玩家的视觉刺激；丢失时保留最后可见位置并取消旧攻击，而不是读取隐藏玩家坐标。
 	UFUNCTION()
 	void HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus);
 
@@ -189,6 +194,7 @@ private:
 	// 移动与朝向：沿路径行进，到位后再面向目标。
 	// 复用有效路径/到位缓存；需要刷新时先预算校验，再提交显式 MoveTo 请求并缓存投影结果。
 	EMoveGoalResult MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority);
+	// 按包围或追击分别记录失败目标和重试时间，避免一个后备行为覆盖另一个行为的退避。
 	void RecordMoveFailure(const FMoveGoalKey& Goal);
 	// 停止路径及地面残余移动，再切换到目标朝向；返回角色是否已转入攻击角度容差。
 	bool FaceTargetAtRest();

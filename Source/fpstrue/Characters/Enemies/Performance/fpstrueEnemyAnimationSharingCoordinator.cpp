@@ -29,6 +29,7 @@ constexpr float SharedMovingSpeedThreshold = 10.0f;
 
 // ==================== 状态适配：读取 Controller 状态与实际速度 ====================
 
+// 由插件采样敌人的移动表现；意图为追击但速度为零时输出待机，不参与高层行为选择。
 void UfpstrueEnemyAnimationSharingStateProcessor::ProcessActorState_Implementation(int32& OutState, AActor* InActor, uint8 CurrentState,
 																				   uint8 OnDemandState, bool& bShouldProcess)
 {
@@ -50,6 +51,7 @@ void UfpstrueEnemyAnimationSharingStateProcessor::ProcessActorState_Implementati
 	OutState = static_cast<int32>(bMoving ? EFPEnemyAIState::Chase : EFPEnemyAIState::Idle);
 }
 
+// 提供共享状态对应的原生枚举，确保状态整数与插件 Setup 使用同一编号。
 UEnum* UfpstrueEnemyAnimationSharingStateProcessor::GetAnimationStateEnum_Implementation()
 {
 	// 把项目 AI 状态枚举交给插件，插件据此解释 ProcessActorState 输出的整数状态。
@@ -76,6 +78,7 @@ UfpstrueEnemyAnimationSharingCoordinator::UfpstrueEnemyAnimationSharingCoordinat
 	}
 }
 
+// 启用并校验共享系统；只创建或复用自己拥有、骨架兼容的 World 共享池。
 void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCharacter> InEnemyClass)
 {
 	// 一个 World 只允许本项目创建一个 Manager；任一资产或骨架校验失败都保持原有 AnimBP，不留下半初始化状态。
@@ -99,6 +102,8 @@ void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCh
 		return;
 	}
 
+	// 优先复用本组件之前创建的池，不覆盖关卡或其他系统已经占有的共享 Manager。
+	// ★【重要边界】[资源所有权] 一个 World 的共享 Manager 只复用本组件创建且骨架兼容的实例，不能覆盖其他系统的 Setup。
 	UAnimationSharingManager* WorldManager = UAnimationSharingManager::GetManagerForWorld(GetWorld());
 	if (WorldManager != nullptr && WorldManager == SharingManager && RuntimeSetup != nullptr)
 	{
@@ -139,6 +144,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCh
 		   FMath::Max(MovingRandomizedInstances, 1), FMath::Clamp(LeaderTickSignificanceThreshold, 0.0f, 1.0f));
 }
 
+// 关闭接纳入口并注销全部已登记、待登记 Follower；允许注销过程同步更新其他句柄。
 void UfpstrueEnemyAnimationSharingCoordinator::Stop()
 {
 	// 先停止接纳新对象，再逐个注销；插件在 RemoveAtSwap 期间仍会同步更新其他对象的句柄。
@@ -158,6 +164,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::Stop()
 	PendingActorRegistrations.Reset();
 }
 
+// 退出时先注销敌人，再释放运行时配置引用；停止对局不等于立即销毁 World 共享池。
 void UfpstrueEnemyAnimationSharingCoordinator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 世界退出时释放 Manager、运行时 Setup 和 Skeleton 的强引用，允许 UObject GC 回收临时配置。
@@ -170,6 +177,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::EndPlay(const EEndPlayReason::Typ
 
 // ==================== 运行时 Setup 构建 ====================
 
+// 根据敌人默认骨架和配置动画创建待机、移动共享组；缺失或骨架不匹配时回退独立 AnimBP。
 bool UfpstrueEnemyAnimationSharingCoordinator::BuildRuntimeSetup(TSubclassOf<AfpstrueEnemyCharacter> InEnemyClass)
 {
 	// Setup 在运行时从敌人 CDO 的 SkeletalMesh/Skeleton 构建，确保共享动画和实际敌人使用同一骨架。
@@ -194,6 +202,7 @@ bool UfpstrueEnemyAnimationSharingCoordinator::BuildRuntimeSetup(TSubclassOf<Afp
 		return false;
 	}
 
+	// 资产全部通过校验后才创建临时 Setup；随机实例数是共享姿态池配置，不是敌人数上限。
 	RuntimeSetup = NewObject<UAnimationSharingSetup>(this, TEXT("EnemyAnimationSharingRuntimeSetup"));
 	RuntimeSetup->ScalabilitySettings.UseBlendTransitions.Default = false;
 	RuntimeSetup->ScalabilitySettings.MaximumNumberConcurrentBlends.Default = 1;
@@ -223,6 +232,7 @@ bool UfpstrueEnemyAnimationSharingCoordinator::BuildRuntimeSetup(TSubclassOf<Afp
 
 // ==================== Follower 注册与退出 ====================
 
+// 资格变化时才加入或退出共享池；已登记敌人仅更新渲染显著性，不重复注册。
 void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(AfpstrueEnemyCharacter* Enemy)
 {
 	// 该函数是幂等的：资格不变时只更新 Significance；资格改变时才真正注册或注销 Actor。
@@ -243,6 +253,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 	if (!RegisteredActorHandles.Contains(EnemyKey) && !PendingActorRegistrations.Contains(EnemyKey))
 	{
 		PendingActorRegistrations.Add(EnemyKey);
+		// ★【重要边界】[回调重入] 注册会同步交付句柄；先登记 pending，等插件调用返回后才能按新资格撤销，不能在句柄回调里反注册。
 		SharingManager->RegisterActorWithSkeleton(
 			Enemy, SharingSkeleton,
 			FUpdateActorHandle::CreateUObject(this, &UfpstrueEnemyAnimationSharingCoordinator::HandleActorHandleUpdated, EnemyKey));
@@ -263,6 +274,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 	}
 }
 
+// 注销本敌人的 Follower，并把骨骼 LOD 控制权还给角色；重复调用不重复注销。
 void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	// 战斗/死亡退出共享后把 LOD 控制权还给 EnemyCharacter，避免插件残留标志覆盖项目自己的骨骼 LOD 策略。
@@ -276,6 +288,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 	const bool bWasRegistered = RegisteredActorHandles.Remove(EnemyKey) > 0;
 	if (bWasPending || bWasRegistered)
 	{
+		// ★【重要边界】[资源所有权] 先移除本地登记再让插件注销；其余敌人的句柄可能同步更新，弱引用和 handle 都不是 Actor 所有权。
 		SharingManager->UnregisterActor(Enemy);
 
 		// Animation Sharing 注册或待注册时都可能接管此标志；退出后必须还给项目的骨骼 LOD 分级。
@@ -293,11 +306,13 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 
 // ==================== Handle 回调 ====================
 
+// 接收插件注册或紧缩数组后的句柄变化；回调只更新本地登记，不能重入插件增删操作。
 void UfpstrueEnemyAnimationSharingCoordinator::HandleActorHandleUpdated(int32 NewHandle, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy)
 {
 	// UE 5.5 在注册和注销的 RemoveAtSwap 中同步回调，此时插件数组可能尚未完成更新。
 	// 这里只维护已知登记的句柄，绝不调用 Register/Unregister 或更新插件数据，避免重入。
 	// Stop 期间也必须接收尚未注销对象的 swap 句柄；资格检查和注销由外层入口执行。
+	// ★【重要边界】[回调重入] RemoveAtSwap 的句柄回调只能维护已知登记，不能调用插件增删接口或把已退出对象重新注册。
 	AfpstrueEnemyCharacter* EnemyCharacter = Enemy.Get();
 	if (EnemyCharacter == nullptr)
 	{

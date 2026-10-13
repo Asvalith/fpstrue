@@ -102,6 +102,7 @@ public:
 	void EndAttackWindow();
 	// 只保留旧资产符号用于迁移诊断；没有身份的异步通知不能结束当前攻击。
 	void HandleAttackFinishedNotify();
+	// 只有通知携带的 Mesh 和 Montage 实例属于当前攻击时，才允许完成本次事务。
 	void HandleAttackFinishedNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference);
 	// 原生 Notify 使用动画携带的播放实例身份；不从当前事务倒填旧回调的身份。
 	bool IsAttackNotifyCurrent(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference) const;
@@ -208,8 +209,10 @@ class FPSTRUE_API UfpstrueAnimNotify_AttackFinished : public UAnimNotify
 	GENERATED_BODY()
 
 public:
+	// 普通队列通知将原始播放上下文交给战斗组件校验，不用当前动作反推旧通知身份。
 	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
 		const FAnimNotifyEventReference& EventReference) override;
+	// 分支点通知补齐 Montage 实例上下文，再复用同一结束通知入口。
 	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& Payload) override;
 };
 
@@ -234,6 +237,8 @@ public:
 
 	// UE 5.5 默认 BranchingPoint 桥不会填 Montage 上下文，因此在这里保留原 Payload 的播放身份。
 	virtual void BranchingPointNotifyBegin(FBranchingPointNotifyPayload& Payload) override;
+	// 分支点更新保留原播放身份和步长，交给普通窗口 Tick 的同一校验路径。
 	virtual void BranchingPointNotifyTick(FBranchingPointNotifyPayload& Payload, float FrameDeltaTime) override;
+	// 分支点结束保留原播放身份，只关闭对应攻击的伤害窗口。
 	virtual void BranchingPointNotifyEnd(FBranchingPointNotifyPayload& Payload) override;
 };

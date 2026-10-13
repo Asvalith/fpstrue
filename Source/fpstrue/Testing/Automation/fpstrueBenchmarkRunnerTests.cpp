@@ -14,9 +14,11 @@
 #include "ProfilingDebugging/CsvProfiler.h"
 #include "Tests/AutomationCommon.h"
 
+// 测试采集器的生命周期和样本门禁，不把无渲染自动化用例当作真实 GPU 性能测试。
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueBenchmarkLifecycleTest, "fpstrue.Performance.Benchmark.CancellationAndOwnership",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证取消能阻断 next-tick/旧轮次回调，采集启动失败可清理，且只释放自己持有的输入锁。
 bool FFpstrueBenchmarkLifecycleTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper World;
@@ -91,6 +93,7 @@ bool FFpstrueBenchmarkLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("No benchmark move lock leaked"), Controller->IsMoveInputIgnored());
 	TestFalse(TEXT("No benchmark look lock leaked"), Controller->IsLookInputIgnored());
 
+	// 测试结束后显式退出组件，避免夹具拆世界时再次触发未完成阶段。
 	Runner->Phase = EFPBenchmarkPhase::Finished;
 	Runner->DestroyComponent();
 	return true;
@@ -99,6 +102,7 @@ bool FFpstrueBenchmarkLifecycleTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueBenchmarkValidationTest, "fpstrue.Performance.Benchmark.SampleValidation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查避障配置必须完整一致，采集窗口内敌人数变化即使恢复也不能重新变成有效样本。
 bool FFpstrueBenchmarkValidationTest::RunTest(const FString& Parameters)
 {
 	TestTrue(TEXT("Zero-enemy scene is a valid empty avoidance configuration"),
@@ -109,6 +113,7 @@ bool FFpstrueBenchmarkValidationTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Mixed avoidance invalidates sample"), UfpstrueBenchmarkRunner::IsAvoidanceConfigurationValid(160, 80, 80, 80));
 	TestFalse(TEXT("No avoidance in a non-empty baseline is invalid"), UfpstrueBenchmarkRunner::IsAvoidanceConfigurationValid(160, 0, 0, 0));
 
+	// 数量回到期望值不能抹去中途变化，否则平均值会混入不同负载阶段。
 	UfpstrueBenchmarkRunner* Runner = NewObject<UfpstrueBenchmarkRunner>();
 	Runner->ExpectedEnemyCount = 2;
 	Runner->HandleEnemyCountChanged(2);
@@ -122,6 +127,7 @@ bool FFpstrueBenchmarkValidationTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueBenchmarkLateCsvTest, "fpstrue.Performance.Benchmark.LateCsvStartAfterCleanupTimeout",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 注入迟到的真实 CSV 启动：业务失败和组件销毁后仍须保留租约，直到进程采集资源结束。
 bool FFpstrueBenchmarkLateCsvTest::RunTest(const FString& Parameters)
 {
 #if CSV_PROFILER
@@ -159,9 +165,11 @@ bool FFpstrueBenchmarkLateCsvTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("A different Runner cannot start while a late CSV request is outstanding"), AnotherRunner->CanStartFreshRun());
 	AnotherRunner->DestroyComponent();
 
+	// 在 Runner 已销毁后才启动原请求，验证进程级清理能停止它并等待真实文件写完。
 	Csv->BeginCapture(-1, FString(), DeferredFilename);
 	const FString ExpectedPath = FPaths::ProfilingDir() / TEXT("CSV") / DeferredFilename;
 	const double Deadline = FPlatformTime::Seconds() + 15.0;
+	// 潜伏命令跨自动化帧等待租约释放，不用假返回值代替 CSV 首帧与写盘完成。
 	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, World, ExpectedPath, Deadline]()
 	{
 		if (UfpstrueBenchmarkRunner::HasOutstandingCsvLease())
@@ -185,8 +193,10 @@ bool FFpstrueBenchmarkLateCsvTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueBenchmarkWatchdogTest, "fpstrue.Performance.Benchmark.PauseWatchdogAndExitContract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证结果与退出码契约，以及世界暂停后独立 Watchdog 仍能拒收样本并完成清理。
 bool FFpstrueBenchmarkWatchdogTest::RunTest(const FString& Parameters)
 {
+	// 先检查所有非成功结果均为非零退出码，脚本不能将取消或无效样本算成成功。
 	TestEqual(TEXT("Completed has success exit code"), UfpstrueBenchmarkRunner::GetResultExitCode(EFPBenchmarkResult::Completed), uint8(0));
 	for (EFPBenchmarkResult Result : {EFPBenchmarkResult::InvalidSample, EFPBenchmarkResult::Failed,
 		EFPBenchmarkResult::Cancelled, EFPBenchmarkResult::Unsupported})

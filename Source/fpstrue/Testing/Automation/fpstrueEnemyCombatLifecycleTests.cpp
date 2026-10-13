@@ -32,6 +32,7 @@
 
 namespace
 {
+// 建立不含项目玩法的测试世界，按需创建 AI 系统，隔离攻击事务与导航/生成流程。
 bool BeginCombatTestWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test, bool bCreateAI = false)
 {
 	if (!Fixture.CreateTestWorld(EWorldType::Game))
@@ -47,6 +48,7 @@ bool BeginCombatTestWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test,
 	return false;
 }
 
+// 经真实 Sight 组件广播已看见目标，避免直接写可见标志绕过战斗上下文约束。
 bool ReportVisibleCombatTarget(AfpstrueEnemyAIController* Controller, AfpstrueCharacter* Target, FAutomationTestBase& Test)
 {
 	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
@@ -65,12 +67,14 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyCombatLifecycleTest,
 	"fpstrue.Gameplay.Combat.AttackProtectionAndCleanup",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查攻击保护、单次伤害、许可归还及停止/替换目标/组件退出的统一清理；不验收最终刀刃画面。
 bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
 	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
 
+	// 保留真实敌人生命周期，但关闭无关碰撞，使用测试 Controller 显式建立目标关系。
 	const auto SpawnEnemy = [World]()
 	{
 		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
@@ -147,6 +151,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	Sharing->RegisteredActorHandles.Add(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy), 0);
 	Enemy->SetAnimationSharingCoordinator(Sharing);
 
+	// 从真实共享登记状态启动攻击，必须先退出共享并恢复高频动画/移动，再进入 Windup。
 	TestTrue(TEXT("Attacker takes the single permit"), Surround->TryAcquireAttackPermission(Enemy));
 	TestFalse(TEXT("Another enemy cannot take the occupied permit"), Surround->TryAcquireAttackPermission(Probe));
 	if (!TestTrue(TEXT("A real attack starts"), Combat->TryAttackTarget())) return false;
@@ -214,6 +219,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A hit transaction cannot reopen its window"), Combat->AttackPhase == EFPEnemyAttackPhase::Recovery);
 	TestFalse(TEXT("The same transaction cannot commit damage again"), Combat->TryApplyAttackDamage(Target));
 
+	// 窗口关闭只进入收招；完整攻击结束或取消才归还许可并清除保护计时器。
 	Combat->EndAttackWindow();
 	AttackWindow->NotifyTick(Mesh, nullptr, 0.016f, NotifyContext);
 	Combat->EndAttackWindow();
@@ -228,6 +234,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Repeated reset cannot release another enemy's permit"), Surround->TryAcquireAttackPermission(Enemy));
 	Surround->ReleaseAttackPermission(Probe);
 
+	// 区分正常结束的冷却与取消：Reset 可重试，Finish 消耗一次完整攻击冷却。
 	TestTrue(TEXT("The original enemy can take the permit again"), Surround->TryAcquireAttackPermission(Enemy));
 	TestTrue(TEXT("Reset does not impose normal-finish cooldown"), Combat->TryAttackTarget());
 	Combat->FinishAttack();
@@ -247,6 +254,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
 	TestTrue(TEXT("The stopped enemy can acquire a fresh permit"), Surround->TryAcquireAttackPermission(Enemy));
 	TestTrue(TEXT("A new context begins a fresh attack"), Combat->TryAttackTarget());
+	// 换目标不能让旧攻击改打新玩家；应取消旧事务，再由新事务捕获目标。
 	AfpstrueCharacter* ReplacementTarget = World->SpawnActor<AfpstrueCharacter>();
 	if (!TestNotNull(TEXT("Replacement player"), ReplacementTarget)) return false;
 	ReplacementTarget->SetActorEnableCollision(false);
@@ -273,6 +281,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueSurroundCacheLifecycleTest,
 	"fpstrue.AI.Surround.CacheAndSlotOwnership",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证位置/导航缓存各有期限，旧槽位身份和失效弱引用不能释放新占用者。
 bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -285,6 +294,7 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	Target->SetActorLocation(FVector::ZeroVector);
 	Manager->SetTargetCharacter(Target);
 	TestTrue(TEXT("Missing navigation schedules retry independently of location validity"), Manager->bNeedsNavigationRetry);
+	// 小于移动阈值的位移也会在快照超龄后刷新；失败投影与成功投影缓存分别重新尝试。
 	Target->SetActorLocation(FVector(190.0f, 0.0f, 0.0f));
 	Manager->NextNavigationRetryTime = World->GetTimeSeconds() + 10.0;
 	Manager->UpdateSharedTargetSnapshot(false);
@@ -303,6 +313,7 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Expired success cache is reprojected instead of trusted forever"), Manager->SurroundSlots[0].bHasProjectedApproachLocation);
 	TestEqual(TEXT("Reprojection refreshes its own age independently of target motion"), Manager->NavigationCacheTime, World->GetTimeSeconds());
 
+	// 构造两个独立占用者，模拟槽位已复用而旧映射仍迟到注销的边界。
 	const auto SpawnEnemy = [World]()
 	{
 		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
@@ -330,6 +341,7 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	Manager->SurroundSlots[0].bHasProjectedApproachLocation = false;
 	TestEqual(TEXT("An unreachable approach is never reserved based only on a valid standing point"),
 		Manager->FindBestFreeSlot(FVector::ZeroVector), INDEX_NONE);
+	// 目标撤销后清空快照和所有站位，不允许下一轮复用旧玩家的分配。
 	Manager->SetTargetCharacter(nullptr);
 	FVector Snapshot;
 	TestFalse(TEXT("Clearing target invalidates the shared snapshot"), Manager->GetSharedTargetSnapshot(Snapshot));
@@ -341,6 +353,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyCombatStateConfigTest,
 	"fpstrue.Gameplay.Combat.ConfigurationSource",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 检查无资产时保留旧蓝图参数，有资产时整份战斗参数统一取自资产且运行中不自动热改。
 bool FFpstrueEnemyCombatStateConfigTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -356,6 +369,7 @@ bool FFpstrueEnemyCombatStateConfigTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("No asset preserves the existing Blueprint range"), Legacy->AttackRange, 321.0f);
 	TestEqual(TEXT("No asset preserves the existing Blueprint damage"), Legacy->AttackDamage, 13.0f);
 
+	// 用与旧字段不同的值覆盖范围、伤害、时序和刀刃采样，证明没有混合多个配置来源。
 	UfpstrueEnemyCombatConfig* Configuration = NewObject<UfpstrueEnemyCombatConfig>(Owner);
 	Configuration->AttackRange = 654.0f;
 	Configuration->AttackDamage = 17.0f;
@@ -395,6 +409,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyAttackPlaybackTest,
 	"fpstrue.Gameplay.Combat.ExplicitPlaybackAndStopReentry",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 用真实 Montage 实例验证动作/播放双重身份、旧 Notify 拒绝、停止重入和实际播放时长保护。
 bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -432,6 +447,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	UAnimInstance* Anim = NewObject<UAnimInstance>(Mesh);
 	Mesh->AnimScriptInstance = Anim;
 	Anim->InitializeAnimation();
+	// 构造不同组的可播放 Montage，保留引擎的真实实例分配及结束回调，不手工造播放 ID。
 	const auto MakeMontage = [Anim](FName Slot, FName Group)
 	{
 		Anim->CurrentSkeleton->SetSlotGroupName(Slot, Group);
@@ -445,6 +461,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 		Section.Link(Montage, 0.0f);
 		return Montage;
 	};
+	// 无关槽位先播放，再连续执行 A/B：绑定和停止只能命中显式捕获的攻击实例。
 	UAnimMontage* Unrelated = MakeMontage(TEXT("HitSlot"), TEXT("HitGroup"));
 	UAnimMontage* Attack = MakeMontage(TEXT("AttackSlot"), TEXT("AttackGroup"));
 	TestTrue(TEXT("Unrelated slot plays first"), Anim->Montage_Play(Unrelated, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, false) > 0.0f);
@@ -462,6 +479,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("Same Montage asset is explicitly replayed for B"), Combat->PlayAttackMontageForAttack(ActionB, Attack))) return false;
 	TestNotEqual(TEXT("Real replay receives new instance identity"), Combat->AttackPlayback.MontageInstanceId, PlaybackA);
 	TestFalse(TEXT("Another slot cannot overwrite bound playback"), Combat->BindAttackMontageForAttack(ActionB, Mesh, Unrelated));
+	// 同一资产重播获得新实例 ID；旧排队通知与 Branching Point 都不能结束新攻击。
 	FAnimNotifyEventReference OldNotify(nullptr, Attack);
 	OldNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(PlaybackA);
 	FAnimNotifyEventReference CurrentNotify(nullptr, Attack);
@@ -487,6 +505,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Stop reentry uses engine playback"), Instance)) return false;
 	int32 StopCallbacks = 0;
 	bool bRestarted = false;
+	// 在真实动画停止广播中尝试重建目标与攻击，整局 StopAI 的命令门必须仍保持关闭。
 	Instance->OnMontageBlendingOutStarted.BindLambda([&](UAnimMontage*, bool)
 	{
 		++StopCallbacks;
@@ -524,6 +543,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	FAnimMontageInstance* InterruptedPlayback = Anim->GetActiveInstanceForMontage(Attack);
 	if (!TestNotNull(TEXT("Interrupted playback instance"), InterruptedPlayback)) return false;
 	bool bObserverSawCleanState = false;
+	// 外部已有动画结束观察者应在战斗清理完成后执行，且取消不能计入正常结束冷却。
 	InterruptedPlayback->OnMontageEnded.BindLambda([&](UAnimMontage*, bool bInterrupted)
 	{
 		bObserverSawCleanState = bInterrupted && !Combat->IsAttacking();
@@ -543,6 +563,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Playback failure releases the transaction immediately"), Combat->IsAttacking());
 	TestFalse(TEXT("Playback failure clears the failsafe timer"), World->GetTimerManager().IsTimerActive(Combat->AttackFinishTimerHandle));
 	TestTrue(TEXT("Playback failure remains retryable"), Combat->CanStartAttack());
+	// 慢速播放的保护时间取实际时长；外部绑定则使用剩余时长，避免固定超时提前打断。
 	TestTrue(TEXT("Slow attack starts"), Combat->TryAttackTarget());
 	TestTrue(TEXT("A legal 0.1x attack plays"), Combat->PlayAttackMontageForAttack(Combat->AttackSequence, Attack, 0.1f));
 	FAnimMontageInstance* SlowPlayback = Anim->GetActiveInstanceForMontage(Attack);
@@ -577,6 +598,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyAttackAssetIntegrationTest,
 	"fpstrue.Gameplay.Combat.ProjectBlueprintPlaybackIntegration",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 加载项目真实 enemy_BP/AnimBP/Montage，检查播放桥和结束清理；仍不等价于完整姿态与命中画面验收。
 bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 {
 	// 必需资产缺失必须失败；本测试不以原生空 Montage 或默认类替代真实项目蓝图。
@@ -631,6 +653,7 @@ bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 		FAnimMontageInstance* Playback = ProjectAnim->GetMontageInstanceForID(Combat->AttackPlayback.MontageInstanceId);
 		if (!TestNotNull(TEXT("The engine allocated the bound project Montage instance"), Playback)) return false;
 		TestTrue(TEXT("Bound instance is actually playing the selected project asset"), Playback->IsPlaying() && Playback->Montage == SelectedMontage);
+		// 分别让引擎自然推进或中断实际实例，验证无需保护 Timer 触发也能完成事务清理。
 		if (bInterrupt) ProjectAnim->Montage_Stop(0.0f, SelectedMontage);
 		const int32 MaxSteps = FMath::CeilToInt((SelectedMontage->GetPlayLength() + 2.0f) / 0.05f);
 		for (int32 Step = 0; Step < MaxSteps && Combat->IsAttacking(); ++Step)
@@ -661,6 +684,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueAnimationSharingStopTest,
 	"fpstrue.Performance.AnimationSharing.StopAndSwapLifecycle",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证真实插件注销的 RemoveAtSwap 句柄更新、停止重入与待注册取消，不覆盖动画质量或收益。
 bool FFpstrueAnimationSharingStopTest::RunTest(const FString& Parameters)
 {
 	// 使用临时世界与插件真实的 UnregisterActor；只省略依赖动画资产的注册 Setup。
@@ -722,6 +746,7 @@ bool FFpstrueAnimationSharingStopTest::RunTest(const FString& Parameters)
 		Enemies.Add(Enemy);
 	}
 
+	// 建立三个最小共享跟随者，保留插件句柄更新委托，以真实 UnregisterActor 检验交换行为。
 	const auto SeedFollowers = [&]()
 	{
 		Coordinator->bRunning = true;
@@ -747,6 +772,7 @@ bool FFpstrueAnimationSharingStopTest::RunTest(const FString& Parameters)
 		}
 	};
 
+	// 整体停止先关闭新注册，随后每个跟随者都应恢复独立 Tick、LOD 与 Leader 关系。
 	SeedFollowers();
 	Coordinator->Stop();
 	TestFalse(TEXT("Stop disables new registrations"), Coordinator->bRunning);

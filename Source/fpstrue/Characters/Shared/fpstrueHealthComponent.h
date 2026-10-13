@@ -59,6 +59,7 @@ public:
 	FOnDamageResolved OnDamageResolved;
 	// 一次同步通知链有界；超限的新请求被拒绝并告警，已接收的请求仍按顺序处理。
 	static constexpr int32 MaxMutationsPerDispatch = 128;
+	// 读取因同步重入链超过容量而被拒绝的请求数，供诊断和自动化测试使用。
 	int32 GetRejectedMutationCount() const { return RejectedMutationCount; }
 
 	// 返回当前血量。
@@ -117,7 +118,9 @@ private:
 		TWeakObjectPtr<AController> Instigator;
 		FFPDamageContext Context;
 	};
+	// 按值接纳伤害或重置；通知期间的新请求排队，最外层调用在当前线程依序排空。
 	void EnqueueMutation(const FMutation& Mutation);
+	// 执行一个已接纳事务，先提交血量和死亡边沿，再按固定顺序发送状态通知。
 	void ApplyMutation(const FMutation& Mutation);
 	TArray<FMutation, TInlineAllocator<4>> PendingMutations;
 	FFPDamageContext IncomingDamageContext;

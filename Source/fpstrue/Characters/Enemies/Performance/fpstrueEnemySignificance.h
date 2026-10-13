@@ -6,6 +6,7 @@
 #include "fpstrueEnemySignificance.generated.h"
 
 UENUM(BlueprintType)
+// 渲染档位只描述表现成本，不替代敌人的追击、攻击等玩法状态。
 enum class EFPEnemyRenderSignificanceTier : uint8
 {
 	Full,
@@ -165,6 +166,7 @@ struct FFPEnemyRenderPriorityKey
 /** 按渲染重要性从高到低排列候选；同一视锥层级内，无效评分落到有效评分之后。 */
 struct FFPEnemyRenderPriorityLess
 {
+	// 纯值比较，不读取 Actor；无效分数排到末尾，最终用对象编号打破完全相同的优先级。
 	bool operator()(const FFPEnemyRenderPriorityKey& Left, const FFPEnemyRenderPriorityKey& Right) const
 	{
 		if (Left.bInPrimaryFrustum != Right.bInPrimaryFrustum)
@@ -198,6 +200,7 @@ struct FFPEnemyRenderTopKEntry
 /** 让堆顶始终保存当前 Top-K 中优先级最低的条目，便于新候选在 O(log K) 内替换它。 */
 struct FFPEnemyRenderTopKWorstFirst
 {
+	// 反转高优先级比较，使堆顶成为最容易被新候选替换的条目。
 	bool operator()(const FFPEnemyRenderTopKEntry& Left, const FFPEnemyRenderTopKEntry& Right) const
 	{
 		return FFPEnemyRenderPriorityLess{}(Right.PriorityKey, Left.PriorityKey);
@@ -221,6 +224,7 @@ FORCEINLINE void FPEnemyRenderTopKInsert(TArray<FFPEnemyRenderTopKEntry, Allocat
 
 	const FFPEnemyRenderTopKEntry Entry{CandidateIndex, PriorityKey};
 	const FFPEnemyRenderTopKWorstFirst WorstFirst;
+	// 名额未满直接入堆；满额后只替换比当前最差条目更重要的候选。
 	if (TopKHeap.Num() < MaxCount)
 	{
 		TopKHeap.HeapPush(Entry, WorstFirst);

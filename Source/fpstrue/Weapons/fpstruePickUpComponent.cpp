@@ -45,6 +45,7 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 		return;
 	}
 
+	// ★【重要边界】[结算去重] 外部装备调用前先占用拾取物；失败才释放，成功后关闭重叠再通知表现。
 	// AttachWeapon 会同步广播装备事件，先占用再调用，防止监听者重入拾取。
 	bConsumed = true;
 	if (!WeaponComponent->AttachWeapon(Character))

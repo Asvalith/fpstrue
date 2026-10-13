@@ -28,6 +28,7 @@ AfpstrueSurroundManager::AfpstrueSurroundManager()
 	PrimaryActorTick.bCanEverTick = false;
 }
 
+// 构建稳定内外环槽位；只有调试开关开启时才启动可视化 Timer。
 void AfpstrueSurroundManager::BeginPlay()
 {
 	// 关卡开始时建立固定槽位拓扑；调试绘制只有显式开启后才产生 Timer 成本。
@@ -40,6 +41,7 @@ void AfpstrueSurroundManager::BeginPlay()
 	}
 }
 
+// 停止调试与共享快照更新，并清除当前对局的槽位、许可和缓存。
 void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 清理两个 Timer、弱引用容器和槽位占用，避免关卡切换后保留旧玩家或敌人。
@@ -48,6 +50,7 @@ void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+// 注入唯一共享目标；换目标时撤销全部旧分配，有效目标建立快照并启动低频刷新。
 void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
 {
 	// GameMode 在开局注入唯一玩家；目标变化时重建快照并重新启动共享刷新 Timer。
@@ -78,6 +81,7 @@ void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCha
 
 // ==================== 共享目标与 NavMesh 投影缓存 ====================
 
+// 按位移、年龄或导航重试刷新目标快照；只有位置或导航缓存需要更新时才批量重新投影。
 void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 {
 	// 位移阈值、最大陈旧时间和导航重试共同限定缓存寿命。
@@ -99,6 +103,7 @@ void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 		return;
 	}
 
+	// 发布新位置后再更新关联的槽位投影，成功投影与失败重试各自有有限缓存寿命。
 	const bool bLocationChanged = !CurrentTargetLocation.Equals(CachedTargetLocation, 1.0f);
 	CachedTargetLocation = CurrentTargetLocation;
 	SharedTargetSnapshotTime = Now;
@@ -110,11 +115,13 @@ void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 	}
 }
 
+// 创建均匀极角分布的内外环槽位；固定拓扑不因每轮 AI 决策重新分配。
 void AfpstrueSurroundManager::BuildSlots()
 {
 	// 槽位只保存相对角度和半径；世界位置基于最新玩家快照统一计算，保证所有敌人使用同一参考系。
 	SurroundSlots.Reset();
 
+	// 为一层环创建角度和半径，实际世界坐标稍后根据共享玩家快照计算。
 	const auto AddRing = [this](int32 RingIndex, int32 SlotCount, float Radius)
 	{
 		const int32 SafeSlotCount = FMath::Max(SlotCount, 1);
@@ -135,12 +142,14 @@ void AfpstrueSurroundManager::BuildSlots()
 	}
 }
 
+// 一次性投影所有站位点和攻击接近点；失败保留重试标记，各 AI 仅消费投影结果而非共享路径。
 void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 {
 	// 同时缓存“站位点”和更靠近玩家的“攻击接近点”，AI 决策阶段不再重复 ProjectPointToNavigation。
 	const UWorld* World = GetWorld();
 	const UNavigationSystemV1* NavigationSystem =
 		World != nullptr ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
+	// 导航系统存在且投影成功时才输出可用位置，失败不伪造可达点。
 	const auto ProjectLocation = [this, NavigationSystem](const FVector& RawLocation, FVector& OutLocation)
 	{
 		if (NavigationSystem == nullptr)
@@ -173,6 +182,7 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 	NavigationCacheTime = GetWorld()->GetTimeSeconds();
 }
 
+// 返回有效共享玩家位置；调用者仍须通过自己的感知状态决定是否允许消费该位置。
 bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
 {
 	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
@@ -232,6 +242,7 @@ bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCha
 	return true;
 }
 
+// 优先选内环可导航空位，再选外环；同环以最近二维距离择位，无可用位置返回 INDEX_NONE。
 int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 {
 	// 先扫描内环再扫描外环，并选择与敌人二维距离最近的可导航空位；槽位数固定，线性扫描成本可控。
@@ -265,6 +276,7 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 	return INDEX_NONE;
 }
 
+// 幂等移除敌人的占位和攻击许可；只有占用身份仍一致时才清槽并安排内环补位。
 void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 {
 	// 释放槽位时同时归还攻击许可；若释放的是内环，再尝试从外环稳定补位。
@@ -281,6 +293,7 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	}
 
 	// 弱引用身份比较包含对象序号；旧映射不能清掉被重新占用的同一下标。
+	// ★【重要边界】[资源归还] 释放槽位必须核对当前占用者身份，旧登记不能清空已被其他敌人占用的位置。
 	if (!SurroundSlots.IsValidIndex(ReleasedSlotIndex) || SurroundSlots[ReleasedSlotIndex].Occupant != EnemyKey)
 	{
 		return;
@@ -293,6 +306,7 @@ void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 	}
 }
 
+// 给可导航的内环空位选取最近外环占用者，更新稳定映射而不重新洗牌整圈敌人。
 void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex)
 {
 	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
@@ -328,6 +342,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 		return;
 	}
 
+	// 同一占用者从外环移到内环，槽位容器与敌人映射同时提交新位置。
 	TWeakObjectPtr<AfpstrueEnemyCharacter> PromotedEnemy = SurroundSlots[BestOuterSlotIndex].Occupant;
 	SurroundSlots[BestOuterSlotIndex].Occupant.Reset();
 	SurroundSlots[InnerSlotIndex].Occupant = PromotedEnemy;
@@ -336,6 +351,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 
 // ==================== 攻击与 MoveTo 全局预算 ====================
 
+// 申请有界并发攻击名额；已有持有者可重查，容量不足返回失败，不关闭敌人的追击行为。
 bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
 	// 当前是容量限制而非 Top-N 排名：名额未满时先申请先获得，攻击结束后由 Controller/CombatComponent 归还。
@@ -368,10 +384,12 @@ bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter*
 	}
 
 	// 预算只保护“攻击事务”，没有拿到名额的敌人仍保留槽位并继续追踪。
+	// ★【重要边界】[状态提交] 攻击许可用唯一敌人集合登记，已有持有者重查不重复占用，容量不足者不能开始攻击。
 	ActiveAttackers.Add(EnemyKey);
 	return true;
 }
 
+// 移除唯一攻击者登记，结束、死亡和中断重复归还均安全。
 void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
 	// TSet::Remove 使重复归还天然幂等，不需要另外维护“已经释放”标志。
@@ -381,6 +399,7 @@ void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* En
 	}
 }
 
+// 消费本帧的新 MoveTo 提交预算；普通追击让出战斗预留额度，拒绝不表示路径不可达。
 bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 {
 	// GFrameCounter 形成无额外 Tick 的帧级计数器；战斗请求可使用预留额度，普通追击不能挤占全部预算。
@@ -412,6 +431,7 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 // ==================== 清理、槽位选择与调试 ====================
 // 槽位选择与补位算法紧邻申请/释放入口；此处集中清理与调试。
 
+// 对局结束或更换目标时统一清空跨敌人资源并停掉共享刷新，允许之后重新注入目标。
 void AfpstrueSurroundManager::ResetManager()
 {
 	// 对局结束时一次性归零槽位、攻击名额、帧预算和目标缓存，Manager 可安全退出或重新初始化。
@@ -434,6 +454,7 @@ void AfpstrueSurroundManager::ResetManager()
 	GetWorldTimerManager().ClearTimer(SharedTargetTimerHandle);
 }
 
+// 删除死亡或失效弱引用，并核对槽位身份后清占用，避免旧登记误清新占用者。
 void AfpstrueSurroundManager::CleanupInvalidEntries()
 {
 	// 弱引用不会阻止 Actor 销毁；清掉已失效或死亡敌人的登记，并同步清空对应槽位占用。
@@ -452,6 +473,7 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 		Iterator.RemoveCurrent();
 	}
 
+	// 攻击许可不依赖是否有槽位，需独立清除失效持有者。
 	for (auto Iterator = ActiveAttackers.CreateIterator(); Iterator; ++Iterator)
 	{
 		const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey = *Iterator;
@@ -462,6 +484,7 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 	}
 }
 
+// 把相对极角和半径换算为世界位置；可选半径用于同角度的攻击接近点。
 FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride) const
 {
 	// 使用缓存玩家位置、槽位极角和半径计算二维世界坐标；随后由批量 NavMesh 投影修正可达性。
@@ -475,6 +498,7 @@ FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurround
 	return CachedTargetLocation + Direction * Radius;
 }
 
+// 调试时绘制有效投影槽位，以青色和绿色区分占用与空闲；不参与正式决策。
 void AfpstrueSurroundManager::DrawDebugSlots()
 {
 	// 仅开发调试使用：绿色为空位、青色为占用位，不参与正式站位决策。

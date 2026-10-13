@@ -19,11 +19,13 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #endif
 
+// 初始化只采样一次的节点名称；每个敌人的数据保存在其 Controller 和黑板中。
 UfpstrueBTTask_SampleDecision::UfpstrueBTTask_SampleDecision()
 {
 	NodeName = TEXT("Sample enemy decision once");
 }
 
+// 校验执行上下文后发布完整决策快照，成功则让后续装饰器消费同一轮数据。
 EBTNodeResult::Type UfpstrueBTTask_SampleDecision::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
 	AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(OwnerComp.GetAIOwner());
@@ -36,17 +38,20 @@ EBTNodeResult::Type UfpstrueBTTask_SampleDecision::ExecuteTask(UBehaviorTreeComp
 	return EBTNodeResult::Succeeded;
 }
 
+// 初始化可配置叶子动作的名称，实际动作由 Action 字段决定。
 UfpstrueBTTask_EnemyAction::UfpstrueBTTask_EnemyAction()
 {
 	NodeName = TEXT("Enemy action");
 }
 
+// 将高层选择交给行为树、执行细节交给 Controller；失败可触发 Selector 的后备分支。
 EBTNodeResult::Type UfpstrueBTTask_EnemyAction::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
 	AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(OwnerComp.GetAIOwner());
 	return Controller != nullptr && Controller->ExecuteBehaviorAction(Action) ? EBTNodeResult::Succeeded : EBTNodeResult::Failed;
 }
 
+// 使用行为树自身的间隔更新，不增加另一套 Controller Timer 或逐帧决策循环。
 UfpstrueBTTask_DecisionWait::UfpstrueBTTask_DecisionWait()
 {
 	NodeName = TEXT("Adaptive decision interval / initial stagger");
@@ -54,6 +59,7 @@ UfpstrueBTTask_DecisionWait::UfpstrueBTTask_DecisionWait()
 	bTickIntervals = true;
 }
 
+// 注册时间到达或消息唤醒两种出口；返回 InProgress 表示等待而不是当前帧反复执行。
 EBTNodeResult::Type UfpstrueBTTask_DecisionWait::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
 	const AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(OwnerComp.GetAIOwner());
@@ -64,11 +70,13 @@ EBTNodeResult::Type UfpstrueBTTask_DecisionWait::ExecuteTask(UBehaviorTreeCompon
 	return EBTNodeResult::InProgress;
 }
 
+// 到期完成等待，下一节点再采样最新上下文；这些任务仍由 Game Thread 执行。
 void UfpstrueBTTask_DecisionWait::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
 	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 }
 
+// 为原生构建的分支配置黑板条件，同时保持编辑器条件字段与运行字段一致。
 void UfpstrueBTDecorator_DecisionFlag::Configure(FName KeyName, bool bExpectedValue)
 {
 	BlackboardKey.SelectedKeyName = KeyName;
@@ -82,6 +90,7 @@ void UfpstrueBTDecorator_DecisionFlag::Configure(FName KeyName, bool bExpectedVa
 
 namespace
 {
+// 为默认黑板新增指定类型的独立键，不开启跨敌人的实例同步。
 template <typename TKey> void AddKey(UBlackboardData& Blackboard, FName Name)
 {
 	FBlackboardEntry& Entry = Blackboard.Keys.AddDefaulted_GetRef();
@@ -89,6 +98,7 @@ template <typename TKey> void AddKey(UBlackboardData& Blackboard, FName Name)
 	Entry.KeyType = NewObject<TKey>(&Blackboard);
 }
 
+// 将组合节点或任务挂到父节点，并返回可继续添加装饰器的子节点记录。
 FBTCompositeChild& AddChild(UBTCompositeNode& Parent, UBTNode& Node)
 {
 	FBTCompositeChild& Child = Parent.Children.AddDefaulted_GetRef();
@@ -97,6 +107,7 @@ FBTCompositeChild& AddChild(UBTCompositeNode& Parent, UBTNode& Node)
 	return Child;
 }
 
+// 给一个子分支增加黑板布尔条件，装饰器对象归属于当前行为树。
 void AddCondition(UBehaviorTree& Tree, FBTCompositeChild& Child, FName Key, bool bExpected)
 {
 	UfpstrueBTDecorator_DecisionFlag* Condition = NewObject<UfpstrueBTDecorator_DecisionFlag>(&Tree);
@@ -104,6 +115,7 @@ void AddCondition(UBehaviorTree& Tree, FBTCompositeChild& Child, FName Key, bool
 	Child.Decorators.Add(Condition);
 }
 
+// 创建指定动作的叶子节点并连接到父节点，返回分支用于追加条件。
 FBTCompositeChild& AddAction(UBehaviorTree& Tree, UBTCompositeNode& Parent, EFPEnemyBehaviorAction Action, const TCHAR* Name)
 {
 	UfpstrueBTTask_EnemyAction* Task = NewObject<UfpstrueBTTask_EnemyAction>(&Tree, FName(Name));
@@ -113,6 +125,7 @@ FBTCompositeChild& AddAction(UBehaviorTree& Tree, UBTCompositeNode& Parent, EFPE
 }
 } // namespace
 
+// 复用本 World 的不可变默认树模板；运行黑板和节点内存仍由各 Controller 独立拥有。
 UBehaviorTree* FPGetDefaultEnemyBehaviorTree(UWorld& World)
 {
 	static const FName TreeName(TEXT("FPEnemyDefaultBehaviorTree"));
@@ -126,12 +139,14 @@ UBehaviorTree* FPGetDefaultEnemyBehaviorTree(UWorld& World)
 	return UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(Tree, Blackboard) ? Tree : nullptr;
 }
 
+// 仅给未配置的树生成默认决策链；已有树、图或不兼容黑板返回失败，避免覆盖策划编辑。
 bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, UBlackboardData* Blackboard)
 {
 	if (Tree == nullptr || Blackboard == nullptr || Tree->RootNode != nullptr || Blackboard->Parent != nullptr)
 	{
 		return false;
 	}
+	// 区分可复用的完整默认 schema 与尚未配置的黑板，不把任意已有内容当作空白资产。
 	const bool bReuseBlackboard = Blackboard->Keys.Num() == 6 && Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey &&
 								  FPHasEnemyBlackboardSchema(Blackboard);
 	if (!bReuseBlackboard && Blackboard->Keys.Num() > 1)
@@ -159,6 +174,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 			return false;
 		}
 	}
+	// 只有未配置黑板才创建目标和决策条件；已匹配的黑板保持原键不变。
 	if (!bReuseBlackboard)
 	{
 		AddKey<UBlackboardKeyType_Object>(*Blackboard, FPEnemyBlackboard::TargetActor);
@@ -180,6 +196,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	Choice->NodeName = TEXT("Enemy behavior priority");
 	AddChild(*Root, *Choice);
 
+	// 分支顺序明确优先级：无目标、维持攻击、超距空闲、近战，再尝试包围与追击。
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Idle, TEXT("NoTargetIdle")), FPEnemyBlackboard::HasTarget, false);
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::SustainAttack, TEXT("SustainAttack")),
 				 FPEnemyBlackboard::Attacking, true);
@@ -194,6 +211,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Surround, TEXT("MoveToSurroundSlot"));
 	AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Pursue, TEXT("PursueSharedTarget"));
 #if WITH_EDITOR
+	// 真实编辑器资产补建可编辑图；临时运行模板不创建编辑器图对象。
 	if (Tree->IsAsset() && !Tree->HasAnyFlags(RF_Transient))
 	{
 		UBehaviorTreeGraph* Graph = CastChecked<UBehaviorTreeGraph>(FBlueprintEditorUtils::CreateNewGraph(
@@ -213,6 +231,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	return true;
 }
 
+// 验证目标对象类型、布尔键和独立实例语义；缺键或错误类型都不能运行项目的默认叶子逻辑。
 bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard)
 {
 	if (Blackboard == nullptr)
@@ -226,6 +245,7 @@ bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard)
 	{
 		return false; // 类型必须能接受项目玩家；目标和决策条件不得跨敌人同步。
 	}
+	// 决策条件必须是各敌人独立的布尔键，防止一个敌人的采样覆盖其他敌人的行为。
 	for (const FName Name :
 		 {FPEnemyBlackboard::HasTarget, FPEnemyBlackboard::Attacking, FPEnemyBlackboard::InAttackRange, FPEnemyBlackboard::InChaseRange})
 	{

@@ -143,6 +143,7 @@ public:
 	FFPWeaponSettings Settings;
 
 #if WITH_EDITOR
+	// 编辑器资产检查复用运行时的整组数值校验，将失败原因反馈到资产验证面板。
 	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;
 #endif
 };
