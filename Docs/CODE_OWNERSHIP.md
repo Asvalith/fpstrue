@@ -9,34 +9,37 @@
 | 阅读入口 | 唯一业务责任 | 不在这里做什么 |
 | --- | --- | --- |
 | `Game/fpstrueGameMode` | 对局阶段、生成队列、参与者注册、胜负与停止玩法 | 不解析性能实验命令行，不维护采集阶段 |
-| `Characters/Player/fpstrueCharacter` | 输入、ADS/冲刺约束、控制权变化、装备槽的内部维护 | 不对外开放能只改一半装备关系的 setter |
-| `Weapons/fpstrueWeaponComponent` | 完整装备/卸下、射击、弹药、换弹身份及结束结果 | 不用“当前正在换弹”推断旧动画通知归属 |
+| `Characters/Player/fpstrueCharacter` | 能力输入、标签派生的速度与表现、控制权变化、装备槽的内部维护 | 不重复声明 GA 的动作互斥，不对外开放能只改一半装备关系的 setter |
+| `Weapons/fpstrueCombatAbilities` | 开火、换弹、瞄准和冲刺的激活、互斥、取消与持续任务 | 不另存弹药、不接受客户端命中或伤害结果 |
+| `Weapons/fpstrueWeaponComponent` | 拾取入口、完整装备/卸下、单发射击、弹药、换弹身份及结束结果 | 不维护第二套动作状态机，不用“当前正在换弹”推断旧动画通知归属 |
 | `Characters/Shared/fpstrueHealthComponent` | 提交生命值变化及依次通知，处理通知期间的重入请求 | 重置生命值不等于复活角色、恢复 AI 或重新装备 |
 | `Characters/Enemies/AI/fpstrueEnemyBehaviorTree` | 用本轮快照选择行为，校验 Blackboard 契约 | 不直接修改攻击内部阶段 |
 | `Characters/Enemies/AI/fpstrueEnemyAIController` | 目标入口、本轮决策快照、朝向、移动请求与执行结果 | 不把无预算和不可达当成同一种失败 |
 | `Characters/Enemies/fpstrueEnemyCombatComponent` | 一次攻击的目标、许可来源、播放身份、窗口、伤害及清理 | 不在结束时反查新 Controller 来猜旧攻击的资源来源 |
 | `Characters/Enemies/AI/fpstrueSurroundManager` | 共享目标缓存、导航重试、围攻槽位、攻击及移动请求预算 | 不把“有位置”当成“导航投影也有效” |
-| `Characters/Enemies/Performance/` | 全局重要性与预算分配、动画共享注册 | 不直接改玩家输入或武器状态 |
+| `Characters/Enemies/AI/fpstrueEnemyPositionQuery` | EQS 候选生成、导航及环境筛选、掩体路径验证 | 不分配槽位、不授予攻击许可、不执行移动或伤害 |
+| `Characters/Enemies/Performance/fpstrueEnemyPerformance` | 全局重要性与预算分配、动画共享注册；两个协调器保持各自职责 | 不直接改玩家输入或武器状态 |
 | `Characters/Enemies/fpstrueEnemyCharacter` | 合成当前战斗保护与性能策略，应用自身 Mesh/Movement 设置；死亡表现 | 不自行分配全局 Full/阴影/光追名额 |
-| `Runtime/fpstrueRuntimeOptions` | 运行时诊断开关和策略覆盖的只读启动快照 | 不启动测试、不锁输入、不写 CSV |
+| `Runtime/fpstrueRuntime` | 共享播放身份与碰撞通道；诊断开关和策略覆盖的只读启动快照 | 不拥有具体动作状态、不启动测试、不锁输入、不写 CSV |
 | `Testing/Benchmarks/` | 实验阶段、测试条件、采集资源及产物校验 | 不成为正常玩法读取配置的依赖 |
 
-GameMode 仍负责创建和挂接 BenchmarkRunner，这是组合入口。正常玩法类只依赖 `Runtime` 参数；`BenchmarkRunner` 内的 `FFPBenchmarkConfig` 复用同一份运行时快照，额外保存预热、时长、人数和输出等采集条件，不重复解析诊断开关。业务埋点保留在业务函数，声明移至 `Runtime/fpstrueRuntimeOptions.h`。
+GameMode 仍负责创建和挂接 BenchmarkRunner，这是组合入口。正常玩法类只依赖 `Runtime` 参数；`BenchmarkRunner` 内的 `FFPBenchmarkConfig` 复用同一份运行时快照，额外保存预热、时长、人数和输出等采集条件，不重复解析诊断开关。业务埋点保留在业务函数，声明集中在 `Runtime/fpstrueRuntime.h`。
 
 后续精简以本轮开始时的工作区为基准：`Source/fpstrue` 的 C++/头文件/构建规则共 14,517 → 13,813 行、60 → 54 个文件（含注释和空行）。其中玩法及运行时代码减少 212 行，测试器减少 109 行，移除一次性迁移工具 415 行；回归测试增加 32 行。合并输入绑定与动作重置、波次配置解析、攻击空间采样和采集轮询；保留身份、重入及资源归还检查，补充其职责、时序与清理注释，没有新增管理层。
 
 ## 2. 武器：先建立身份，再提交和结束
 
-阅读顺序：`AttachWeapon/DetachWeapon` → `StartFire/Fire` → `RequestReload` → `CommitReloadForTransaction` → `EndReload` → 所有者离场清理。
+阅读顺序：`Character` 输入 → ASC 与四个 GA → `AttachWeapon/DetachWeapon`、单发 `Fire`、`BeginAbilityReload` → `CommitReloadForTransaction` → `EndReload` → 所有者离场清理。
 
 - 装备/卸下同时维护双方引用、实际附着及动作清理。装备事件返回后再次确认关系，监听者立即卸下时不误报成功。
 - 换弹开始创建 `ReloadId`；蓝图收到 `OnWeaponReloadPlaybackRequested(ReloadId, bWasEmptyReload)` 后，通过 `PlayReloadMontage` 明确提交 Mesh 和 Montage。外部播放只允许通过 `BindReloadMontage` 显式登记，不再比较播放前后的列表猜归属。
 - `FFPActionPlayback` 统一保存动作编号、Mesh、AnimInstance、Montage 和实例 ID，武器与近战复用身份校验，仍各自拥有业务状态和清理责任。
 - 原生换弹 Notify 核对播放实例；正常结束、取消、播放失败、超时、禁用收敛到 `EndReload`。自然结束等待本次绑定的手臂和枪械播放全部结束；中断停止同一事务持有的播放，不停止无关实例。
 - `OnWeaponReloadEnded` 报告原因及是否已经装弹。取消不回滚已提交弹药；超时只解除动作锁，不伪造装填成功。`OnWeaponReloadStarted` 只作观察通知，不再承担动画播放命令。
-- `ActionRevision` 继续处理同步委托重入；操作 ID 和 Montage 实例处理延迟通知，两者不互相替代。
+- GA 的 `ActivationRevision` 与武器 `EquipmentRevision` 核对同步回调后的激活及装备身份；`ReloadId` 和 Montage 实例拒绝延迟旧通知，两者不互相替代。网络动作枚举仅为标签派生的展示结果。
 - 控制权变化只中断旧输入事务，不永久禁用装备；转换期间拒绝委托重新发起动作。角色离场完整结束独立 Pickup Actor 上的武器组件，不能依赖角色组件销毁连带清理。
-- 自动射击按上一发的剩余冷却安排 Timer；后坐力恢复按实际经过时间积分；已经发生的射击继续报告事实，不因回调结束动作而漏报。
+- Fire GA 按上一发的剩余冷却安排 `WaitDelay`，能力结束即清理任务；后坐力恢复按实际经过时间积分。已经发生的射击继续报告事实，不因回调结束动作而漏报。
+- 单发提交时保存表现激活编号与序号，伤害和弹道监听者即使同步重启开火，旧发多播也只使用自己的身份，不读取新一轮计数。
 
 ### 蓝图入口与兼容边界
 
@@ -57,6 +60,8 @@ GameMode 仍负责创建和挂接 BenchmarkRunner，这是组合入口。正常�
 - StopAI 和上下文替换先禁止接收新战斗命令，再停止行为树、移动和 Montage，避免停止委托重入重新占用许可。结束清理统一处理窗口、Timer、许可和动画保护。
 - 开始攻击检查高度和环境遮挡；刀刃采样先按环境阻挡截断有效轨迹，再处理 Pawn 命中。同一攻击多个窗口仍只提交一次目标伤害。
 - `SampleAttackReach` 为一次 AI 决策同时提供距离、有效攻击范围和可达性；正式提交攻击仍重新检查，不能用旧快照越过环境或状态变化。
+- EQS 共享接近查询按目标位移与缓存期限刷新；异步结果核对查询编号、版本及目标快照后才发布。具体敌人的占位与许可仍由 SurroundManager 管理，不因接入 EQS 改成逐敌人重复查询。
+- 低血通知唤醒行为树；撤退先取消攻击、归还许可和站位，再按已知威胁位置申请掩体。初次响应和等待查询保持及时，已有目标后的维护才按 Gameplay Significance 降频；超时、无掩体、移动失败、目标遗忘和离场都释放查询与掩体占用。撤退不增加回血，也不读取已丢失玩家的实时位置。
 
 原生 Attack Window 和 `Enemy Attack Finished` Notify 校验播放身份。攻击播放实例自身也负责结束回调，不依赖受击 Montage 代为结束攻击。自动化区分原生逻辑和真实项目蓝图入口；NullRHI 下通过不等于刀刃轨迹、LOD 保骨和运动画面已经验收。
 

@@ -5,6 +5,20 @@
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
+#include "UObject/UnrealType.h"
+
+// 读取实际调用生成 RPC 包装函数时传入的参数；不依赖私有成员或手工构造的 RPC 参数布局。
+void UfpstrueShotPresentationTestWeapon::ProcessEvent(UFunction* Function, void* Parameters)
+{
+	if (Function != nullptr && Parameters != nullptr && Function->GetFName() == FName(TEXT("MulticastShot")))
+	{
+		const FIntProperty* Key = FindFProperty<FIntProperty>(Function, TEXT("PresentationKey"));
+		const FIntProperty* Shot = FindFProperty<FIntProperty>(Function, TEXT("ShotIndex"));
+		if (Key != nullptr && Shot != nullptr)
+			ShotPresentations.Emplace(Key->GetPropertyValue_InContainer(Parameters), Shot->GetPropertyValue_InContainer(Parameters));
+	}
+	Super::ProcessEvent(Function, Parameters);
+}
 
 // 本文件检查输入、装备、射击和换弹的业务边界；资产集成用例也不替代完整 AnimBP 姿态或 GPU 验收。
 // ★【重要边界】[验收边界] 真实 Montage 的身份/通知测试不等于整套 AnimBP 姿态或画面验收，NullRHI 也不能证明 GPU 收益。
@@ -41,6 +55,12 @@ void UfpstrueReloadReentryObserver::HandleFirePerformed()
 	++FireEventCount;
 }
 
+// 不伪造弹道事件；由武器真实广播进入后，执行测试指定的一次同步重入。
+void UfpstrueReloadReentryObserver::HandleTraceFinished(bool, FVector, FVector, FVector, FHitResult)
+{
+	if (OnTraceReceived) OnTraceReceived();
+}
+
 // 保存换弹结束结果，并可立即请求新动作，检查旧事务清理不能覆盖回调中新建的状态。
 void UfpstrueReloadReentryObserver::HandleReloadEnded(int32 ReloadId, EFPReloadEndReason Reason, bool bAmmoCommitted)
 {
@@ -66,11 +86,12 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "fpstrue.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
+#include "Weapons/fpstrueCombatAbilities.h"
 #include "AIController.h"
 #include "Animation/AnimNotifyQueue.h"
 #include "Animation/ActiveMontageInstanceScope.h"
@@ -85,6 +106,7 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerController.h"
+#include "GameplayTask.h"
 #include "InputAction.h"
 #include "GameFramework/WorldSettings.h"
 #include "Misc/AutomationTest.h"
@@ -94,7 +116,7 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "ReferenceSkeleton.h"
 #include "Tests/AutomationCommon.h"
 #include "UObject/StrongObjectPtr.h"
-#include "UObject/UnrealType.h"
+#include "UObject/UObjectIterator.h"
 #include <limits>
 
 namespace FpstrueGameplayBoundaryTests
@@ -244,7 +266,7 @@ struct FEnemyFacingFixture
 
 // 经真实装备和开火入口准备少一发子弹的武器；临时骨骼只提供挂接前提，不模拟换弹结果。
 UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, FAutomationTestBase& Test,
-	UfpstrueWeaponConfig* Configuration = nullptr)
+	UfpstrueWeaponConfig* Configuration = nullptr, UClass* WeaponClass = UfpstrueWeaponComponent::StaticClass())
 {
 	AfpstrueCharacter* Player = Fixture.SpawnPlayer();
 	AAIController* Controller = Fixture.Spawn<AAIController>();
@@ -264,6 +286,12 @@ UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, F
 		Modifier.Add(FMeshBoneInfo(FName(TEXT("GripPoint")), TEXT("GripPoint"), INDEX_NONE), FTransform::Identity);
 	}
 	AttachmentMesh->CalculateInvRefMatrices();
+	// 同一最小骨架同时属于 Mesh 与测试 Montage，不能让 AnimInstance 单独持有一套不相干的 Skeleton。
+	// 此夹具仍不启用物理或姿态求值；真实项目动画/PhysicsAsset 的完整性另由资产用例检查。
+	USkeleton* AttachmentSkeleton = NewObject<USkeleton>(AttachmentMesh, NAME_None, RF_Transient);
+	AttachmentMesh->SetSkeleton(AttachmentSkeleton);
+	if (!Test.TestTrue(TEXT("The attachment mesh has a matching real skeleton"),
+		AttachmentSkeleton->MergeAllBonesToBoneTree(AttachmentMesh, false))) return nullptr;
 	USkeletalMeshComponent* Arms = Player->GetMesh1P();
 	Arms->bEnableAnimation = false;
 	Arms->SetComponentTickEnabled(false);
@@ -277,7 +305,7 @@ UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, F
 	// Match production ownership: equipment belongs to a separate pickup Actor, not the player.
 	AActor* PickupActor = Fixture.Spawn<AActor>();
 	if (PickupActor == nullptr) return nullptr;
-	UfpstrueWeaponComponent* Weapon = NewObject<UfpstrueWeaponComponent>(PickupActor, NAME_None, RF_Transient);
+	UfpstrueWeaponComponent* Weapon = NewObject<UfpstrueWeaponComponent>(PickupActor, WeaponClass, NAME_None, RF_Transient);
 	if (Configuration != nullptr)
 	{
 		const FObjectProperty* Property = FindFProperty<FObjectProperty>(Weapon->GetClass(), TEXT("WeaponConfiguration"));
@@ -665,17 +693,33 @@ bool FFpstrueAutoReloadConflictTest::RunTest(const FString& Parameters)
 	const FBoolProperty* Aiming = FindFProperty<FBoolProperty>(Player->GetClass(), TEXT("bIsAiming"));
 	const FBoolProperty* Sprinting = FindFProperty<FBoolProperty>(Player->GetClass(), TEXT("bIsSprinting"));
 	if (!TestNotNull(TEXT("Aim state is reflected"), Aiming) || !TestNotNull(TEXT("Sprint state is reflected"), Sprinting)) return false;
+	UAbilitySystemComponent* AbilitySystem = Player->GetAbilitySystemComponent();
+	if (!TestNotNull(TEXT("Movement conflicts use the player's real ASC"), AbilitySystem)) return false;
 	// 只设置输入前态；耗尽弹匣、换弹和状态收尾均运行真实代码。
-	for (const FBoolProperty* InputState : {Aiming, Sprinting})
+	// 前态现在也由真实 GA 建立，bIsAiming/bIsSprinting 只作为标签派生的表现镜像读取。
+	for (const int32 MovementInput : {static_cast<int32>(EFPCombatAbilityInput::Aim), static_cast<int32>(EFPCombatAbilityInput::Sprint)})
 	{
-		InputState->SetPropertyValue_InContainer(Player, true);
+		AbilitySystem->AbilityLocalInputPressed(MovementInput);
+		if (!TestTrue(TEXT("The actual movement ability establishes the initial state"), Player->IsAiming() || Sprinting->GetPropertyValue_InContainer(Player))) return false;
 		Weapon->StartFire();
-		if (!World.Advance(3.2f)) return false;
+		TestTrue(TEXT("Fire preserves the existing aim or sprint ability until reload"), Player->IsAiming() || Sprinting->GetPropertyValue_InContainer(Player));
+		const int32 MaxSteps = FMath::CeilToInt((Weapon->GetCurrentAmmo() * 60.0f / Weapon->GetWeaponSettings().RoundsPerMinute + 1.0f) / 0.01f);
+		// 在第一次观测到空仓的同一帧验收能力切换，不多推进一帧来掩盖延迟或额外请求往返。
+		for (int32 Step = 0; Step < MaxSteps && Weapon->GetCurrentAmmo() > 0; ++Step)
+		{
+			if (!World.Advance(0.01f)) return false;
+		}
+		TestEqual(TEXT("The real held fire empties the magazine"), Weapon->GetCurrentAmmo(), 0);
 		TestTrue(TEXT("Empty magazine starts automatic reload"), Weapon->IsReloading());
+		TestTrue(TEXT("Automatic reload activates the authoritative reload ability"),
+			AbilitySystem->HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading));
+		TestFalse(TEXT("Automatic reload releases the firing ability tag"),
+			AbilitySystem->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing));
 		TestFalse(TEXT("Automatic reload clears aiming"), Player->IsAiming());
 		TestFalse(TEXT("Automatic reload clears sprinting"), Sprinting->GetPropertyValue_InContainer(Player));
 		TestEqual(TEXT("Reload restores the unique walk-speed policy"), Player->GetCharacterMovement()->MaxWalkSpeed, 300.0f);
 		Weapon->FinishReloadForTransaction(Weapon->GetActiveReloadId());
+		AbilitySystem->AbilityLocalInputReleased(MovementInput);
 	}
 	return true;
 }
@@ -820,11 +864,15 @@ bool FFpstrueExternalEquipmentLifetimeTest::RunTest(const FString& Parameters)
 	TestNotEqual(TEXT("The production-style weapon is not owned by the player"), Weapon->GetOwner(), static_cast<AActor*>(Player));
 	const FBoolProperty* Aiming = FindFProperty<FBoolProperty>(Player->GetClass(), TEXT("bIsAiming"));
 	if (!TestNotNull(TEXT("Aim state exists"), Aiming)) return false;
-	Aiming->SetPropertyValue_InContainer(Player, true);
-	Player->GetCharacterMovement()->MaxWalkSpeed = 120.0f;
+	UAbilitySystemComponent* AbilitySystem = Player->GetAbilitySystemComponent();
+	if (!TestNotNull(TEXT("Equipment lifetime uses the actual ASC"), AbilitySystem)) return false;
+	AbilitySystem->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Aim));
+	if (!TestTrue(TEXT("The actual aim ability is active before unequipping"),
+		Player->IsAiming() && AbilitySystem->HasMatchingGameplayTag(FpstrueGameplayTags::State_Aiming))) return false;
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
 	Player->ClearEquippedWeaponComponent(Weapon);
 	TestFalse(TEXT("Unequip exits ADS"), Player->IsAiming());
+	TestFalse(TEXT("Unequip cancels the ability rather than only clearing its mirror"), AbilitySystem->HasMatchingGameplayTag(FpstrueGameplayTags::State_Aiming));
 	TestEqual(TEXT("Unequip restores walk speed"), Player->GetCharacterMovement()->MaxWalkSpeed, 300.0f);
 	TestNull(TEXT("Unequip removes physical attachment"), Weapon->GetAttachParent());
 	TestFalse(TEXT("Unequip clears the character slot"), Player->HasEquippedWeapon());
@@ -896,6 +944,104 @@ bool FFpstrueShotCooldownReentryTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueShotPresentationReentryTest,
+	"fpstrue.Gameplay.Boundaries.Weapon.ShotPresentationIdentityOnReentry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 命中伤害与弹道通知分别重启同一个真实 GA；旧单发 RPC 必须保存旧身份，新轮从第一发重新编号。
+// 这里验证服务器结算和生成 RPC 的分派实参，不替代多进程传输、丢包或客户端画面验收。
+bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
+{
+	using namespace FpstrueGameplayBoundaryTests;
+	for (const bool bRestartFromDamage : {true, false})
+	{
+		const FString Label = bRestartFromDamage ? TEXT("Damage callback: ") : TEXT("Trace callback: ");
+		FGameplayWorld Fixture(*this);
+		if (!Fixture.Initialize()) return false;
+		UfpstrueShotPresentationTestWeapon* Weapon = Cast<UfpstrueShotPresentationTestWeapon>(
+			EquipWeaponWithOneSpentRound(Fixture, *this, nullptr, UfpstrueShotPresentationTestWeapon::StaticClass()));
+		AActor* Target = Fixture.Spawn<AActor>();
+		if (!TestNotNull(Label + TEXT("Production weapon with RPC observer"), Weapon) || Target == nullptr) return false;
+		AfpstrueCharacter* Player = Weapon->GetOwningCharacter();
+		UAbilitySystemComponent* ASC = Player->GetAbilitySystemComponent();
+		FGameplayAbilitySpec* Fire = ASC->FindAbilitySpecFromClass(UfpstrueFireAbility::StaticClass());
+		const FStructProperty* StateProperty = FindFProperty<FStructProperty>(Weapon->GetClass(), TEXT("NetworkState"));
+		if (!TestNotNull(Label + TEXT("Real fire spec"), Fire) ||
+			!TestNotNull(Label + TEXT("Real network presentation snapshot"), StateProperty)) return false;
+		FFPReplicatedWeaponState* State = StateProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponState>(Weapon);
+		UBoxComponent* TargetBox = NewObject<UBoxComponent>(Target);
+		Target->AddInstanceComponent(TargetBox);
+		Target->SetRootComponent(TargetBox);
+		TargetBox->SetBoxExtent(FVector(100.0f));
+		TargetBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		TargetBox->SetCollisionResponseToAllChannels(ECR_Ignore);
+		TargetBox->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Block);
+		TargetBox->RegisterComponent();
+		FVector EyeLocation;
+		FRotator EyeRotation;
+		Player->GetActorEyesViewPoint(EyeLocation, EyeRotation);
+		Target->SetActorLocation(EyeLocation + EyeRotation.Vector() * 500.0f);
+		UfpstrueHealthComponent* Health = NewObject<UfpstrueHealthComponent>(Target);
+		Target->AddInstanceComponent(Health);
+		Health->RegisterComponent();
+		Health->SetMaxHealthAndReset(1000.0f);
+		int32 Reentries = 0;
+		int32 OldKey = 0;
+		int32 ReplacementKey = 0;
+		const auto RestartFire = [&]()
+		{
+			if (Reentries++ != 0) return;
+			OldKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
+			Weapon->StopFire();
+			Weapon->StartFire();
+			ReplacementKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
+			TestTrue(Label + TEXT("The replacement ability really activates"), Fire->IsActive());
+			TestNotEqual(Label + TEXT("The replacement owns a different activation key"), ReplacementKey, OldKey);
+			TestEqual(Label + TEXT("A new activation starts before its first shot"), State->FirePresentationShot, 0);
+		};
+		TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
+		FDelegateHandle DamageObserver;
+		if (bRestartFromDamage)
+			DamageObserver = Health->OnDamageResolved.AddLambda([&](float, AActor*, AController*, const FFPDamageContext&) { RestartFire(); });
+		else
+		{
+			Observer->OnTraceReceived = RestartFire;
+			Weapon->OnWeaponTraceFinished.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleTraceFinished);
+		}
+		const int32 AmmoBefore = Weapon->GetCurrentAmmo();
+		{
+			// UE 可由待旅行 URL 推导 ListenServer 模式；作用域内只执行同步开火，绝不 Tick 或实际旅行。
+			TGuardValue<FString> ListenMode(Fixture.GetWorld()->NextURL, TEXT("?listen"));
+			if (!TestTrue(Label + TEXT("The real network-only shot branch is enabled"), Weapon->GetNetMode() != NM_Standalone)) return false;
+			Weapon->StartFire();
+		}
+		TestTrue(Label + TEXT("The temporary URL is restored before any world tick"), Fixture.GetWorld()->NextURL.IsEmpty());
+		TestEqual(Label + TEXT("The expected real callback reentered once"), Reentries, 1);
+		TestTrue(Label + TEXT("The original activation has a real nonzero key"), OldKey > 0);
+		TestEqual(Label + TEXT("Only the original shot spends ammunition synchronously"), Weapon->GetCurrentAmmo(), AmmoBefore - 1);
+		if (!TestEqual(Label + TEXT("Exactly one real MulticastShot was dispatched"), Weapon->ShotPresentations.Num(), 1)) return false;
+		TestEqual(Label + TEXT("The old shot RPC retains its committed activation key"), Weapon->ShotPresentations[0].X, OldKey);
+		TestEqual(Label + TEXT("The old shot RPC retains ordinal one instead of the new round's zero"), Weapon->ShotPresentations[0].Y, 1);
+		TestEqual(Label + TEXT("The new round keeps its own published key"), State->FirePresentationKey, ReplacementKey);
+		TestEqual(Label + TEXT("The old call stack cannot increment the replacement round"), State->FirePresentationShot, 0);
+		Health->OnDamageResolved.Remove(DamageObserver);
+		Observer->OnTraceReceived = nullptr;
+		Weapon->OnWeaponTraceFinished.RemoveDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleTraceFinished);
+		// 在已恢复 Standalone 的世界推进真正 WaitDelay；验证新轮只有一发、序号从一开始，而非伪造任务回调。
+		if (!Fixture.Advance(60.0f / Weapon->GetWeaponSettings().RoundsPerMinute + 0.03f)) return false;
+		TestEqual(Label + TEXT("Only the replacement task fires the next single shot"), Weapon->GetCurrentAmmo(), AmmoBefore - 2);
+		{
+			// Standalone 不发布网络快照；同步结束能力时临时恢复网络分支，读取真实新轮计数，仍不 Tick 或旅行。
+			TGuardValue<FString> ListenMode(Fixture.GetWorld()->NextURL, TEXT("?listen"));
+			Weapon->StopFire();
+		}
+		TestEqual(Label + TEXT("The replacement shot preserves its own activation key"), State->FirePresentationKey, ReplacementKey);
+		TestEqual(Label + TEXT("The replacement round starts with ordinal one"), State->FirePresentationShot, 1);
+		TestFalse(Label + TEXT("Cleanup ends the replacement fire ability"), Fire->IsActive());
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadMontageIdentityTest, "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
@@ -913,7 +1059,7 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	UAnimInstance* Anim = NewObject<UAnimInstance>(Arms);
 	Arms->AnimScriptInstance = Anim;
 	Anim->InitializeAnimation();
-	Anim->CurrentSkeleton = NewObject<USkeleton>(Anim);
+	Anim->CurrentSkeleton = Arms->GetSkeletalMeshAsset()->GetSkeleton();
 	UAnimMontage* Montage = NewObject<UAnimMontage>(Anim);
 	Montage->SetSkeleton(Anim->CurrentSkeleton);
 	Montage->SetCompositeLength(1.0f);
@@ -1041,7 +1187,7 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 	UAnimInstance* Anim = NewObject<UAnimInstance>(Arms);
 	Arms->AnimScriptInstance = Anim;
 	Anim->InitializeAnimation();
-	Anim->CurrentSkeleton = NewObject<USkeleton>(Anim);
+	Anim->CurrentSkeleton = Arms->GetSkeletalMeshAsset()->GetSkeleton();
 	UAnimMontage* Montage = NewObject<UAnimMontage>(Anim);
 	Montage->SetSkeleton(Anim->CurrentSkeleton);
 	Montage->SetCompositeLength(1.0f);
@@ -1289,6 +1435,96 @@ bool FFpstrueOwnerInputTransitionTest::RunTest(const FString& Parameters)
 	NewController->Possess(Player);
 	TestTrue(TEXT("A new controller can start a legitimate reload after migration"), Weapon->RequestReload());
 	Weapon->CancelReload();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueAbilityCommitReentryTest,
+	"fpstrue.Gameplay.Boundaries.GAS.CommitCancellationAndSameSpecRestart",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 真实 GAS Commit 广播中取消并重启同一能力，旧激活栈不能再扣弹、建立换弹或注册重复任务。
+bool FFpstrueAbilityCommitReentryTest::RunTest(const FString& Parameters)
+{
+	using namespace FpstrueGameplayBoundaryTests;
+	FGameplayWorld World(*this);
+	if (!World.Initialize()) return false;
+	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this);
+	if (Weapon == nullptr) return false;
+	AfpstrueCharacter* Player = Weapon->GetOwningCharacter();
+	UAbilitySystemComponent* ASC = Player->GetAbilitySystemComponent();
+	if (!TestNotNull(TEXT("Commit reentry exercises the production ASC"), ASC)) return false;
+	const auto CountTasks = [](UGameplayAbility* Ability)
+	{
+		int32 Count = 0;
+		for (TObjectIterator<UGameplayTask> Task; Task; ++Task)
+		{
+			if (IsValid(*Task) && Task->GetTaskOwner() == Ability && !Task->IsFinished()) ++Count;
+		}
+		return Count;
+	};
+	struct FCase { UClass* Class; EFPCombatAbilityInput Input; FGameplayTag State; };
+	const FCase Cases[] = {
+		{UfpstrueFireAbility::StaticClass(), EFPCombatAbilityInput::Fire, FpstrueGameplayTags::State_Firing},
+		{UfpstrueReloadAbility::StaticClass(), EFPCombatAbilityInput::Reload, FpstrueGameplayTags::State_Reloading},
+		{UfpstrueAimAbility::StaticClass(), EFPCombatAbilityInput::Aim, FpstrueGameplayTags::State_Aiming},
+		{UfpstrueSprintAbility::StaticClass(), EFPCombatAbilityInput::Sprint, FpstrueGameplayTags::State_Sprinting}
+	};
+	for (const FCase& Case : Cases)
+	{
+		FGameplayAbilitySpec* Spec = ASC->FindAbilitySpecFromClass(Case.Class);
+		if (!TestNotNull(TEXT("The real combat ability is granted"), Spec)) return false;
+		UGameplayAbility* Instance = Spec->GetPrimaryInstance();
+		if (!TestNotNull(TEXT("The granted ability has its real reusable instance"), Instance)) return false;
+		for (const bool bRestart : {false, true})
+		{
+			const FString Label = FString::Printf(TEXT("%s %s: "), *Case.Class->GetName(), bRestart ? TEXT("restart") : TEXT("cancel"));
+			const int32 AmmoBefore = Weapon->GetCurrentAmmo();
+			const float IdleSpeed = Player->GetCharacterMovement()->MaxWalkSpeed;
+			int32 Commits = 0;
+			bool bRestartAccepted = false;
+			const FDelegateHandle Observer = ASC->AbilityCommittedCallbacks.AddLambda([&](UGameplayAbility* Ability)
+			{
+				if (Ability != Instance || ++Commits != 1) return;
+				ASC->CancelAbilityHandle(Spec->Handle);
+				if (bRestart) bRestartAccepted = ASC->TryActivateAbility(Spec->Handle);
+			});
+			ASC->AbilityLocalInputPressed(static_cast<int32>(Case.Input));
+			ASC->AbilityCommittedCallbacks.Remove(Observer);
+			TestEqual(Label + TEXT("only expected activations commit"), Commits, bRestart ? 2 : 1);
+			TestEqual(Label + TEXT("same-spec restart is accepted only when requested"), bRestartAccepted, bRestart);
+			TestEqual(Label + TEXT("only the requested replacement stays active"), Spec->IsActive(), bRestart);
+			TestEqual(Label + TEXT("the action tag matches the actual replacement"), ASC->HasMatchingGameplayTag(Case.State), bRestart);
+			const bool bFire = Case.Input == EFPCombatAbilityInput::Fire;
+			const bool bReload = Case.Input == EFPCombatAbilityInput::Reload;
+			TestEqual(Label + TEXT("the cancelled outer activation cannot spend a round"),
+				Weapon->GetCurrentAmmo(), AmmoBefore - (bRestart && bFire ? 1 : 0));
+			TestEqual(Label + TEXT("only a replacement owns tasks, never its cancelled outer stack"), CountTasks(Instance),
+				bRestart ? (bFire ? 2 : Case.Input == EFPCombatAbilityInput::Aim ? 1 : 0) : 0);
+			TestEqual(Label + TEXT("only the replacement reload opens a transaction"), Weapon->GetActiveReloadId() != INDEX_NONE, bRestart && bReload);
+			TestEqual(Label + TEXT("aim presentation follows the real replacement"), Player->IsAiming(), bRestart && Case.Input == EFPCombatAbilityInput::Aim);
+			if (bRestart && bFire)
+			{
+				// 真的推进下一次 WaitDelay，重复注册的旧任务会多开火或错误结束新能力。
+				if (!World.Advance(60.0f / Weapon->GetWeaponSettings().RoundsPerMinute + 0.03f)) return false;
+				TestEqual(Label + TEXT("exactly one new pulse fires at the next interval"), Weapon->GetCurrentAmmo(), AmmoBefore - 2);
+				TestTrue(Label + TEXT("the replacement still owns held fire"), Spec->IsActive());
+			}
+			ASC->AbilityLocalInputReleased(static_cast<int32>(Case.Input));
+			ASC->CancelAbilityHandle(Spec->Handle);
+			TestFalse(Label + TEXT("cleanup leaves no active ability"), Spec->IsActive());
+			TestFalse(Label + TEXT("cleanup removes the action tag"), ASC->HasMatchingGameplayTag(Case.State));
+			TestEqual(Label + TEXT("cleanup ends every ability-owned task"), CountTasks(Instance), 0);
+			TestEqual(Label + TEXT("cleanup closes the reload transaction"), Weapon->GetActiveReloadId(), INDEX_NONE);
+			TestFalse(Label + TEXT("cleanup clears aim presentation"), Player->IsAiming());
+			TestEqual(Label + TEXT("cleanup restores movement speed"), Player->GetCharacterMovement()->MaxWalkSpeed, IdleSpeed);
+			const int32 SettledAmmo = Weapon->GetCurrentAmmo();
+			const float SettleTime = bReload ? FMath::Max(Weapon->GetWeaponSettings().ReloadFailSafeDuration,
+				Weapon->GetWeaponSettings().EmptyReloadDuration) + Weapon->GetWeaponSettings().ReloadCompletionGracePeriod + 0.1f : 0.3f;
+			if (!World.Advance(SettleTime)) return false;
+			TestEqual(Label + TEXT("advancing real timers cannot execute a ghost shot or reload"), Weapon->GetCurrentAmmo(), SettledAmmo);
+			TestFalse(Label + TEXT("advancing real timers cannot reactivate the old action"), Spec->IsActive());
+		}
+	}
 	return true;
 }
 

@@ -3,11 +3,10 @@
 #include "Game/fpstrueGameMode.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.h"
-#include "Runtime/fpstrueRuntimeOptions.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/TargetPoint.h"
@@ -36,7 +35,9 @@ DEFINE_STAT(STAT_fpstrueEnemySpawnCount);
 AfpstrueGameMode::AfpstrueGameMode()
 {
 	SurroundManagerClass = AfpstrueSurroundManager::StaticClass();
+#if !UE_BUILD_SHIPPING
 	BenchmarkRunner = CreateDefaultSubobject<UfpstrueBenchmarkRunner>(TEXT("BenchmarkRunner"));
+#endif
 	EnemySignificanceCoordinator = CreateDefaultSubobject<UfpstrueEnemySignificanceCoordinator>(TEXT("EnemySignificanceCoordinator"));
 	EnemyAnimationSharingCoordinator =
 		CreateDefaultSubobject<UfpstrueEnemyAnimationSharingCoordinator>(TEXT("EnemyAnimationSharingCoordinator"));
@@ -48,10 +49,12 @@ void AfpstrueGameMode::BeginPlay()
 	// 普通游玩等待关卡/UI显式开始；只有命令行要求自动基准时才由 Runner 代为启动。
 	Super::BeginPlay();
 
+#if !UE_BUILD_SHIPPING
 	if (BenchmarkRunner != nullptr)
 	{
 		BenchmarkRunner->StartIfRequested(this);
 	}
+#endif
 }
 
 // 对局对象退出时停止玩法生产者并解除全部敌人登记，不在拆世界期间发布胜负 UI。

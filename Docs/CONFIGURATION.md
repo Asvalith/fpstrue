@@ -4,6 +4,12 @@
 
 ## 玩法资产：整组选择一个配置来源
 
+### EQS 与低血撤退
+
+包围与接近点参数仍在 `SurroundManager` 的蓝图默认值：内外环数量、半径、接近半径、目标刷新间隔和缓存期限。EQS 模板在运行时只创建一次，候选生成与环境筛选集中在 `AI/fpstrueEnemyPositionQuery.h/.cpp`；每次请求传入位置快照，不读取隐藏玩家的实时位置。`MinPositionSpacing` 限制已发布接近点及掩体之间的距离；`MaxPendingCoverQueries` 默认 4，`MaxCoverQueriesPerFrame` 默认 1。`DefaultGame.ini` 的 `EnvQueryManager` 将 EQS 测试时间片设为 0.5 ms；这是候选之间的预算，不是每次导航调用的硬性耗时上限。
+
+Controller 蓝图的 `AI|Retreat` 管理低血比例（默认 0.30）、撤退总期限（6 秒）、到位停留（1.5 秒）、重复触发冷却（8 秒）和决策间隔（0.25 秒）。生命值通知只唤醒现有行为树，不新增 Tick。首次/等待掩体保留紧急频率，取得移动目标后的维护乘以已有 Significance 倍率，同时不超过撤退期限。没有回血系统；持续低血不反复触发查询，只有冷却后的新伤害可以开启下一轮撤退。
+
 建立或迁移项目资产时，使用以下对应关系：
 
 | 配置类型 | 配置资产路径 | 绑定位置 |
@@ -26,9 +32,9 @@
 - `BP_Weapon` 已绑定该资产，原有 25 项组件数值字段已移除，不存在“资产与蓝图旧数值谁优先”的双入口。原生未绑定组件使用 `FFPWeaponSettings` 的完整默认值；真实资产测试检查 BP 绑定，防止意外落回默认值。
 - 首次成功装备时校验并复制整组参数。编辑器“验证资产”和运行时装备共用合法性检查，拒绝非有限数、越界数值等；装备失败不发布装备关系或初始化弹药。没有读取磁盘的逐帧路径。
 - 装备后读取该实例的数值快照；修改共享资产不会中途改变射速、弹匣容量或正在进行的换弹。调参后重新开始对局或生成新武器以生效。卸下再装备同一件武器保留快照与剩余弹药，不补满。
-- 当前弹药、动作状态、换弹编号、播放身份、已提交标记与 Timer 仍只属于组件实例。多个武器可以引用同一资产，但不共享这些运行状态。
+- 弹药、换弹编号、播放身份、已提交标记与表现 Timer 属于武器实例，动作标签和连射任务属于角色 ASC 与 GA。多个武器可以引用同一资产，但不共享这些运行状态。
 - `VisualRecoil` 只叠加最终镜头画面，不写入控制方向或命中射线所用的 Camera 组件，也不修改动画。`VisualRecoilScale` 控制整体强度（0 为关闭），`AimVisualRecoilMultiplier` 控制瞄准倍率；`VisualRecoilRotation` 是以度为单位的 Pitch/Yaw/Roll 峰值，`VisualRecoilFOV` 是短促视野脉冲，`VisualRecoilDuration` 是回正总时长。每发重触发同一个 Shake，死亡、卸下或失去控制时仅清理武器自身的效果。旧配置资产加载时使用这五个新增字段的结构体默认值，无需重新迁移或重接蓝图。
-- `ReloadDuration` / `EmptyReloadDuration` 是兜底计时依据，正常装填仍由带身份的 Notify 提交；超时不补弹。手臂/枪械 Montage、音效和特效仍在蓝图选择，本次不改原播放接线。
+- `ReloadDuration` / `EmptyReloadDuration` 在多人模式决定服务器装填时长；单机正常装填由带身份的 Notify 提交，播放缺失时超时不补弹。手臂/枪械 Montage、音效和特效仍在蓝图选择。
 
 迁移原样保留蓝图实际数值（600 发/分钟、30 发弹匣、90 发备弹等）。原包与 25 项完整导出位于 `Saved/Backups/WeaponConfigurationMigration/`。`Tools/Gameplay/MigrateWeaponConfiguration.py` 分为旧模块 `Export`、新模块 `Migrate`、新进程 `Verify` 三种模式；原备份和已存在配置禁止覆盖。**当前项目已迁移，日常调参直接编辑资产，不重跑迁移。** 旧版本升级必须先在删除旧属性前导出，并同时交付新配置资产、已绑定蓝图和新代码；仅更新源码不会替旧包迁移数值。
 
@@ -98,11 +104,11 @@ MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarr
 | 人数、预热、时长、轮次、地图、实验组选项 | `Tools/Performance/ExperimentProfiles/*.json` |
 | 公共默认值、分辨率、Trace 通道、隔离与超时设置 | `Tools/Performance/ExperimentProfiles/RenderCostCases.psd1` 的 `Defaults` / `Capture` |
 | 每个实验的开关、CVar、消费者数量与分辨率限制 | 同文件的 `Variants`；CVar 同时生成启动命令和读回检查 |
-| 运行时诊断开关与策略覆盖的唯一解析入口 | `Source/fpstrue/Runtime/fpstrueRuntimeOptions.h/.cpp` |
+| 运行时诊断开关与策略覆盖的唯一解析入口 | `Source/fpstrue/Runtime/fpstrueRuntime.h/.cpp` 内的 `FFPRuntimeOptions` |
 | 预热、时长、人数、输出等采集条件 | `Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkRunner.h/.cpp` 内的 `FFPBenchmarkConfig`；复用运行时快照，不重复解析上述开关 |
 | 游戏内等待生成、预热、采集、校验与退出 | `Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkRunner.h/.cpp` |
 
-业务埋点仍留在对应业务函数，声明集中在 `Source/fpstrue/Runtime/fpstrueRuntimeOptions.h`；正常玩法不依赖 `Testing/Benchmarks` 的参数实现。正式玩法默认值继续由 `Config/` 和玩法配置资产管理，不混入实验配置。`ReadRenderCostConfig.ps1` 只负责读取、校验和生成命令，`SummarizeRenderCostMatrix.ps1` 只负责汇总已有采集结果。
+业务埋点仍留在对应业务函数，声明集中在 `Source/fpstrue/Runtime/fpstrueRuntime.h`；正常玩法不依赖 `Testing/Benchmarks` 的参数实现。正式玩法默认值继续由 `Config/` 和玩法配置资产管理，不混入实验配置。`ReadRenderCostConfig.ps1` 只负责读取、校验和生成命令，`SummarizeRenderCostMatrix.ps1` 只负责汇总已有采集结果。
 
 `Tools/Performance/ExperimentProfiles/baseline160.json` 保存 160 敌人、3 轮、15 秒预热、30 秒采集的常规 Baseline 方案。它不代表已通过性能验收，也不改变项目默认画质；ScreenPercentage 为 null，表示不额外覆盖内部渲染比例。
 

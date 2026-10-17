@@ -20,7 +20,8 @@ enum class EFPEnemyBehaviorAction : uint8
 	TryAttack,
 	MaintainCombatPosition,
 	Surround,
-	Pursue
+	Pursue,
+	Retreat
 };
 
 namespace FPEnemyBlackboard
@@ -30,6 +31,7 @@ namespace FPEnemyBlackboard
 	inline const FName Attacking(TEXT("Attacking"));
 	inline const FName InAttackRange(TEXT("InAttackRange"));
 	inline const FName InChaseRange(TEXT("InChaseRange"));
+	inline const FName Retreating(TEXT("Retreating"));
 }
 
 inline const FName FPEnemyDecisionWake(TEXT("FPEnemyDecisionWake"));
@@ -84,6 +86,7 @@ class FPSTRUE_API UfpstrueBTDecorator_DecisionFlag : public UBTDecorator_Blackbo
 public:
 	// 设置黑板布尔条件及期望值，禁用等待期间基于旧快照的分支中止。
 	void Configure(FName KeyName, bool bExpectedValue);
+	bool HasSameCondition(const UfpstrueBTDecorator_DecisionFlag& Other) const;
 };
 
 /** 初始化未配置树；创建默认 Blackboard 或复用完全匹配的已有键，供编辑器生成可编辑资产。 */
@@ -95,6 +98,9 @@ public:
 	// 拒绝覆盖已有树/图，不修改既有 Blackboard；日后策划编辑不会被重建抹掉。
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Behavior Tree")
 	static bool PopulateDefaultTree(UBehaviorTree* Tree, UBlackboardData* Blackboard);
+	// 仅升级未编辑的旧默认结构；新默认结构重复调用不改变节点或图。
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Behavior Tree")
+	static bool UpgradeDefaultTreeForRetreat(UBehaviorTree* Tree, UBlackboardData* Blackboard);
 };
 
 // 世界内共享不可变树模板，每个 Controller 的 Blackboard 和节点内存由引擎单独分配。

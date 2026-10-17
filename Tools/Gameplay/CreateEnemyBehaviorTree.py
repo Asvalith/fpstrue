@@ -33,9 +33,16 @@ if tree_existed != blackboard_existed:
 
 tree = create_or_load("BT_FPEnemy", unreal.BehaviorTree, unreal.BehaviorTreeFactory())
 blackboard = create_or_load("BB_FPEnemy", unreal.BlackboardData, unreal.BlackboardDataFactory())
+library_class = unreal.load_class(None, "/Script/fpstrue.fpstrueEnemyBehaviorTreeLibrary")
+library = unreal.get_default_object(library_class)
+if tree_existed:
+    # Upgrade only the exact native default; reject designer changes before saving.
+    if not library.upgrade_default_tree_for_retreat(tree, blackboard):
+        raise RuntimeError("Existing BT/Blackboard contain designer changes; native retreat upgrade refused.")
+    for asset in (blackboard, tree):
+        if not unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=True):
+            raise RuntimeError("Could not save " + asset.get_path_name())
 if not tree_existed:
-    library_class = unreal.load_class(None, "/Script/fpstrue.fpstrueEnemyBehaviorTreeLibrary")
-    library = unreal.get_default_object(library_class)
     if not library.populate_default_tree(tree, blackboard):
         raise RuntimeError("Native initializer rejected the empty assets.")
     for asset in (blackboard, tree):

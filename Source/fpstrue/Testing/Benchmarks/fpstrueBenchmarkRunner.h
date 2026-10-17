@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Containers/Ticker.h"
-#include "Runtime/fpstrueRuntimeOptions.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "fpstrueBenchmarkRunner.generated.h"
 
 class AfpstrueGameMode;

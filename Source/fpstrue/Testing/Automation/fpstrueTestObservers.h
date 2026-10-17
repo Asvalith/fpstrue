@@ -96,6 +96,17 @@ public:
 class UfpstrueWeaponComponent;
 class AfpstrueCharacter;
 
+// 只观察生产 RPC 分派的实参，不替换开火、伤害或网络发送逻辑。
+UCLASS(Transient, NotBlueprintable)
+class UfpstrueShotPresentationTestWeapon : public UfpstrueWeaponComponent
+{
+	GENERATED_BODY()
+public:
+	TArray<FIntPoint> ShotPresentations;
+	// 在真实 MulticastShot 进入 ProcessEvent 时保存身份，随后继续执行原实现。
+	virtual void ProcessEvent(UFunction* Function, void* Parameters) override;
+};
+
 // A reflected receiver is required by OnAmmoChanged's dynamic multicast signature.
 // Only automation tests instantiate this transient object; it adds no gameplay API.
 UCLASS(Transient, NotBlueprintable)
@@ -119,6 +130,7 @@ public:
 	TWeakObjectPtr<UAnimInstance> ReloadAnimInstance;
 	TWeakObjectPtr<UAnimMontage> ReloadMontage;
 	bool bAmmoChangedWhileMontageActive = false;
+	TFunction<void()> OnTraceReceived;
 
 	// 记录弹药通知，检查通知时动画是否仍在播放，并可同步禁用武器。
 	UFUNCTION()
@@ -129,6 +141,9 @@ public:
 	// 统计已完成的单发事实，区别于可能被取消的开火请求。
 	UFUNCTION()
 	void HandleFirePerformed();
+	// 可在真实弹道广播内同步重启开火，复现同一调用栈覆盖新旧表现身份的边界。
+	UFUNCTION()
+	void HandleTraceFinished(bool bHit, FVector TraceStart, FVector TraceEnd, FVector TraceTarget, FHitResult Hit);
 	// 记录换弹结束原因，并可从结束通知立即重启换弹或开火，检查旧清理不伤新动作。
 	UFUNCTION()
 	void HandleReloadEnded(int32 ReloadId, EFPReloadEndReason Reason, bool bAmmoCommitted);

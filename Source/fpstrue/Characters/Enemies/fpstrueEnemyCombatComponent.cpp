@@ -9,7 +9,7 @@
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifyQueue.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Runtime/fpstrueRuntimeOptions.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
@@ -153,7 +153,7 @@ bool UfpstrueEnemyCombatComponent::IsAttackReady() const
 	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	const UWorld* World = GetWorld();
 	const AfpstrueEnemyAIController* Controller = Enemy != nullptr ? Cast<AfpstrueEnemyAIController>(Enemy->GetController()) : nullptr;
-	if (bEndingPlay || bStartingPlayback || Enemy == nullptr || World == nullptr || Controller == nullptr || !Controller->AcceptsCombatCommands())
+	if (bEndingPlay || bStartingPlayback || Enemy == nullptr || !Enemy->HasAuthority() || World == nullptr || Controller == nullptr || !Controller->AcceptsCombatCommands())
 	{
 		return false;
 	}
@@ -267,6 +267,10 @@ void UfpstrueEnemyCombatComponent::BindAttackPlaybackCompletion(FAnimMontageInst
 {
 	const FFPActionPlayback ExpectedPlayback = AttackPlayback;
 	ScheduleAttackFailSafe(&Instance);
+	if (AfpstrueEnemyCharacter* Enemy = GetEnemy())
+	{
+		Enemy->PublishAttackPresentation(AttackSequence, Instance.Montage, Instance.GetPlayRate(), true);
+	}
 	// 只订阅明确实例，不订阅只含 Montage 资产的全局事件；同资源旧播放结束不能结束新事务。
 	// 显式 Bind 路径已有的观察回调保留，但必须在本组件提交完成/中断后通知。
 	const FOnMontageEnded PreviousObserver = Instance.OnMontageEnded;
@@ -328,7 +332,7 @@ void UfpstrueEnemyCombatComponent::BeginAttackWindow()
 {
 	// NotifyState Begin 记录刀刃首个采样位置；后续 Tick 才能用上一帧到当前帧的轨迹补足快速运动区域。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || Enemy->IsDead() || !IsAttacking() || AttackPhase == EFPEnemyAttackPhase::Active || bHitTargetThisAttack)
+	if (Enemy == nullptr || !Enemy->HasAuthority() || Enemy->IsDead() || !IsAttacking() || AttackPhase == EFPEnemyAttackPhase::Active || bHitTargetThisAttack)
 	{
 		return;
 	}
@@ -353,7 +357,7 @@ void UfpstrueEnemyCombatComponent::UpdateAttackWindow()
 {
 	// 只在动画有效帧执行连续 Sweep；已命中唯一玩家后会立即关闭窗口，避免后续帧重复扣血和无效查询。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
-	if (Enemy == nullptr || AttackPhase != EFPEnemyAttackPhase::Active || Enemy->IsDead())
+	if (Enemy == nullptr || !Enemy->HasAuthority() || AttackPhase != EFPEnemyAttackPhase::Active || Enemy->IsDead())
 	{
 		return;
 	}
@@ -505,7 +509,7 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 	// Sweep 可命中多个 Pawn，但当前事务只接受指定玩家且每次攻击最多成功扣血一次。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	AfpstrueCharacter* TargetCharacter = AttackTarget.Get();
-	if (Enemy == nullptr || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
+	if (Enemy == nullptr || !Enemy->HasAuthority() || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
 		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack ||
 		!HasClearAttackPath(*Enemy, *TargetCharacter, Enemy->GetActorLocation(), TargetCharacter->GetActorLocation()))
 	{
@@ -591,6 +595,7 @@ void UfpstrueEnemyCombatComponent::ResetCombat()
 	}
 	if (AfpstrueEnemyCharacter* Enemy = GetEnemy())
 	{
+		if (bWasAttacking) Enemy->PublishAttackPresentation(AttackSequence, nullptr, 1.0f, false);
 		if (PermissionSource != nullptr)
 		{
 			// ★【重要边界】[资源归还] 许可只归还给攻击开始时捕获的管理器，不从已改变的 Controller 反查新来源。

@@ -11,6 +11,7 @@ class AfpstrueEnemyCharacter;
 class AfpstrueSurroundManager;
 class UBehaviorTree;
 class UBlackboardComponent;
+class UfpstrueHealthComponent;
 struct FAIStimulus;
 enum class EFPEnemyBehaviorAction : uint8;
 
@@ -50,8 +51,10 @@ public:
 	// 视觉观察点使用 Pawn 视点及真实朝向；没有 Pawn 时使用引擎默认实现。
 	virtual void GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const override;
 
-	// 由 GameMode 注入玩家目标和全局包围管理器，避免每个 AI 自行查找。
+	// 单机由 GameMode 注入目标；多人从感知缓存选目标，再取得该玩家专属的包围管理器。
 	void InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager);
+	// 主动离开/恢复期限结束可立即撤销目标；死亡和 EndPlay 也会通过绑定进入同一清理。
+	void NotifyCombatTargetUnavailable(AfpstrueCharacter* UnavailableTarget);
 
 	// Benchmark 消融入口：单独关闭 PathFollowingComponent Tick。
 	void ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick);
@@ -73,14 +76,15 @@ public:
 	// 战斗目标只由 Controller 持有，EnemyCharacter 通过只读接口使用，避免双份状态漂移。
 	AfpstrueCharacter* GetTargetCharacter() const
 	{
-		return AcceptsCombatCommands() && bTargetVisible && IsTargetUsable(TargetCharacter) ? TargetCharacter.Get() : nullptr;
+		// 撤退期间禁止外部战斗入口启动替代攻击；寻掩体只消费单独捕获的位置快照。
+		return AcceptsCombatCommands() && !bRetreatActive && bTargetVisible && IsTargetUsable(TargetCharacter) ? TargetCharacter.Get() : nullptr;
 	}
 	// 攻击开始时捕获许可来源，结束时不再从可能已变化的 Controller 上反查。
 	AfpstrueSurroundManager* GetSurroundManager() const { return SurroundManager; }
 	// Animation Sharing 等只读消费者通过这里获取当前表现状态。
 	EFPEnemyAIState GetAIState() const { return AIState; }
 	// 停止/换目标先关闭命令入口，Montage 停止回调不能在清理过程中重启攻击。
-	bool AcceptsCombatCommands() const { return CommandPhase == ECommandPhase::Accepting; }
+	bool AcceptsCombatCommands() const { return HasAuthority() && GetNetMode() != NM_Client && CommandPhase == ECommandPhase::Accepting; }
 
 	// PathFollowing 失败时安排退避；成功到位后的朝向由下一次决策结合到达检测更新。
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
@@ -137,9 +141,27 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0"))
 	float TargetMemorySeconds = 5.0f;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LowHealthRetreatThreshold = 0.3f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.1"))
+	float RetreatTimeLimit = 6.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.0"))
+	float RetreatHoldSeconds = 1.5f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.1"))
+	float RetreatCooldown = 8.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.05"))
+	float RetreatDecisionInterval = 0.25f;
+
 private:
 	friend class FFPEnemyBehaviorTreeLifecycleTest;
 	friend class FFPEnemyMoveRequestOwnershipTest;
+	friend class FFpstrueEnemyLowHealthRetreatTest;
+	friend class FFpstrueMultiplayerPveAuthorityTest;
+	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	enum class ECommandPhase : uint8 { Stopped, Accepting, ChangingContext, Stopping };
 	enum class EMoveGoalResult : uint8
 	{
@@ -176,9 +198,20 @@ private:
 	void StartBehaviorLogic();
 	// 消息只排队唤醒当前等待节点，不从感知回调中重入行为树。
 	void RequestBehaviorDecision();
-	// 只处理当前玩家的视觉刺激；丢失时保留最后可见位置并取消旧攻击，而不是读取隐藏玩家坐标。
+	// 单机只处理注入玩家；多人也接收其他玩家的视觉刺激，但稳定保留当前可见目标。
 	UFUNCTION()
 	void HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus);
+	// 只在需要换目标时遍历感知组件已有的可见玩家缓存，不逐敌人扫描整个世界。
+	void SelectPerceivedTarget();
+	UFUNCTION() void HandleCombatTargetDied(AfpstrueCharacter* DeadTarget);
+	UFUNCTION() void HandleCombatTargetEndPlay(AActor* EndingTarget, EEndPlayReason::Type EndPlayReason);
+
+	// 只由新增扣血触发一轮撤退；持续低血不会在每轮采样重新申请掩体。
+	UFUNCTION()
+	void HandleEnemyHealthChanged(float NewHealth);
+	bool IsBelowRetreatThreshold() const;
+	bool HandleRetreat();
+	void FinishRetreat(bool bApplyCooldown = true);
 
 	// 根据状态、距离和 Significance 返回下一次决策间隔。
 	float GetNextDecisionInterval(const FDecisionContext& Context) const;
@@ -217,12 +250,26 @@ private:
 	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;
 
 	UPROPERTY(Transient)
+	TObjectPtr<UfpstrueHealthComponent> EnemyHealthComponent;
+
+	float LastObservedHealth = 0.0f;
+	bool bRetreatRequested = false;
+	bool bRetreatActive = false;
+	bool bHasRetreatGoal = false;
+	FVector RetreatThreatLocation = FVector::ZeroVector;
+	FVector RetreatGoalLocation = FVector::ZeroVector;
+	double RetreatEndTime = 0.0;
+	double RetreatHoldUntil = 0.0;
+	double NextRetreatAllowedTime = 0.0;
+
+	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueCharacter> TargetCharacter;
 
 	// 玩家引用是候选身份，不代表知道其位置；丢失时不再读取真实 Transform 或共享目标快照。
 	FVector LastKnownTargetLocation = FVector::ZeroVector;
 	double TargetForgetTime = 0.0;
 	bool bTargetVisible = false;
+	bool bUsesMultiplayerTargets = false;
 
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;

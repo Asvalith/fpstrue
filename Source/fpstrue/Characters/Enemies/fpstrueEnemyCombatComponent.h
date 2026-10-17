@@ -7,7 +7,7 @@
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Components/ActorComponent.h"
 #include "Engine/DataAsset.h"
-#include "fpstrue.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "fpstrueEnemyCombatComponent.generated.h"
 
 class AfpstrueEnemyCharacter;
@@ -165,6 +165,7 @@ private:
 	friend class FFpstrueEnemyCombatStateConfigTest;
 	friend class FFpstrueEnemyAttackPlaybackTest;
 	friend class FFpstrueEnemyAttackAssetIntegrationTest;
+	friend class FFpstrueMultiplayerPveAuthorityTest;
 	// 返回强类型 Owner，供内部战斗逻辑使用。
 	AfpstrueEnemyCharacter* GetEnemy() const;
 	// 从骨骼 Socket 读取本帧武器根部和尖端位置。

@@ -400,6 +400,9 @@ Saved/
 # Logs
 *.log
 
+# Local scratch work and extracted reference material
+/tmp/
+
 # OS files
 .DS_Store
 Thumbs.db

@@ -1,11 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Runtime/fpstrueRuntimeOptions.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "fpstrue.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -14,6 +13,10 @@
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/GameStateBase.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "Net/UnrealNetwork.h"
 #include "Math/RotationMatrix.h"
 #include "SignificanceManager.h"
 
@@ -47,6 +50,8 @@ namespace
 AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	bReplicates = true;
+	SetReplicateMovement(true);
 	AIControllerClass = AfpstrueEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
 
@@ -69,6 +74,8 @@ void AfpstrueEnemyCharacter::BeginPlay()
 {
 	//初始化顺序：读取Benchmark覆盖 -> 配置Mesh/Movement -> 绑定 Health -> 注册 Gameplay Significance。
 	Super::BeginPlay();
+	// 旧蓝图可能保存过未复制默认值；联网敌人只能由服务器生成，客户端消费复制副本。
+	if (HasAuthority()) { SetReplicates(true); SetReplicateMovement(true); }
 
 	//从全局 Benchmark 配置读入诊断开关，缓存成成员变量，避免每帧查配置
 	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
@@ -116,7 +123,84 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	}
 	bUseControllerRotationYaw = false;
 	//注册SignificanceManager
+	SignificancePositionSnapshot = GetActorLocation();
+	bHasSignificancePositionSnapshot = true;
 	RegisterWithSignificanceManager();
+	if (!HasAuthority()) OnRep_NetworkPresentation();
+}
+
+void AfpstrueEnemyCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AfpstrueEnemyCharacter, NetworkPresentation);
+}
+
+// 攻击是否发生由服务器事务决定；客户端只读取用于动画的当前快照。
+void AfpstrueEnemyCharacter::PublishAttackPresentation(uint32 AttackId, UAnimMontage* Montage, float PlayRate, bool bPlaying)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Standalone) return;
+	NetworkPresentation.AttackId = AttackId;
+	NetworkPresentation.bAttacking = bPlaying && !IsDead();
+	NetworkPresentation.Montage = Montage;
+	NetworkPresentation.PlayRate = PlayRate;
+	NetworkPresentation.ServerStartTime = GetWorld()->GetTimeSeconds();
+	ForceNetUpdate();
+}
+
+// 属性到达顺序不保证生命先于播放快照；死亡表现只使用同一快照中的击杀信息。
+void AfpstrueEnemyCharacter::OnRep_NetworkPresentation()
+{
+	if (HasAuthority() || !HasActorBegunPlay()) return;
+	if (NetworkPresentation.bDead)
+	{
+		LastAppliedDamage.Direction = NetworkPresentation.DeathDirection;
+		LastAppliedDamage.Location = NetworkPresentation.DeathLocation;
+		LastAppliedDamage.BoneName = NetworkPresentation.DeathBone;
+		LastAppliedDamage.bHasHitData = true;
+		HandleDeath();
+		return;
+	}
+	if (IsDead()) return;
+	if (RemoteAttackPlayback.ActionId == NetworkPresentation.AttackId && RemoteAttackPlayback.IsSet() &&
+		NetworkPresentation.bAttacking) return;
+	RemoteAttackPlayback.Stop();
+	RemoteAttackPlayback.Reset();
+	if (!NetworkPresentation.bAttacking || !IsValid(NetworkPresentation.Montage))
+	{
+		ApplyRenderSignificanceSettings();
+		RefreshAnimationSharingRegistration();
+		return;
+	}
+	// ★【重要边界】共享 Follower 必须先恢复自己的 AnimInstance，再绑定本次网络攻击播放。
+	LastCombatRelevantTime = GetWorld()->GetTimeSeconds();
+	SuspendAnimationSharing();
+	ApplyRenderSignificanceSettings();
+	UAnimInstance* Anim = GetMesh()->GetAnimInstance();
+	if (Anim == nullptr) return;
+	const AGameStateBase* State = GetWorld()->GetGameState();
+	const double ServerNow = State != nullptr ? State->GetServerWorldTimeSeconds() : NetworkPresentation.ServerStartTime;
+	const double EffectiveRate = NetworkPresentation.PlayRate * NetworkPresentation.Montage->RateScale;
+	if (!FMath::IsFinite(EffectiveRate) || EffectiveRate <= 0.0) return;
+	const float Position = static_cast<float>(FMath::Max(0.0, ServerNow - NetworkPresentation.ServerStartTime) * EffectiveRate);
+	if (Position >= NetworkPresentation.Montage->GetPlayLength()) return;
+	if (Anim->Montage_Play(NetworkPresentation.Montage, NetworkPresentation.PlayRate,
+		EMontagePlayReturnType::MontageLength, Position, true) > 0.0f)
+	{
+		RemoteAttackPlayback.TryBind(NetworkPresentation.AttackId, GetMesh(), NetworkPresentation.Montage);
+		ApplyRenderSignificanceSettings();
+	}
+}
+
+// 受击是可丢弃的瞬时反馈；生命和死亡仍由复制属性恢复，不依赖收到这条通知。
+void AfpstrueEnemyCharacter::MulticastHitReaction_Implementation(float DamageAmount)
+{
+	if (HasAuthority() || IsDead()) return;
+	LastCombatRelevantTime = GetWorld()->GetTimeSeconds();
+	HitAnimationProtectionUntil = LastCombatRelevantTime + 0.3f;
+	SuspendAnimationSharing();
+	ApplyRenderSignificanceSettings();
+	GetWorldTimerManager().SetTimer(HitAnimationProtectionTimer, this, &ThisClass::RefreshHitAnimationProtection, 0.3f, false);
+	OnEnemyDamaged(DamageAmount, nullptr, nullptr);
 }
 
 // 无论死亡销毁还是关卡退出，都解除外部登记、受击计时和事件绑定。
@@ -142,14 +226,15 @@ void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 bool AfpstrueEnemyCharacter::IsDead() const
 {
 	// 死亡状态始终转发到 HealthComponent，EnemyCharacter 不保存第二份生命事实。
-	return HealthComponent != nullptr && HealthComponent->IsDead();
+	return (HealthComponent != nullptr && HealthComponent->IsDead()) || (!HasAuthority() && NetworkPresentation.bDead);
 }
 
 // 查询战斗组件的当前攻击事务，用于 AI 选择和动画保护。
 bool AfpstrueEnemyCharacter::IsAttacking() const
 {
 	// 攻击事务状态属于 CombatComponent，角色只提供给 AI 和显著性系统读取。
-	return CombatComponent != nullptr && CombatComponent->IsAttacking();
+	return HasAuthority() ? CombatComponent != nullptr && CombatComponent->IsAttacking()
+		: NetworkPresentation.bAttacking && !NetworkPresentation.bDead;
 }
 
 // 判断攻击、近战范围和近期交互是否需要恢复完整动画；保护不增加阴影或光追预算。
@@ -157,7 +242,8 @@ bool AfpstrueEnemyCharacter::RequiresGameplayAnimationProtection(float CurrentTi
 {
 	// 攻击中、已贴近目标或刚发生交互时禁止动画降级，保护 Montage、Notify 和刀刃 Socket 更新。
 	const bool bRecentlyInteracted = CurrentTime - LastCombatRelevantTime <= FMath::Max(GraceSeconds, 0.0f);
-	return IsAttacking() || IsTargetInAttackRange() || bRecentlyInteracted;
+	return IsAttacking() || (SignificanceCombatProtectionSample != nullptr
+		? *SignificanceCombatProtectionSample : IsTargetInAttackRange()) || bRecentlyInteracted;
 }
 
 // 复用战斗组件的攻击范围判定，使 AI 与性能保护使用同一组规则。
@@ -289,6 +375,7 @@ void AfpstrueEnemyCharacter::HandleDamageResolved(float DamageAmount, AActor* Da
 		}
 	}
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
+	if (HasAuthority() && GetNetMode() != NM_Standalone) MulticastHitReaction(DamageAmount);
 }
 
 // 受击保护到期后重新合成动画设置和共享资格，不永久保留全速动画。
@@ -303,12 +390,23 @@ void AfpstrueEnemyCharacter::RefreshHitAnimationProtection()
 void AfpstrueEnemyCharacter::HandleDeath()
 {
 	//死亡顺序先停止会继续回调的系统，再关闭移动/碰撞，最后进入 Ragdoll 并广播给 GameMode/蓝图。
-	if (bDeathEffectsApplied)
+	if (bDeathEffectsApplied || (!HasAuthority() && (!HasActorBegunPlay() || !NetworkPresentation.bDead)))
 	{
 		return;
 	}
 
 	bDeathEffectsApplied = true;
+	if (HasAuthority() && GetNetMode() != NM_Standalone)
+	{
+		NetworkPresentation.bDead = true;
+		NetworkPresentation.bAttacking = false;
+		NetworkPresentation.DeathDirection = LastAppliedDamage.Direction;
+		NetworkPresentation.DeathLocation = LastAppliedDamage.Location;
+		NetworkPresentation.DeathBone = LastAppliedDamage.BoneName;
+		ForceNetUpdate();
+	}
+	RemoteAttackPlayback.Stop();
+	RemoteAttackPlayback.Reset();
 	// ★【重要边界】[生命周期] 先冻结击杀快照、撤销预算并停止 AI/攻击，再关闭移动碰撞和启用布娃娃，死亡通知放在内部提交之后。
 	DeathDamageContext = LastAppliedDamage;
 	GetWorldTimerManager().ClearTimer(HitAnimationProtectionTimer);
@@ -357,7 +455,7 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	RefreshRenderBudgetMeshes();
 	GetWorldTimerManager().SetTimerForNextTick(this, &AfpstrueEnemyCharacter::ApplyDeathImpulse);
 
-	if (bDestroyOnDeath)
+	if (bDestroyOnDeath && HasAuthority())
 	{
 		SetLifeSpan(DestroyDelay);
 	}
@@ -392,7 +490,7 @@ void AfpstrueEnemyCharacter::ApplyDeathImpulse()
 void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 {
 	// 每个敌人只注册一个轻量距离函数；集中 Coordinator 调用 Manager::Update，敌人本身没有 Significance Tick。
-	if (bRegisteredWithSignificanceManager || GetWorld() == nullptr)
+	if (!HasAuthority() || bRegisteredWithSignificanceManager || GetWorld() == nullptr)
 	{
 		return;
 	}
@@ -404,18 +502,18 @@ void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 	}
 
 	// 评分回调只返回距离数值；组件写入放在 Sequential 后处理，而不是评分回调中。
-	// ★【重要边界】[线程交接] 插件可并行执行评分，当前仍读取 Actor/Health；Sequential 只约束后处理，不让这些读取自动变成线程安全快照。
+	// ★【重要边界】[线程交接] 主线程先冻结位置；插件同步等待并行评分结束，回调不查询可变的 Actor/Health 状态。
 	Manager->RegisterObject(
 		this, TEXT("Enemy"),
 		[](USignificanceManager::FManagedObjectInfo* ObjectInfo, const FTransform& Viewpoint)
 		{
-			const AfpstrueEnemyCharacter* Enemy = Cast<AfpstrueEnemyCharacter>(ObjectInfo->GetObject());
-			if (!IsValid(Enemy) || Enemy->IsDead())
+			const auto* Enemy = static_cast<const AfpstrueEnemyCharacter*>(ObjectInfo->GetObject());
+			if (!Enemy->bHasSignificancePositionSnapshot)
 			{
 				return 0.0f;
 			}
 
-			const float Distance = FVector::Dist2D(Enemy->GetActorLocation(), Viewpoint.GetLocation());
+			const float Distance = FVector::Dist2D(Enemy->SignificancePositionSnapshot, Viewpoint.GetLocation());
 			return 1.0f / (1.0f + Distance);
 		},
 		// ★【重要边界】[线程交接] 并行评分完成后，后处理在 Manager::Update 调用线程顺序执行；本项目由游戏线程 Timer 调用并写入组件。
@@ -454,13 +552,14 @@ void AfpstrueEnemyCharacter::UnregisterFromSignificanceManager()
 void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 {
 	// 距离决定自然档位，但攻击中或已进入攻击范围必须保持 Full，保证近战响应不被后台档降频。
-	if (IsDead())
+	if (!HasAuthority() || IsDead())
 	{
 		return;
 	}
 	const float FullRateThreshold = 1.0f / (1.0f + FullRateMovementDistance);
 	const float MidRateThreshold = 1.0f / (1.0f + MidRateMovementDistance);
-	const bool bRequiresFullRate = IsAttacking() || IsTargetInAttackRange();
+	const bool bRequiresFullRate = IsAttacking() || (SignificanceCombatProtectionSample != nullptr
+		? *SignificanceCombatProtectionSample : IsTargetInAttackRange());
 
 	EFPEnemySignificanceTier NewTier = EFPEnemySignificanceTier::Background;
 	if (bRequiresFullRate || Significance >= FullRateThreshold)
@@ -493,7 +592,7 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 void AfpstrueEnemyCharacter::ApplyGameplaySignificanceIntervals()
 {
 	// Gameplay 档位只改变 CharacterMovement 的更新间隔；攻击状态始终恢复为逐帧移动更新。
-	if (IsDead())
+	if (!HasAuthority() || IsDead())
 	{
 		return;
 	}
@@ -737,7 +836,9 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 	const bool bHitProtected = GetWorld() != nullptr && GetWorld()->GetTimeSeconds() < HitAnimationProtectionUntil;
 	// ★【重要边界】[预算保护] 攻击和受击只恢复必要动画与 LOD，不能提高渲染分数或额外获得阴影、硬件光追名额。
 	const bool bUseFullAnimationAndLOD = IsAttacking() || bGameplayAnimationProtection || bHitProtected;
-	const bool bRefreshCombatPose = bUseFullAnimationAndLOD || bDisableAnimationOptimizationsForBenchmark;
+	// 联网权威端即使没有画面，也必须刷新物理命中形状；不能让客户端看见跑动、服务器却查询旧骨骼。
+	const bool bNetworkAuthority = HasAuthority() && GetNetMode() != NM_Standalone;
+	const bool bRefreshCombatPose = bUseFullAnimationAndLOD || bDisableAnimationOptimizationsForBenchmark || bNetworkAuthority;
 	CharacterMesh->VisibilityBasedAnimTickOption = bRefreshCombatPose
 		? EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones : AuthoredAnimTickOption;
 	CharacterMesh->bEnableUpdateRateOptimizations = bAuthoredUpdateRateOptimizations && !bRefreshCombatPose;
@@ -762,7 +863,7 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 	}
 
 	// 完整动画恢复要同时撤销组件已有冷却，不能只改下一次 Tick 的间隔。
-	const float TargetInterval = bDisableAnimationOptimizationsForBenchmark || !LastRenderSignificancePolicy.bEnableAnimationTickTiering
+	const float TargetInterval = bNetworkAuthority || bDisableAnimationOptimizationsForBenchmark || !LastRenderSignificancePolicy.bEnableAnimationTickTiering
 		? 0.0f : AnimationTickInterval;
 	if (TargetInterval == 0.0f && CharacterMesh->GetComponentTickInterval() > 0.0f)
 	{
@@ -776,13 +877,13 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
 
 	// MinLOD 仅限制可选择的精度范围；零值解除最低 LOD 限制，不强制 GPU 绘制 LOD0。
 	// ★【重要边界】[配置契约] MinLOD 是最低精度约束，不是 GPU 实际选择；零值不能解释为每个渲染 Pass 都绘制 LOD0。
-	if (!LastRenderSignificancePolicy.bEnableSkeletalLOD || bUseFullAnimationAndLOD)
+	if (bNetworkAuthority || !LastRenderSignificancePolicy.bEnableSkeletalLOD || bUseFullAnimationAndLOD)
 	{
 		RequestedMinLOD = 0;
 	}
 	const int32 LODCount = FMath::Max(CharacterMesh->GetNumLODs(), 1);
 	const int32 SafeMinLOD = FMath::Clamp(RequestedMinLOD, 0, LODCount - 1);
-	if ((bHasRenderSignificancePolicy || bUseFullAnimationAndLOD) && AppliedMinimumLOD != SafeMinLOD)
+	if ((bHasRenderSignificancePolicy || bUseFullAnimationAndLOD || bNetworkAuthority) && AppliedMinimumLOD != SafeMinLOD)
 	{
 		CharacterMesh->OverrideMinLOD(SafeMinLOD);
 		AppliedMinimumLOD = SafeMinLOD;
@@ -895,7 +996,8 @@ void AfpstrueEnemyCharacter::GetRenderBudgetEligibility(bool& bOutShadow, bool& 
 bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
 {
 	// 只有低渲染档、非战斗保护、非死亡且未模拟物理的敌人才可成为 Follower；攻击/布娃娃必须使用独立姿态。
-	if (IsDead() || !bHasRenderSignificancePolicy || bDisableAnimationOptimizationsForBenchmark ||
+	// 联网权威端保留自己的命中骨骼，不能以其他敌人的共享姿态替代物理查询形状。
+	if ((HasAuthority() && GetNetMode() != NM_Standalone) || IsDead() || !bHasRenderSignificancePolicy || bDisableAnimationOptimizationsForBenchmark ||
 		RenderSignificanceTier == EFPEnemyRenderSignificanceTier::Full ||
 		RequiresGameplayAnimationProtection(GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0f,
 											LastRenderSignificancePolicy.CombatPriorityGraceSeconds))

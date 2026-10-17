@@ -1,13 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
-#include "Runtime/fpstrueRuntimeOptions.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "DrawDebugHelpers.h"
 #include "EngineGlobals.h"
 #include "Engine/World.h"
 #include "NavigationSystem.h"
+#include "Characters/Enemies/AI/fpstrueEnemyPositionQuery.h"
+#include "EnvironmentQuery/EnvQueryManager.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "Components/CapsuleComponent.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+
+CSV_DEFINE_CATEGORY(fpstrueEQS, true);
+
+namespace
+{
+	// 站位和攻击许可按目标分组，寻路提交预算按 World 共用；弱 World 键不保活已经退出的关卡。
+	struct FWorldMoveRequestBudget
+	{
+		TSet<TWeakObjectPtr<AfpstrueSurroundManager>> Managers;
+		uint64 Frame = MAX_uint64;
+		int32 Consumed = 0;
+		int32 Maximum = 8;
+		int32 ReservedCombat = 2;
+	};
+	TMap<TWeakObjectPtr<UWorld>, FWorldMoveRequestBudget> WorldMoveRequestBudgets;
+}
 
 /*
  * 多敌人共享的群体协调器。
@@ -33,6 +55,10 @@ void AfpstrueSurroundManager::BeginPlay()
 {
 	// 关卡开始时建立固定槽位拓扑；调试绘制只有显式开启后才产生 Timer 成本。
 	Super::BeginPlay();
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	for (auto It = WorldMoveRequestBudgets.CreateIterator(); It; ++It)
+		if (!It.Key().IsValid()) It.RemoveCurrent();
+	WorldMoveRequestBudgets.FindOrAdd(GetWorld()).Managers.Add(this);
 	BuildSlots();
 
 	if (bDrawDebugSlots)
@@ -46,6 +72,7 @@ void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// 清理两个 Timer、弱引用容器和槽位占用，避免关卡切换后保留旧玩家或敌人。
 	GetWorldTimerManager().ClearTimer(DebugDrawTimerHandle);
+	if (FWorldMoveRequestBudget* Budget = WorldMoveRequestBudgets.Find(GetWorld())) Budget->Managers.Remove(this);
 	ResetManager();
 	Super::EndPlay(EndPlayReason);
 }
@@ -54,6 +81,9 @@ void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
 {
 	// GameMode 在开局注入唯一玩家；目标变化时重建快照并重新启动共享刷新 Timer。
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	if (!IsValid(NewTargetCharacter) || NewTargetCharacter->IsDead() || NewTargetCharacter->IsActorBeingDestroyed()
+		|| NewTargetCharacter->GetWorld() != GetWorld()) NewTargetCharacter = nullptr;
 	if (TargetCharacter == NewTargetCharacter && bHasSharedTargetSnapshot)
 	{
 		return;
@@ -85,7 +115,8 @@ void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCha
 void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 {
 	// 位移阈值、最大陈旧时间和导航重试共同限定缓存寿命。
-	if (!IsValid(TargetCharacter))
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	if (!IsValid(TargetCharacter) || TargetCharacter->IsDead() || TargetCharacter->IsActorBeingDestroyed())
 	{
 		ResetManager();
 		return;
@@ -94,7 +125,7 @@ void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 	const double Now = GetWorld()->GetTimeSeconds();
 	const FVector CurrentTargetLocation = TargetCharacter->GetActorLocation();
 	const bool bMovedEnough =
-		FVector::DistSquared2D(CurrentTargetLocation, CachedTargetLocation) >= FMath::Square(SharedTargetMoveThreshold);
+		FVector::DistSquared(CurrentTargetLocation, CachedTargetLocation) >= FMath::Square(SharedTargetMoveThreshold);
 	const bool bSnapshotExpired = Now - SharedTargetSnapshotTime >= FMath::Max(0.05f, SharedTargetMaxAge);
 	const bool bRetryNavigation = bNeedsNavigationRetry && Now >= NextNavigationRetryTime;
 	const bool bNavigationExpired = Now - NavigationCacheTime >= FMath::Max(0.05f, NavigationCacheMaxAge);
@@ -124,7 +155,7 @@ void AfpstrueSurroundManager::BuildSlots()
 	// 为一层环创建角度和半径，实际世界坐标稍后根据共享玩家快照计算。
 	const auto AddRing = [this](int32 RingIndex, int32 SlotCount, float Radius)
 	{
-		const int32 SafeSlotCount = FMath::Max(SlotCount, 1);
+		const int32 SafeSlotCount = FMath::Clamp(SlotCount, 4, RingIndex == 0 ? 24 : 32);
 		for (int32 SlotIndex = 0; SlotIndex < SafeSlotCount; ++SlotIndex)
 		{
 			FfpstrueSurroundSlot& Slot = SurroundSlots.AddDefaulted_GetRef();
@@ -145,48 +176,208 @@ void AfpstrueSurroundManager::BuildSlots()
 // 一次性投影所有站位点和攻击接近点；失败保留重试标记，各 AI 仅消费投影结果而非共享路径。
 void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 {
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
 	// 同时缓存“站位点”和更靠近玩家的“攻击接近点”，AI 决策阶段不再重复 ProjectPointToNavigation。
-	const UWorld* World = GetWorld();
-	const UNavigationSystemV1* NavigationSystem =
-		World != nullptr ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
 	// 导航系统存在且投影成功时才输出可用位置，失败不伪造可达点。
-	const auto ProjectLocation = [this, NavigationSystem](const FVector& RawLocation, FVector& OutLocation)
-	{
-		if (NavigationSystem == nullptr)
-		{
-			return false;
-		}
-
-		FNavLocation ProjectedLocation;
-		if (!NavigationSystem->ProjectPointToNavigation(RawLocation, ProjectedLocation, NavigationProjectionExtent))
-		{
-			return false;
-		}
-
-		OutLocation = ProjectedLocation.Location;
-		return true;
-	};
-
-	bNeedsNavigationRetry = false;
 	// 每次只集中投影一次；失败标志独立于位置快照有效性。
-	for (FfpstrueSurroundSlot& Slot : SurroundSlots)
+	// 上述投影缓存职责保留，但生产和筛选已由异步 EQS 执行；不再保留手写投影循环。
+	UWorld* World = GetWorld();
+	UEnvQueryManager* Queries = World != nullptr ? UEnvQueryManager::GetCurrent(World) : nullptr;
+	if (Queries == nullptr || !bHasSharedTargetSnapshot) return;
+	const double Now = World->GetTimeSeconds();
+	if (ApproachQueryId != INDEX_NONE)
 	{
-		Slot.bHasProjectedSlotLocation = ProjectLocation(CalculateRawSlotLocation(Slot), Slot.ProjectedSlotLocation);
-
-		const float ApproachRadius = Slot.RingIndex == 0 ? AttackApproachRadius : OuterAttackApproachRadius;
-		Slot.bHasProjectedApproachLocation =
-			ProjectLocation(CalculateRawSlotLocation(Slot, ApproachRadius), Slot.ProjectedApproachLocation);
-		bNeedsNavigationRetry |= !Slot.bHasProjectedSlotLocation || !Slot.bHasProjectedApproachLocation;
+		if (Now - ApproachQueryStartedTime < 2.0) return;
+		// ★【重要边界】[异步身份] AbortQuery 会同步调用结束委托；先作废身份，再停止旧查询。
+		const int32 OldQuery = ApproachQueryId;
+		ApproachQueryId = INDEX_NONE;
+		++PositionQueryRevision;
+		Queries->AbortQuery(OldQuery);
 	}
-	NextNavigationRetryTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.05f, NavigationRetryInterval);
-	NavigationCacheTime = GetWorld()->GetTimeSeconds();
+	if (ApproachQueryTemplate == nullptr) ApproachQueryTemplate = FPCreateEnemyPositionQuery(*this, false);
+	const uint32 Revision = ++PositionQueryRevision;
+	const FVector QueryTarget = CachedTargetLocation;
+	FEnvQueryRequest Request(ApproachQueryTemplate, this);
+	Request.SetFloatParam(TEXT("OriginX"), QueryTarget.X).SetFloatParam(TEXT("OriginY"), QueryTarget.Y).SetFloatParam(TEXT("OriginZ"), QueryTarget.Z);
+	Request.SetFloatParam(TEXT("ThreatX"), QueryTarget.X).SetFloatParam(TEXT("ThreatY"), QueryTarget.Y).SetFloatParam(TEXT("ThreatZ"), QueryTarget.Z);
+	Request.SetFloatParam(TEXT("Cover"), 0.0f).SetFloatParam(TEXT("InnerCount"), FMath::Clamp(InnerSlotCount, 4, 24));
+	Request.SetFloatParam(TEXT("OuterCount"), FMath::Clamp(OuterSlotCount, 4, 32));
+	Request.SetFloatParam(TEXT("InnerRadius"), InnerRadius).SetFloatParam(TEXT("OuterRadius"), OuterRadius);
+	Request.SetFloatParam(TEXT("InnerApproach"), AttackApproachRadius).SetFloatParam(TEXT("OuterApproach"), OuterAttackApproachRadius);
+	Request.SetFloatParam(TEXT("ProjectionX"), NavigationProjectionExtent.X).SetFloatParam(TEXT("ProjectionY"), NavigationProjectionExtent.Y).SetFloatParam(TEXT("ProjectionZ"), NavigationProjectionExtent.Z);
+	ApproachQueryStartedTime = NavigationCacheTime = Now;
+	bNeedsNavigationRetry = false;
+	ApproachQueryId = Request.Execute(EEnvQueryRunMode::AllMatching,
+		FQueryFinishedSignature::CreateUObject(this, &ThisClass::HandleApproachQueryFinished, Revision, QueryTarget));
+	CSV_CUSTOM_STAT(fpstrueEQS, ApproachQueries, 1, ECsvCustomStatOp::Accumulate);
+	if (ApproachQueryId == INDEX_NONE)
+	{
+		bNeedsNavigationRetry = true;
+		NextNavigationRetryTime = Now + FMath::Max(0.05f, NavigationRetryInterval);
+	}
+}
+
+// 校验查询身份后一次发布新位置，候选排序不影响槽位身份；相邻点还需满足几何间距。
+void AfpstrueSurroundManager::HandleApproachQueryFinished(TSharedPtr<FEnvQueryResult> Result, uint32 Revision, FVector QueryTarget)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEQS_PublishApproach);
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	if (!Result.IsValid() || Result->QueryID != ApproachQueryId || Revision != PositionQueryRevision ||
+		!bHasSharedTargetSnapshot || !IsValid(TargetCharacter)) return;
+	ApproachQueryId = INDEX_NONE;
+	const double Now = GetWorld()->GetTimeSeconds();
+	NavigationCacheTime = Now;
+	bNeedsNavigationRetry = true;
+	NextNavigationRetryTime = Now + FMath::Max(0.05f, NavigationRetryInterval);
+	if (!Result->IsSuccessful() || Result->ItemType != UfpstrueEnvQueryItemType_Position::StaticClass() ||
+		FVector::DistSquared(QueryTarget, CachedTargetLocation) > FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold)))
+	{
+		for (FfpstrueSurroundSlot& Slot : SurroundSlots) Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = false;
+		return;
+	}
+	for (FfpstrueSurroundSlot& Slot : SurroundSlots) Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = false;
+	// 分数相同也采用固定槽位和偏移顺序，避免每轮查询排序波动导致站位来回变化。
+	Result->Items.Sort([&Result](const FEnvQueryItem& A, const FEnvQueryItem& B)
+	{
+		if (A.Score != B.Score) return A.Score > B.Score;
+		const FFPEnemyQueryPoint Left = UfpstrueEnvQueryItemType_Position::GetValue(Result->RawData.GetData() + A.DataOffset);
+		const FFPEnemyQueryPoint Right = UfpstrueEnvQueryItemType_Position::GetValue(Result->RawData.GetData() + B.DataOffset);
+		if (Left.SlotIndex != Right.SlotIndex) return Left.SlotIndex < Right.SlotIndex;
+		if (Left.Kind != Right.Kind) return Left.Kind < Right.Kind;
+		return Left.Preference < Right.Preference;
+	});
+	for (int32 Index = 0; Index < Result->Items.Num(); ++Index)
+	{
+		if (!Result->Items[Index].IsValid()) continue;
+		const FFPEnemyQueryPoint& Point = Result->GetItemAsTypeChecked<UfpstrueEnvQueryItemType_Position>(Index);
+		if (!SurroundSlots.IsValidIndex(Point.SlotIndex) || Point.Nav.Location.ContainsNaN()) continue;
+		FfpstrueSurroundSlot& Slot = SurroundSlots[Point.SlotIndex];
+		if (Point.Kind == 0 && !Slot.bHasProjectedSlotLocation)
+		{
+			Slot.ProjectedSlotLocation = Point.Nav.Location;
+			Slot.bHasProjectedSlotLocation = true;
+		}
+		else if (Point.Kind == 1 && !Slot.bHasProjectedApproachLocation)
+		{
+			bool bOverlaps = false;
+			for (const FfpstrueSurroundSlot& Other : SurroundSlots)
+			{
+				if (Other.bHasProjectedApproachLocation &&
+					FVector::DistSquared2D(Other.ProjectedApproachLocation, Point.Nav.Location) < FMath::Square(MinPositionSpacing))
+				{
+					bOverlaps = true;
+					break;
+				}
+			}
+			if (!bOverlaps)
+			{
+				Slot.ProjectedApproachLocation = Point.Nav.Location;
+				Slot.bHasProjectedApproachLocation = true;
+			}
+		}
+	}
+	int32 Available = 0;
+	for (const FfpstrueSurroundSlot& Slot : SurroundSlots) Available += Slot.bHasProjectedApproachLocation ? 1 : 0;
+	bNeedsNavigationRetry = Available != SurroundSlots.Num();
+	PublishedTargetLocation = QueryTarget;
+	CSV_CUSTOM_STAT(fpstrueEQS, ApproachAvailableSlots, Available, ECsvCustomStatOp::Set);
+}
+
+// 低血撤退只在首次请求时发查询；后续轮询同一缓存，未获得提交预算时等待而非执行同步查询。
+EFPCoverQueryResult AfpstrueSurroundManager::FindOrRequestCover(AfpstrueEnemyCharacter* Enemy, const FVector& KnownThreatLocation, FVector& OutLocation)
+{
+	UWorld* World = GetWorld();
+	if (!HasAuthority() || GetNetMode() == NM_Client || World == nullptr || !IsValid(Enemy)
+		|| Enemy->IsDead() || KnownThreatLocation.ContainsNaN()) return EFPCoverQueryResult::Failed;
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> Key(Enemy);
+	if (FCoverRequest* Existing = CoverRequests.Find(Key))
+	{
+		if (Existing->State == EFPCoverQueryResult::Pending && World->GetTimeSeconds() - Existing->StartedTime >= 2.0)
+		{
+			ReleaseCover(Enemy);
+			return EFPCoverQueryResult::Failed;
+		}
+		if (Existing->State == EFPCoverQueryResult::Found) OutLocation = Existing->Location;
+		return Existing->State;
+	}
+	if (CoverQueryBudgetFrame != GFrameCounter)
+	{
+		CoverQueryBudgetFrame = GFrameCounter;
+		CoverQueriesStartedThisFrame = 0;
+	}
+	if (PendingCoverQueries >= FMath::Clamp(MaxPendingCoverQueries, 1, 8) ||
+		CoverQueriesStartedThisFrame >= FMath::Clamp(MaxCoverQueriesPerFrame, 1, 4)) return EFPCoverQueryResult::Pending;
+	UEnvQueryManager* Queries = UEnvQueryManager::GetCurrent(World);
+	if (Queries == nullptr) return EFPCoverQueryResult::Failed;
+	if (CoverQueryTemplate == nullptr) CoverQueryTemplate = FPCreateEnemyPositionQuery(*this, true);
+	FCoverRequest& Cover = CoverRequests.Add(Key);
+	Cover.ThreatLocation = KnownThreatLocation;
+	Cover.StartedTime = World->GetTimeSeconds();
+	Cover.Revision = ++NextCoverRevision;
+	const FVector Origin = Enemy->GetActorLocation();
+	FEnvQueryRequest Request(CoverQueryTemplate, Enemy);
+	Request.SetFloatParam(TEXT("OriginX"), Origin.X).SetFloatParam(TEXT("OriginY"), Origin.Y).SetFloatParam(TEXT("OriginZ"), Origin.Z);
+	Request.SetFloatParam(TEXT("ThreatX"), KnownThreatLocation.X).SetFloatParam(TEXT("ThreatY"), KnownThreatLocation.Y).SetFloatParam(TEXT("ThreatZ"), KnownThreatLocation.Z);
+	Request.SetFloatParam(TEXT("Cover"), 1.0f);
+	Request.SetFloatParam(TEXT("AgentRadius"), Enemy->GetCapsuleComponent()->GetScaledCapsuleRadius());
+	Request.SetFloatParam(TEXT("AgentHeight"), Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+	Request.SetFloatParam(TEXT("ProjectionX"), NavigationProjectionExtent.X).SetFloatParam(TEXT("ProjectionY"), NavigationProjectionExtent.Y).SetFloatParam(TEXT("ProjectionZ"), NavigationProjectionExtent.Z);
+	Cover.QueryId = Request.Execute(EEnvQueryRunMode::AllMatching,
+		FQueryFinishedSignature::CreateUObject(this, &ThisClass::HandleCoverQueryFinished, Key, Cover.Revision));
+	if (Cover.QueryId == INDEX_NONE) Cover.State = EFPCoverQueryResult::Failed;
+	else { ++PendingCoverQueries; ++CoverQueriesStartedThisFrame; }
+	CSV_CUSTOM_STAT(fpstrueEQS, CoverQueries, 1, ECsvCustomStatOp::Accumulate);
+	return Cover.State;
+}
+
+// 只认本次敌人的查询；候选已通过环境与路径检查，发布前再核对其他撤退敌人的占用。
+void AfpstrueSurroundManager::HandleCoverQueryFinished(TSharedPtr<FEnvQueryResult> Result, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, uint32 Revision)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	FCoverRequest* Cover = CoverRequests.Find(Enemy);
+	if (Cover == nullptr || !Result.IsValid() || Result->QueryID != Cover->QueryId || Revision != Cover->Revision) return;
+	Cover->QueryId = INDEX_NONE;
+	PendingCoverQueries = FMath::Max(0, PendingCoverQueries - 1);
+	Cover->State = EFPCoverQueryResult::Failed;
+	if (!Enemy.IsValid() || Enemy->IsDead() || !Result->IsSuccessful()) return;
+	for (int32 Index = 0; Index < Result->Items.Num(); ++Index)
+	{
+		if (!Result->Items[Index].IsValid()) continue;
+		const FVector Location = Result->GetItemAsLocation(Index);
+		bool bOccupied = Location.ContainsNaN();
+		for (const auto& Pair : CoverRequests)
+		{
+			if (Pair.Key != Enemy && Pair.Key.IsValid() && !Pair.Key->IsDead() && Pair.Value.State == EFPCoverQueryResult::Found &&
+				FVector::DistSquared2D(Pair.Value.Location, Location) < FMath::Square(MinPositionSpacing))
+			{
+				bOccupied = true;
+				break;
+			}
+		}
+		if (!bOccupied) { Cover->Location = Location; Cover->State = EFPCoverQueryResult::Found; break; }
+	}
+	CSV_CUSTOM_STAT(fpstrueEQS, CoverFound, Cover->State == EFPCoverQueryResult::Found ? 1 : 0, ECsvCustomStatOp::Accumulate);
+}
+
+// 删除登记先于 Abort，避免同步结束委托发布已被释放的掩体；重复释放无副作用。
+void AfpstrueSurroundManager::ReleaseCover(AfpstrueEnemyCharacter* Enemy)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	FCoverRequest Cover;
+	if (Enemy == nullptr || !CoverRequests.RemoveAndCopyValue(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy), Cover)) return;
+	if (Cover.QueryId != INDEX_NONE)
+	{
+		PendingCoverQueries = FMath::Max(0, PendingCoverQueries - 1);
+		if (UEnvQueryManager* Queries = UEnvQueryManager::GetCurrent(GetWorld())) Queries->AbortQuery(Cover.QueryId);
+	}
 }
 
 // 返回有效共享玩家位置；调用者仍须通过自己的感知状态决定是否允许消费该位置。
 bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) const
 {
 	// AIController 读取同一份玩家位置快照，避免一批敌人在相邻时刻使用不同目标点。
-	if (!bHasSharedTargetSnapshot || !IsValid(TargetCharacter))
+	if (!HasAuthority() || GetNetMode() == NM_Client || !bHasSharedTargetSnapshot || !IsValid(TargetCharacter)
+		|| TargetCharacter->IsDead() || TargetCharacter->IsActorBeingDestroyed())
 	{
 		return false;
 	}
@@ -201,7 +392,10 @@ bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) cons
 bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation)
 {
 	// 已分配的敌人直接复用原槽位；只有首次申请才寻找空位，避免每轮决策改变目标导致来回晃动。
-	if (!IsValid(Enemy) || !IsValid(TargetCharacter))
+	if (!HasAuthority() || GetNetMode() == NM_Client) return false;
+	if (FVector::DistSquared(CachedTargetLocation, PublishedTargetLocation) > FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold))) return false;
+	if (!IsValid(Enemy) || Enemy->IsDead() || !IsValid(TargetCharacter) || TargetCharacter->IsDead()
+		|| TargetCharacter->IsActorBeingDestroyed())
 	{
 		return false;
 	}
@@ -280,7 +474,7 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
 void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 {
 	// 释放槽位时同时归还攻击许可；若释放的是内环，再尝试从外环稳定补位。
-	if (!IsValid(Enemy))
+	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Enemy))
 	{
 		return;
 	}
@@ -317,7 +511,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 
 	const FfpstrueSurroundSlot& InnerSlot = SurroundSlots[InnerSlotIndex];
 	const FVector InnerLocation =
-		InnerSlot.bHasProjectedSlotLocation ? InnerSlot.ProjectedSlotLocation : CalculateRawSlotLocation(InnerSlot);
+		InnerSlot.bHasProjectedSlotLocation ? InnerSlot.ProjectedSlotLocation : InnerSlot.ProjectedApproachLocation;
 	int32 BestOuterSlotIndex = INDEX_NONE;
 	float BestDistanceSquared = TNumericLimits<float>::Max();
 
@@ -355,7 +549,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
 	// 当前是容量限制而非 Top-N 排名：名额未满时先申请先获得，攻击结束后由 Controller/CombatComponent 归还。
-	if (!IsValid(Enemy) || Enemy->IsDead())
+	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Enemy) || Enemy->IsDead())
 	{
 		return false;
 	}
@@ -393,7 +587,7 @@ bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter*
 void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
 	// TSet::Remove 使重复归还天然幂等，不需要另外维护“已经释放”标志。
-	if (Enemy != nullptr)
+	if (HasAuthority() && GetNetMode() != NM_Client && Enemy != nullptr)
 	{
 		ActiveAttackers.Remove(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
 	}
@@ -403,28 +597,43 @@ void AfpstrueSurroundManager::ReleaseAttackPermission(AfpstrueEnemyCharacter* En
 bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 {
 	// GFrameCounter 形成无额外 Tick 的帧级计数器；战斗请求可使用预留额度，普通追击不能挤占全部预算。
+	if (!HasAuthority() || GetNetMode() == NM_Client || GetWorld() == nullptr) return false;
 	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
 	if (!bEnableMoveRequestBudget || BenchmarkConfig.bDisableMoveToRequestBudget)
 	{
 		return true;
 	}
 
-	if (MoveRequestBudgetFrame != GFrameCounter)
+	FWorldMoveRequestBudget& Budget = WorldMoveRequestBudgets.FindOrAdd(GetWorld());
+	Budget.Managers.Add(this);
+	if (Budget.Frame != GFrameCounter)
 	{
-		MoveRequestBudgetFrame = GFrameCounter;
-		MoveRequestsConsumedThisFrame = 0;
+		Budget.Frame = GFrameCounter;
+		Budget.Consumed = 0;
+		Budget.Maximum = MAX_int32;
+		Budget.ReservedCombat = 0;
+		for (auto It = Budget.Managers.CreateIterator(); It; ++It)
+		{
+			const AfpstrueSurroundManager* Manager = It->Get();
+			if (!IsValid(Manager) || Manager->IsActorBeingDestroyed()) { It.RemoveCurrent(); continue; }
+			if (!Manager->bEnableMoveRequestBudget) continue;
+			// 不同目标使用不同配置时也不相加；取最紧总额与最大预留，保持整 World 的确定上限。
+			Budget.Maximum = FMath::Min(Budget.Maximum, FMath::Max(Manager->MaxMoveRequestsPerFrame, 1));
+			Budget.ReservedCombat = FMath::Max(Budget.ReservedCombat, Manager->ReservedCombatMoveRequestsPerFrame);
+		}
+		if (Budget.Maximum == MAX_int32) Budget.Maximum = FMath::Max(MaxMoveRequestsPerFrame, 1);
+		Budget.ReservedCombat = FMath::Clamp(Budget.ReservedCombat, 0, Budget.Maximum - 1);
 	}
-
-	const int32 SafeMaximum = FMath::Max(MaxMoveRequestsPerFrame, 1);
-	const int32 SafeReservedCombat = FMath::Clamp(ReservedCombatMoveRequestsPerFrame, 0, SafeMaximum - 1);
-	const int32 RequestLimit = bCombatPriority ? SafeMaximum : SafeMaximum - SafeReservedCombat;
-	if (MoveRequestsConsumedThisFrame >= RequestLimit)
+	MoveRequestBudgetFrame = Budget.Frame;
+	MoveRequestsConsumedThisFrame = Budget.Consumed;
+	const int32 RequestLimit = bCombatPriority ? Budget.Maximum : Budget.Maximum - Budget.ReservedCombat;
+	if (Budget.Consumed >= RequestLimit)
 	{
 		return false;
 	}
 
 	// 近战槽位请求可以使用预留额度，远距离追踪不会挤占整帧的导航提交。
-	++MoveRequestsConsumedThisFrame;
+	MoveRequestsConsumedThisFrame = ++Budget.Consumed;
 	return true;
 }
 
@@ -435,6 +644,22 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 void AfpstrueSurroundManager::ResetManager()
 {
 	// 对局结束时一次性归零槽位、攻击名额、帧预算和目标缓存，Manager 可安全退出或重新初始化。
+	// ★【重要边界】[生命周期/异步身份] 清空身份与登记后再 Abort；回调不能恢复已经结束的世界状态。
+	const int32 OldApproach = ApproachQueryId;
+	ApproachQueryId = INDEX_NONE;
+	++PositionQueryRevision;
+	TArray<int32, TInlineAllocator<8>> OldCoverQueries;
+	for (const auto& Pair : CoverRequests) if (Pair.Value.QueryId != INDEX_NONE) OldCoverQueries.Add(Pair.Value.QueryId);
+	CoverRequests.Reset();
+	PendingCoverQueries = 0;
+	CoverQueryBudgetFrame = MAX_uint64;
+	CoverQueriesStartedThisFrame = 0;
+	if (UEnvQueryManager* Queries = UEnvQueryManager::GetCurrent(GetWorld()))
+	{
+		if (OldApproach != INDEX_NONE) Queries->AbortQuery(OldApproach);
+		for (const int32 QueryId : OldCoverQueries) Queries->AbortQuery(QueryId);
+	}
+	PublishedTargetLocation = FVector::ZeroVector;
 	EnemyToSlot.Reset();
 	ActiveAttackers.Reset();
 	MoveRequestBudgetFrame = MAX_uint64;
@@ -485,18 +710,8 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 }
 
 // 把相对极角和半径换算为世界位置；可选半径用于同角度的攻击接近点。
-FVector AfpstrueSurroundManager::CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride) const
-{
 	// 使用缓存玩家位置、槽位极角和半径计算二维世界坐标；随后由批量 NavMesh 投影修正可达性。
-	if (!bHasSharedTargetSnapshot)
-	{
-		return GetActorLocation();
-	}
-
-	const float Radius = RadiusOverride >= 0.0f ? RadiusOverride : Slot.Radius;
-	const FVector Direction(FMath::Cos(Slot.AngleRadians), FMath::Sin(Slot.AngleRadians), 0.0f);
-	return CachedTargetLocation + Direction * Radius;
-}
+// 以上原始坐标计算说明保留；对应实现集中到 EQS Generator，调试只绘制已发布的结果。
 
 // 调试时绘制有效投影槽位，以青色和绿色区分占用与空闲；不参与正式决策。
 void AfpstrueSurroundManager::DrawDebugSlots()

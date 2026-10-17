@@ -28,15 +28,15 @@
 
 项目源码入口：
 
-- `Source/fpstrue/fpstrueCharacter.cpp`
-- `Source/fpstrue/fpstrueHealthComponent.cpp`
-- `Source/fpstrue/fpstrueWeaponComponent.cpp`
-- `Source/fpstrue/fpstrueEnemyAIController.cpp`
-- `Source/fpstrue/fpstrueEnemyCombatComponent.cpp`
-- `Source/fpstrue/fpstrueSurroundManager.cpp`
-- `Source/fpstrue/fpstrueEnemyCharacter.cpp`
-- `Source/fpstrue/fpstrueEnemySignificanceCoordinator.cpp`
-- `Source/fpstrue/fpstrueEnemyAnimationSharingCoordinator.cpp`
+- `Source/fpstrue/Characters/Player/fpstrueCharacter.cpp`
+- `Source/fpstrue/Characters/Shared/fpstrueHealthComponent.cpp`
+- `Source/fpstrue/Weapons/fpstrueWeaponComponent.cpp`
+- `Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyAIController.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.cpp`
+- `Source/fpstrue/Characters/Enemies/AI/fpstrueSurroundManager.cpp`
+- `Source/fpstrue/Characters/Enemies/fpstrueEnemyCharacter.cpp`
+- `Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.h`（渲染策略与优先级）
+- `Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.cpp`（集中预算与动画共享）
 
 ---
 
@@ -916,7 +916,7 @@ Blackboard 的优势是可视化、Decorator/Service/Task 集成和行为树调�
 状态处理器把现有 AI 状态和实际速度映射为两种共享姿态：
 
 ```cpp
-// fpstrueEnemyAnimationSharingCoordinator.cpp:31-49（压缩）
+// fpstrueEnemyPerformance.cpp：Animation Sharing 状态处理段（压缩）
 const EFPEnemyAIState AIState = EnemyController
     ? EnemyController->GetAIState()
     : EFPEnemyAIState::Idle;

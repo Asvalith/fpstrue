@@ -4,7 +4,7 @@
 #include "Async/Future.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
-#include "Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Game/fpstrueGameMode.h"
@@ -50,6 +50,7 @@ const FFPBenchmarkConfig& FFPBenchmarkConfig::Get()
 FFPBenchmarkConfig::FFPBenchmarkConfig()
 	: FFPRuntimeOptions(FFPRuntimeOptions::Get())
 {
+#if !UE_BUILD_SHIPPING
 	// 所有开关只在首次读取时解析一次；正式基线不传 BenchmarkDisable*，消融脚本才显式启用单项关闭。
 	const TCHAR* CommandLine = FCommandLine::Get();
 
@@ -77,7 +78,7 @@ FFPBenchmarkConfig::FFPBenchmarkConfig()
 	{
 		TraceFile.TrimQuotesInline();
 	}
-
+#endif
 }
 
 // CSV 的 BeginCapture 只排队，尚未开始时 EndCapture 无法撤销它。
@@ -164,6 +165,7 @@ UfpstrueBenchmarkRunner::UfpstrueBenchmarkRunner()
 // 仅自动测试参数存在时接管开局；一个进程只接纳一次，防止复用已改变的随机流和 World。
 void UfpstrueBenchmarkRunner::StartIfRequested(AfpstrueGameMode* InGameMode)
 {
+#if !UE_BUILD_SHIPPING
 	// 只有 -AutoBenchmark 存在时接管开局；普通游玩不会进入任何测试专用流程。
 	if (!FFPBenchmarkConfig::Get().bAutoBenchmark || !IsValid(InGameMode) || GetWorld() == nullptr || bEndingPlay)
 	{
@@ -184,6 +186,7 @@ void UfpstrueBenchmarkRunner::StartIfRequested(AfpstrueGameMode* InGameMode)
 	PhaseDeadline = FPlatformTime::Seconds() + ProfilerTimeoutSeconds;
 	StartWatchdog();
 	ScheduleStage(Phase, &UfpstrueBenchmarkRunner::BeginBenchmark, 0.0f);
+#endif
 }
 
 // Idle、未消耗进程运行机会且无遗留 CSV 租约三者同时满足，才允许首次启动。

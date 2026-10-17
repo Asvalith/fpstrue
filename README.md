@@ -1,6 +1,6 @@
 # fpstrue · UE5 C++ FPS
 
-基于 Unreal Engine 5.5 和 C++ 的单机 PvE FPS Demo，实现射击、换弹、敌人追击与近战、群体围攻、波次结算和事件驱动 HUD 接口，并围绕 160 敌人场景开展性能分析与优化。
+基于 Unreal Engine 5.5 和 C++ 的 FPS Demo。当前 `codex/multiplayer-fps` 分支提供专用服务器 PvPvE：玩家之间可以互相伤害，也能与 AI 敌人交战。GAS 管理开火、换弹、瞄准和冲刺，服务器维护生命、伤害、计分及重生；同时保留单机 PvE 的群体调度及性能测试。下文的 160 敌人性能结果来自单机 PvE，不能当作多人容量或 GAS 接入后的性能成绩。
 
 > `review` 用于完整项目开发与复习，保留 Content 资产和“语法复习”注释；`main` 用于面试展示，不随开发分支自动更新。
 > [FPS项目架构、性能与UE机制说明](Docs/FPS_PROJECT_ENGINEERING_NOTES.md)保留复习笔记；最新目录和优化记录以本页及实验报告为准。
@@ -13,32 +13,43 @@
 ## 项目亮点
 
 - **FPS 玩法架构设计**：角色协调输入与装备，武器组件负责射击和换弹，生命组件统一处理伤害与死亡，GameMode 管理波次、生成与胜负。C++ 实现规则和状态，蓝图接入动画、音效与界面，形成输入、动作、命中、伤害、反馈的完整链路。
-- **武器状态切换与冲突约束**：统一管理装备、射击、换弹和禁用状态，协调 ADS、冲刺与武器动作，避免多个入口互相覆盖。换弹通过动作编号和动画播放实例识别回调，统一处理装填提交、完成、中断及超时，防止重复补弹、旧通知误提交和取消后状态残留。
-- **敌人行为树与群体战术协作**：C++ Task、Blackboard 与可编辑行为树组织追击、包围、站位和攻击；群体管理分配站位与攻击许可，避免所有敌人同时挤向玩家。MoveTo 结合目标去重、失败退避、帧级预算和请求身份校验，在限制重复寻路的同时保留战斗响应。
+- **GAS 动作规则与战斗结算**：四个 GA 统一管理开火、换弹、瞄准和冲刺的激活、互斥及取消；武器只执行单发射击和换弹事务，不再维护另一套动作状态机。换弹通过事务编号和动画播放实例识别回调，统一处理装填提交、完成、中断及超时，防止重复补弹、旧通知误提交和取消后状态残留。
+- **多人射击与预测校正**：逐发输入关联装备代际、开火会话和 ShotId，服务器校验射速、时间及弹药后结算并返回 ACK；拥有者预测开火表现，按权威结果纠正弹药，避免重复播放。移动扩展保存瞄准/冲刺模式，服务器用短期身体历史进行部位命中回溯，明确区分动作预测、移动重放与命中补偿。
+- **敌人行为树与群体战术协作**：C++ Task、Blackboard 与可编辑行为树组织追击、包围、站位、攻击及低血撤退；EQS 集中筛选接近候选，群体管理分配站位与攻击许可，避免所有敌人同时挤向玩家。低血时按需寻找有遮挡且可达的掩体。MoveTo 结合目标去重、失败退避、帧级预算和请求身份校验，在限制重复寻路的同时保留战斗响应。
 - **覆盖 UI、玩法调度与场景渲染的性能优化**：为 UMG 提供事件驱动刷新接口；Gameplay 与 Render 分别评分，通过决策降频、移动分级、Animation Sharing 和阴影/光追预算减少重复工作，战斗时恢复必要更新。有界 Top-K、数据快照和缓冲复用降低调度开销；场景侧结合查询缓冲、反射下采样、静态样条烘焙、TSR 与纹理流送治理，按整帧和尾帧选择方案。具体收益与证据分级见下文。
 - **生命周期与资源清理治理**：死亡、销毁和 EndPlay 共用清理入口，停止 AI、移动和 Timer，释放委托、站位、攻击许可与共享动画注册。弱引用注册表、幂等注销及回调重入保护约束对象失效边界；尸体保留需要的表现，撤销不必要的阴影和光追参与。
 - **配置抽离，便于策划调参与测试**：波次、近战和武器参数集中到配置资产，蓝图选择表现资源；武器首次装备校验并保存配置快照，共享配置不共享弹药等运行状态。性能实验预设和控制开关集中管理，便于调整规模、预算与采集条件，避免修改参数时穿透业务代码。
-- **自动化功能回归与性能测试流程**：46 项 UE Automation 测试及 56 项采集配置检查通过，覆盖射击换弹、配置、AI、生命周期和测试资源释放。性能脚本串联场景准备、预热、采集、有效性校验与报告汇总，记录参数读回和输入指纹；功能回归与实景性能采集分开执行，支持修改后的重复验证。
+- **自动化功能回归与性能测试流程**：75 项 UE Automation 测试通过，覆盖射击换弹、逐发去重与时序、SavedMove、历史命中、GAS 权限与属性、能力提交取消与同实例重启、单发表现身份、同轮近战保护采样、配置、AI、EQS、低血撤退、生命周期和测试资源释放，以及多人 AI 权限、跨目标预算、断线恢复、分端重要性调度、权威骨骼保护、HUD 重绑定、RAR 动画资源、三 Mesh 动作与中途换弹恢复；采集配置另有 56 项检查。性能脚本串联场景准备、预热、采集、有效性校验与报告汇总，记录参数读回和输入指纹；功能回归与实景性能采集分开执行，支持修改后的重复验证。
 
 ## 目录结构
 
 ```text
 Config/                     引擎、输入、碰撞与默认资源配置
 Source/fpstrue/
-  fpstrue.h/.cpp            主模块、共享播放身份与碰撞通道
-  Game/                     波次、生成、注册表与结算
+  fpstrue.cpp               主模块注册；编译规则保留在模块根目录
+  Game/                     波次、生成、注册表与结算；PvP 时钟、计分与重生
   Characters/
-    Player/                 玩家控制
+    Player/                 玩家控制、SavedMove 与权威身体历史
     Enemies/                敌人角色、近战组件与战斗配置
-      AI/                   Controller、行为树、导航与群体战术资源
-      Performance/          Gameplay/Render 分级、Top-K 与动画共享接入
-    Shared/                 生命组件
-  Weapons/                  武器配置、射击、换弹、视觉后坐力、拾取与动画通知
-  Runtime/                  诊断参数快照与业务埋点声明
+      AI/                   Controller、行为树、EQS 选点、导航与群体战术资源
+      Performance/
+        fpstrueEnemyPerformance.h/.cpp
+                            Gameplay/Render 分级、Top-K 与动画共享接入
+    Shared/                 ASC、生命属性、伤害 GE 与兼容健康事件
+  Weapons/
+    fpstrueWeaponComponent.h/.cpp
+                            拾取、装备、射击、换弹、视觉后坐力与动画通知
+    fpstrueWeaponConfig.h/.cpp
+                            武器参数资产与整组校验
+    fpstrueCombatAbilities.h/.cpp
+                            开火/换弹/瞄准/冲刺 GA、输入释放与动作任务
+  Runtime/
+    fpstrueRuntime.h/.cpp   共享播放身份、碰撞通道、诊断参数快照与业务埋点
   Testing/
-    Automation/             玩法、算法与生命周期回归
+    Automation/             按玩法边界、组件、敌人 AI、渲染预算、对局与采集分组回归
     Benchmarks/             采集阶段、资源管理与产物校验
 Tools/                      开发与测试工具（见 Tools/README.md）
+  Networking/               PvP 构建、双客户端联网验证与版本证据归档
   Gameplay/                 行为树生成/校验与玩法配置迁移
   Assets/                   网格、LOD、Nanite、纹理与样条资产处理
   Performance/              性能采集、Trace 导出、分析与配置校验
@@ -57,8 +68,9 @@ PerformanceEvidence/        可公开的性能截图
 flowchart TD
     GM[GameMode：波次、生成、注册表与胜负]
     PLAYER[玩家 Character：输入与组件协调]
+    GA[ASC + 四个 GA：动作规则与持续任务]
     WEAPON[WeaponComponent：射击与换弹事务]
-    HEALTH[HealthComponent：伤害与死亡]
+    HEALTH[HealthComponent ASC + AttributeSet：生命与伤害 GE]
     BT[BehaviorTree + Blackboard：行为选择与本轮快照]
     AI[EnemyAIController：行为执行与导航预算]
     ENEMY[EnemyCharacter：组件与表现协调]
@@ -72,7 +84,8 @@ flowchart TD
     AI -->|控制| ENEMY
     AI -->|请求攻击| COMBAT
     ENEMY --> COMBAT
-    PLAYER --> WEAPON
+    PLAYER -->|输入按下与松开| GA
+    GA -->|单发与换弹执行| WEAPON
     WEAPON -->|提交命中伤害| HEALTH
     COMBAT -->|提交近战伤害| HEALTH
     HEALTH -->|状态事件| HUD
@@ -86,11 +99,40 @@ GameMode 使用 `Waiting → Starting → Playing → Finished` 表达对局阶�
 
 ### 射击与换弹
 
-- 玩家输入经过角色接口交给武器；武器检查状态、射速和弹药，执行 Hitscan，再通过 UE 伤害接口交给目标的生命组件。
-- `WeaponTrace` 与普通碰撞分开配置：敌人 Mesh 接收射击查询，胶囊不抢先阻挡该通道。
-- 换弹使用 Ready/Firing/Reloading/Disabled 状态与独立提交入口；动画通知提交弹药，结束路径处理重复通知和委托重入，角色死亡时停止武器动作与 Timer。
+- 玩家输入经过角色接口进入 ASC；开火、换弹、瞄准、冲刺 GA 管理激活、标签互斥与取消，角色从标签更新速度和表现。每发通过同一 ASC 通道的 TargetData 传递角色身份、装备代际、开火会话、ShotId、估计服务器时间和瞄准方向；不传客户端命中结论或伤害。服务器自行确定起点、命中与数值，复制动作枚举仅供展示。
+- 原生命组件同时是 ASC，玩家和敌人通过 `IAbilitySystemInterface` 暴露它。`AttributeSet` 保存真实生命数值，瞬时 `GameplayEffect` 执行伤害与重置；原健康接口和委托保留为事件桥，不再独立复制第二份血量。
+- 开火能力使用 `LocalPredicted`、`WaitInputRelease` 和等待任务：拥有者先播放枪声、动画与后坐力；服务器逐发校验身份、时间、客户端节奏与实际冷却，最多保留一个待执行请求。可靠 ACK 返回该发裁决及权威弹药，快照恢复当前状态；装备代际、会话和 ShotId 共同去重，过期能力数据不能污染新装备。排队中的重复请求不提前产生终结 ACK，完成后的重复请求不重复扣弹或伤害。
+- `WeaponTrace` 与普通碰撞分开配置：敌人 Mesh 接收射击查询，胶囊不抢先阻挡该通道。PvP 玩家按 PhysicsAsset 的身体球、盒及胶囊识别部位，缺少可支持形状时不退回移动胶囊冒充精确命中。
+- 瞄准取消冲刺，换弹取消并阻止开火、瞄准和冲刺；死亡取消全部能力。冲刺保留按键切换语义，瞄准持续到松开输入；动作规则只在 GA 声明，不由角色和武器重复判断。
 - `ReloadId` 与 Mesh、AnimInstance、Montage 实例组成播放身份；手臂和枪械播放由同一事务管理。装填 Notify 校验身份后提交弹药，完成与取消统一清理，超时只解除动作锁。
-- HUD 订阅生命、弹药和对局事件；C++ 提供状态变化入口，不在 UI 回调中执行伤害或弹药结算。
+- 换弹采用 `ServerInitiated`，手动请求和服务器空仓自动换弹共用同一 GA；空仓不绕一次拥有者激活往返。多人模式由服务器配置时长完成装弹，不依赖 Dedicated Server 播放第一人称动画，客户端 Notify 不能补弹；单机模式保留有身份的动画提交与超时。GA 等待真实事务结束，不增加第二份装弹计时。
+- `ABP_RARBody`、`ABP_RARArms` 和 `ABP_RARWeapon` 只负责第三人称身体、第一人称手臂和枪械表现，规则仍由原生角色、GAS 和武器事务维护。身体按实际速度播放四向走跑、起跳与落地，上半身叠加持枪、瞄准和冲刺；装备、腰射/瞄准射击、普通/空仓换弹、受击与死亡使用对应表现。换弹同时驱动三套 Mesh，并按服务器开始时间补齐中途进度；迟到的装备或附着更新不能重新显示已死亡角色的手臂、枪及附件。
+- 多人模式保留现有 Canvas HUD，订阅生命和弹药事件、读取当前成绩；C++ 提供状态变化入口，不在 UI 回调中执行伤害或弹药结算。原 `ingame`、菜单、暂停和胜负 UMG 资产仍在，但新 `BP_RARCharacter` 不继承旧玩家的 UI 事件图，不能视为原 UMG 已恢复。
+
+多人功能验证使用 `Tools/Networking/RunPvpSmoke.ps1` 启动一个服务器和两个客户端，检查真实输入后的伤害、手动与空仓换弹、击杀、重生及远端姿态。深度门禁另要求专用服务器没有本地玩家、服务器和远端角色实际位移、双方时钟采样，以及同一发号的预测表现、服务器接受、ACK 与有效历史命中记录；同一客户端不能重复播放同一发。
+
+已归档的 PvP 构建完成 **Win64 打包客户端 × 2 → 公网 Linux Dedicated Server** 的正常网络与模拟弱网深度门禁：报告分别为 `Saved/Networking/PvpSmoke_20261016_022020_a991b9ac/Report.json` 和 `Saved/Networking/PvpSmoke_20261016_022105_08b0d1f7/Report.json`。两轮均检查实际位移、射击伤害、手动/空仓换弹、死亡重生、远端瞄准/冲刺，以及同一发号的预测、服务器接受、ACK、历史部位命中和表现去重。弱网条件为每个发送方向额外延迟 100 ms、波动参数 20 ms、丢包 2%，不是实测 RTT。该批次不包含随后加入的多人 AI 与短时断线恢复，不能用旧报告代替新增功能的公网验收。
+
+客户端与服务器使用同一源码引擎的 Development 目标，核对构建收据与程序哈希，不覆盖 NetVersion；兼容 Editor Cook 使用 `-VersionCookedContent`，避免定制引擎增加反射属性后按序号读取错位，但不据此保证任意引擎分支兼容。服务器以普通用户运行，测试结束自动停止本轮临时服务，不影响 Co-op。上述为 NullRHI 跨机功能验收，不证明画面、手感、移动误差上界、人数容量或长时稳定性；并非已经部署常驻运营服务。本地 Editor 验证及失败尝试的原始报告继续保留，完整前置条件见[工具入口](Tools/README.md#远端-linux-server-与本机双客户端验收)。
+
+### 移动预测与命中回溯
+
+- **移动校正重放**：自定义 CharacterMovement/SavedMove 保存每段移动的瞄准和冲刺意图，随压缩标志传递；模式不同不合并，重放前恢复历史模式，重放后读取当前 GAS 派生状态。服务器使用当前 GAS 授权和有界旧模式过渡校验，不采信客户端速度；这不是逐 Move 绑定能力预测键的完整时间线，重放也不重新激活能力、播放动作或广播 UI。
+- **有界身体历史**：服务器按骨骼完成后的姿态采样，使用固定 32 帧环形缓冲，最多查询 350 ms 历史；只保存查询所需的身体形状和视点，不移动真实角色。相邻姿态插值，死亡、重生、显式 `TeleportTo`、异常大位移或形状变更断开历史。每帧最多 64 个 PhysicsAsset 盒、球或胶囊形状，不等同于渲染三角面；不支持的凸体/锥胶囊跳过并记录警告。
+- **时间与公平性边界**：请求年龄按服务器观测的延迟限制在 100–300 ms，未来时间容差为 25 ms。目标查询使用固定 50 ms 的显示插值近似，不能当作客户端实际渲染时刻的精确还原；时间戳与方向仍是待校验输入，不是客户端裁决权限。
+- **射手与时钟**：起点来自服务器记录的视点，不接受客户端自报起点；最新端只允许一个服务器帧且不超过 50 ms 的采样间隙，缺失历史则拒绝。客户端要求 5 秒内有效时钟样本且估计不确定度不超过 300 ms 才提交，服务器仍独立校验；高抖动或不对称延迟可能暂缓或拒绝射击，阈值不是精度保证。
+- **遮挡和范围**：PvP 玩家使用历史形状，AI 与静态、动态障碍使用当前碰撞。没有保存动态门等物体的历史，因此不是整场世界回滚，也不承诺消除所有“进掩体后受击”现象。不将这些校验机制等同于生产级反作弊。
+
+### 多人 AI 与短时断线恢复
+
+- **权威 AI**：服务器分批生成敌人，Sight 从可见且有效的玩家中选目标；目标死亡或退出后释放旧站位、攻击许可和路径上下文，再选择其他可见玩家。每个目标维护自己的围攻位置，同一 World 共用移动请求预算；客户端不运行行为树、EQS 或伤害窗口。
+- **表现同步**：服务器发布带攻击编号、Montage 和开始时间的攻击状态，以及死亡方向和命中部位。客户端按当前时间播放对应表现，不把客户端动画通知当作伤害权限；死亡状态可被晚到的副本补读。布娃娃属于本地表现，不是逐骨骼物理同步。
+- **短时保留**：服务器识别断线后保留原 Pawn、PlayerState 和武器 30 秒，停止旧技能与输入，但角色仍可受伤和死亡。合法恢复沿用服务器当前生命、弹药和计分，不恢复旧射击请求；离线死亡按当前死亡及重生规则处理，不回滚为离线前状态。
+- **恢复边界**：所属 Controller 握手校验本局随机票据，成功后轮换票据并推进装备输入代际，拒绝活跃身份抢占。GameInstance 管理连接期限、取消和 1/2/4 秒有限重试，等待角色、属性、装备和时钟就绪。票据不进入 URL 或日志，但匿名票据不等于账号认证或加密传输；服务器进程重启不保留这份内存状态。
+- **分端性能调度**：复用现有 Significance/Animation Sharing 协调器，由每端 GameState 统一启动。服务器按所有有效玩家（含保留期离线角色）的最大重要性调整 AI/移动节奏；每个客户端仅按自己的相机分配动画、阴影与光追预算，并按实际速度切换共享待机/移动姿态。晚复制、相关性重建和重连通过低频类型迭代发现本端副本，不要求客户端拥有 GameMode 或敌人 Controller。
+- **判定保护与界面恢复**：专服不创建共享动画池或执行相机预算；监听服务器也不共享权威命中姿态。联网权威骨骼保持逐帧更新、关闭 URO，不施加客户端降级 LOD。联机 HUD 换 Pawn/武器时先解除旧事件、订阅新对象并补读当前生命和弹药，成绩读取当前 PlayerState；不从断线前的 UI 缓存恢复游戏状态。单机的 160 敌人数据仍不用于证明当前多人容量。
+
+本地 Editor 服务器＋双客户端的正常及模拟弱网整合验证均通过：`Saved/Networking/PvpSmoke_20261016_120700_7860b3c5/Report.json`、`Saved/Networking/PvpSmoke_20261016_120855_c0c7753d/Report.json`。保留原 PvP 深度门禁，并验证真实 AI 攻击、玩家反击、敌人死亡、双端复制，以及客户端被强制关闭并重启后的身份恢复。两轮离线生命均由 90 降至 80，恢复仍为 80，各自弹药和成绩保持；服务器保留、恢复和新客户端的 Pawn/PlayerState NetGUID 一致，不以跨端对象名字相等代替身份核验。弱网为每发送方向额外延迟 100 ms、波动参数 20 ms、丢包 2%，不是测得的 RTT。此处“恢复”是使用同一私有用户目录重启客户端，不是原进程自动重试的端到端验收；NullRHI 也不证明动画观感和完整画面恢复。该批次尚未重新打包到公网 Linux Server。
 
 ### 敌人追击与近战
 
@@ -101,9 +143,11 @@ GameMode 使用 `Waiting → Starting → Playing → Finished` 表达对局阶�
 - 攻击阶段使用 `Idle / Windup / Active / Recovery`，只有 Active 执行伤害查询；重复打开窗口不重置刀刃历史采样，命中过的本次攻击不能重新开窗。
 - 正常结束、保护 Timer 和死亡中断共用事务清理，归还许可并清除定时任务；正常结束更新冷却，中断不伪造正常完成。
 
-默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/Gameplay/CreateEnemyBehaviorTree.py` 可重建缺失资产，已有树不会被覆盖；无 Content 的源码环境保留原生默认树用于测试。
+默认可编辑资产位于 `/Game/FirstPerson/AI/BT_FPEnemy`、`BB_FPEnemy` 和 `BP_FPEnemyAIController`。C++ 负责采样、受预算约束的动作和自适应等待；行为树编辑器负责分支优先级与 Blackboard 条件，Controller 蓝图可以替换树。`Tools/Gameplay/CreateEnemyBehaviorTree.py` 可重建缺失资产，并仅为识别出的旧默认树补入撤退分支、修正历史采样顺序；自定义树拒绝自动覆盖。无 Content 的源码环境保留原生默认树用于测试。
 
 下文的 AI Decision 消融对应历史 Timer 版本，用于验证决策降频策略；行为树负责当前行为编排，场景复测单独记录版本与配置。
+
+EQS 接近查询由群体管理器集中运行并缓存，默认每批 80 个有界候选，不为每个敌人重复查询；槽位占用与攻击名额仍由管理器维护。掩体查询只在低血撤退时按需提交，默认 24 个候选，环境筛选后再检查路径，最多 4 个待完成查询、每帧最多提交 1 个。敌人血量降至 30% 时优先退出攻击并归还围攻资源；撤退最长 6 秒，到位停留 1.5 秒后恢复战斗，8 秒冷却后只有新的扣血才可再次触发。首次响应不被 Significance 降频，已有掩体目标的维护沿用分级间隔；无掩体或移动失败不会永久卡住，也不增加自动回血。
 
 ## 性能优化架构
 
@@ -153,7 +197,7 @@ flowchart TD
 
 ### 1. 运行时调度：事件驱动、分级更新与战斗保护
 
-- **事件驱动入口**：血量、弹药、剩余时间等状态变化通过委托通知 UMG；输入与动作事件驱动武器逻辑，射击、后坐力恢复等持续动作仅在需要时启用 Timer。不需要常驻更新的 Actor/组件关闭自身 Tick，组件 Tick 与 Timer 分别管理。
+- **事件驱动入口**：血量、弹药、剩余时间等状态变化通过委托通知 UMG；连射由 Fire GA 的 AbilityTask 调度，后坐力恢复和换弹事务按需使用 Timer。不需要常驻更新的 Actor/组件关闭自身 Tick，组件 Tick、能力任务与 Timer 各自管理生命周期。
 - **Gameplay 分级**：Coordinator 定时把玩家 Transform 交给 UE SignificanceManager，敌人按二维距离评分，叠加攻击保护后下发 Full/Reduced/Background 的 AI 决策倍率与 Movement 更新间隔。Gameplay 不使用相机可见性，玩家背后的敌人仍能追击和攻击。
 - **行为树与群体资源**：行为树独立完成自适应等待、单轮目标采样和分支选择，首次等待错峰；Controller 执行 MoveTo 去重、失败退避与预算申请。SurroundManager 共享目标和站位投影缓存，管理攻击许可与每帧移动请求名额，避免重复寻路和集中提交。
 - **战斗优先约束**：攻击中或进入攻击范围时保持 Gameplay Full；战斗附近采用独立短决策间隔。攻击入口恢复 Movement 与必要骨骼更新，受击刷新动画保护、退出共享；这些保护不额外授予阴影或光追名额。
@@ -328,14 +372,15 @@ Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依
 | 玩家控制 | [Character](Source/fpstrue/Characters/Player/fpstrueCharacter.cpp) |
 | 武器、射击与换弹 | [WeaponComponent](Source/fpstrue/Weapons/fpstrueWeaponComponent.cpp) |
 | 通用伤害与生命 | [HealthComponent](Source/fpstrue/Characters/Shared/fpstrueHealthComponent.cpp) |
-| 动作播放身份与碰撞通道 | [模块公共定义](Source/fpstrue/fpstrue.h)、[播放身份实现](Source/fpstrue/fpstrue.cpp) |
+| 动作播放身份与碰撞通道 | [运行时公共定义](Source/fpstrue/Runtime/fpstrueRuntime.h)、[播放身份实现](Source/fpstrue/Runtime/fpstrueRuntime.cpp) |
 | 敌人 AI 与路径请求 | [EnemyAIController](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyAIController.cpp) |
 | 行为树任务与默认树 | [BehaviorTree](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyBehaviorTree.cpp) |
+| EQS 候选生成、环境筛选与掩体检查 | [EnemyPositionQuery](Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyPositionQuery.cpp) |
 | 攻击事务与命中窗口 | [EnemyCombatComponent](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.cpp) |
 | 围攻槽位与共享预算 | [SurroundManager](Source/fpstrue/Characters/Enemies/AI/fpstrueSurroundManager.cpp) |
 | 角色表现与性能档位 | [EnemyCharacter](Source/fpstrue/Characters/Enemies/fpstrueEnemyCharacter.cpp) |
-| Top-K 与预算分配 | [SignificanceCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificanceCoordinator.cpp)、[优先级键与堆](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemySignificance.h) |
-| 动画共享接入 | [AnimationSharingCoordinator](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyAnimationSharingCoordinator.cpp) |
+| Top-K 与预算分配 | [性能策略与优先级键](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.h)、[集中采样与分配](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.cpp) |
+| 动画共享接入 | [EnemyPerformance：共享池与注册](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.cpp) |
 | 波次、注册表与胜负 | [GameMode](Source/fpstrue/Game/fpstrueGameMode.cpp) |
 | 玩法配置资产 | [波次配置（GameMode 内）](Source/fpstrue/Game/fpstrueGameMode.h)、[近战配置（CombatComponent 内）](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.h)、[WeaponConfig](Source/fpstrue/Weapons/fpstrueWeaponConfig.h) |
 | 场景静态化与资产核验 | [样条烘焙](Tools/Assets/BakeStaticLandscapeSplines.py)、[烘焙核验](Tools/Assets/VerifyBakedLandscapeSplines.py)、[资产审计工具](Tools/Assets/) |
@@ -345,6 +390,8 @@ Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依
 ## 构建与验证
 
 环境：Unreal Engine 5.5、Visual Studio 2022、“使用 C++ 的游戏开发”工作负载及 Windows SDK。生成 Visual Studio 项目文件后，编译 `fpstrueEditor` 的 Development Editor 配置。
+
+统一构建与联网验证入口为 `Tools/Networking/BuildPvpDelivery.ps1`。`Editor` 和 Windows `Delivery` 分别执行本机开发验证与打包程序检查；`LinuxPackage` 使用同一源码引擎构建 Win64 Game 与 Linux Server，Cook、Stage、Archive 后另走 `RemoteLinux` 运行门禁，不通过覆盖 NetVersion 混配客户端。独立服务器使用 `Source/fpstrueServer.Target.cs`；Shipping 不响应自动输入或性能消融参数。符号和原始日志保留内部，具体命令、前置条件及验收范围见[工具入口](Tools/README.md#pvp-构建与交付)。
 
 `review` 默认打开已验收的 `/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked`，由关卡或 UI 调用 `StartGameMode` 开始正式波次。原 `/Game/FactoryDistrict/Maps/Demonstration` 保留，不覆盖旧地图。
 
@@ -358,7 +405,9 @@ UE Automation 测试组为 `fpstrue.`，可在 Session Frontend → Automation �
 
 自动化测试覆盖行为树结构与运行生命周期、真实树资产的编辑器连线、开局回调重入、配置选源、攻击阶段与清理、射击换弹、严格弱序、Top-K 等价性、共享注销、渲染档位迟滞，以及附件和尸体的渲染资格。真实资产测试仅在对应 Content 齐备时运行。NullRHI 验证代码与组件属性，画面和 GPU 性能另做实景回归。
 
-开发环境验证：Development Editor 编译通过；**46 项 UE 自动化测试全部通过，0 失败、0 未运行**，其中 17 项包含测试夹具或故障注入警告。回归覆盖武器配置合法性、独立快照与重新装备、真实蓝图换弹与攻击播放、旧回调拒绝、停止重入、MoveTo 请求归属、生命值通知队列、受击解除 Tick 冷却、CSV 迟到启动与暂停超时。报告位于 `Saved/Automation/TestCleanup/`，日志为 `Saved/Logs/TestCleanupAutomation.log`。`BP_Weapon`、`enemy_BP` 已迁移到明确动作编号的播放入口；迁移备份和旧回归报告继续保留，职责及边界见[代码职责与动作生命周期](Docs/CODE_OWNERSHIP.md)。NullRHI 功能测试不代替画面与性能验收。
+开发环境验证：最新 Development Editor 构建和 **75 项 UE 自动化测试通过，0 失败、0 未运行、0 进行中**，其中 63 项无警告、12 项带警告；警告单独保留，不宣称无告警。除原有配置、动作回调、AI、EQS、生命周期和采集资源回归外，覆盖 SavedMove 模式恢复与禁止错误合并、历史部位命中/形状插值/遮挡/生命代际、逐发协议、多目标 AI 权限与共享预算，以及票据轮换、离线伤害和过期清理。动画用例使用实际 RAR 角色、身体、手臂和枪械资源，检查无本地加速度时的移动、瞄准时手与枪的对齐、GAS 射击与三 Mesh 换弹/取消、动画延迟就绪后的换弹进度补齐，以及死亡后迟到装备/附着更新仍保持手臂、枪与附件隐藏；保留专服多玩家重要性、客户端预算、权威骨骼保护和 HUD 重绑定用例。当前本机报告为 `C:/UEBuild/FPS/RARAnimationCompletion_20261016/FramingVerifiedRegression2/index.json`。这些规则与动画求值测试不冒充跨进程验收；当前 RAR 表现的真实联网渲染仍在验收，不能据此宣称原 UMG 恢复或画面通过。历史 `Saved/Automation/Cleanup_Verified/` 报告继续保留，不冒充最新版本结果。`BP_Weapon` 仅保留旧武器的明确动作编号入口，当前 RAR 武器使用原生表现桥；敌人继续使用 `enemy_BP`，职责及边界见[代码职责与动作生命周期](Docs/CODE_OWNERSHIP.md)。新功能不沿用历史数据宣称性能收益。
+
+EQS 接近路径另在实际烘焙地图完成 160 敌人单轮短测：15 秒预热、30 秒采集，2,137 个有效帧中共提交 46 次共享查询，46 次均发布 16 个可用接近点；不是每个敌人分别查询。该次 Frame 平均 14.099 ms、P95/P99 为 16.677/20.901 ms，GT 为 7.532 ms；没有同版本旧方案对照，不作 EQS 提升帧率或稳定锁定 60 FPS 的结论。记录位于 `Saved/Profiling/EQSRetreat160Smoke_20261013/`。这轮敌人未受玩家伤害，不能代替低血找掩体、撤退姿态和动态遮挡的实景验收。
 
 实际关卡的 160 敌人功能烟测通过，组件属性读回为 5 个投影 Mesh、12 个光追 Mesh，与当次预算一致。日志为 `Saved/Logs/StructureCleanup2160Smoke.log`。关卡中 `TargetPoint_5` 仍有生成失败日志，队列通过换点重试补齐目标数量；此轮使用 NullRHI 和测试生命值，仅核对玩法流程与预算下发，不产生 GPU 性能结论。
 

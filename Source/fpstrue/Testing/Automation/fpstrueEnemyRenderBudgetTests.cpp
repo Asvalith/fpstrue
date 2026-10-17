@@ -2,9 +2,13 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
+#include "Game/fpstrueMultiplayer.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
 #include "Components/ChildActorComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -12,12 +16,108 @@
 #include "Engine/World.h"
 #include "GameFramework/DamageType.h"
 #include "GameFramework/GameModeBase.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AISense_Sight.h"
 #include "Tests/AutomationCommon.h"
+#include "SignificanceManager.h"
+#include "AnimationSharingManager.h"
 
 #include <limits>
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemySignificanceCombatSampleTest,
+	"fpstrue.Performance.Significance.ScopedCombatProtection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 同轮评分与共享资格复用近战快照，离开作用域恢复实时采样；真正攻击查询不读取快照。
+bool FFpstrueEnemySignificanceCombatSampleTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game))
+	{
+		Fixture.ForwardErrorMessages(this);
+		return false;
+	}
+	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Significance fixture has an AI system"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld())
+	{
+		Fixture.ForwardErrorMessages(this);
+		return false;
+	}
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
+		AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity);
+	if (!TestNotNull(TEXT("Significance sample enemy"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	if (!TestNotNull(TEXT("Significance sample target"), Target) ||
+		!TestNotNull(TEXT("Significance sample controller"), Controller)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
+	Controller->Possess(Enemy);
+	Controller->InitializeCombatContext(Target, nullptr);
+	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
+	if (!TestNotNull(TEXT("Real sight listener"), Perception)) return false;
+	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(),
+		Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	Perception->RegisterStimulus(Target, Stimulus);
+	Perception->ProcessStimuli();
+	UBehaviorTreeComponent* Behavior = Cast<UBehaviorTreeComponent>(Controller->GetBrainComponent());
+	if (!TestNotNull(TEXT("Behavior brain"), Behavior) ||
+		!TestTrue(TEXT("Fixture starts the real behavior tree"), Behavior->IsRunning()) ||
+		!TestNotNull(TEXT("Fixture owns a running tree instance"), Behavior->GetCurrentTree())) return false;
+	Behavior->StopLogic(TEXT("Scoped significance sampling fixture"));
+	if (!TestTrue(TEXT("The real melee check starts within reach"), Enemy->IsTargetInAttackRange())) return false;
+	FFPEnemyRenderSignificancePolicy Policy;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Reduced, false, false, false, Policy);
+	const float Time = World->GetTimeSeconds();
+
+	// 用一次真实范围结果建立只读作用域，再移动目标，区分预算快照与实时攻击查询。
+	const bool bProtectedSample = Enemy->IsTargetInAttackRange();
+	{
+		TGuardValue<const bool*> SampleScope(Enemy->SignificanceCombatProtectionSample, &bProtectedSample);
+		Target->SetActorLocation(FVector(1000.0f, 0.0f, 0.0f));
+		TestFalse(TEXT("Live attack reach never consumes the budget sample"), Enemy->IsTargetInAttackRange());
+		Enemy->ApplySignificance(0.0f);
+		TestTrue(TEXT("Gameplay consumes this round's close-combat sample"),
+			Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+		TestTrue(TEXT("Render animation protection consumes the same sample"),
+			Enemy->RequiresGameplayAnimationProtection(Time, 0.0f));
+		TestFalse(TEXT("Sharing cannot repeat the live query and undo the sampled protection"), Enemy->CanUseAnimationSharing());
+	}
+	TestNull(TEXT("No protection sample remains outside its scope"), Enemy->SignificanceCombatProtectionSample);
+	Enemy->ApplySignificance(0.0f);
+	TestTrue(TEXT("Outside the round gameplay samples the moved target"),
+		Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Background);
+	TestFalse(TEXT("Outside the round render protection also samples the moved target"),
+		Enemy->RequiresGameplayAnimationProtection(Time, 0.0f));
+	TestTrue(TEXT("An unprotected reduced enemy can share animation again"), Enemy->CanUseAnimationSharing());
+
+	// 下一轮必须重新采样；空快照不能让外部攻击校验继续使用上一轮的远距结果。
+	const bool bUnprotectedSample = Enemy->IsTargetInAttackRange();
+	{
+		TGuardValue<const bool*> SampleScope(Enemy->SignificanceCombatProtectionSample, &bUnprotectedSample);
+		Target->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
+		TestTrue(TEXT("Live reach sees a target that entered after budget sampling"), Enemy->IsTargetInAttackRange());
+		Enemy->ApplySignificance(0.0f);
+		TestTrue(TEXT("The next snapshot is independent of the previous protected one"),
+			Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Background);
+	}
+	Enemy->ApplySignificance(0.0f);
+	TestTrue(TEXT("A later round observes the newly close target"),
+		Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+	Controller->Destroy();
+	Enemy->Destroy();
+	Target->Destroy();
+	return true;
+}
 
 // 本组验证预算选择、组件标志和降级时序；NullRHI 下的通过不证明阴影、光追或运动画面正确。
 // ★【重要边界】[验收边界] NullRHI 只能确认行为和组件旗标；真实阴影/光追画面与 GPU 耗时须另行运行验收。
@@ -262,6 +362,191 @@ bool FFpstrueEnemyRenderHysteresisTest::RunTest(const FString& Parameters)
 	CheckTier(0.0f, Tier::Full, TEXT("Disabling restores Full from Background"));
 	return true;
 }
+
+#if WITH_EDITOR
+
+// 只固定临时世界的 PIE 网络角色以覆盖权限分支；不建立 Socket，也不替代多进程弱网和真实画面验收。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerSignificanceCoordinatorTest,
+	"fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	auto* Mode = World->GetAuthGameMode<AfpstruePvpGameMode>();
+	auto* State = World->GetGameState<AfpstruePvpGameState>();
+	if (!TestNotNull(TEXT("Real multiplayer GameMode"), Mode) || !TestNotNull(TEXT("Real multiplayer GameState"), State)) return false;
+	Mode->EnemyPopulation = 0;
+	auto* Coordinator = State->FindComponentByClass<UfpstrueEnemySignificanceCoordinator>();
+	auto* Sharing = State->FindComponentByClass<UfpstrueEnemyAnimationSharingCoordinator>();
+	if (!TestNotNull(TEXT("GameState owns the significance coordinator"), Coordinator) ||
+		!TestNotNull(TEXT("GameState owns the sharing coordinator"), Sharing) ||
+		!TestTrue(TEXT("GameState BeginPlay starts the existing coordinator"), Coordinator->IsRunning()) ||
+		!TestNotNull(TEXT("The real significance plugin is available"), USignificanceManager::Get(World))) return false;
+	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
+	World->SetPlayInEditorInitialNetMode(NM_DedicatedServer);
+	TestTrue(TEXT("Fixture enters the dedicated-server branch without creating a network transport"), World->GetNetMode() == NM_DedicatedServer);
+	FActorSpawnParameters Spawn;
+	Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AfpstrueCharacter* Players[2] = {};
+	APlayerController* Controllers[2] = {};
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		Players[Index] = World->SpawnActor<AfpstrueCharacter>(AfpstrueCharacter::StaticClass(), FTransform::Identity, Spawn);
+		Controllers[Index] = World->SpawnActor<APlayerController>();
+		if (!TestNotNull(TEXT("Server participant Pawn"), Players[Index]) || !TestNotNull(TEXT("Server participant Controller"), Controllers[Index])) return false;
+		Players[Index]->SetActorEnableCollision(false);
+		Players[Index]->GetCharacterMovement()->SetComponentTickEnabled(false);
+		Players[Index]->SetActorLocation(FVector(Index == 0 ? 50000.0f : 1000.0f, 0.0f, 0.0f));
+		Controllers[Index]->Possess(Players[Index]);
+		if (!TestTrue(TEXT("Possessed Pawn satisfies production participation rules"), Mode->IsCombatParticipant(Players[Index]))) return false;
+	}
+	auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity,
+		nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("Server significance enemy"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	Enemy->SetActorEnableCollision(false);
+	Coordinator->Update();
+	TestEqual(TEXT("Both valid participants contribute viewpoints"), Coordinator->GetGameplayViewpointCount(), 2);
+	TestEqual(TEXT("Typed discovery finds the live enemy"), Coordinator->GetTrackedEnemyCount(), 1);
+	TestTrue(TEXT("Near second participant wins over far first participant, rather than averaging"),
+		Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+	TestEqual(TEXT("DS never executes render application"), Coordinator->GetRenderUpdateSerial(), uint32(0));
+	TestNull(TEXT("DS never creates the World animation-sharing manager"), UAnimationSharingManager::GetManagerForWorld(World));
+	TestEqual(TEXT("DS has no sharing followers"), Sharing->GetRegisteredEnemyCount(), 0);
+
+	// 保留槽位是本用例的服务器前置；参与资格、失效和多视点评分仍调用生产代码。
+	Controllers[1]->UnPossess();
+	AfpstruePvpGameMode::FRejoinSlot Retained;
+	Retained.Pawn = Players[1];
+	Retained.bDisconnected = true;
+	Retained.ExpiresAt = World->GetTimeSeconds() + 30.0;
+	Mode->RejoinSlots.Add(TEXT("significance-retained-fixture"), Retained);
+	Coordinator->Update();
+	TestEqual(TEXT("Uncontrolled but retained Pawn still contributes a viewpoint"), Coordinator->GetGameplayViewpointCount(), 2);
+	TestTrue(TEXT("Retained nearby player keeps enemy response"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+	Mode->RejoinSlots.FindChecked(TEXT("significance-retained-fixture")).ExpiresAt = World->GetTimeSeconds() - 1.0;
+	Coordinator->Update();
+	TestEqual(TEXT("Expired retained Pawn is excluded"), Coordinator->GetGameplayViewpointCount(), 1);
+	TestTrue(TEXT("Only distant valid participant permits background gameplay"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Background);
+	Players[0]->SetActorLocation(FVector(1000.0f, 0.0f, 0.0f));
+	Coordinator->Update();
+	TestTrue(TEXT("Moving the first participant near independently restores full gameplay"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+	const uint32 SerialBeforeEnd = Coordinator->GetUpdateSerial();
+	State->Destroy();
+	TestFalse(TEXT("GameState EndPlay stops its coordinator"), Coordinator->IsRunning());
+	TestFalse(TEXT("GameState EndPlay clears the owned update timer"), World->GetTimerManager().IsTimerActive(Coordinator->UpdateTimerHandle));
+	Coordinator->Update();
+	TestEqual(TEXT("Stopped coordinator cannot perform another update"), Coordinator->GetUpdateSerial(), SerialBeforeEnd);
+	TestEqual(TEXT("Cleanup leaves no sharing followers"), Sharing->GetRegisteredEnemyCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerClientPerformanceTest,
+	"fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueMultiplayerClientPerformanceTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
+	World->SetPlayInEditorInitialNetMode(NM_Client);
+	auto* State = World->SpawnActorDeferred<AfpstruePvpGameState>(AfpstruePvpGameState::StaticClass(), FTransform::Identity);
+	if (!TestNotNull(TEXT("Client GameState fixture"), State)) return false;
+	State->SetRole(ROLE_SimulatedProxy);
+	State->FinishSpawning(FTransform::Identity);
+	auto* Coordinator = State->FindComponentByClass<UfpstrueEnemySignificanceCoordinator>();
+	if (!TestNotNull(TEXT("Client GameState owns its coordinator"), Coordinator) ||
+		!TestTrue(TEXT("Client GameState BeginPlay also starts local coordination"), Coordinator->IsRunning())) return false;
+	auto* Player = World->SpawnActor<APlayerController>();
+	if (!TestNotNull(TEXT("Client local view Controller"), Player) || !TestTrue(TEXT("Fixture Controller owns the client view"), Player->IsLocalController())) return false;
+	const FTransform EnemyTransform(FVector(-20000.0f, 0.0f, 0.0f));
+	auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), EnemyTransform);
+	if (!TestNotNull(TEXT("Client enemy replica fixture"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->SetRole(ROLE_SimulatedProxy);
+	Enemy->GetMesh()->bEnableUpdateRateOptimizations = true;
+	Enemy->FinishSpawning(EnemyTransform);
+	Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+	TestNull(TEXT("Client has no enemy AIController"), Enemy->GetController());
+	TestFalse(TEXT("Client enemy never registers a gameplay significance callback"), Enemy->bRegisteredWithSignificanceManager);
+	// 该用例隔离预算与权限；真实素材注册和共享姿态另由多进程渲染验收，避免原生空骨骼加载失败污染断言。
+	Coordinator->bSharingStartAttempted = true;
+	Coordinator->ActiveRenderPolicy.MinimumTierHoldSeconds = 0.0f;
+	Coordinator->ActiveRenderPolicy.DemotionDelaySeconds = 0.0f;
+	const auto GameplayTierBefore = Enemy->GetGameplaySignificanceTier();
+	Enemy->GetCharacterMovement()->SetComponentTickInterval(0.0125f);
+	Enemy->ApplySignificance(0.0f);
+	Enemy->ApplyGameplaySignificanceIntervals();
+	Coordinator->Update();
+	TestEqual(TEXT("Client coordinator does not create gameplay viewpoints"), Coordinator->GetGameplayViewpointCount(), 0);
+	TestTrue(TEXT("Client still applies its own render policy"), Coordinator->GetRenderUpdateSerial() > 0);
+	TestTrue(TEXT("Client cannot overwrite the gameplay tier"), Enemy->GetGameplaySignificanceTier() == GameplayTierBefore);
+	TestEqual(TEXT("Client cannot change CharacterMovement update cadence"), Enemy->GetCharacterMovement()->GetComponentTickInterval(), 0.0125f);
+	TestTrue(TEXT("Client background animation may be throttled"), Enemy->GetMesh()->GetComponentTickInterval() > 0.0f);
+	TestTrue(TEXT("Client may retain authored animation URO"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
+
+	auto* Processor = NewObject<UfpstrueEnemyAnimationSharingStateProcessor>(State);
+	int32 AnimationState = INDEX_NONE;
+	bool bShouldProcess = false;
+	Enemy->GetCharacterMovement()->Velocity = FVector(200.0f, 0.0f, 0.0f);
+	Processor->ProcessActorState_Implementation(AnimationState, Enemy, 0, 0, bShouldProcess);
+	TestTrue(TEXT("Sharing state accepts a replica without an AIController"), bShouldProcess);
+	TestEqual(TEXT("Replicated velocity selects moving animation"), AnimationState, static_cast<int32>(EFPEnemyAIState::Chase));
+	Enemy->GetCharacterMovement()->Velocity = FVector::ZeroVector;
+	Processor->ProcessActorState_Implementation(AnimationState, Enemy, 0, 0, bShouldProcess);
+	TestEqual(TEXT("Stopped replica selects idle instead of running in place"), AnimationState, static_cast<int32>(EFPEnemyAIState::Idle));
+	// 模拟引擎移除客户端复制副本，不能用客户端普通 Destroy 请求绕过网络销毁权限。
+	State->Destroy(true);
+	TestFalse(TEXT("Client GameState cleanup stops its local coordinator"), Coordinator->IsRunning());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerAuthorityPoseTest,
+	"fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFpstrueMultiplayerAuthorityPoseTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
+	World->SetPlayInEditorInitialNetMode(NM_ListenServer);
+	auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity);
+	if (!TestNotNull(TEXT("Network-authority enemy"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->GetMesh()->bEnableUpdateRateOptimizations = true;
+	Enemy->FinishSpawning(FTransform::Identity);
+	Enemy->GetMesh()->SetComponentTickInterval(0.1f);
+	FFPEnemyRenderSignificancePolicy Policy;
+	Policy.FullMinLOD = 2;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, false, false, false, Policy);
+	TestEqual(TEXT("Authority removes pre-existing mesh cooldown interval"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
+	TestFalse(TEXT("Authority disables URO independently of client visibility"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
+	TestTrue(TEXT("Authority refreshes offscreen bones for hit shapes"), Enemy->GetMesh()->VisibilityBasedAnimTickOption == EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones);
+	TestEqual(TEXT("Authority does not impose a reduced minimum LOD"), Enemy->GetAppliedMinimumLOD(), 0);
+	TestFalse(TEXT("Authority can never become an animation-sharing follower"), Enemy->CanUseAnimationSharing());
+	auto* Sharing = NewObject<UfpstrueEnemyAnimationSharingCoordinator>(Enemy);
+	Enemy->AddInstanceComponent(Sharing);
+	Sharing->RegisterComponent();
+	Sharing->Start(Enemy->GetClass());
+	TestNull(TEXT("Listen-server rendering cannot replace authority pose with a shared manager"), UAnimationSharingManager::GetManagerForWorld(World));
+	return true;
+}
+
+#endif // WITH_EDITOR
 
 #endif // WITH_DEV_AUTOMATION_TESTS
 

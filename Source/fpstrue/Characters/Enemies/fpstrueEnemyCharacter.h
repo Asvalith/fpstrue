@@ -4,9 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "AbilitySystemInterface.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
-#include "Characters/Enemies/Performance/fpstrueEnemySignificance.h"
+#include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "fpstrueEnemyCharacter.generated.h"
 
 class AfpstrueCharacter;
@@ -16,6 +18,23 @@ class UfpstrueEnemyAnimationSharingCoordinator;
 class UfpstrueEnemyCombatComponent;
 class UfpstrueHealthComponent;
 class UMeshComponent;
+class UAnimMontage;
+
+// 只复制可恢复的表现状态；客户端不据此运行行为树、开伤害窗口或提交伤害。
+USTRUCT()
+struct FFPEnemyNetworkPresentation
+{
+	GENERATED_BODY()
+	UPROPERTY() uint32 AttackId = 0;
+	UPROPERTY() TObjectPtr<UAnimMontage> Montage;
+	UPROPERTY() float PlayRate = 1.0f;
+	UPROPERTY() float ServerStartTime = 0.0f;
+	UPROPERTY() bool bAttacking = false;
+	UPROPERTY() bool bDead = false;
+	UPROPERTY() FVector_NetQuantizeNormal DeathDirection = FVector::ZeroVector;
+	UPROPERTY() FVector_NetQuantize DeathLocation = FVector::ZeroVector;
+	UPROPERTY() FName DeathBone;
+};
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyDeathReported, AfpstrueEnemyCharacter*, DeadEnemy);
 
@@ -33,13 +52,17 @@ enum class EFPEnemySignificanceTier : uint8
  * 本类主要负责 Actor/组件生命周期、受击死亡表现，以及把 Gameplay/Render Significance 结果应用到具体组件。
  */
 UCLASS(Blueprintable)
-class FPSTRUE_API AfpstrueEnemyCharacter : public ACharacter
+class FPSTRUE_API AfpstrueEnemyCharacter : public ACharacter, public IAbilitySystemInterface
 {
 	GENERATED_BODY()
 
 public:
 	// 创建健康/战斗组件并设置基础骨骼动画优化。
 	AfpstrueEnemyCharacter();
+	// CharacterMovement/生命属性负责规则同步，本类补充攻击播放及死亡表现的当前快照。
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	// 敌人与玩家共享 GE 生命结算；现有 AI/攻击事务不因此改为另一套决策系统。
+	virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override { return HealthComponent.Get(); }
 
 	// ==================== 状态查询 ====================
 
@@ -215,10 +238,17 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// 语法复习：friend 只开放 private 访问权，不改变对象所有权；内部桥接仅开放给共享协调器和 CombatComponent。
+	// 语法复习：friend 只开放 private 访问权，不改变对象所有权；内部桥接仅开放给性能协调器和 CombatComponent。
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
+	friend class UfpstrueEnemySignificanceCoordinator;
 	friend class UfpstrueEnemyCombatComponent;
 	friend class FFpstrueEnemyQueuedDamageContextTest;
+	friend class FFpstrueEnemySignificanceCombatSampleTest;
+	friend class AfpstruePvpGameMode;
+	friend class FFpstrueNetworkEnemyPresentationTest;
+	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
+	friend class FFpstrueMultiplayerClientPerformanceTest;
+	friend class FFpstrueMultiplayerAuthorityPoseTest;
 
 	// ==================== 战斗与受击内部桥接 ====================
 
@@ -230,6 +260,11 @@ private:
 	void ApplyDeathImpulse();
 	// 受击保护有自己的截止时间，即使协调器停用，也不会永久锁在全速动画。
 	void RefreshHitAnimationProtection();
+	// 服务器播放绑定或取消时发布快照；晚加入只恢复尚未结束的播放，不重放历史事件。
+	void PublishAttackPresentation(uint32 AttackId, UAnimMontage* Montage, float PlayRate, bool bPlaying);
+	UFUNCTION() void OnRep_NetworkPresentation();
+	UFUNCTION(NetMulticast, Unreliable)
+	void MulticastHitReaction(float DamageAmount);
 
 	// ==================== Gameplay 分级 ====================
 
@@ -259,11 +294,20 @@ private:
 
 	// HealthComponent 保存死亡事实；这里只记录死亡副作用是否已经执行。
 	bool bDeathEffectsApplied = false;
+	UPROPERTY(ReplicatedUsing = OnRep_NetworkPresentation)
+	FFPEnemyNetworkPresentation NetworkPresentation;
+	// 客户端自己的播放实例只用于停止表现，绝不绑定服务器攻击事务或执行伤害。
+	FFPActionPlayback RemoteAttackPlayback;
 	bool bDisableAnimationOptimizationsForBenchmark = false;
 	// BeginPlay 保存资产原始设置；战斗保护结束后恢复，而不是强制开启优化。
 	bool bAuthoredUpdateRateOptimizations = false;
 	EVisibilityBasedAnimTickOption AuthoredAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 	bool bRegisteredWithSignificanceManager = false;
+	// 主线程集中采样后交给插件评分；Update 同步等待评分完成，期间这些值不再修改。
+	FVector SignificancePositionSnapshot = FVector::ZeroVector;
+	bool bHasSignificancePositionSnapshot = false;
+	// 只借用 Coordinator 本轮候选中的近战保护值；Update 退出即撤销，真实攻击与命中从不读取它。
+	const bool* SignificanceCombatProtectionSample = nullptr;
 	// Gameplay 档位控制 AI/移动节奏；自然 Render 档位经过滞回，再由全局预算决定最终档位。
 	EFPEnemySignificanceTier SignificanceTier = EFPEnemySignificanceTier::Full;
 	EFPEnemyRenderSignificanceTier NaturalRenderSignificanceTier = EFPEnemyRenderSignificanceTier::Full;

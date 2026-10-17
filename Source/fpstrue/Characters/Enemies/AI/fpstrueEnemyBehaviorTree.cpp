@@ -12,9 +12,14 @@
 #include "BehaviorTree/Composites/BTComposite_Selector.h"
 #include "BehaviorTree/Composites/BTComposite_Sequence.h"
 #include "Engine/World.h"
+#include "UObject/UnrealType.h"
 
 #if WITH_EDITOR
 #include "BehaviorTreeGraph.h"
+#include "BehaviorTreeGraphNode_Root.h"
+#include "BehaviorTreeGraphNode_Composite.h"
+#include "BehaviorTreeGraphNode_Task.h"
+#include "BehaviorTreeGraphNode_Decorator.h"
 #include "EdGraphSchema_BehaviorTree.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #endif
@@ -90,6 +95,31 @@ void UfpstrueBTDecorator_DecisionFlag::Configure(FName KeyName, bool bExpectedVa
 
 namespace
 {
+bool RejectEnemyTreeUpgradeProperty(const UBTNode& Node, const UBTNode& Default, const FProperty& Property)
+{
+	FString ActualValue, DefaultValue;
+	Property.ExportText_InContainer(0, ActualValue, &Node, nullptr, const_cast<UBTNode*>(&Node), PPF_None);
+	Property.ExportText_InContainer(0, DefaultValue, &Default, nullptr, const_cast<UBTNode*>(&Default), PPF_None);
+	UE_LOG(LogTemp, Warning, TEXT("FPEnemyBTUpgrade rejected editable property: node=%s name=%s expectedName=%s property=%s actual=%s expected=%s"),
+		*Node.GetPathName(), *Node.GetNodeName(), *Default.GetNodeName(), *Property.GetName(), *ActualValue, *DefaultValue);
+	return false;
+}
+}
+
+bool UfpstrueBTDecorator_DecisionFlag::HasSameCondition(const UfpstrueBTDecorator_DecisionFlag& Other) const
+{
+	for (TFieldIterator<FProperty> Property(GetClass()); Property; ++Property)
+		if (Property->HasAnyPropertyFlags(CPF_Edit) && Property->GetFName() != TEXT("BlackboardKey") && !Property->Identical_InContainer(this, &Other)) return RejectEnemyTreeUpgradeProperty(*this, Other, **Property);
+	const bool bMatches = GetSelectedBlackboardKey() == Other.GetSelectedBlackboardKey() && OperationType == Other.OperationType &&
+		GetFlowAbortMode() == Other.GetFlowAbortMode() && IsInversed() == Other.IsInversed();
+	if (!bMatches) UE_LOG(LogTemp, Warning, TEXT("FPEnemyBTUpgrade rejected condition: node=%s key=%s/%s operation=%u/%u abort=%d/%d inverse=%d/%d"),
+		*GetPathName(), *GetSelectedBlackboardKey().ToString(), *Other.GetSelectedBlackboardKey().ToString(), OperationType, Other.OperationType,
+		static_cast<int32>(GetFlowAbortMode()), static_cast<int32>(Other.GetFlowAbortMode()), IsInversed(), Other.IsInversed());
+	return bMatches;
+}
+
+namespace
+{
 // 为默认黑板新增指定类型的独立键，不开启跨敌人的实例同步。
 template <typename TKey> void AddKey(UBlackboardData& Blackboard, FName Name)
 {
@@ -147,7 +177,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 		return false;
 	}
 	// 区分可复用的完整默认 schema 与尚未配置的黑板，不把任意已有内容当作空白资产。
-	const bool bReuseBlackboard = Blackboard->Keys.Num() == 6 && Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey &&
+	const bool bReuseBlackboard = Blackboard->Keys.Num() == 7 && Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey &&
 								  FPHasEnemyBlackboardSchema(Blackboard);
 	if (!bReuseBlackboard && Blackboard->Keys.Num() > 1)
 	{
@@ -182,6 +212,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Attacking);
 		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::InAttackRange);
 		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::InChaseRange);
+		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Retreating);
 	}
 	Tree->BlackboardAsset = Blackboard;
 
@@ -198,6 +229,9 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 
 	// 分支顺序明确优先级：无目标、维持攻击、超距空闲、近战，再尝试包围与追击。
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Idle, TEXT("NoTargetIdle")), FPEnemyBlackboard::HasTarget, false);
+	// 低血撤退先中断已有攻击，避免 SustainAttack 把伤害窗口一直维持到动画自然结束。
+	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Retreat, TEXT("RetreatToCover")),
+				 FPEnemyBlackboard::Retreating, true);
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::SustainAttack, TEXT("SustainAttack")),
 				 FPEnemyBlackboard::Attacking, true);
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Idle, TEXT("OutsideChaseRange")), FPEnemyBlackboard::InChaseRange,
@@ -231,6 +265,189 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	return true;
 }
 
+bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTree* Tree, UBlackboardData* Blackboard)
+{
+	const auto Reject = [Tree](const TCHAR* Stage, const FString& Detail = FString())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FPEnemyBTUpgrade rejected: tree=%s stage=%s %s"), *GetPathNameSafe(Tree), Stage, *Detail);
+		return false;
+	};
+	if (Tree == nullptr || Blackboard == nullptr || Tree->BlackboardAsset != Blackboard || Blackboard->Parent != nullptr ||
+		!Tree->RootDecorators.IsEmpty() || !Tree->RootDecoratorOps.IsEmpty() || (Blackboard->Keys.Num() != 6 && Blackboard->Keys.Num() != 7))
+		return Reject(TEXT("Context"), FString::Printf(TEXT("blackboard=%s treeBlackboard=%s parent=%s keys=%d rootDecorators=%d rootOps=%d"),
+			*GetPathNameSafe(Blackboard), *GetPathNameSafe(Tree == nullptr ? nullptr : Tree->BlackboardAsset.Get()), *GetPathNameSafe(Blackboard == nullptr ? nullptr : Blackboard->Parent.Get()),
+			Blackboard == nullptr ? -1 : Blackboard->Keys.Num(), Tree == nullptr ? -1 : Tree->RootDecorators.Num(), Tree == nullptr ? -1 : Tree->RootDecoratorOps.Num()));
+	const bool bCurrent = Blackboard->Keys.Num() == 7;
+	UBehaviorTree* Expected = NewObject<UBehaviorTree>(GetTransientPackage(), NAME_None, RF_Transient);
+	UBlackboardData* ExpectedBlackboard = NewObject<UBlackboardData>(Expected);
+	if (!PopulateDefaultTree(Expected, ExpectedBlackboard)) return Reject(TEXT("ReferenceBuild"));
+	UBTCompositeNode* ExpectedChoice = Expected->RootNode->Children[2].ChildComposite;
+	if (!bCurrent) ExpectedChoice->Children.RemoveAt(1);
+	UBTCompositeNode* Root = Tree->RootNode;
+	const auto HasClass = [](const UBTNode* Node, UClass* Class) { return Node != nullptr && Node->GetClass() == Class; };
+	// 只兼容已确认的历史保存排列；全部其他默认结构及编辑图检查仍在任何资产修改前完成。
+	const bool bHistoricalRootOrder = Root != nullptr && Root->Children.Num() == 3 &&
+		HasClass(Root->GetChildNode(0), UfpstrueBTTask_DecisionWait::StaticClass()) &&
+		HasClass(Root->GetChildNode(1), UBTComposite_Selector::StaticClass()) &&
+		HasClass(Root->GetChildNode(2), UfpstrueBTTask_SampleDecision::StaticClass());
+	if (bHistoricalRootOrder) Expected->RootNode->Children.Swap(1, 2);
+	TSet<FName> SeenKeys;
+	for (const FBlackboardEntry& Entry : Blackboard->Keys)
+	{
+		const FBlackboardEntry* Default = ExpectedBlackboard->Keys.FindByPredicate([&Entry](const FBlackboardEntry& Key) { return Key.EntryName == Entry.EntryName; });
+		if (Default == nullptr || SeenKeys.Contains(Entry.EntryName) || (!bCurrent && Entry.EntryName == FPEnemyBlackboard::Retreating) ||
+			Entry.bInstanceSynced || Entry.KeyType == nullptr || Entry.KeyType->GetClass() != Default->KeyType->GetClass())
+			return Reject(TEXT("BlackboardKey"), FString::Printf(TEXT("key=%s actualClass=%s expectedClass=%s synced=%d duplicate=%d"),
+				*Entry.EntryName.ToString(), *GetNameSafe(Entry.KeyType == nullptr ? nullptr : Entry.KeyType->GetClass()),
+				*GetNameSafe(Default == nullptr ? nullptr : Default->KeyType->GetClass()), Entry.bInstanceSynced, SeenKeys.Contains(Entry.EntryName)));
+		SeenKeys.Add(Entry.EntryName);
+		if (const UBlackboardKeyType_Object* Object = Cast<UBlackboardKeyType_Object>(Entry.KeyType))
+			if (Object->BaseClass != CastChecked<UBlackboardKeyType_Object>(Default->KeyType)->BaseClass)
+				return Reject(TEXT("BlackboardObjectBaseClass"), FString::Printf(TEXT("key=%s actual=%s expected=%s"), *Entry.EntryName.ToString(),
+					*GetNameSafe(Object->BaseClass), *GetNameSafe(CastChecked<UBlackboardKeyType_Object>(Default->KeyType)->BaseClass)));
+	}
+	TSet<const UBTNode*> Nodes;
+	TMap<const UBTNode*, const FBTCompositeChild*> Branches;
+	TFunction<bool(const UBTNode*, const UBTNode*)> Matches = [&](const UBTNode* Node, const UBTNode* Default)
+	{
+		if (Node == nullptr || Default == nullptr || Node->GetClass() != Default->GetClass() || Nodes.Contains(Node))
+			return Reject(TEXT("RuntimeNodeClassOrDuplicate"), FString::Printf(TEXT("node=%s actualClass=%s expectedClass=%s duplicate=%d"),
+				*GetPathNameSafe(Node), *GetNameSafe(Node == nullptr ? nullptr : Node->GetClass()), *GetNameSafe(Default == nullptr ? nullptr : Default->GetClass()), Nodes.Contains(Node)));
+		for (TFieldIterator<FProperty> Property(Node->GetClass()); Property; ++Property)
+			if (Property->HasAnyPropertyFlags(CPF_Edit) && Property->GetFName() != TEXT("BlackboardKey") && !Property->Identical_InContainer(Node, Default)) return RejectEnemyTreeUpgradeProperty(*Node, *Default, **Property);
+		if (const UBTTaskNode* Task = Cast<UBTTaskNode>(Node); Task != nullptr && !Task->Services.IsEmpty()) return Reject(TEXT("RuntimeTaskServices"), Node->GetNodeName());
+		Nodes.Add(Node);
+		const UBTCompositeNode* Composite = Cast<UBTCompositeNode>(Node);
+		if (Composite == nullptr) return true;
+		const UBTCompositeNode* DefaultComposite = CastChecked<UBTCompositeNode>(Default);
+		if (!Composite->Services.IsEmpty() || Composite->Children.Num() != DefaultComposite->Children.Num())
+			return Reject(TEXT("RuntimeCompositeStructure"), FString::Printf(TEXT("node=%s services=%d children=%d expectedChildren=%d"), *Node->GetNodeName(), Composite->Services.Num(), Composite->Children.Num(), DefaultComposite->Children.Num()));
+		for (int32 Index = 0; Index < Composite->Children.Num(); ++Index)
+		{
+			const FBTCompositeChild& Child = Composite->Children[Index];
+			const FBTCompositeChild& DefaultChild = DefaultComposite->Children[Index];
+			if ((Child.ChildComposite != nullptr && Child.ChildTask != nullptr) || Child.Decorators.Num() != DefaultChild.Decorators.Num() ||
+				(!Child.DecoratorOps.IsEmpty() && (Child.Decorators.Num() != 1 || Child.DecoratorOps.Num() != 1 || Child.DecoratorOps[0].Operation != EBTDecoratorLogic::Test || Child.DecoratorOps[0].Number != 0)))
+				return Reject(TEXT("RuntimeBranchDecorators"), FString::Printf(TEXT("parent=%s index=%d decorators=%d expected=%d ops=%d"), *Node->GetNodeName(), Index, Child.Decorators.Num(), DefaultChild.Decorators.Num(), Child.DecoratorOps.Num()));
+			for (int32 DecoratorIndex = 0; DecoratorIndex < Child.Decorators.Num(); ++DecoratorIndex)
+			{
+				const UfpstrueBTDecorator_DecisionFlag* Flag = Cast<UfpstrueBTDecorator_DecisionFlag>(Child.Decorators[DecoratorIndex]);
+				if (Flag == nullptr || Flag->GetClass() != UfpstrueBTDecorator_DecisionFlag::StaticClass() || !Flag->HasSameCondition(*CastChecked<UfpstrueBTDecorator_DecisionFlag>(DefaultChild.Decorators[DecoratorIndex])))
+					return Reject(TEXT("RuntimeCondition"), FString::Printf(TEXT("parent=%s branch=%d decorator=%d class=%s"), *Node->GetNodeName(), Index, DecoratorIndex, *GetNameSafe(Child.Decorators[DecoratorIndex] == nullptr ? nullptr : Child.Decorators[DecoratorIndex]->GetClass())));
+			}
+			const UBTNode* ChildNode = Composite->GetChildNode(Index);
+			Branches.Add(ChildNode, &Child);
+			if (!Matches(ChildNode, DefaultComposite->GetChildNode(Index))) return false;
+		}
+		return true;
+	};
+	if (!Matches(Tree->RootNode, Expected->RootNode)) return Reject(TEXT("RuntimeDefaultTemplate"));
+#if WITH_EDITOR
+	UBehaviorTreeGraph* Graph = Cast<UBehaviorTreeGraph>(Tree->BTGraph);
+	TMap<const UBTNode*, UBehaviorTreeGraphNode*> GraphNodes;
+	UBehaviorTreeGraphNode_Root* GraphRoot = nullptr;
+	if ((Tree->IsAsset() && Graph == nullptr) || (Tree->BTGraph != nullptr && (Graph == nullptr || Graph->GetClass() != UBehaviorTreeGraph::StaticClass())))
+		return Reject(TEXT("GraphClass"), GetNameSafe(Tree->BTGraph == nullptr ? nullptr : Tree->BTGraph->GetClass()));
+	if (Graph != nullptr)
+	{
+		if (Graph->Nodes.Num() != Nodes.Num() + 1) return Reject(TEXT("GraphNodeCount"), FString::Printf(TEXT("actual=%d expected=%d"), Graph->Nodes.Num(), Nodes.Num() + 1));
+		for (UEdGraphNode* Raw : Graph->Nodes)
+		{
+			UBehaviorTreeGraphNode* Node = Cast<UBehaviorTreeGraphNode>(Raw);
+			if (Node == nullptr || !Node->Services.IsEmpty() || !Node->NodeComment.IsEmpty())
+				return Reject(TEXT("GraphCustomNode"), FString::Printf(TEXT("node=%s class=%s services=%d comment=%s"), *GetPathNameSafe(Raw), *GetNameSafe(Raw == nullptr ? nullptr : Raw->GetClass()), Node == nullptr ? -1 : Node->Services.Num(), Node == nullptr ? TEXT("") : *Node->NodeComment));
+			if (Node->GetClass() == UBehaviorTreeGraphNode_Root::StaticClass())
+			{
+				if (GraphRoot != nullptr || CastChecked<UBehaviorTreeGraphNode_Root>(Node)->BlackboardAsset != Blackboard || !Node->SubNodes.IsEmpty())
+					return Reject(TEXT("GraphRoot"), FString::Printf(TEXT("duplicate=%d blackboard=%s subnodes=%d"), GraphRoot != nullptr, *GetPathNameSafe(CastChecked<UBehaviorTreeGraphNode_Root>(Node)->BlackboardAsset), Node->SubNodes.Num()));
+				GraphRoot = CastChecked<UBehaviorTreeGraphNode_Root>(Node);
+				continue;
+			}
+			const UBTNode* Runtime = Cast<UBTNode>(Node->NodeInstance);
+			const FBTCompositeChild* Branch = Branches.FindRef(Runtime);
+			const int32 DecoratorCount = Branch == nullptr ? 0 : Branch->Decorators.Num();
+			if (!Nodes.Contains(Runtime) || GraphNodes.Contains(Runtime) || Node->Decorators.Num() != DecoratorCount || Node->SubNodes.Num() != DecoratorCount ||
+				Node->GetClass() != (Cast<UBTCompositeNode>(Runtime) != nullptr ? UBehaviorTreeGraphNode_Composite::StaticClass() : UBehaviorTreeGraphNode_Task::StaticClass()))
+				return Reject(TEXT("GraphRuntimeMapping"), FString::Printf(TEXT("graph=%s class=%s runtime=%s known=%d duplicate=%d decorators=%d expected=%d subnodes=%d"), *Node->GetPathName(), *Node->GetClass()->GetName(), *GetPathNameSafe(Runtime), Nodes.Contains(Runtime), GraphNodes.Contains(Runtime), Node->Decorators.Num(), DecoratorCount, Node->SubNodes.Num()));
+			for (int32 Index = 0; Index < DecoratorCount; ++Index)
+				if (Node->Decorators[Index] == nullptr || Node->Decorators[Index]->GetClass() != UBehaviorTreeGraphNode_Decorator::StaticClass() || Node->Decorators[Index]->NodeInstance != Branch->Decorators[Index] ||
+					Node->SubNodes[Index] != Node->Decorators[Index] || !Node->Decorators[Index]->SubNodes.IsEmpty() || !Node->Decorators[Index]->Services.IsEmpty() || !Node->Decorators[Index]->Decorators.IsEmpty())
+					return Reject(TEXT("GraphDecoratorMapping"), FString::Printf(TEXT("graph=%s index=%d actual=%s expected=%s"), *Node->GetPathName(), Index, *GetPathNameSafe(Node->Decorators[Index] == nullptr ? nullptr : Node->Decorators[Index]->NodeInstance.Get()), *GetPathNameSafe(Branch->Decorators[Index])));
+			GraphNodes.Add(Runtime, Node);
+		}
+		if (GraphRoot == nullptr) return Reject(TEXT("GraphMissingRoot"));
+		GraphNodes.Add(nullptr, GraphRoot);
+		for (const auto& Pair : GraphNodes)
+		{
+			const UBTCompositeNode* Composite = Cast<UBTCompositeNode>(Pair.Key);
+			TSet<const UBTNode*> Linked;
+			for (const UEdGraphPin* Pin : Pair.Value->Pins)
+				if (Pin != nullptr && Pin->Direction == EGPD_Output) for (const UEdGraphPin* Link : Pin->LinkedTo)
+				{
+					const UBehaviorTreeGraphNode* Child = Link == nullptr ? nullptr : Cast<UBehaviorTreeGraphNode>(Link->GetOwningNode());
+					const UBTNode* ChildRuntime = Child == nullptr ? nullptr : Cast<UBTNode>(Child->NodeInstance);
+					if (ChildRuntime == nullptr || Link->Direction != EGPD_Input || !Link->LinkedTo.Contains(Pin) || GraphNodes.FindRef(ChildRuntime) != Child || Linked.Contains(ChildRuntime))
+						return Reject(TEXT("GraphPinMapping"), FString::Printf(TEXT("parent=%s pin=%s child=%s runtime=%s direction=%d reciprocal=%d duplicate=%d"), *Pair.Value->GetPathName(), *Pin->PinName.ToString(), *GetPathNameSafe(Child), *GetPathNameSafe(ChildRuntime), Link == nullptr ? -1 : static_cast<int32>(Link->Direction), Link != nullptr && Link->LinkedTo.Contains(Pin), Linked.Contains(ChildRuntime)));
+					Linked.Add(ChildRuntime);
+				}
+			const int32 ExpectedLinks = Pair.Key == nullptr ? 1 : Composite == nullptr ? 0 : Composite->Children.Num();
+			if (Linked.Num() != ExpectedLinks) return Reject(TEXT("GraphPinCount"), FString::Printf(TEXT("node=%s actual=%d expected=%d"), *Pair.Value->GetPathName(), Linked.Num(), ExpectedLinks));
+			if (Pair.Key == nullptr && !Linked.Contains(Tree->RootNode)) return Reject(TEXT("GraphRootLink"));
+			if (Composite != nullptr) for (int32 Index = 0; Index < Composite->Children.Num(); ++Index)
+				if (!Linked.Contains(Composite->GetChildNode(Index))) return Reject(TEXT("GraphMissingBranchLink"), FString::Printf(TEXT("parent=%s child=%s index=%d"), *Composite->GetNodeName(), *GetPathNameSafe(Composite->GetChildNode(Index)), Index));
+		}
+		if (bHistoricalRootOrder && static_cast<int64>(GraphNodes.FindChecked(Root->GetChildNode(1))->NodePosX) - GraphNodes.FindChecked(Root->GetChildNode(0))->NodePosX < 2)
+			return Reject(TEXT("HistoricalRootLayout"), TEXT("Wait and Choice must leave space for Sample between them."));
+	}
+#endif
+	if (bHistoricalRootOrder)
+	{
+		Root->Children.Swap(1, 2);
+#if WITH_EDITOR
+		if (Graph != nullptr) GraphNodes.FindChecked(Root->GetChildNode(1))->NodePosX = static_cast<int32>(
+			(static_cast<int64>(GraphNodes.FindChecked(Root->GetChildNode(0))->NodePosX) + GraphNodes.FindChecked(Root->GetChildNode(2))->NodePosX) / 2);
+#endif
+		Tree->MarkPackageDirty();
+	}
+	if (bCurrent)
+	{
+#if WITH_EDITOR
+		if (bHistoricalRootOrder && Graph != nullptr) Graph->UpdateAsset();
+#endif
+		return true;
+	}
+	// 所有拒绝检查完成后才追加键和节点，保持旧资产、旧节点及策划可编辑布局。
+	AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Retreating);
+	UBTCompositeNode* Choice = Root->Children[2].ChildComposite;
+	FBTCompositeChild Retreat = AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Retreat, TEXT("RetreatToCover"));
+	Choice->Children.Pop();
+	Choice->Children.Insert(Retreat, 1);
+	AddCondition(*Tree, Choice->Children[1], FPEnemyBlackboard::Retreating, true);
+#if WITH_EDITOR
+	if (Graph != nullptr)
+	{
+		Graph->LockUpdates();
+		UBehaviorTreeGraphNode_Task* Task = NewObject<UBehaviorTreeGraphNode_Task>(Graph);
+		Task->CreateNewGuid();
+		Task->SetFlags(RF_Transactional);
+		Task->NodeInstance = Choice->Children[1].ChildTask;
+		Task->NodePosX = (GraphNodes.FindChecked(Choice->GetChildNode(0))->NodePosX + GraphNodes.FindChecked(Choice->GetChildNode(2))->NodePosX) / 2;
+		Task->NodePosY = GraphNodes.FindChecked(Choice->GetChildNode(2))->NodePosY;
+		Graph->AddNode(Task);
+		Task->AllocateDefaultPins();
+		UBehaviorTreeGraphNode_Decorator* Decorator = NewObject<UBehaviorTreeGraphNode_Decorator>(Graph);
+		Decorator->NodeInstance = Choice->Children[1].Decorators[0];
+		Task->AddSubNode(Decorator, Graph);
+		GraphNodes.FindChecked(Choice)->GetOutputPin()->MakeLinkTo(Task->GetInputPin());
+		Graph->UpdateClassData();
+		Graph->UnlockUpdates();
+	}
+#endif
+	Tree->MarkPackageDirty();
+	Blackboard->MarkPackageDirty();
+	return true;
+}
+
 // 验证目标对象类型、布尔键和独立实例语义；缺键或错误类型都不能运行项目的默认叶子逻辑。
 bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard)
 {
@@ -247,7 +464,8 @@ bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard)
 	}
 	// 决策条件必须是各敌人独立的布尔键，防止一个敌人的采样覆盖其他敌人的行为。
 	for (const FName Name :
-		 {FPEnemyBlackboard::HasTarget, FPEnemyBlackboard::Attacking, FPEnemyBlackboard::InAttackRange, FPEnemyBlackboard::InChaseRange})
+		 {FPEnemyBlackboard::HasTarget, FPEnemyBlackboard::Attacking, FPEnemyBlackboard::InAttackRange, FPEnemyBlackboard::InChaseRange,
+		  FPEnemyBlackboard::Retreating})
 	{
 		const FBlackboardEntry* Entry = Blackboard->GetKey(Blackboard->GetKeyID(Name));
 		if (Entry == nullptr || Entry->bInstanceSynced || Entry->KeyType == nullptr ||

@@ -4,10 +4,101 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "AbilitySystemComponent.h"
+#include "AttributeSet.h"
+#include "GameplayEffect.h"
+#include "NativeGameplayTags.h"
 #include "fpstrueHealthComponent.generated.h"
 
 class AController;
 class UDamageType;
+class FLifetimeProperty;
+class UfpstrueHealthComponent;
+
+// 项目统一的原生标签；能力只描述动作与互斥，伤害和初始化数值由 GE 的 SetByCaller 提供。
+namespace FpstrueGameplayTags
+{
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Fire)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Reload)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Aim)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Sprint)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Firing)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Reloading)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Aiming)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Sprinting)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Dead)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Data_Damage)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Data_Health)
+	FPSTRUE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Data_MaxHealth)
+}
+
+// GAS 的生命数值唯一存储；复制属性而非重复复制旧组件快照，客户端不能通过兼容接口自行扣血。
+UCLASS()
+class FPSTRUE_API UfpstrueHealthAttributeSet : public UAttributeSet
+{
+	GENERATED_BODY()
+
+public:
+	UfpstrueHealthAttributeSet();
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue) override;
+	virtual void PreAttributeBaseChange(const FGameplayAttribute& Attribute, float& NewValue) const override;
+	virtual void PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data) override;
+	// 一个网络批次的属性 RepNotify 全部结束后，再刷新旧 BP 接口，避免一次接收中重复通知。
+	virtual void PostRepNotifies() override;
+
+	GAMEPLAYATTRIBUTE_PROPERTY_GETTER(UfpstrueHealthAttributeSet, Health)
+	GAMEPLAYATTRIBUTE_VALUE_GETTER(Health)
+	GAMEPLAYATTRIBUTE_VALUE_SETTER(Health)
+	GAMEPLAYATTRIBUTE_VALUE_INITTER(Health)
+	GAMEPLAYATTRIBUTE_PROPERTY_GETTER(UfpstrueHealthAttributeSet, MaxHealth)
+	GAMEPLAYATTRIBUTE_VALUE_GETTER(MaxHealth)
+	GAMEPLAYATTRIBUTE_VALUE_SETTER(MaxHealth)
+	GAMEPLAYATTRIBUTE_VALUE_INITTER(MaxHealth)
+
+private:
+	UPROPERTY(ReplicatedUsing = OnRep_Health)
+	FGameplayAttributeData Health;
+	UPROPERTY(ReplicatedUsing = OnRep_MaxHealth)
+	FGameplayAttributeData MaxHealth;
+	UFUNCTION() void OnRep_Health(const FGameplayAttributeData& Previous);
+	UFUNCTION() void OnRep_MaxHealth(const FGameplayAttributeData& Previous);
+	bool bReceivedHealthAttributes = false;
+};
+
+// 瞬时伤害只修改 Health；事务队列负责来源、通知顺序和死亡去重，不再另做一遍减法。
+UCLASS()
+class UfpstrueHealthDamageEffect : public UGameplayEffect
+{
+	GENERATED_BODY()
+public:
+	UfpstrueHealthDamageEffect();
+};
+
+// 数值重置先更新上限再回满；它不是角色复活，不恢复动画、移动、装备或 AI。
+UCLASS()
+class UfpstrueHealthResetEffect : public UGameplayEffect
+{
+	GENERATED_BODY()
+public:
+	UfpstrueHealthResetEffect();
+};
+
+// 旧蓝图接口使用的本地兼容镜像；网络真实数值由 GAS AttributeSet 复制，版本仅标记本地提交。
+USTRUCT()
+struct FPSTRUE_API FFPReplicatedHealthSnapshot
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	float CurrentHealth = 100.0f;
+
+	UPROPERTY()
+	float MaxHealth = 100.0f;
+
+	UPROPERTY()
+	uint32 Revision = 0;
+};
 
 // 随伤害一起排队的命中数据；不持有角色或布娃娃，只描述这一次命中的事实。
 struct FFPDamageContext
@@ -32,13 +123,25 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
  * Ragdoll 等差异化副作用，因此生命数值与角色表现可以分别复用和测试。
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
-class FPSTRUE_API UfpstrueHealthComponent : public UActorComponent
+// 上述原有说明中的 CurrentHealth 现在是兼容只读镜像；真实权威值由 AttributeSet + GE 维护。
+class FPSTRUE_API UfpstrueHealthComponent : public UAbilitySystemComponent
 {
 	GENERATED_BODY()
 
 public:
 	// 创建无 Tick 的生命值组件。
 	UfpstrueHealthComponent();
+	// 只复制完整生命快照；伤害来源和本地事务队列不作为客户端事件重放。
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	// 调试与测试读取真正的 GAS 属性集；不能把旧显示镜像误认为第二套生命状态。
+	const UfpstrueHealthAttributeSet* GetHealthAttributeSet() const { return HealthAttributes != nullptr ? HealthAttributes.Get() : GetSet<UfpstrueHealthAttributeSet>(); }
+	// 外部瞬时生命 GE 也按事务执行；不能绕过旧 BP 通知、死亡结算及同线程重入顺序。
+	virtual FActiveGameplayEffectHandle ApplyGameplayEffectSpecToSelf(const FGameplayEffectSpec& GameplayEffect,
+		FPredictionKey PredictionKey = FPredictionKey()) override;
+	// ★【迟到输入边界】已经结束或不属于当前激活的射击数据不能重新创建 ASC 旧缓存。
+	virtual void ServerSetReplicatedTargetData_Implementation(FGameplayAbilitySpecHandle AbilityHandle,
+		FPredictionKey AbilityOriginalPredictionKey, const FGameplayAbilityTargetDataHandle& TargetData,
+		FGameplayTag ApplicationTag, FPredictionKey CurrentPredictionKey) override;
 
 	// ==================== 生命值管理 ====================
 	// 只重置生命数据，不复活角色；广播期间的请求排在当前伤害通知之后执行。
@@ -107,9 +210,26 @@ protected:
 	bool bDeathBroadcast = false;
 
 private:
+	friend class UfpstrueHealthAttributeSet;
+	// 属性集以所属 Actor 为 Outer，ASC 只登记它；不能把 AttributeSet 嵌套在组件下面。
+	void EnsureHealthAttributes();
+	// Standalone 与服务器拥有生命写权限；客户端 API 不隐式转成服务器 RPC。
+	bool HasHealthAuthority() const;
+	// 在本地通知前提交兼容镜像，并为网络 Actor 请求更新；真实生命数值的复制归 GAS 属性集。
+	void CommitHealthSnapshot();
+	// 客户端先提交所有数值和死亡边沿，再发布血量与首次死亡通知。
+	UFUNCTION()
+	void OnRep_HealthSnapshot();
+
+	// GAS 接管后仅保留反射兼容镜像；不再独立复制，OnRep 入口只从真实属性集补齐通知。
+	UPROPERTY(Transient)
+	FFPReplicatedHealthSnapshot HealthSnapshot;
+	UPROPERTY(Transient)
+	TObjectPtr<UfpstrueHealthAttributeSet> HealthAttributes;
+
 	// 一个伤害事务先提交数值，再按 Damage -> Health -> Death 通知。
 	// 监听者重入的伤害/重置排队，不能改写外层死亡判定或令 HUD 收到倒序快照。
-	enum class EMutation : uint8 { Damage, Reset, ResetMaximum };
+	enum class EMutation : uint8 { Damage, Reset, ResetMaximum, Effect };
 	struct FMutation
 	{
 		EMutation Type;
@@ -117,6 +237,8 @@ private:
 		TWeakObjectPtr<AActor> Causer;
 		TWeakObjectPtr<AController> Instigator;
 		FFPDamageContext Context;
+		FGameplayEffectSpecHandle Effect;
+		FPredictionKey PredictionKey;
 	};
 	// 按值接纳伤害或重置；通知期间的新请求排队，最外层调用在当前线程依序排空。
 	void EnqueueMutation(const FMutation& Mutation);

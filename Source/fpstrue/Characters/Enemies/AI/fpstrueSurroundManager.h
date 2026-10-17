@@ -8,6 +8,11 @@
 
 class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
+class UEnvQuery;
+struct FEnvQueryResult;
+
+// 掩体查询按需异步执行；Pending 不等于找不到掩体。
+enum class EFPCoverQueryResult : uint8 { Pending, Found, Failed };
 
 // 单个包围槽的静态布局、占用者和 NavMesh 投影缓存。
 USTRUCT()
@@ -48,12 +53,17 @@ public:
 	bool TryAcquireAttackPermission(AfpstrueEnemyCharacter* Enemy);
 	// 攻击结束、死亡或退出时归还攻击名额。
 	void ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy);
-	// AIController 提交 MoveTo 前消费本帧预算，战斗请求可使用预留名额。
+	// AIController 提交 MoveTo 前消费 World 共用帧预算；多个玩家的 Manager 不会各增加一份额度。
 	bool TryConsumeMoveRequestBudget(bool bCombatPriority);
 	// 为敌人分配槽位，并返回更靠近玩家的攻击接近点。
 	bool GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation);
 	// 远距离追击读取共享玩家位置，避免每个 AI 重复采样目标。
 	bool GetSharedTargetSnapshot(FVector& OutLocation) const;
+
+	// 只使用调用者已知的威胁位置；首次申请查询，后续读取结果，不在每轮决策重复执行 EQS。
+	EFPCoverQueryResult FindOrRequestCover(AfpstrueEnemyCharacter* Enemy, const FVector& KnownThreatLocation, FVector& OutLocation);
+	// 撤退结束、死亡、失去控制或换目标时撤销查询及掩体占用。
+	void ReleaseCover(AfpstrueEnemyCharacter* Enemy);
 
 	// 清空槽位、攻击者、预算和目标缓存，供 GameMode 结束时调用。
 	void ResetManager();
@@ -123,8 +133,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Debug", meta = (ClampMin = "0.1"))
 	float DebugDrawInterval = 0.25f;
 
+	// 接近点共享查询；掩体按需查询。候选间距和提交上限独立于 MoveTo 预算。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|EQS", meta = (ClampMin = "50.0"))
+	float MinPositionSpacing = 90.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|EQS", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 MaxPendingCoverQueries = 4;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|EQS", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 MaxCoverQueriesPerFrame = 1;
+
 private:
+	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	friend class FFpstrueSurroundCacheLifecycleTest;
+	friend class FFpstrueEnemyLowHealthRetreatTest;
+	friend class FFpstrueMultiplayerPveBudgetTest;
 	// 根据内外环配置创建稳定槽位布局。
 	void BuildSlots();
 	// Timer 回调：按阈值刷新共享目标位置。
@@ -132,6 +153,10 @@ private:
 	void UpdateSharedTargetSnapshot(bool bForce);
 	// 批量把原始槽位和接近点投影到 NavMesh。
 	void RebuildProjectedSlotCache();
+	// 只发布属于当前目标和本轮查询的完整缓存；EQS 回调在游戏线程执行。
+	void HandleApproachQueryFinished(TSharedPtr<FEnvQueryResult> Result, uint32 Revision, FVector QueryTarget);
+	// 掩体结果还要核对敌人请求身份和几何占用，查询分数不等于已获得占用。
+	void HandleCoverQueryFinished(TSharedPtr<FEnvQueryResult> Result, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, uint32 Revision);
 	// 移除失效敌人的槽位和攻击名额，防止弱引用表膨胀。
 	void CleanupInvalidEntries();
 	// 按距离和内外环优先级选择最佳空闲槽位。
@@ -139,7 +164,7 @@ private:
 	// 内环空出时把合适的外环敌人提升进来。
 	void PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex);
 	// 根据玩家位置、槽位角度和半径计算未投影位置。
-	FVector CalculateRawSlotLocation(const FfpstrueSurroundSlot& Slot, float RadiusOverride = -1.0f) const;
+	// 此生成规则集中在 EQS Generator，不再保留第二个手写选点实现。
 	// 调试模式下绘制已投影槽位，并以颜色区分是否占用。
 	void DrawDebugSlots();
 
@@ -153,6 +178,7 @@ private:
 	double SharedTargetSnapshotTime = 0.0;
 	double NextNavigationRetryTime = 0.0;
 	double NavigationCacheTime = 0.0;
+	FVector PublishedTargetLocation = FVector::ZeroVector;
 
 	// 语法复习：TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
@@ -161,6 +187,29 @@ private:
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
 	uint64 MoveRequestBudgetFrame = MAX_uint64;
 	int32 MoveRequestsConsumedThisFrame = 0;
+	// 模板仅建立一次，参数使用请求快照；运行中不修改 EQS 已缓存的模板。
+	UPROPERTY(Transient)
+	TObjectPtr<UEnvQuery> ApproachQueryTemplate;
+	UPROPERTY(Transient)
+	TObjectPtr<UEnvQuery> CoverQueryTemplate;
+	int32 ApproachQueryId = INDEX_NONE;
+	uint32 PositionQueryRevision = 0;
+	double ApproachQueryStartedTime = 0.0;
+
+	struct FCoverRequest
+	{
+		FVector ThreatLocation = FVector::ZeroVector;
+		FVector Location = FVector::ZeroVector;
+		int32 QueryId = INDEX_NONE;
+		uint32 Revision = 0;
+		EFPCoverQueryResult State = EFPCoverQueryResult::Pending;
+		double StartedTime = 0.0;
+	};
+	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, FCoverRequest> CoverRequests;
+	uint32 NextCoverRevision = 0;
+	int32 PendingCoverQueries = 0;
+	uint64 CoverQueryBudgetFrame = MAX_uint64;
+	int32 CoverQueriesStartedThisFrame = 0;
 	FTimerHandle DebugDrawTimerHandle;
 	FTimerHandle SharedTargetTimerHandle;
 };
