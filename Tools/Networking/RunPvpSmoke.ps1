@@ -45,12 +45,174 @@ param(
     [bool]$IncludeReconnect = $true,
     [switch]$RenderedClients,
     [switch]$VisibleClients,
-    [switch]$DryRun
+    [switch]$MovingHit,
+    [switch]$WeakPolicyCorrectness,
+    [switch]$DryRun,
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
-if ($VisibleClients -and -not $RenderedClients) {
-    throw 'VisibleClients requires -RenderedClients; visible acceptance must use the real renderer.'
+function Assert-SmokeScenarioOptions([bool]$IncludePve, [bool]$IncludeReconnect,
+    [bool]$RenderedClients, [bool]$VisibleClients, [bool]$MovingHit, [bool]$DeepChecks) {
+    if ($VisibleClients -and -not $RenderedClients) {
+        throw 'VisibleClients requires -RenderedClients; visible acceptance must use the real renderer.'
+    }
+    if ($MovingHit -and -not $DeepChecks) { throw 'MovingHit requires DeepChecks; a launch without the paired damage evidence cannot pass this scenario.' }
+    if ($RenderedClients -and -not $IncludePve) {
+        throw 'RenderedClients verifies replicated enemies as well as the local player; keep IncludePve enabled.'
+    }
+    if ($IncludeReconnect -and -not $IncludePve) {
+        throw 'IncludeReconnect requires IncludePve; this recovery scenario verifies real offline AI damage before restoration.'
+    }
+}
+
+# SelfTest reads this script's real pure functions/configuration through its AST;
+# it never resolves an engine/project, starts processes, accesses SSH or writes evidence.
+if ($SelfTest) {
+    $SelfTokens = $null
+    $SelfParseErrors = $null
+    $SelfAst = [Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$SelfTokens, [ref]$SelfParseErrors)
+    if ($SelfParseErrors.Count -ne 0) { throw 'Smoke SelfTest could not parse its production script.' }
+    $ConfigNode = $SelfAst.Find({ param($Node)
+        $Node -is [Management.Automation.Language.AssignmentStatementAst] -and $Node.Left.Extent.Text -eq '$SmokeConfig'
+    }, $true)
+    if ($null -eq $ConfigNode) { throw 'Smoke SelfTest could not find its production scenario configuration.' }
+    . ([scriptblock]::Create($ConfigNode.Extent.Text))
+    foreach ($FunctionName in @('Get-SmokeShotIdentity', 'Get-SmokeShotLedger', 'Get-SmokeMovingHitEvidence', 'Get-SmokeWeakPolicyEvidence',
+        'Get-SmokeRequiredDeepEvidence', 'Test-SmokeFailureLog')) {
+        $FunctionNode = $SelfAst.Find({ param($Node)
+            $Node -is [Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $FunctionName
+        }, $true)
+        if ($null -eq $FunctionNode) { throw "Smoke SelfTest could not find production function $FunctionName." }
+        . ([scriptblock]::Create($FunctionNode.Extent.Text))
+    }
+    $SelfChecks = [Collections.Generic.List[string]]::new()
+    function Assert-SmokeSelfTest([string]$Name, [bool]$Condition) {
+        if (-not $Condition) { throw "Smoke SelfTest failed: $Name" }
+        $SelfChecks.Add($Name)
+    }
+    $Present = 'PVP_SMOKE CLIENT_SHOT_PRESENT ShotId=1 Session=1 Generation=1 Count=1 WeaponNetGuid=7'
+    $Ack = 'PVP_SMOKE CLIENT_SHOT_ACK ShotId=1 Session=1 Generation=1 Result=0 Outstanding=0 WeaponNetGuid=7'
+    $Accept = 'PVP_SMOKE SERVER_SHOT_ACCEPT ShotId=1 Session=1 Generation=1 Result=0 WeaponNetGuid=7'
+    $Client = $Present + "`n" + $Ack
+    $Ledger = Get-SmokeShotLedger $Client $Accept -RequireShots
+    Assert-SmokeSelfTest 'One predicted/accepted/acknowledged shot' ($Ledger.Complete -and $Ledger.Clean -and $Ledger.Accepted -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Present + "`n" + $Ack.Replace('Result=0', 'Result=10')) $Accept.Replace('ACCEPT', 'REJECT').Replace('Result=0', 'Result=10') -RequireShots
+    Assert-SmokeSelfTest 'Explicit cancellation is final, not an accepted shot' ($Ledger.Complete -and $Ledger.Clean -and $Ledger.Cancelled -eq 1 -and $Ledger.Accepted -eq 0)
+    foreach ($NonTerminal in @(1, 4)) {
+        $Ledger = Get-SmokeShotLedger ($Present + "`n" + $Ack.Replace('Result=0', "Result=$NonTerminal")) $Accept.Replace('ACCEPT', 'REJECT').Replace('Result=0', "Result=$NonTerminal") -RequireShots
+        Assert-SmokeSelfTest "Result $NonTerminal alone is not final" (-not $Ledger.Complete -and $Ledger.MissingFinalAck -eq 1)
+    }
+    $Ledger = Get-SmokeShotLedger $Present $Accept -RequireShots
+    Assert-SmokeSelfTest 'Missing owner ACK fails' (-not $Ledger.Complete -and $Ledger.MissingFinalAck -eq 1)
+    $Ledger = Get-SmokeShotLedger $Client '' -RequireShots
+    Assert-SmokeSelfTest 'Missing server verdict fails' (-not $Ledger.Complete -and $Ledger.ConflictingVerdicts -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Client + "`n" + $Ack.Replace('Result=0', 'Result=5')) $Accept -RequireShots
+    Assert-SmokeSelfTest 'Conflicting terminal ACKs fail' (-not $Ledger.Complete -and $Ledger.ConflictingVerdicts -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Client + "`n" + $Present) $Accept -RequireShots
+    Assert-SmokeSelfTest 'Repeated prediction presentation fails' (-not $Ledger.Complete -and $Ledger.DuplicatePresentations -eq 1)
+    $Ledger = Get-SmokeShotLedger $Client ($Accept + "`n" + $Accept) -RequireShots
+    Assert-SmokeSelfTest 'Repeated server execution fails' (-not $Ledger.Complete -and $Ledger.ConflictingVerdicts -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Client + "`n" + $Ack) $Accept -RequireShots
+    Assert-SmokeSelfTest 'Repeated identical ACK is idempotent' ($Ledger.Complete -and $Ledger.Accepted -eq 1)
+    $Ledger = Get-SmokeShotLedger '' ''
+    Assert-SmokeSelfTest 'Empty observer is explicitly not exercised' ($Ledger.Complete -and $Ledger.ExerciseStatus -eq 'NotExercised' -and $Ledger.Predicted -eq 0)
+    $Ledger = Get-SmokeShotLedger '' '' -RequireShots
+    Assert-SmokeSelfTest 'Empty active client fails' (-not $Ledger.Complete -and $Ledger.MissingRequiredShots)
+    $Ledger = Get-SmokeShotLedger $Ack $Accept
+    Assert-SmokeSelfTest 'Orphan owner ACK fails' (-not $Ledger.Complete -and $Ledger.OrphanAcknowledgements -eq 1)
+    $Ledger = Get-SmokeShotLedger $Client ($Accept + "`n" + $Accept.Replace('WeaponNetGuid=7', 'WeaponNetGuid=8')) -RequireShots
+    Assert-SmokeSelfTest 'Another client weapon is not this clients orphan server verdict' ($Ledger.Complete -and $Ledger.Accepted -eq 1)
+    $Ledger = Get-SmokeShotLedger $Client ($Accept + "`n" + $Accept.Replace('ShotId=1', 'ShotId=2')) -RequireShots
+    Assert-SmokeSelfTest 'An observed owner weapon cannot execute an unpredicted extra shot' (-not $Ledger.Complete -and $Ledger.OrphanServerVerdicts -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Client + "`n" + $Client.Replace('WeaponNetGuid=7', 'WeaponNetGuid=8')) ($Accept + "`n" + $Accept.Replace('WeaponNetGuid=7', 'WeaponNetGuid=8')) -RequireShots
+    Assert-SmokeSelfTest 'Equal shot numbers on different weapons remain distinct' ($Ledger.Complete -and $Ledger.Accepted -eq 2)
+    $Ledger = Get-SmokeShotLedger ($Client + "`n" + $Client.Replace('Generation=1', 'Generation=2')) ($Accept + "`n" + $Accept.Replace('Generation=1', 'Generation=2')) -RequireShots
+    Assert-SmokeSelfTest 'Equal shot numbers in different generations remain distinct' ($Ledger.Complete -and $Ledger.Accepted -eq 2)
+    $Ledger = Get-SmokeShotLedger ($Client + "`n" + $Client.Replace('Session=1', 'Session=2')) ($Accept + "`n" + $Accept.Replace('Session=1', 'Session=2')) -RequireShots
+    Assert-SmokeSelfTest 'Equal shot numbers in different sessions remain distinct' ($Ledger.Complete -and $Ledger.Accepted -eq 2)
+    $Ledger = Get-SmokeShotLedger ($Present + "`n" + $Ack.Replace('Outstanding=0', 'Outstanding=1')) $Accept -RequireShots
+    Assert-SmokeSelfTest 'Unsettled owner outstanding ledger fails' (-not $Ledger.Complete -and $Ledger.LastOutstanding -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Present + "`n" + $Ack.Replace('Outstanding=0 ', '')) $Accept -RequireShots
+    Assert-SmokeSelfTest 'Missing outstanding diagnostic fails' (-not $Ledger.Complete -and $Ledger.MissingStableIdentity -gt 0)
+    $Ledger = Get-SmokeShotLedger $Client.Replace('WeaponNetGuid=7', 'WeaponNetGuid=0') $Accept -RequireShots
+    Assert-SmokeSelfTest 'Zero weapon identity fails' (-not $Ledger.Complete -and $Ledger.MissingStableIdentity -gt 0)
+    $Ledger = Get-SmokeShotLedger $Client.Replace('Generation=1', 'Generation=0') $Accept -RequireShots
+    Assert-SmokeSelfTest 'Zero equipment generation fails' (-not $Ledger.Complete -and $Ledger.MissingStableIdentity -gt 0)
+    $Ledger = Get-SmokeShotLedger ($Client.Replace('Count=1', 'Count=0')) $Accept -RequireShots
+    Assert-SmokeSelfTest 'Zero presentation count fails' (-not $Ledger.Complete -and $Ledger.MissingStableIdentity -gt 0)
+    foreach ($DamagedNumber in @(
+        @{ Name = 'Fractional presentation count fails'; Client = $Client.Replace('Count=1', 'Count=1.5'); Server = $Accept },
+        @{ Name = 'Fractional result code fails'; Client = $Client.Replace('Result=0', 'Result=0.5'); Server = $Accept.Replace('Result=0', 'Result=0.5') },
+        @{ Name = 'Fractional outstanding count fails'; Client = $Client.Replace('Outstanding=0', 'Outstanding=0.5'); Server = $Accept },
+        @{ Name = 'Fractional generation fails'; Client = $Client.Replace('Generation=1', 'Generation=1.5'); Server = $Accept },
+        @{ Name = 'Fractional weapon identity fails'; Client = $Client.Replace('WeaponNetGuid=7', 'WeaponNetGuid=7.5'); Server = $Accept },
+        @{ Name = 'Out-of-range shot identity fails'; Client = $Client.Replace('ShotId=1', 'ShotId=4294967296'); Server = $Accept },
+        @{ Name = 'Out-of-range weapon identity fails'; Client = $Client.Replace('WeaponNetGuid=7', 'WeaponNetGuid=18446744073709551616'); Server = $Accept },
+        @{ Name = 'Out-of-range result code fails'; Client = $Client.Replace('Result=0', 'Result=999999999999999999999'); Server = $Accept },
+        @{ Name = 'Out-of-range outstanding count fails'; Client = $Client.Replace('Outstanding=0', 'Outstanding=999999999999999999999'); Server = $Accept },
+        @{ Name = 'Unknown result code fails'; Client = $Client.Replace('Result=0', 'Result=11'); Server = $Accept.Replace('Result=0', 'Result=11') }
+    )) {
+        $Ledger = Get-SmokeShotLedger $DamagedNumber.Client $DamagedNumber.Server -RequireShots
+        Assert-SmokeSelfTest $DamagedNumber.Name (-not $Ledger.Complete -and $Ledger.MissingStableIdentity -gt 0)
+    }
+    $QueuedAck = $Ack.Replace('Result=0', 'Result=1').Replace('Outstanding=0', 'Outstanding=1')
+    $QueuedServer = $Accept.Replace('ACCEPT', 'REJECT').Replace('Result=0', 'Result=1')
+    $DuplicateAck = $Ack.Replace('Result=0', 'Result=4').Replace('Outstanding=0', 'Outstanding=1')
+    $DuplicateServer = $Accept.Replace('ACCEPT', 'REJECT').Replace('Result=0', 'Result=4')
+    $Ledger = Get-SmokeShotLedger ($Present + "`n" + $QueuedAck + "`n" + $DuplicateAck + "`n" + $Ack) ($QueuedServer + "`n" + $DuplicateServer + "`n" + $Accept) -RequireShots
+    Assert-SmokeSelfTest 'Queued/duplicate diagnostics do not hide the later real terminal ACK' ($Ledger.Complete -and $Ledger.Accepted -eq 1)
+    $Ledger = Get-SmokeShotLedger ($Present + "`n" + $Ack.Replace('Result=0', 'Result=5')) $Accept.Replace('ACCEPT', 'REJECT').Replace('Result=0', 'Result=5') -RequireShots
+    Assert-SmokeSelfTest 'Time rejection is accounted but not clean acceptance' ($Ledger.Complete -and -not $Ledger.Clean -and $Ledger.UnexpectedRejections -eq 1)
+    $Moving = Get-SmokeMovingHitEvidence $false '' @()
+    Assert-SmokeSelfTest 'Unrequested moving-hit is not a successful test' ($Moving.Status -eq 'NotRequested' -and $null -eq $Moving.Passed)
+    $Moving = Get-SmokeMovingHitEvidence $true 'PVP_SMOKE MOVING_HIT_SERVER PASS' @('')
+    Assert-SmokeSelfTest 'Moving-hit needs both server and client evidence' (-not $Moving.Passed -and $Moving.Status -eq 'MissingEvidence')
+    $Moving = Get-SmokeMovingHitEvidence $true 'PVP_SMOKE MOVING_HIT_SERVER PASS' @('PVP_SMOKE MOVING_HIT_CLIENT PASS')
+    Assert-SmokeSelfTest 'Requested moving-hit uses paired evidence' ($Moving.Passed -and $Moving.Status -eq 'Passed')
+    Assert-SmokeSelfTest 'Unrequested moving-hit is not in the required gate' ('Deep.MovingHit' -notin @(Get-SmokeRequiredDeepEvidence $false))
+    Assert-SmokeSelfTest 'Requested moving-hit is in the required gate' ('Deep.MovingHit' -in @(Get-SmokeRequiredDeepEvidence $true))
+    Assert-SmokeScenarioOptions $true $true $false $false $false $true
+    Assert-SmokeSelfTest 'Default scenario options are valid' $true
+    foreach ($InvalidOptions in @(
+        @{ Name = 'Recovery requires offline PvE damage'; Values = @($false, $true, $false, $false, $false, $true) },
+        @{ Name = 'Moving-hit requires deep checks'; Values = @($true, $false, $false, $false, $true, $false) },
+        @{ Name = 'Visible clients require rendered clients'; Values = @($true, $false, $false, $true, $false, $true) },
+        @{ Name = 'Rendered scenario requires PvE'; Values = @($false, $false, $true, $false, $false, $true) }
+    )) {
+        $Rejected = $false
+        $InvalidValues = $InvalidOptions.Values
+        try { Assert-SmokeScenarioOptions @InvalidValues } catch { $Rejected = $true }
+        Assert-SmokeSelfTest $InvalidOptions.Name $Rejected
+    }
+    foreach ($FailureLog in @(('PVP_SMOKE PASS=Final' + "`n" + 'Fatal error: late crash'),
+        'PVP_VISUAL FAIL', 'Assertion failed: invariant', 'Unhandled Exception: access violation',
+        'Blueprint Runtime Error', 'LogScript: Warning: Accessed None', 'OOM-killer', 'Memory cgroup out of memory',
+        'Out of memory: Killed process', 'Ran out of memory allocating')) {
+        Assert-SmokeSelfTest ('Failure marker: ' + ($FailureLog -replace '[\r\n]+', ' ')) (Test-SmokeFailureLog $FailureLog)
+    }
+    Assert-SmokeSelfTest 'Ordinary PASS is not a failure' (-not (Test-SmokeFailureLog 'PVP_SMOKE PASS=Final'))
+    $PolicyServer = "PVP_SMOKE SERVER_SHOT_ACCEPT ShotId=1 Session=1 Generation=1 Result=0 Ammo=29 WeaponNetGuid=7`n" +
+        "PVP_SMOKE SHOT_COMMIT ShotId=1 Session=1 Generation=1 WeaponNetGuid=7 AmmoBefore=30 AmmoAfter=29`n" +
+        "PVP_SMOKE SERVER_SHOT_REJECT ShotId=2 Session=1 Generation=1 Result=5 Ammo=29 WeaponNetGuid=7`n" +
+        "PVP_SMOKE SHOT_TIME_REJECT ShotId=2 Session=1 Generation=1 WeaponNetGuid=7 Stage=Admission Reason=Stale AgeMs=250.0 AllowedAgeMs=220.0`n" +
+        'PVP_SMOKE SHOT_REJECT_BOUNDARY ShotId=2 Session=1 Generation=1 WeaponNetGuid=7 AmmoBefore=29 AmmoAfter=29 ReserveBefore=90 ReserveAfter=90 ExecutedBefore=1 ExecutedAfter=1'
+    $PolicyClient = "PVP_SMOKE CLIENT_SHOT_ACK ShotId=2 Session=1 Generation=1 Result=5 Ammo=29 Outstanding=0 WeaponNetGuid=7`n" +
+        "PVP_SMOKE CLIENT_PVE_COMPLETE PASS`nPVP_SMOKE WEAK_POLICY_SETTLED Ammo=29 Reserve=90 Outstanding=0 Firing=0 Reloading=0 Aiming=0 Sprinting=0"
+    Assert-SmokeSelfTest 'Measured stale rejection with unchanged state is policy-correct' (Get-SmokeWeakPolicyEvidence $PolicyServer @($PolicyClient)).Passed
+    Assert-SmokeSelfTest 'Execution stale is checked against its measured execution budget' (Get-SmokeWeakPolicyEvidence $PolicyServer.Replace('Stage=Admission','Stage=Execution') @($PolicyClient)).Passed
+    foreach ($BadServer in @($PolicyServer.Replace('Reason=Stale','Reason=Future'),$PolicyServer.Replace('AmmoAfter=29 ReserveBefore','AmmoAfter=28 ReserveBefore'),
+        $PolicyServer.Replace('AgeMs=250.0','AgeMs=200.0'),$PolicyServer.Replace('Result=5','Result=7'),$PolicyServer.Replace('AmmoBefore=30 AmmoAfter=29','AmmoBefore=30 AmmoAfter=28'))) {
+        Assert-SmokeSelfTest 'Policy rejects future/within-budget/rate/mutation/extra-consumption violations' (-not (Get-SmokeWeakPolicyEvidence $BadServer @($PolicyClient)).Passed)
+    }
+    Assert-SmokeSelfTest 'Policy requires actual stale exercise' (-not (Get-SmokeWeakPolicyEvidence '' @($PolicyClient)).Passed)
+    [pscustomobject]@{ Mode = 'SelfTest'; Passed = $true; Checks = $SelfChecks.Count; Scenarios = @($SelfChecks)
+        Scope = 'Offline production-parser/options/evidence regression only; no UE, game process, network or disk output. Not gameplay/network acceptance.' } | ConvertTo-Json -Depth 4
+    return
+}
+Assert-SmokeScenarioOptions $IncludePve $IncludeReconnect ([bool]$RenderedClients) ([bool]$VisibleClients) ([bool]$MovingHit) $DeepChecks
+if ($WeakPolicyCorrectness -and (-not $DeepChecks -or -not $IncludePve -or -not $IncludeReconnect)) {
+    throw 'WeakPolicyCorrectness requires all deep/PvE/reconnect checks; it is separate from strict zero-unexpected-rejection experience acceptance.'
 }
 if (-not $ProjectRoot) { $ProjectRoot = Join-Path $PSScriptRoot '..\..' }
 # Keep the scenario contract in one place. C++ emits these only after checking
@@ -197,9 +359,6 @@ if ($Map -notmatch '^/Game/[A-Za-z0-9_/]+(?:\.[A-Za-z0-9_]+)?$') {
 if ($PacketLagVarianceMs -gt 0 -and $PacketLagMs -eq 0) {
     throw 'PacketLagVarianceMs requires a nonzero PacketLagMs.'
 }
-if ($RenderedClients -and -not $IncludePve) {
-    throw 'RenderedClients verifies replicated enemies as well as the local player; keep IncludePve enabled.'
-}
 
 $RunId = (Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $OutputDirectory = Join-Path $ProjectRoot ('Saved\Networking\PvpSmoke_' + $RunId)
@@ -212,6 +371,8 @@ $SharedArguments = @(
 )
 if ($IncludePve) { $SharedArguments += '-PvpSmokePve' }
 if ($IncludeReconnect) { $SharedArguments += '-PvpSmokeReconnect' }
+if ($WeakPolicyCorrectness) { $SharedArguments += '-PvpWeakPolicyCorrectness' }
+if ($MovingHit) { $SharedArguments += '-PvpSmokeMovingHit' }
 $ClientSharedArguments = @($SharedArguments)
 if ($RenderedClients) {
     # This removes NullRHI only from clients. RenderOffscreen still renders the
@@ -287,6 +448,9 @@ if ($DryRun) {
         IncludeReconnect = $IncludeReconnect
         RenderedClients = [bool]$RenderedClients
         VisibleClients = [bool]$VisibleClients
+        MovingHit = [bool]$MovingHit
+        MovingHitStatus = if ($MovingHit) { 'Requested' } else { 'NotRequested' }
+        MemoryRequired = if ($DeepChecks) { 'Server: at least two distinct player Pawns with populated history; every diagnostic row must have at most 32*64 reserved shapes, shape stride at most 96 bytes, history heap capacity at most 32*64*stride, and no first-person main AnimInstance or component tick. Every original/restored client needs a PVP_MEMORY row and zero history capacity. Optional post-process instances are reported, not required to be absent. This is shape-buffer heap accounting, not process RAM or a memory high-water measurement.' } else { 'Not gated without DeepChecks.' }
         VisualRequired = if ($RenderedClients) { 'Both initial clients and, when requested, the restored client must emit matching PVP_VISUAL_READY/CAPTURE markers, then produce actual 1280x720 PNGs in their own capture directories. PNG dimensions/hash are checked; human visual review is separate.' } else { $null }
         PveRequired = if ($IncludePve) { $SmokeConfig.PveServerMarkers + @('Both CLIENT_PVE_REPLICATED PASS; one CLIENT_PVE_COMPLETE PASS') } else { @() }
         PerformanceIntegrationRequired = if ($IncludePve) { 'Dedicated server must start/populate Gameplay-only scheduling; each original and restored client must start/apply its own populated presentation budget without server Gameplay viewpoints. Dedicated server must never apply render/sharing work. Sharing follower markers are optional diagnostics, not a one-enemy smoke gate. NullRHI application markers do not prove rendered frames.' } else { $null }
@@ -336,6 +500,302 @@ $ReconnectBaseline = $null
 $ReconnectOfflineDamageIndex = -1
 $ReconnectStoppedUtc = $null
 $VisualCaptures = @{}
+$ShotLedgers = @{}
+$MemoryAccounting = $null
+
+# These diagnostics measure only the allocated capacity of historical collision
+# shape buffers. They are not process working set, asset/GPU memory or a sampled
+# high-water mark. Keep limits independent of one particular PhysicsAsset.
+function Get-SmokeMemoryEndpoint([string]$Text, [string]$Role) {
+    $Rows = @([regex]::Matches($Text, 'PVP_MEMORY\s+[^\r\n]+'))
+    $Pawns = @{}
+    $PopulatedPawns = @{}
+    $Violations = [Collections.Generic.List[string]]::new()
+    $MalformedRows = 0
+    $ValidRows = 0
+    $MaxHistoryBytes = [long]0
+    $MaxReservedShapes = [long]0
+    $MaxShapeStride = [long]0
+    $MaxViewmodelAnim = [long]0
+    $MaxViewmodelTick = [long]0
+    $PostProcessRows = 0
+    $MaxViewmodelPostProcess = [long]0
+    foreach ($Row in $Rows) {
+        $Fields = @{}
+        foreach ($Field in [regex]::Matches($Row.Value, '\b(Pawn|NetMode|HistoryBytes|ReservedShapes|ShapeStride|ViewmodelAnim|ViewmodelTick|ViewmodelPostProcess)=(\S+)')) {
+            $Fields[$Field.Groups[1].Value] = $Field.Groups[2].Value
+        }
+        $Numbers = @{}
+        $WellFormed = $Fields.ContainsKey('Pawn')
+        foreach ($Name in @('NetMode', 'HistoryBytes', 'ReservedShapes', 'ShapeStride', 'ViewmodelAnim', 'ViewmodelTick')) {
+            $Value = [long]0
+            if (-not $Fields.ContainsKey($Name) -or $Fields[$Name] -notmatch '^\d+$' -or
+                -not [long]::TryParse($Fields[$Name], [ref]$Value)) {
+                $WellFormed = $false
+            }
+            else { $Numbers[$Name] = $Value }
+        }
+        if ($Fields.ContainsKey('ViewmodelPostProcess')) {
+            $Value = [long]0
+            if ($Fields['ViewmodelPostProcess'] -notmatch '^[01]$' -or
+                -not [long]::TryParse($Fields['ViewmodelPostProcess'], [ref]$Value)) { $WellFormed = $false }
+            else {
+                $PostProcessRows++
+                $MaxViewmodelPostProcess = [Math]::Max($MaxViewmodelPostProcess, $Value)
+            }
+        }
+        if (-not $WellFormed) {
+            $MalformedRows++
+            $Violations.Add('Malformed or out-of-range diagnostic row')
+            continue
+        }
+        $ValidRows++
+        $Pawns[$Fields['Pawn']] = $true
+        $MaxHistoryBytes = [Math]::Max($MaxHistoryBytes, $Numbers['HistoryBytes'])
+        $MaxReservedShapes = [Math]::Max($MaxReservedShapes, $Numbers['ReservedShapes'])
+        $MaxShapeStride = [Math]::Max($MaxShapeStride, $Numbers['ShapeStride'])
+        $MaxViewmodelAnim = [Math]::Max($MaxViewmodelAnim, $Numbers['ViewmodelAnim'])
+        $MaxViewmodelTick = [Math]::Max($MaxViewmodelTick, $Numbers['ViewmodelTick'])
+        $ExpectedNetMode = if ($Role -eq 'Server') { 1 } else { 3 }
+        if ($Numbers['NetMode'] -ne $ExpectedNetMode) { $Violations.Add('Unexpected NetMode for ' + $Fields['Pawn']) }
+        if ($Numbers['ShapeStride'] -lt 1 -or $Numbers['ShapeStride'] -gt 96 -or
+            $Numbers['ReservedShapes'] -gt (32 * 64) -or
+            $Numbers['HistoryBytes'] -gt (32 * 64 * [decimal]$Numbers['ShapeStride'])) {
+            $Violations.Add('Historical shape-buffer bound exceeded for ' + $Fields['Pawn'])
+        }
+        if ($Numbers['ViewmodelAnim'] -notin @(0, 1) -or $Numbers['ViewmodelTick'] -notin @(0, 1)) {
+            $Violations.Add('Invalid viewmodel boolean for ' + $Fields['Pawn'])
+        }
+        if ($Role -eq 'Server') {
+            if ($Numbers['HistoryBytes'] -gt 0 -and $Numbers['ReservedShapes'] -gt 0) { $PopulatedPawns[$Fields['Pawn']] = $true }
+            if ($Numbers['ViewmodelAnim'] -ne 0 -or $Numbers['ViewmodelTick'] -ne 0) {
+                $Violations.Add('Dedicated-server viewmodel main animation or tick enabled for ' + $Fields['Pawn'])
+            }
+        }
+        elseif ($Numbers['HistoryBytes'] -ne 0) { $Violations.Add('Client allocated authority-only hit history for ' + $Fields['Pawn']) }
+    }
+    if ($Role -eq 'Server' -and $PopulatedPawns.Count -lt 2) { $Violations.Add('Fewer than two distinct Pawns with populated server history') }
+    if ($Role -ne 'Server' -and $ValidRows -lt 1) { $Violations.Add('No valid client memory diagnostic') }
+    return [pscustomobject]@{
+        Role = $Role; ObservedRows = $Rows.Count; ValidRows = $ValidRows; MalformedRows = $MalformedRows
+        DistinctPawns = $Pawns.Count; PopulatedHistoryPawns = $PopulatedPawns.Count
+        MaxHistoryBytes = $MaxHistoryBytes; MaxReservedShapes = $MaxReservedShapes; MaxShapeStride = $MaxShapeStride
+        MaxViewmodelMainAnimInstances = $MaxViewmodelAnim; MaxViewmodelTickEnabled = $MaxViewmodelTick
+        PostProcessObservedRows = $PostProcessRows
+        MaxViewmodelPostProcessInstances = if ($PostProcessRows -gt 0) { $MaxViewmodelPostProcess } else { $null }
+        ViolationCount = $Violations.Count; ViolationExamples = @($Violations | Select-Object -Unique -First 8)
+        Verified = $Violations.Count -eq 0
+    }
+}
+
+# Account for every predicted round, not only one successful exchange. Weapon
+# NetGUID separates independently spawned guns whose local shot/session numbers
+# may coincide. A rejected request is reported separately from a collision miss.
+function Get-SmokeShotIdentity([string]$Record) {
+    $Identity = [regex]::Match($Record, 'ShotId=(\d+)\s+Session=(\d+)\s+Generation=(\d+)(?=\s|$)')
+    $Weapon = [regex]::Match($Record, '\bWeaponNetGuid=(\d+)(?=\s|$)')
+    if (-not $Identity.Success -or -not $Weapon.Success) { return $null }
+    [uint32]$Shot = 0
+    [uint32]$Session = 0
+    [uint32]$Generation = 0
+    [uint64]$WeaponGuid = 0
+    if (-not [uint32]::TryParse($Identity.Groups[1].Value, [ref]$Shot) -or $Shot -eq 0 -or $Shot -gt [int]::MaxValue -or
+        -not [uint32]::TryParse($Identity.Groups[2].Value, [ref]$Session) -or $Session -eq 0 -or
+        -not [uint32]::TryParse($Identity.Groups[3].Value, [ref]$Generation) -or $Generation -eq 0 -or
+        -not [uint64]::TryParse($Weapon.Groups[1].Value, [ref]$WeaponGuid) -or $WeaponGuid -eq 0) { return $null }
+    return ('{0}:{1}:{2}:{3}' -f $WeaponGuid, $Generation, $Session, $Shot)
+}
+
+function Get-SmokeShotLedger([string]$ClientText, [string]$ServerText, [switch]$RequireShots) {
+    $Predictions = @{}
+    $Acknowledgements = @{}
+    $ServerVerdicts = @{}
+    $MissingIdentity = 0
+    $LastOutstanding = -1
+    foreach ($Record in [regex]::Matches($ClientText, 'PVP_SMOKE\s+CLIENT_SHOT_(PRESENT|ACK)\s+[^\r\n]+')) {
+        $Key = Get-SmokeShotIdentity $Record.Value
+        if ($null -eq $Key) {
+            $MissingIdentity++
+            continue
+        }
+        if ($Record.Groups[1].Value -eq 'PRESENT') {
+            $Count = [regex]::Match($Record.Value, '\bCount=(\S+)')
+            [int]$PresentationCount = 0
+            if (-not $Count.Success -or -not [int]::TryParse($Count.Groups[1].Value, [ref]$PresentationCount) -or $PresentationCount -ne 1) {
+                $MissingIdentity++
+                continue
+            }
+            if (-not $Predictions.ContainsKey($Key)) { $Predictions[$Key] = 0 }
+            $Predictions[$Key] += $PresentationCount
+        }
+        else {
+            $Result = [regex]::Match($Record.Value, '\bResult=(\S+)')
+            $Outstanding = [regex]::Match($Record.Value, '\bOutstanding=(\S+)')
+            [int]$ResultCode = -1
+            [int]$OutstandingCount = -1
+            if (-not $Result.Success -or -not [int]::TryParse($Result.Groups[1].Value, [ref]$ResultCode) -or $ResultCode -notin 0..10 -or
+                -not $Outstanding.Success -or -not [int]::TryParse($Outstanding.Groups[1].Value, [ref]$OutstandingCount) -or $OutstandingCount -lt 0) {
+                $MissingIdentity++
+                continue
+            }
+            if (-not $Acknowledgements.ContainsKey($Key)) { $Acknowledgements[$Key] = @() }
+            $Acknowledgements[$Key] += $ResultCode
+            $LastOutstanding = $OutstandingCount
+        }
+    }
+    foreach ($Record in [regex]::Matches($ServerText, 'PVP_SMOKE\s+SERVER_SHOT_(ACCEPT|REJECT)\s+[^\r\n]+')) {
+        $Key = Get-SmokeShotIdentity $Record.Value
+        $Result = [regex]::Match($Record.Value, '\bResult=(\S+)')
+        [int]$ResultCode = -1
+        if ($null -eq $Key -or -not $Result.Success -or -not [int]::TryParse($Result.Groups[1].Value, [ref]$ResultCode) -or
+            $ResultCode -notin 0..10 -or ($Record.Groups[1].Value -eq 'ACCEPT') -ne ($ResultCode -eq 0)) { $MissingIdentity++; continue }
+        if (-not $ServerVerdicts.ContainsKey($Key)) { $ServerVerdicts[$Key] = @() }
+        $ServerVerdicts[$Key] += $ResultCode
+    }
+    # ACKs are already scoped to this owner's log. Do not classify other
+    # clients' independent weapons in the shared Server log as orphan requests.
+    $OrphanAcknowledgements = @($Acknowledgements.Keys | Where-Object { -not $Predictions.ContainsKey($_) })
+    $ObservedWeapons = @{}
+    foreach ($Key in @($Predictions.Keys) + @($Acknowledgements.Keys)) { $ObservedWeapons[$Key.Split(':')[0]] = $true }
+    $OrphanServerVerdicts = @($ServerVerdicts.Keys | Where-Object {
+        $ObservedWeapons.ContainsKey($_.Split(':')[0]) -and -not $Predictions.ContainsKey($_) -and
+        @($ServerVerdicts[$_] | Where-Object { $_ -notin @(1, 4) }).Count -gt 0
+    })
+    $Reasons = @{}
+    $NamedReasons = @{}
+    $ResultNames = @('Accepted', 'Queued', 'InvalidContext', 'InvalidIdentity', 'Duplicate', 'InvalidTime', 'InvalidAim', 'RateLimited', 'Busy', 'NoAmmo', 'Cancelled')
+    $Missing = @()
+    $Conflicts = @()
+    $DuplicatePresentations = 0
+    $Accepted = 0
+    $Cancelled = 0
+    $UnexpectedRejections = 0
+    foreach ($Key in $Predictions.Keys) {
+        if ($Predictions[$Key] -ne 1) { $DuplicatePresentations++ }
+        # Queued and Duplicate are not a new terminal verdict for the original
+        # request. The original Accepted/rejection must still reach its owner.
+        $Final = if ($Acknowledgements.ContainsKey($Key)) { @($Acknowledgements[$Key] | Where-Object { $_ -notin @(1, 4) } | Select-Object -Unique) } else { @() }
+        $ServerFinal = if ($ServerVerdicts.ContainsKey($Key)) { @($ServerVerdicts[$Key] | Where-Object { $_ -notin @(1, 4) } | Select-Object -Unique) } else { @() }
+        if ($Final.Count -eq 0) { $Missing += $Key; continue }
+        if ($Final.Count -ne 1 -or $ServerFinal.Count -ne 1 -or $Final[0] -ne $ServerFinal[0]) {
+            $Conflicts += $Key
+            continue
+        }
+        $Result = [int]$Final[0]
+        if (-not $Reasons.ContainsKey([string]$Result)) { $Reasons[[string]$Result] = 0 }
+        $Reasons[[string]$Result]++
+        $ResultName = if ($Result -lt $ResultNames.Count) { $ResultNames[$Result] } else { 'Unknown' + $Result }
+        if (-not $NamedReasons.ContainsKey($ResultName)) { $NamedReasons[$ResultName] = 0 }
+        $NamedReasons[$ResultName]++
+        if ($Result -eq 0) {
+            $Accepted++
+            if (@($ServerVerdicts[$Key] | Where-Object { $_ -eq 0 }).Count -ne 1) { $Conflicts += $Key }
+        }
+        elseif ($Result -eq 10) { $Cancelled++ }
+        else { $UnexpectedRejections++ }
+    }
+    $MissingRequiredShots = [bool]$RequireShots -and $Predictions.Count -eq 0
+    $Complete = $Missing.Count -eq 0 -and $Conflicts.Count -eq 0 -and $DuplicatePresentations -eq 0 -and
+        $MissingIdentity -eq 0 -and $OrphanAcknowledgements.Count -eq 0 -and $OrphanServerVerdicts.Count -eq 0 -and -not $MissingRequiredShots -and
+        ($Predictions.Count -eq 0 -or $LastOutstanding -eq 0)
+    return [pscustomobject]@{
+        Predicted = $Predictions.Count; Accepted = $Accepted; Cancelled = $Cancelled
+        UnexpectedRejections = $UnexpectedRejections; ResultCounts = $Reasons; OutcomeCounts = $NamedReasons
+        MissingFinalAck = $Missing.Count; ConflictingVerdicts = $Conflicts.Count
+        DuplicatePresentations = $DuplicatePresentations; MissingStableIdentity = $MissingIdentity
+        OrphanAcknowledgements = $OrphanAcknowledgements.Count
+        OrphanAckExamples = @($OrphanAcknowledgements | Select-Object -First 12)
+        OrphanServerVerdicts = $OrphanServerVerdicts.Count
+        OrphanServerExamples = @($OrphanServerVerdicts | Select-Object -First 12)
+        RequiredShots = [bool]$RequireShots; MissingRequiredShots = $MissingRequiredShots
+        ExerciseStatus = if ($Predictions.Count -eq 0) { 'NotExercised' } else { 'Exercised' }
+        LastOutstanding = $LastOutstanding
+        MissingExamples = @($Missing | Select-Object -First 12)
+        ConflictExamples = @($Conflicts | Select-Object -First 12)
+        Complete = $Complete
+        Clean = $UnexpectedRejections -eq 0
+        Interpretation = 'Accepted is an executed shot, not necessarily a collision hit; explicit time/capacity rejection is not a geometry miss. Result 10 is an explicit cancellation, not a successful shot.'
+    }
+}
+
+# Keep "not requested" separate from a passed scenario. Runtime gating and the
+# offline regression use the same paired server/client evidence calculation.
+function Get-SmokeMovingHitEvidence([bool]$Requested, [string]$ServerText, [string[]]$ClientTexts) {
+    if (-not $Requested) { return [pscustomobject]@{ Status = 'NotRequested'; Passed = $null } }
+    $Paired = $ServerText -match 'PVP_SMOKE\s+MOVING_HIT_SERVER PASS\b' -and
+        @($ClientTexts | Where-Object { $_ -match 'PVP_SMOKE\s+MOVING_HIT_CLIENT PASS\b' }).Count -gt 0
+    return [pscustomobject]@{ Status = if ($Paired) { 'Passed' } else { 'MissingEvidence' }; Passed = [bool]$Paired }
+}
+
+function Get-SmokeRequiredDeepEvidence([bool]$RequireMovingHit) {
+    @('Server.DedicatedIdentity', 'Server.Displacement', 'Deep.BothClientClocks',
+        'Deep.RemoteDisplacement', 'Deep.AcceptAckRewindSameShot', 'Deep.NoRepeatedPresentation',
+        'Deep.AllPredictionsFinal', 'Deep.NoUnexpectedShotRejections',
+        'Server.MemoryAccounting', 'Deep.ClientMemoryAccounting')
+    if ($RequireMovingHit) { 'Deep.MovingHit' }
+}
+
+# A distinct policy check does not turn the strict zero-rejection gate green.
+# Every stale denial needs admission-time evidence AND an unchanged mutation
+# boundary; future/identity/rate/unknown denials are never waived.
+function Get-SmokeWeakPolicyEvidence([string]$ServerText,[string[]]$ClientTexts) {
+    $Failures = [Collections.Generic.List[string]]::new()
+    $TimeRows = @{}; $Boundaries = @{}; $Commits = @{}
+    foreach ($item in @(@{Marker='SHOT_TIME_REJECT';Table=$TimeRows},@{Marker='SHOT_REJECT_BOUNDARY';Table=$Boundaries},@{Marker='SHOT_COMMIT';Table=$Commits})) {
+        foreach ($record in [regex]::Matches($ServerText, ('PVP_SMOKE\s+'+$item.Marker+'\s+[^\r\n]+'))) {
+            $key = Get-SmokeShotIdentity $record.Value
+            if ($key) { $item.Table[$key] = $record.Value }
+        }
+    }
+    $Rejected = 0; $MeasuredStale = 0; $Accepted = 0
+    foreach ($record in [regex]::Matches($ServerText, 'PVP_SMOKE\s+SERVER_SHOT_(ACCEPT|REJECT)\s+[^\r\n]+')) {
+        $key = Get-SmokeShotIdentity $record.Value
+        if (-not $key) { $Failures.Add('Server verdict lacks a valid stable identity.'); continue }
+        $result = [regex]::Match($record.Value,'\bResult=(\d+)').Groups[1].Value
+        if ($result -in @('1','4')) { continue }
+        if ($result -eq '0') {
+            $Accepted++
+            $commit = $Commits[$key]
+            if (-not $commit -or $commit -notmatch '\bAmmoBefore=(\d+) AmmoAfter=(\d+)\b' -or [int]$Matches[2] -ne [int]$Matches[1]-1) {
+                $Failures.Add('Accepted shot lacks exactly-one-ammo commit: '+$key)
+            }
+            continue
+        }
+        $Rejected++
+        if ($result -ne '5') { $Failures.Add('Non-stale terminal rejection: '+$key+' Result='+$result); continue }
+        $time = $TimeRows[$key]; $boundary = $Boundaries[$key]
+        if (-not $time -or $time -notmatch '\bStage=(?:Admission|Execution) Reason=Stale AgeMs=([\d.]+) AllowedAgeMs=([\d.]+)\b' -or
+            [double]::Parse($Matches[1],[Globalization.CultureInfo]::InvariantCulture) -le [double]::Parse($Matches[2],[Globalization.CultureInfo]::InvariantCulture)) {
+            $Failures.Add('Rejection lacks measured stale timing: '+$key)
+        } else { $MeasuredStale++ }
+        if (-not $boundary -or $boundary -notmatch '\bAmmoBefore=(\d+) AmmoAfter=(\d+) ReserveBefore=(\d+) ReserveAfter=(\d+) ExecutedBefore=(\d+) ExecutedAfter=(\d+)\b' -or
+            $Matches[1] -ne $Matches[2] -or $Matches[3] -ne $Matches[4] -or $Matches[5] -ne $Matches[6]) {
+            $Failures.Add('Rejection mutation boundary is missing or changed: '+$key)
+        }
+        $parts = $key.Split(':')
+        if ($ServerText -match ('PVP_SMOKE\s+REWIND ShotId='+$parts[3]+'\b[^\r\n]*WeaponNetGuid='+$parts[0]+'\b')) {
+            $Failures.Add('Rejected shot entered authoritative trace: '+$key)
+        }
+    }
+    $Settled = 0
+    foreach ($text in $ClientTexts) {
+        if ($text -notmatch 'PVP_SMOKE\s+CLIENT_PVE_COMPLETE PASS') { continue }
+        $row = [regex]::Matches($text,'PVP_SMOKE\s+WEAK_POLICY_SETTLED Ammo=(\d+) Reserve=(\d+) Outstanding=0 Firing=0 Reloading=0 Aiming=0 Sprinting=0\b') | Select-Object -Last 1
+        $ack = [regex]::Matches($text,'PVP_SMOKE\s+CLIENT_SHOT_ACK[^\r\n]*Result=\d+ Ammo=(\d+)[^\r\n]*Outstanding=0\b') | Select-Object -Last 1
+        if ($null -eq $row -or $null -eq $ack -or $row.Groups[1].Value -ne $ack.Groups[1].Value) {
+            $Failures.Add('Owner did not settle to final acknowledged ammunition and released actions.')
+        } else { $Settled++ }
+    }
+    if ($Accepted -lt 1) { $Failures.Add('No real accepted shot was exercised.') }
+    if ($Rejected -lt 1) { $Failures.Add('Stale policy was not exercised; a no-rejection run is not this boundary test.') }
+    if ($Settled -lt 1) { $Failures.Add('No active owner settled after real PvE combat.') }
+    [pscustomobject]@{Passed=($Failures.Count-eq 0);Accepted=$Accepted;TerminalRejected=$Rejected;MeasuredStaleRejected=$MeasuredStale;SettledOwners=$Settled;Failures=@($Failures);
+        Scope='Admission/execution-age policy and rejection cleanup only. Not zero-rejection experience acceptance, transport optimization, hit-rate or per-packet retransmission attribution.'}
+}
+
+function Test-SmokeFailureLog([string]$Text) {
+    return $Text -match $SmokeConfig.Failure -or $Text -match $SmokeConfig.ExplicitOom
+}
 
 function Invoke-SmokeSsh([string]$Command) {
     # OpenSSH receives paths as separate native arguments; no key contents,
@@ -554,8 +1014,7 @@ function Assert-SmokeRunning {
     if ($IsRemote -and $RemoteOwned -and $RemoteActiveState -notin @('activating', 'active', 'reloading')) {
         throw "The owned remote Server unit is $RemoteActiveState before acceptance completed. Read $ServerLog."
     }
-    if ($IsRemote -and ((Read-SmokeLog $ServerLog) -match $SmokeConfig.Failure -or
-        (Read-SmokeLog $ServerLog) -match $SmokeConfig.ExplicitOom)) {
+    if ($IsRemote -and (Test-SmokeFailureLog (Read-SmokeLog $ServerLog))) {
         throw "Remote Server reported a smoke failure or crash. Read $ServerLog."
     }
     if ($IncludePve -and (Read-SmokeLog $ServerLog) -match $SmokeConfig.ServerForbiddenRender) {
@@ -566,7 +1025,7 @@ function Assert-SmokeRunning {
         if ($Entry.Process.HasExited -and -not $Entry.ExpectedExit) {
             throw "$($Entry.Name) exited before all acceptance checks passed. Read $($Entry.Log)."
         }
-        if ((Read-SmokeLog $Entry.Log) -match $SmokeConfig.Failure -or (Read-SmokeLog $Entry.Log) -match $SmokeConfig.ExplicitOom) {
+        if (Test-SmokeFailureLog (Read-SmokeLog $Entry.Log)) {
             throw "$($Entry.Name) reported a smoke failure or crash. Read $($Entry.Log)."
         }
         if ($ExecutionMode -eq 'Packaged' -and
@@ -580,6 +1039,7 @@ function Assert-SmokeRunning {
     }
 }
 
+$MovingHitEvidence = Get-SmokeMovingHitEvidence ([bool]$MovingHit) '' @()
 try {
     if ($IsRemote) { Start-RemoteSmokeServer }
     else { Start-SmokeProcess 'Server' $ServerPath $ServerArguments $ServerLog }
@@ -608,7 +1068,13 @@ try {
             $Evidence[$ClientCommand.Name + '.RemoteSprint'] = $ClientText -match $SmokeConfig.ClientRemoteSprint
             $Evidence[$ClientCommand.Name + '.RemoteAim'] = $ClientText -match $SmokeConfig.ClientRemoteAim
             if ($Evidence[$ClientCommand.Name + '.State'] -and $Evidence[$ClientCommand.Name + '.Movement'] -and
-                $Evidence[$ClientCommand.Name + '.Complete']) { $CompletedClients++ }
+                $Evidence[$ClientCommand.Name + '.Complete']) {
+                # A completion marker with no actual firing is not an active
+                # combat completion, even when optional deep checks are disabled.
+                $ActiveLedger = Get-SmokeShotLedger $ClientText $ServerText -RequireShots
+                $ShotLedgers[$ClientCommand.Name] = $ActiveLedger
+                if (-not $ActiveLedger.MissingRequiredShots) { $CompletedClients++ }
+            }
             # A single observer must receive both movement states; two partial logs cannot satisfy this check.
             if ($Evidence[$ClientCommand.Name + '.RemoteSprint'] -and $Evidence[$ClientCommand.Name + '.RemoteAim']) { $MovementObservers++ }
         }
@@ -616,16 +1082,31 @@ try {
         $MissingClients = @($ClientCommands | Where-Object { -not $Evidence[$_.Name + '.Ready'] })
         $MissingDeep = 0
         if ($DeepChecks) {
+            $ServerMemory = Get-SmokeMemoryEndpoint $ServerText 'Server'
+            $ClientMemory = @{}
+            $AllClientMemoryVerified = $true
             $Evidence['Server.DedicatedIdentity'] = $ServerText -match 'PVP_SMOKE[^\r\n]*SERVER_IDENTITY[^\r\n]*Dedicated=1\b[^\r\n]*LocalPlayers=0\b'
             $Evidence['Server.Displacement'] = $ServerText -match 'PVP_SMOKE[^\r\n]*SERVER_DISPLACEMENT PASS\b'
             $ClockClients = 0
             $DisplacementObservers = 0
-            $AcceptedShots = [regex]::Matches($ServerText, 'SERVER_SHOT_ACCEPT[^\r\n]*ShotId=(\d+)\s+Session=(\d+)\s+Generation=(\d+)[^\r\n]*Result=0\b[^\r\n]*FireTime=(-?\d+(?:\.\d+)?)\b')
-            $RewindShots = [regex]::Matches($ServerText, 'REWIND[^\r\n]*ShotId=(\d+)[^\r\n]*FireTime=(-?\d+(?:\.\d+)?)\b[^\r\n]*Hit=(\S+)[^\r\n]*Bone=(\S+)')
+            $AcceptedShots = [regex]::Matches($ServerText, 'SERVER_SHOT_ACCEPT[^\r\n]*ShotId=(\d+)\s+Session=(\d+)\s+Generation=(\d+)[^\r\n]*Result=0\b[^\r\n]*FireTime=(-?\d+(?:\.\d+)?)\b[^\r\n]*WeaponNetGuid=(\d+)\b')
+            $RewindShots = [regex]::Matches($ServerText, 'REWIND[^\r\n]*ShotId=(\d+)[^\r\n]*FireTime=(-?\d+(?:\.\d+)?)\b[^\r\n]*Hit=(\S+)[^\r\n]*Bone=(\S+)[^\r\n]*WeaponNetGuid=(\d+)\b')
             $MatchedShot = $false
             $PresentationOnce = $true
+            $AllPredictionsFinal = $true
+            $NoUnexpectedRejections = $true
             foreach ($ClientCommand in $ClientCommands) {
                 $ClientText = Read-SmokeLog $ClientCommand.Log
+                $ClientMemory[$ClientCommand.Name] = Get-SmokeMemoryEndpoint $ClientText $ClientCommand.Name
+                $AllClientMemoryVerified = $AllClientMemoryVerified -and $ClientMemory[$ClientCommand.Name].Verified
+                # One client actively completes the scripted combat while the
+                # other observes it; only an actual completing client must shoot.
+                $RequiresShots = $Evidence[$ClientCommand.Name + '.State'] -and
+                    $Evidence[$ClientCommand.Name + '.Movement'] -and $Evidence[$ClientCommand.Name + '.Complete']
+                $Ledger = Get-SmokeShotLedger $ClientText $ServerText -RequireShots:$RequiresShots
+                $ShotLedgers[$ClientCommand.Name] = $Ledger
+                $AllPredictionsFinal = $AllPredictionsFinal -and $Ledger.Complete
+                $NoUnexpectedRejections = $NoUnexpectedRejections -and $Ledger.Clean
                 $Clock = $ClientText -match 'CLOCK_SAMPLE PASS[^\r\n]*RTT=[0-9.]+[^\r\n]*Uncertainty=[0-9.]+'
                 $RemoteDisplacement = $ClientText -match 'CLIENT_REMOTE_DISPLACEMENT PASS\b'
                 $Evidence[$ClientCommand.Name + '.ClockSample'] = $Clock
@@ -637,11 +1118,13 @@ try {
                     $Session = $Shot.Groups[2].Value
                     $Generation = $Shot.Groups[3].Value
                     $FireTime = $Shot.Groups[4].Value
+                    $WeaponGuid = $Shot.Groups[5].Value
                     $Identity = 'ShotId=' + $ShotId + '\s+Session=' + $Session + '\s+Generation=' + $Generation + '\b'
-                    $Ack = $ClientText -match ('CLIENT_SHOT_ACK\s+' + $Identity + '[^\r\n]*Result=0\b[^\r\n]*Predicted=1\b')
-                    $Predicted = $ClientText -match ('CLIENT_SHOT_PRESENT\s+' + $Identity + '\s+Count=1\b')
+                    $Ack = $ClientText -match ('CLIENT_SHOT_ACK\s+' + $Identity + '[^\r\n]*Result=0\b[^\r\n]*Predicted=1\b[^\r\n]*WeaponNetGuid=' + $WeaponGuid + '\b')
+                    $Predicted = $ClientText -match ('CLIENT_SHOT_PRESENT\s+' + $Identity + '\s+Count=1\b[^\r\n]*WeaponNetGuid=' + $WeaponGuid + '\b')
                     $Rewind = @($RewindShots | Where-Object {
                         $_.Groups[1].Value -eq $ShotId -and $_.Groups[2].Value -eq $FireTime -and
+                        $_.Groups[5].Value -eq $WeaponGuid -and $WeaponGuid -ne '0' -and
                         $_.Groups[3].Value -notin @('None', 'none', 'NULL', 'nullptr') -and
                         $_.Groups[4].Value -notin @('None', 'none', 'NULL', 'nullptr')
                     }).Count -gt 0
@@ -649,21 +1132,46 @@ try {
                 }
                 # Count events for each full identity, rather than accepting a
                 # cumulative counter or requiring unreliable multicasts to arrive.
-                $Presentations = [regex]::Matches($ClientText, 'CLIENT_SHOT_PRESENT\s+ShotId=(\d+)\s+Session=(\d+)\s+Generation=(\d+)\s+Count=(\d+)')
+                $Presentations = [regex]::Matches($ClientText, 'CLIENT_SHOT_PRESENT\s+ShotId=(\d+)\s+Session=(\d+)\s+Generation=(\d+)\s+Count=(\d+)[^\r\n]*WeaponNetGuid=(\d+)\b')
                 $Counts = @{}
                 foreach ($Presentation in $Presentations) {
-                    $Identity = $Presentation.Groups[1].Value + ':' + $Presentation.Groups[2].Value + ':' + $Presentation.Groups[3].Value
+                    $Identity = $Presentation.Groups[5].Value + ':' + $Presentation.Groups[1].Value + ':' + $Presentation.Groups[2].Value + ':' + $Presentation.Groups[3].Value
                     if (-not $Counts.ContainsKey($Identity)) { $Counts[$Identity] = 0 }
                     $Counts[$Identity] += [int]$Presentation.Groups[4].Value
                     if ($Counts[$Identity] -gt 1) { $PresentationOnce = $false }
                 }
             }
+            if ($null -ne $ReconnectCommand) {
+                $ClientMemory[$ReconnectCommand.Name] = Get-SmokeMemoryEndpoint (Read-SmokeLog $ReconnectCommand.Log) $ReconnectCommand.Name
+                $AllClientMemoryVerified = $AllClientMemoryVerified -and $ClientMemory[$ReconnectCommand.Name].Verified
+            }
+            $MemoryAccounting = [pscustomobject]@{
+                Scope = 'Allocated heap capacity of historical collision-shape buffers only; not process RAM, retained asset/GPU memory or a sampled high-water mark. Dedicated-server main viewmodel animation/tick suppression is checked independently; a retained post-process instance does not imply animation evaluation.'
+                Limits = @{ HistoryFrames = 32; ShapesPerFrame = 64; MaxReservedShapesPerPawn = 2048; MaxShapeStrideBytes = 96 }
+                Server = $ServerMemory; Clients = $ClientMemory
+                Verified = $ServerMemory.Verified -and $AllClientMemoryVerified
+            }
+            $Evidence['Server.MemoryAccounting'] = $ServerMemory.Verified
+            $Evidence['Deep.ClientMemoryAccounting'] = $AllClientMemoryVerified
             $Evidence['Deep.BothClientClocks'] = $ClockClients -eq $SmokeConfig.ClientCount
             $Evidence['Deep.RemoteDisplacement'] = $DisplacementObservers -gt 0
             $Evidence['Deep.AcceptAckRewindSameShot'] = $MatchedShot
             $Evidence['Deep.NoRepeatedPresentation'] = $PresentationOnce
-            foreach ($Key in @('Server.DedicatedIdentity', 'Server.Displacement', 'Deep.BothClientClocks',
-                'Deep.RemoteDisplacement', 'Deep.AcceptAckRewindSameShot', 'Deep.NoRepeatedPresentation')) {
+            $Evidence['Deep.AllPredictionsFinal'] = $AllPredictionsFinal
+            $Evidence['Deep.NoUnexpectedShotRejections'] = $NoUnexpectedRejections
+            $MovingHitEvidence = Get-SmokeMovingHitEvidence ([bool]$MovingHit) $ServerText @(
+                $ClientCommands | ForEach-Object { Read-SmokeLog $_.Log })
+            $Evidence['Deep.MovingHit'] = $MovingHitEvidence.Passed
+            $RequiredDeepEvidence = @(Get-SmokeRequiredDeepEvidence ([bool]$MovingHit))
+            if ($WeakPolicyCorrectness) {
+                $PolicyEvidence = Get-SmokeWeakPolicyEvidence $ServerText @($ClientCommands | ForEach-Object { Read-SmokeLog $_.Log })
+                $Evidence['Deep.WeakPolicyCorrectness'] = $PolicyEvidence.Passed
+                $RequiredDeepEvidence = @($RequiredDeepEvidence | Where-Object { $_ -ne 'Deep.NoUnexpectedShotRejections' }) + 'Deep.WeakPolicyCorrectness'
+                if ($PolicyEvidence.Accepted -gt 0 -and $PolicyEvidence.TerminalRejected -eq 0 -and $PolicyEvidence.SettledOwners -gt 0 -and $AllPredictionsFinal) {
+                    throw 'WeakPolicyCorrectness was not exercised: all requests in this sample were accepted. Preserve it as a no-rejection sample, not a stale-boundary pass.'
+                }
+            }
+            foreach ($Key in $RequiredDeepEvidence) {
                 if (-not $Evidence[$Key]) { $MissingDeep++ }
             }
         }
@@ -829,12 +1337,12 @@ try {
         }
         $Succeeded = $PvpPassed -and $PvePassed -and $ResumePassed -and $InitialVisualPassed
         # Fail markers invalidate a run even when a previous phase printed PASS.
-        if ($ServerText -match $SmokeConfig.Failure -or $ServerText -match $SmokeConfig.ExplicitOom) { throw "Server reported a failure; see $ServerLog." }
+        if (Test-SmokeFailureLog $ServerText) { throw "Server reported a failure; see $ServerLog." }
         if ($IsRemote -and $RemoteActiveState -notin @('activating', 'active', 'reloading')) {
             throw "The owned remote Server unit is $RemoteActiveState at acceptance; see $ServerLog."
         }
         foreach ($Entry in $Started) {
-            if ((Read-SmokeLog $Entry.Log) -match $SmokeConfig.Failure -or (Read-SmokeLog $Entry.Log) -match $SmokeConfig.ExplicitOom) { throw "$($Entry.Name) reported a failure; see $($Entry.Log)." }
+            if (Test-SmokeFailureLog (Read-SmokeLog $Entry.Log)) { throw "$($Entry.Name) reported a failure; see $($Entry.Log)." }
         }
         if ($Succeeded) {
             # Acceptance uses fresh remote evidence and live owned processes,
@@ -891,8 +1399,7 @@ finally {
             if ($RemoteActiveState -notin @('activating', 'active', 'reloading')) {
                 throw "The owned remote Server is $RemoteActiveState before the requested stop."
             }
-            if ((Read-SmokeLog $ServerLog) -match $SmokeConfig.Failure -or
-                (Read-SmokeLog $ServerLog) -match $SmokeConfig.ExplicitOom) {
+            if (Test-SmokeFailureLog (Read-SmokeLog $ServerLog)) {
                 throw 'Remote Server final pre-stop log contains a failure or explicit OOM.'
             }
         }
@@ -911,8 +1418,7 @@ finally {
             # stop is expected. Only gameplay/fatal assertions or explicit OOM
             # diagnostics invalidate the collected shutdown tail.
             $FinalServerText = Read-SmokeLog $ServerLog
-            if ($FinalServerText -match $SmokeConfig.Failure -or $FinalServerText -match $SmokeConfig.ExplicitOom -or
-                $Journal -match $SmokeConfig.Failure -or $Journal -match $SmokeConfig.ExplicitOom) {
+            if ((Test-SmokeFailureLog $FinalServerText) -or (Test-SmokeFailureLog $Journal)) {
                 throw 'Collected remote shutdown logs contain a failure, fatal assertion or explicit OOM.'
             }
         }
@@ -925,8 +1431,16 @@ finally {
             if ($FailureReason) { $FailureReason += '; ' + $CleanupFailure } else { $FailureReason = $CleanupFailure }
         }
     }
+    $LatencyEvidence = $null
+    if (Test-Path -LiteralPath $ServerLog -PathType Leaf) {
+        try { $LatencyEvidence = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $OutputDirectory | ConvertFrom-Json }
+        catch { $LatencyEvidence = @{ Error=$_.Exception.Message; Scope='Latency evidence unavailable; never substitute zero latency.' } }
+    }
     $Report = [pscustomobject]@{
         Passed = $Succeeded; Failure = $FailureReason
+        AcceptanceMode = if ($WeakPolicyCorrectness) { 'WeakPolicyCorrectness' } else { 'StrictExperience' }
+        StrictZeroUnexpectedRejectionsPassed = $Evidence['Deep.NoUnexpectedShotRejections']
+        WeakPolicyEvidence = if ($WeakPolicyCorrectness) { $PolicyEvidence } else { $null }
         ExecutionMode = $ExecutionMode
         ServerMode = $ServerMode; ServerAddress = $ConnectAddress
         DeepChecks = $DeepChecks
@@ -934,6 +1448,12 @@ finally {
         IncludeReconnect = $IncludeReconnect
         RenderedClients = [bool]$RenderedClients
         VisibleClients = [bool]$VisibleClients
+        MovingHit = [bool]$MovingHit
+        MovingHitStatus = $MovingHitEvidence.Status
+        MovingHitScope = if ($MovingHit) { 'Explicit development-only zero-spread configuration; one actual shot while both clients inject movement during the first five seconds. Requires server historical hit and observed replicated health reduction. Not a 30-shot accuracy/rate benchmark or full render-time reconstruction.' } else { 'NotRequested; ordinary smoke uses authored production spread.' }
+        ShotAccounting = $ShotLedgers
+        ShotLatency = $LatencyEvidence
+        MemoryAccounting = $MemoryAccounting
         ClientRenderer = if ($VisibleClients) { 'D3D12Windowed' } elseif ($RenderedClients) { 'D3D12Offscreen' } else { 'NullRHI' }
         ServerRenderer = 'NullRHI'
         VisualArtifacts = @($VisualCaptures.Values | Sort-Object Client)

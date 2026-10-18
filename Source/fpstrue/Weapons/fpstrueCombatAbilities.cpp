@@ -29,6 +29,8 @@ UfpstrueFireAbility::UfpstrueFireAbility()
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 	bRetriggerInstancedAbility = false;
 	bReplicateInputDirectly = false;
+	// 正常松开由可靠输入事件结束；强取消仍只接受服务器规则，不接受客户端伪造取消旧队列。
+	bServerRespectsRemoteAbilityCancellation = false;
 	SetAssetTags(FGameplayTagContainer(FpstrueGameplayTags::Ability_Fire));
 	ActivationOwnedTags.AddTag(FpstrueGameplayTags::State_Firing);
 	ActivationBlockedTags.AddTag(FpstrueGameplayTags::State_Dead);
@@ -52,7 +54,7 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 	if (!IsActive()) return;
 	const uint32 RequestedActivation = ++ActivationRevision;
 	bEnding = false;
-	bHasPendingShot = false;
+	bInputReleased = false;
 	AfpstrueCharacter* Character = ActorInfo != nullptr ? Cast<AfpstrueCharacter>(ActorInfo->AvatarActor.Get()) : nullptr;
 	UfpstrueWeaponComponent* Weapon = Character != nullptr ? Character->GetEquippedWeaponComponent() : nullptr;
 	UAbilitySystemComponent* ASC = ActorInfo != nullptr ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
@@ -107,7 +109,6 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 		ASC->ConsumeClientReplicatedTargetData(Handle, ActivationInfo.GetActivationPredictionKey());
 	}
 	ShotDataHandle.Reset();
-	if (PendingShotTask != nullptr) { PendingShotTask->EndTask(); PendingShotTask = nullptr; }
 	if (AimTimeoutTask != nullptr)
 	{
 		AimTimeoutTask->EndTask();
@@ -117,10 +118,8 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 	ActiveWeapon.Reset();
 	if (Weapon != nullptr)
 	{
-		// 松开/死亡与未消费输入同通道排序；结束时明确拒绝唯一待执行项，不让旧会话继续开火。
-		if (bHasPendingShot && HasAuthority(&ActivationInfo)) Weapon->AcknowledgeShot(PendingShot, EFPShotResult::Cancelled);
-		bHasPendingShot = false;
-		Weapon->EndAbilityFire();
+		// 正常松开只停止新输入，不撤销已准入事实；死亡、卸枪和换弹强取消时才清执行队列。
+		Weapon->EndAbilityFire(bWasCancelled);
 	}
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 	// 先由 GAS 解除 Firing，再派生远端表现快照；武器不反向取消能力或重建动作状态机。
@@ -130,13 +129,14 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 // 松开只结束本次能力，释放事件已由 WaitInputRelease 同步给服务器。
 void UfpstrueFireAbility::HandleInputReleased(float)
 {
+	bInputReleased = true;
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 }
 
-// 能力直接推进每发工作，结束由 EndAbility 的活动状态保护；武器不持有连射 Timer，也不反向管理 GA。
+// 能力直接生成每发输入，结束由 EndAbility 的活动状态保护；武器 Timer 只消费已准入网络事实，不生成连射输入或反向管理 GA。
 void UfpstrueFireAbility::Pulse()
 {
-	if (!IsActive() || bEnding) return;
+	if (!IsActive() || bEnding || bInputReleased) return;
 	const uint32 RequestedActivation = ActivationRevision;
 	UfpstrueWeaponComponent* Weapon = ActiveWeapon.Get();
 	if (!IsValid(Weapon) || !Weapon->CanExecuteShot())
@@ -215,18 +215,14 @@ void UfpstrueFireAbility::HandleShotData(const FGameplayAbilityTargetDataHandle&
 		return;
 	}
 	const FFPShotRequest Request = Shot->Request;
-	const EFPShotResult Result = Weapon->AcceptShotRequest(Request, bHasPendingShot);
-	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
-	if (Result == EFPShotResult::Queued)
+	// 同一可靠通道中排在松开之后的数据不能再准入；只排空松开之前已接受的输入。
+	if (bInputReleased)
 	{
-		// 同一个待执行编号的重复包只观察等待状态，不重建任务或改变原请求的终结时刻。
-		if (bHasPendingShot) return;
-		bHasPendingShot = true;
-		PendingShot = Request;
-		PendingShotTask = UAbilityTask_WaitDelay::WaitDelay(this, FMath::Max(Weapon->GetNextShotDelay(), 0.001f));
-		PendingShotTask->OnFinish.AddDynamic(this, &ThisClass::ExecutePendingShot);
-		PendingShotTask->ReadyForActivation();
+		Weapon->RejectNetworkShot(Request, EFPShotResult::Cancelled);
+		return;
 	}
+	const EFPShotResult Result = Weapon->AcceptShotRequest(Request);
+	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
 	if (Result == EFPShotResult::Accepted || Result == EFPShotResult::Queued)
 	{
 		if (AimTimeoutTask != nullptr) AimTimeoutTask->EndTask();
@@ -235,24 +231,6 @@ void UfpstrueFireAbility::HandleShotData(const FGameplayAbilityTargetDataHandle&
 		AimTimeoutTask->ReadyForActivation();
 	}
 	if ((Result == EFPShotResult::Accepted || Result == EFPShotResult::NoAmmo) && Weapon->GetCurrentAmmo() == 0)
-	{
-		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
-		if (ActivationRevision == RequestedActivation && !IsActive() && IsValid(Weapon) && Weapon->CanExecuteShot()) Weapon->RequestReload();
-	}
-}
-
-void UfpstrueFireAbility::ExecutePendingShot()
-{
-	PendingShotTask = nullptr;
-	if (!IsActive() || bEnding || !bHasPendingShot) return;
-	const uint32 RequestedActivation = ActivationRevision;
-	const FFPShotRequest Request = PendingShot;
-	bHasPendingShot = false;
-	UfpstrueWeaponComponent* Weapon = ActiveWeapon.Get();
-	if (!IsValid(Weapon)) { HandleAimTimeout(); return; }
-	Weapon->ExecuteNetworkShot(Request);
-	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
-	if (Weapon->GetCurrentAmmo() == 0)
 	{
 		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 		if (ActivationRevision == RequestedActivation && !IsActive() && IsValid(Weapon) && Weapon->CanExecuteShot()) Weapon->RequestReload();

@@ -20,6 +20,7 @@ class USpringArmComponent;
 class UfpstrueHealthComponent;
 class UfpstrueWeaponComponent;
 class UAnimMontage;
+class UAnimSequence;
 class UMaterialParameterCollection;
 class AfpstrueCharacter;
 struct FInputActionValue;
@@ -28,6 +29,18 @@ DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
 //动态多播委托，用于在玩家死亡时通知其他系统:DYNAMIC可以被蓝图绑定
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerDeathReported, AfpstrueCharacter*, DeadPlayer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEquippedWeaponChanged, UfpstrueWeaponComponent*, WeaponComponent);
+
+// 只在停走和转身边界更新；晚加入和动画实例重建也能恢复同一脚部朝向，不另发逐帧视角 RPC。
+USTRUCT()
+struct FFpstrueBodyFacingState
+{
+	GENERATED_BODY()
+	UPROPERTY() bool bInitialized = false;
+	UPROPERTY() bool bStationary = false;
+	UPROPERTY() int8 TurnDirection = 0;
+	UPROPERTY() float FacingYaw = 0.0f;
+	UPROPERTY() float TurnStartedServerTime = 0.0f;
+};
 
 // 玩家动画只消费移动快照、GAS 派生姿态和武器事实事件；不创建另一套动作状态，也不从通知结算伤害或弹药。
 // 与玩家放在同一文件，身体和手臂共用数据入口，AnimGraph 分别负责全身分层与第一人称表现。
@@ -52,6 +65,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float MovementAlpha = 0.0f;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float AimAlpha = 0.0f;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float SprintAlpha = 0.0f;
+	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float AimPitch = 0.0f;
+	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float RootYawOffset = 0.0f;
+	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float TurnTime = 0.0f;
+	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float TurnAlpha = 0.0f;
+	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") bool bTurnRight = false;
+	UPROPERTY(EditDefaultsOnly, Category = "Presentation") TObjectPtr<UAnimSequence> TurnLeftAnimation;
+	UPROPERTY(EditDefaultsOnly, Category = "Presentation") TObjectPtr<UAnimSequence> TurnRightAnimation;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") FRotator AimRotation = FRotator::ZeroRotator;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") FVector GunAimTranslation = FVector::ZeroVector;
 	UPROPERTY(EditDefaultsOnly, Category = "Presentation") TObjectPtr<UAnimMontage> FireMontage;
@@ -65,14 +85,18 @@ public:
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float HitTime = 0.0f;
 private:
 	void BindCurrentWeapon();
+	UFUNCTION() void HandleEquipmentChanged(UfpstrueWeaponComponent* Weapon);
 	UFUNCTION() void PresentFire();
 	UFUNCTION() void PresentReload(int32 ReloadId, bool bWasEmpty);
 	TWeakObjectPtr<UfpstrueWeaponComponent> AnimationWeapon;
+	TWeakObjectPtr<AfpstrueCharacter> EquipmentSource;
 	UPROPERTY() TObjectPtr<UMaterialParameterCollection> ViewmodelFOVCollection;
 	float LandingRemaining = 0.0f;
 	bool bWasFalling = false;
 #if !UE_BUILD_SHIPPING
-	void CapturePresentation(const TCHAR* Phase) const;
+	void CapturePresentation(const TCHAR* Phase);
+	TSet<FName> PendingPresentationCaptures;
+	uint32 PresentationCaptureRevision = 0;
 #endif
 };
 
@@ -175,8 +199,12 @@ public:
 	bool GetHistoricalViewOrigin(double ServerTime, FVector& OutOrigin) const;
 	// 正常由骨骼完成回调记录；显式接口也只允许权威端按当前世界时间采样，不能由客户端灌入历史。
 	void RecordServerHitHistory();
-	void ResetHitHistory();
+	void ResetHitHistory(bool bReleaseMemory = false);
 	uint32 GetHitHistoryEpoch() const { return HitHistoryEpoch; }
+	// 只读容量诊断：比较实际常驻预算，不把整个进程或着色器编译峰值冒充历史缓存收益。
+	SIZE_T GetHitHistoryAllocatedBytes() const;
+	int32 GetHitHistoryReservedShapeCount() const;
+	static SIZE_T GetHitHistoryShapeStride();
 	virtual bool TeleportTo(const FVector& DestLocation, const FRotator& DestRotation, bool bIsATest = false, bool bNoCheck = false) override;
 
 	//Character只暴露当前装备关系，武器运行时状态由WeaponComponent持有
@@ -198,6 +226,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool IsSprinting() const { return bIsSprinting; }
 	bool UsesRARPresentation() const { return bUseRARPresentation; }
+	bool UsesTemplatePresentation() const { return bUseTemplatePresentation; }
+	bool UsesNativePresentation() const { return bUseRARPresentation || bUseTemplatePresentation; }
+	static constexpr float ViewPitchLimit = 75.0f;
+	static constexpr float ViewYawLimit = 75.0f;
+	static constexpr float TurnTriggerYaw = 55.0f;
+	const FFpstrueBodyFacingState& GetBodyFacingState() const { return BodyFacingState; }
+	float GetBodyFacingServerTime() const;
+	void UpdateBodyFacing(float TurnDuration);
 
 	//转发HealthComponent，角色本身不再直接管理生命值状态
 	// GameMode、武器和输入规则通过这里读取玩家死亡事实。
@@ -291,18 +327,24 @@ private:
 	// 身体受击是瞬时表现；持久生命与死亡仍由现有 HealthComponent 复制，不以 RPC 代替状态。
 	UFUNCTION(NetMulticast, Unreliable) void MulticastPresentHit();
 	UPROPERTY(EditDefaultsOnly, Category = "Presentation") bool bUseRARPresentation = false;
+	UPROPERTY(EditDefaultsOnly, Category = "Presentation") bool bUseTemplatePresentation = false;
 	// 装备复制与武器快照可能乱序到达，通过两侧幂等补齐，不由客户端执行拾取结算。
 	UFUNCTION() void OnRep_EquippedWeapon();
 	UFUNCTION() void OnRep_MovementModifiers();
 #if !UE_BUILD_SHIPPING
 	// 只在显式 -PvpSmokeTest 参数下运行客户端脚本输入；不是正常玩法 Tick。
 	void RunPvpSmokeStep();
+	void ReleaseNetworkSmokeMovementKey();
+	TWeakObjectPtr<class APlayerController> NetworkSmokeMovementController;
 	FTimerHandle NetworkSmokeTimer;
 	double NetworkSmokeStarted = -1.0;
 	double NetworkSmokePhaseStarted = 0.0;
 	double NetworkSmokeNextDiagnostic = 0.0;
 	int32 NetworkSmokePhase = 0;
+	int32 NetworkSmokeWarmupRetries = 0;
 	int32 NetworkSmokeInitialReserve = 0;
+	float NetworkSmokeMovingInitialHealth = -1.0f;
+	bool bNetworkSmokeMovingHitAttempted = false;
 	TWeakObjectPtr<AfpstrueCharacter> NetworkSmokeTarget;
 	bool bNetworkSmokeInjectingMove = false;
 	bool bNetworkSmokePveSeen = false;
@@ -378,6 +420,7 @@ private:
 	bool bIsAiming = false;
 	// 只记录已发送给蓝图的瞄准表现，避免标签预测、服务器复制重复通知同一变化。
 	bool bPresentedAiming = false;
+	UPROPERTY(Transient, Replicated) FFpstrueBodyFacingState BodyFacingState;
 
 	// 装备关系只在运行时存在，不参与序列化。
 	UPROPERTY(Transient, ReplicatedUsing = OnRep_EquippedWeapon)
@@ -397,12 +440,14 @@ private:
 	// HealthComponent 保存死亡事实；这里只防止死亡表现和广播重复执行。
 	bool bDeathEffectsApplied = false;
 
-	// 固定 32 帧、每帧最多 64 形状；60 Hz 采样覆盖 .35 秒，环形复用容量，不随游戏时长增长。
+	// 固定 32 帧、每帧最多 64 形状；实际容量按物理资产预留，60 Hz 覆盖 .35 秒且不随游戏时长增长。
 	static constexpr int32 HitHistoryCapacity = 32;
 	static constexpr int32 MaxHistoricalShapes = 64;
 	struct FHistoricalShape
 	{
-		FTransform Transform;
+		// 形状缩放已烘入 Extent；只保留命中查询使用的双精度旋转和位置，避免每条历史重复存恒等 Scale。
+		FQuat Rotation = FQuat::Identity;
+		FVector Location = FVector::ZeroVector;
 		FVector Extent = FVector::ZeroVector; // Box 半尺寸；Sphere.X 半径；Capsule.X 半径、Z 轴线半长。
 		FName Bone;
 		uint8 Type = 0; // 0 Box、1 Sphere、2 Capsule。

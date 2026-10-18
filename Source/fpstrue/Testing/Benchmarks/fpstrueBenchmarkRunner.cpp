@@ -2,33 +2,63 @@
 
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 #include "Async/Future.h"
+#include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Game/fpstrueGameMode.h"
+#include "Game/fpstrueMultiplayer.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
+#include "Characters/Shared/fpstrueFootIK.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/PendingNetGame.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
+#include "GameFramework/GameStateBase.h"
 #include "GameFramework/WorldSettings.h"
+#include "GameFramework/GameUserSettings.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Navigation/CrowdFollowingComponent.h"
 #include "Navigation/CrowdManager.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformMemory.h"
+#include "HAL/PlatformTLS.h"
 #include "Misc/Paths.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "Misc/FileHelper.h"
+#include "Misc/StringBuilder.h"
+#include "Misc/CoreDelegates.h"
+#include "HAL/IConsoleManager.h"
 #include "ProfilingDebugging/CsvProfiler.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "ProfilingDebugging/CountersTrace.h"
+#include "ProfilingDebugging/MiscTrace.h"
 #include "ProfilingDebugging/TraceAuxiliary.h"
+#include "UnrealClient.h"
+#include "UObject/UnrealType.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/Package.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
+#endif
+
+CSV_DECLARE_CATEGORY_EXTERN(fpstrueEnemyUI);
 
 // Copyright Epic Games, Inc. All Rights Reserved.
 
@@ -145,6 +175,1272 @@ void DisableTickForCapture(UActorComponent* Component, bool bDisable, bool& bWas
 		Component->SetComponentTickEnabled(false);
 	}
 }
+}
+
+#if !UE_BUILD_SHIPPING
+namespace
+{
+// A profiling process is disposable: no settings/assets are saved. Weak World
+// ownership lets CoreTicker finish queued CSV cleanup after a World disappears.
+struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
+{
+	TWeakObjectPtr<UWorld> World;
+	FString Role, ControlPath, OutputDirectory, CsvPath, TracePath, OwnedTracePath;
+	TSharedPtr<FFPBenchmarkCsvCapture> Capture;
+	TSet<TWeakObjectPtr<AfpstrueCharacter>> PreparedPlayers;
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> PreparedEnemies;
+	TWeakObjectPtr<ACameraActor> FixedCamera;
+	double StartedAt = FPlatformTime::Seconds();
+	double ReadyAt = 0.0, CaptureAt = 0.0, FlushAt = 0.0;
+	double FixedViewStableAt = 0.0;
+	double ControlUnreadableAt = -1.0;
+	double WorldTickAt = 0.0;
+	FDelegateHandle WorldTickStartHandle, WorldTickEndHandle;
+	bool bReady = false, bStarting = false, bCapturing = false, bFlushing = false;
+	bool bFailed = false, bOwnsTrace = false, bTraceStopRequested = false, bQuarantineLogged = false;
+	bool bCollectTrace = true, bFinalized = false;
+	bool bFixedView = false;
+	bool bHealthAndDeath = false, bDeathBatchApplied = false, bProfileSettingsChecked = false;
+	bool bCapturedPostDeath = false;
+	double NextHealthPulse = 2.0;
+	int32 Enemies = 0, Players = 0, Width = 0, Height = 0;
+	FFPEnemyHealthBarMetrics HealthBars;
+	FVector ViewLocation = FVector::ZeroVector;
+	FRotator ViewRotation = FRotator::ZeroRotator;
+
+	~FPvpPerformanceProfile()
+	{
+		FWorldDelegates::OnWorldTickStart.Remove(WorldTickStartHandle);
+		FWorldDelegates::OnWorldTickEnd.Remove(WorldTickEndHandle);
+	}
+
+	void BeginWorldTick(UWorld* TickWorld, ELevelTick, float)
+	{
+		if (TickWorld == World.Get() && bCapturing && !bFlushing) WorldTickAt = FPlatformTime::Seconds();
+	}
+
+	void EndWorldTick(UWorld* TickWorld, ELevelTick, float)
+	{
+		if (TickWorld != World.Get() || WorldTickAt == 0.0) return;
+		// DS 不写引擎 stat-unit GameThreadTime。单独记录完整 World::Tick 的实测 wall-time，
+		// 不含外部帧率等待，不冒充 CPU 占用率或扣除 Wait 后的 stat-unit GT。
+		CSV_CUSTOM_STAT_GLOBAL(PvpProfileWorldTickMs, static_cast<float>((FPlatformTime::Seconds() - WorldTickAt) * 1000.0), ECsvCustomStatOp::Set);
+		WorldTickAt = 0.0;
+	}
+
+	static FString Canonical(FString Path)
+	{
+		Path = FPaths::ConvertRelativePathToFull(Path);
+		FPaths::NormalizeFilename(Path);
+		if (!FPaths::CollapseRelativeDirectories(Path)) return FString();
+		return Path;
+	}
+
+	static bool IsProfilePath(const FString& Path)
+	{
+		FString RequestedRoot;
+		FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRoot="), RequestedRoot);
+		RequestedRoot.TrimQuotesInline();
+		const FString Root = RequestedRoot.IsEmpty() ? Canonical(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling"))) : Canonical(RequestedRoot);
+		// 显式本机采集目录可位于另一块盘；仍拒绝盘根和目录本身，不覆写用户已有产物。
+		if (Root.Len() <= 3 || FPaths::IsRelative(Root)) return false;
+		return !Path.IsEmpty() && !Path.Equals(Root, ESearchCase::IgnoreCase) && FPaths::IsUnderDirectory(Path, Root);
+	}
+
+	void ApplyHealthWorkload()
+	{
+		if (!bHealthAndDeath || Role != TEXT("Server") || !bCapturing || bDeathBatchApplied) return;
+		const double Elapsed = FPlatformTime::Seconds() - CaptureAt;
+		if (Elapsed >= 20.0)
+		{
+			TArray<AfpstrueEnemyCharacter*> EnemiesToKill;
+			for (const auto& WeakEnemy : PreparedEnemies)
+				if (auto* Enemy = WeakEnemy.Get(); IsValid(Enemy) && !Enemy->IsDead()) EnemiesToKill.Add(Enemy);
+			EnemiesToKill.Sort([](const AfpstrueEnemyCharacter& A, const AfpstrueEnemyCharacter& B) { return A.GetUniqueID() < B.GetUniqueID(); });
+			if (EnemiesToKill.Num() != 160) { Fail(TEXT("DeathWorkloadInitialPopulationChanged")); return; }
+			// 只进入本项目真实 Health/GAS 伤害路径，不广播伪造死亡或直接隐藏 UI。
+			for (int32 Index = 0; Index < 32; ++Index)
+			{
+				if (auto* Health = EnemiesToKill[Index]->FindComponentByClass<UfpstrueHealthComponent>())
+					UGameplayStatics::ApplyDamage(EnemiesToKill[Index], Health->GetHealth() + 1.0f, nullptr, nullptr, nullptr);
+				// 保留本次死亡 Actor 到采集结束，避免对象移除令累计 UI 计数丢失；不保留 Widget/渲染资源。
+				if (IsValid(EnemiesToKill[Index])) EnemiesToKill[Index]->SetLifeSpan(60.0f);
+			}
+			bDeathBatchApplied = true;
+			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE WORKLOAD DeathBatch=32 ExpectedAlive=128 Elapsed=%.3f"), Elapsed);
+		}
+		else if (Elapsed >= NextHealthPulse && Elapsed <= 18.5)
+		{
+			if (Elapsed > NextHealthPulse + 1.0) { Fail(TEXT("HealthPulseScheduleMissedNoBurstCatchup")); return; }
+			int32 Changed = 0;
+			for (const auto& WeakEnemy : PreparedEnemies)
+				if (auto* Enemy = WeakEnemy.Get(); IsValid(Enemy) && !Enemy->IsDead())
+				{
+					UGameplayStatics::ApplyDamage(Enemy, 0.5f, nullptr, nullptr, nullptr);
+					++Changed;
+				}
+			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE WORKLOAD HealthPulse=%d Damage=0.5 Elapsed=%.3f"), Changed, Elapsed);
+			// 卡顿后不在同一采样里补发多次伤害，避免把不相同的尖峰当作 UI 模式差异。
+			NextHealthPulse += 1.0;
+		}
+	}
+
+	void Fail(const TCHAR* Reason)
+	{
+		if (!bFailed) UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=%s Reason=%s"), *Role, Reason);
+		bFailed = true;
+		if (!bFlushing) FlushAt = FPlatformTime::Seconds();
+		bFlushing = true;
+	}
+
+	bool ReadControl(FString& Command)
+	{
+		const int64 Bytes = IFileManager::Get().FileSize(*ControlPath);
+		if (Bytes > 64)
+		{
+			Fail(TEXT("ControlMissingUnreadableOrOversized"));
+			return false;
+		}
+		// 原子替换保证不会读取半条命令，但 Windows 的替换瞬间仍可能暂时拒绝打开。
+		// 不在游戏线程 sleep，不伪造命令；下次 ticker 重试，持续不可读一秒仍判测试失败。
+		if (Bytes < 1 || !FFileHelper::LoadFileToString(Command, *ControlPath))
+		{
+			const double Now = FPlatformTime::Seconds();
+			if (ControlUnreadableAt < 0.0) ControlUnreadableAt = Now;
+			if (Now - ControlUnreadableAt >= 1.0) Fail(TEXT("ControlMissingUnreadableOrOversized"));
+			return false;
+		}
+		ControlUnreadableAt = -1.0;
+		Command.TrimStartAndEndInline();
+		Command.ToUpperInline();
+		if (Command != TEXT("WAIT") && Command != TEXT("START") && Command != TEXT("STOP") && Command != TEXT("EXIT"))
+		{
+			Fail(TEXT("InvalidControlCommand"));
+			return false;
+		}
+		return true;
+	}
+
+	bool SampleWorld(bool& bWaitingForLocalView)
+	{
+		bWaitingForLocalView = false;
+		UWorld* CurrentWorld = World.Get();
+		if (CurrentWorld == nullptr || CurrentWorld->GetWorldSettings() == nullptr || CurrentWorld->IsPaused() ||
+			!FMath::IsNearlyEqual(CurrentWorld->GetWorldSettings()->GetEffectiveTimeDilation(), 1.0f)) return false;
+		const bool bServer = Role == TEXT("Server");
+		auto* Mode = CurrentWorld->GetAuthGameMode<AfpstruePvpGameMode>();
+		Enemies = Players = Width = Height = 0;
+		HealthBars = FFPEnemyHealthBarMetrics{};
+		for (TActorIterator<AfpstrueEnemyCharacter> It(CurrentWorld); It; ++It)
+		{
+			if (const auto* Bar = It->FindComponentByClass<UfpstrueEnemyHealthBarComponent>()) Bar->AppendMetrics(HealthBars);
+			if (It->IsActorBeingDestroyed() || It->IsDead()) continue;
+			++Enemies;
+			if (bServer && !PreparedEnemies.Contains(*It))
+			{
+				// Explicit benchmark relevancy: all 160 replicas remain eligible,
+				// rather than silently comparing different client populations.
+				It->SetNetCullDistanceSquared(1.0e12f);
+				It->ForceNetUpdate();
+				PreparedEnemies.Add(*It);
+			}
+		}
+		if (bServer)
+		{
+			if (Mode == nullptr) return false;
+			if (!bProfileSettingsChecked)
+			{
+				const auto* DelayProperty = FindFProperty<FFloatProperty>(Mode->GetClass(), TEXT("EnemyRespawnDelay"));
+				const float Delay = DelayProperty != nullptr ? DelayProperty->GetPropertyValue_InContainer(Mode) : -1.0f;
+				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE SETTINGS HealthAndDeath=%d EnemyRespawnDelay=%.3f"), bHealthAndDeath, Delay);
+				if (bHealthAndDeath && Delay < 600.0f) { Fail(TEXT("DeathWorkloadRequiresRespawnDelay600")); return false; }
+				bProfileSettingsChecked = true;
+			}
+			for (TActorIterator<AfpstrueCharacter> It(CurrentWorld); It; ++It)
+			{
+				if (!Mode->IsCombatParticipant(*It) || Cast<APlayerController>(It->GetController()) == nullptr) continue;
+				++Players;
+				if (!PreparedPlayers.Contains(*It))
+				{
+					UfpstrueHealthComponent* Health = It->GetHealthComponent();
+					if (Health == nullptr) return false;
+					// One initialization per Pawn, not invulnerability or per-frame
+					// healing. Real AI attacks and damage callbacks remain enabled.
+					Health->SetMaxHealthAndReset(1000000.0f);
+					PreparedPlayers.Add(*It);
+					UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE HEALTH Role=Server Pawn=%s Max=%.1f Current=%.1f"),
+						*It->GetName(), Health->GetMaxHealth(), Health->GetHealth());
+				}
+				ViewLocation = It->GetActorLocation();
+				ViewRotation = It->GetActorRotation();
+			}
+			return true;
+		}
+		const AGameStateBase* State = CurrentWorld->GetGameState();
+		if (State != nullptr)
+			for (const APlayerState* Player : State->PlayerArray) if (IsValid(Player)) ++Players;
+		APlayerController* Local = UGameplayStatics::GetPlayerController(CurrentWorld, 0);
+		if (Local == nullptr || !Local->IsLocalController() || Local->GetPawn() == nullptr)
+		{
+			// GameState BeginPlay can precede local Controller/Pawn replication.
+			// Only the initial WAIT phase may defer this view-readiness check.
+			bWaitingForLocalView = true;
+			return false;
+		}
+		if (Local->AcknowledgedPawn != Local->GetPawn())
+		{
+			// ClientRestart 先确认占有再自动切回 Pawn；CoreTicker 要等这一整轮初始化完成后才安装专项镜头。
+			bWaitingForLocalView = true;
+			return false;
+		}
+		Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		if (bFixedView && !FixedCamera.IsValid())
+		{
+			// 仅此一次性采集进程固定镜头；仍保留服务器 AI、玩家受伤与真实副本更新。
+			ACameraActor* Camera = nullptr;
+			for (TActorIterator<ACameraActor> It(CurrentWorld); It; ++It)
+				if (It->ActorHasTag(TEXT("EnemyUIProfileCamera"))) { Camera = *It; break; }
+			if (Camera == nullptr)
+			{
+				Local->GetPawn()->GetActorEyesViewPoint(ViewLocation, ViewRotation);
+				Camera = CurrentWorld->SpawnActor<ACameraActor>(ViewLocation, ViewRotation);
+			}
+			if (Camera == nullptr) return false;
+			Camera->GetCameraComponent()->SetFieldOfView(90.0f);
+			Local->SetViewTarget(Camera);
+			FixedCamera = Camera;
+			// 等 PlayerCameraManager 真正更新一帧，再记录实际视图；不能把意图镜头当作已渲染镜头。
+			bWaitingForLocalView = true;
+			return false;
+		}
+		if (FixedCamera.IsValid())
+		{
+			Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
+			if (Local->GetViewTarget() != FixedCamera.Get() ||
+				!ViewLocation.Equals(FixedCamera->GetActorLocation(), 1.0f) ||
+				!ViewRotation.Equals(FixedCamera->GetActorRotation(), 0.1f))
+			{
+				if (!bReady && !bStarting && !bCapturing)
+				{
+					// ClientRestart 可晚于 Pawn 首次复制；只在 WAIT 初始化阶段完成专项相机安装。
+					// READY 后绝不重设镜头来掩盖漂移，下面仍保留实际视图的硬失败门禁。
+					UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE INITIAL_VIEW_RESELECT PreviousTarget=%s"), *GetNameSafe(Local->GetViewTarget()));
+					Local->SetViewTarget(FixedCamera.Get());
+					FixedViewStableAt = 0.0;
+					bWaitingForLocalView = true;
+					return false;
+				}
+				UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE VIEW_MISMATCH Target=%s ActualLocation=%s ActualRotation=%s"),
+					*GetNameSafe(Local->GetViewTarget()), *ViewLocation.ToCompactString(), *ViewRotation.ToCompactString());
+				Fail(TEXT("FixedCameraNotActualPlayerView"));
+				return false;
+			}
+			if (!bReady)
+			{
+				if (FixedViewStableAt == 0.0) FixedViewStableAt = FPlatformTime::Seconds();
+				if (FPlatformTime::Seconds() - FixedViewStableAt < 0.5)
+				{
+					bWaitingForLocalView = true;
+					return false;
+				}
+			}
+		}
+		Local->GetViewportSize(Width, Height);
+		return true;
+	}
+
+	bool OwnsCsv() const
+	{
+#if CSV_PROFILER
+		return Capture.IsValid() && Canonical(FCsvProfiler::Get()->GetOutputFilename()).Equals(CsvPath, ESearchCase::IgnoreCase);
+#else
+		return false;
+#endif
+	}
+
+	void BeginCapture()
+	{
+#if CSV_PROFILER
+		FCsvProfiler* Csv = FCsvProfiler::Get();
+		if ((OutstandingCsvCapture.IsValid() && OutstandingCsvCapture->State != FFPBenchmarkCsvCapture::EState::Released) ||
+			Csv->IsCapturing() || Csv->IsWritingFile() || Csv->IsEndCapturePending() || FTraceAuxiliary::IsConnected())
+		{
+			Fail(TEXT("ProfilerAlreadyOwned"));
+			return;
+		}
+		if (IFileManager::Get().FileExists(*CsvPath) || IFileManager::Get().FileExists(*TracePath))
+		{
+			Fail(TEXT("RefusingToOverwriteCaptureArtifacts"));
+			return;
+		}
+		// UE 5.5 CsvProfiler 的 Trace 元数据在启动时注册；中途打开 Counters 会漏掉类别定义，
+		// 导致 Insights 的 CSV analyzer 断言。独立 CSV 文件仍正常采集，仅关闭这条冗余 Trace 通道。
+		// Start 只启用所列通道，不会关闭已经启用的通道，因此先显式禁用 Counters。
+		if (bCollectTrace) FTraceAuxiliary::DisableChannels(TEXT("counters"));
+		if (bCollectTrace && !FTraceAuxiliary::Start(FTraceAuxiliary::EConnectionType::File, *TracePath,
+			Role == TEXT("Server") ? TEXT("cpu,frame,bookmark,task,stats") : TEXT("cpu,gpu,frame,bookmark,task,stats")))
+		{
+			Fail(TEXT("TraceStartFailed"));
+			return;
+		}
+		if (bCollectTrace)
+		{
+			TStringBuilder<512> ActiveChannels;
+			FTraceAuxiliary::GetActiveChannelsString(ActiveChannels);
+			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE TRACE_CHANNELS Role=%s Active=%s"), *Role, ActiveChannels.ToString());
+			OwnedTracePath = FTraceAuxiliary::GetTraceDestinationString();
+			bOwnsTrace = true;
+		}
+		Capture = MakeShared<FFPBenchmarkCsvCapture>();
+		Capture->Filename = Role + TEXT(".csv");
+		OutstandingCsvCapture = Capture;
+		const TSharedRef<FFPBenchmarkCsvCapture> Lease = Capture.ToSharedRef();
+		const FString ExpectedPath = CsvPath;
+		Lease->FirstFrameHandle = Csv->OnCSVProfileFirstFrame().AddLambda([Lease, ExpectedPath]()
+		{
+			FCsvProfiler* Profiler = FCsvProfiler::Get();
+			if (!Canonical(Profiler->GetOutputFilename()).Equals(ExpectedPath, ESearchCase::IgnoreCase)) return;
+			const bool bCancelled = Lease->State == FFPBenchmarkCsvCapture::EState::CancelPendingStart;
+			Lease->State = FFPBenchmarkCsvCapture::EState::Capturing;
+			Profiler->OnCSVProfileFirstFrame().Remove(Lease->FirstFrameHandle);
+			Lease->FirstFrameHandle.Reset();
+			if (bCancelled)
+			{
+				Lease->WriteComplete = Profiler->EndCapture();
+				Lease->State = FFPBenchmarkCsvCapture::EState::StopRequested;
+			}
+		});
+		// Like the single-player lease, cleanup survives World teardown and a
+		// cancelled queued start. Never release it merely because a timer expired.
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Lease](float)
+		{
+			if (Lease->State == FFPBenchmarkCsvCapture::EState::StopRequested && Lease->WriteComplete.IsValid() && Lease->WriteComplete.IsReady())
+				Lease->State = FFPBenchmarkCsvCapture::EState::Released;
+			if (Lease->State != FFPBenchmarkCsvCapture::EState::Released) return true;
+			if (OutstandingCsvCapture == Lease) OutstandingCsvCapture.Reset();
+			return false;
+		}), 0.1f);
+		bStarting = true;
+		Csv->BeginCapture(-1, OutputDirectory, Capture->Filename);
+#else
+		Fail(TEXT("CsvProfilerUnavailable"));
+#endif
+	}
+
+	void StopOwnedResources()
+	{
+#if CSV_PROFILER
+		if (Capture.IsValid())
+		{
+			FCsvProfiler* Csv = FCsvProfiler::Get();
+			if (Capture->State == FFPBenchmarkCsvCapture::EState::StartRequested)
+				Capture->State = FFPBenchmarkCsvCapture::EState::CancelPendingStart;
+			else if (Capture->State == FFPBenchmarkCsvCapture::EState::Capturing && Csv->IsCapturing() && OwnsCsv())
+			{
+				Capture->WriteComplete = Csv->EndCapture();
+				Capture->State = FFPBenchmarkCsvCapture::EState::StopRequested;
+			}
+		}
+#endif
+		if (bOwnsTrace && !bTraceStopRequested)
+		{
+			if (FTraceAuxiliary::GetTraceDestinationString() == OwnedTracePath)
+				bTraceStopRequested = FTraceAuxiliary::Stop();
+			else
+			{
+				Fail(TEXT("TraceOwnershipLost"));
+				bOwnsTrace = false; // Never stop a replacement session.
+			}
+		}
+	}
+
+	bool PollFlush()
+	{
+		StopOwnedResources();
+		const bool bCsvDone = !Capture.IsValid() || (Capture->WriteComplete.IsValid() && Capture->WriteComplete.IsReady());
+		const bool bTraceDone = !bOwnsTrace || (bTraceStopRequested && !FTraceAuxiliary::IsConnected());
+		if (!bCsvDone || !bTraceDone)
+		{
+			if (!bQuarantineLogged && FPlatformTime::Seconds() - FlushAt >= 30.0)
+			{
+				bQuarantineLogged = true;
+				Fail(TEXT("ArtifactFlushTimeoutLeaseRetained"));
+				UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE QUARANTINED Role=%s CsvDone=%d TraceDone=%d"), *Role, bCsvDone, bTraceDone);
+			}
+			return true;
+		}
+		if (!bFailed && !bFinalized)
+		{
+			const FString ActualCsv = Capture.IsValid() ? Canonical(Capture->WriteComplete.Get()) : FString();
+			if (!ActualCsv.Equals(CsvPath, ESearchCase::IgnoreCase) || IFileManager::Get().FileSize(*CsvPath) <= 0 ||
+				(bCollectTrace && IFileManager::Get().FileSize(*TracePath) <= 0)) Fail(TEXT("ArtifactMissingEmptyOrWrongPath"));
+			if (Role != TEXT("Server") && !GUsingNullRHI &&
+				IFileManager::Get().FileSize(*FPaths::Combine(OutputDirectory, Role + TEXT(".png"))) <= 0)
+				Fail(TEXT("RenderedClientScreenshotMissing"));
+			if (bHealthAndDeath && Role != TEXT("Server") && !GUsingNullRHI &&
+				IFileManager::Get().FileSize(*FPaths::Combine(OutputDirectory, Role + TEXT("_AfterDeath.png"))) <= 0)
+				Fail(TEXT("DeathWorkloadScreenshotMissing"));
+		}
+		if (!bFailed && !bFinalized)
+		{
+			// 写盘完成后才检查 UObject 释放，不把强制 GC 停顿混入正式帧时；仍不把驻留量当作分配归因。
+			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+			int32 RemainingWidgets = 0;
+			UWorld* CurrentWorld = World.Get();
+			ForEachObjectOfClass(UfpstrueEnemyHealthBarWidget::StaticClass(), [CurrentWorld, &RemainingWidgets](UObject* Object)
+			{
+				if (!Object->HasAnyFlags(RF_ClassDefaultObject) && CastChecked<UfpstrueEnemyHealthBarWidget>(Object)->GetWorld() == CurrentWorld)
+					++RemainingWidgets;
+			});
+			const int32 ExpectedWidgets = Role == TEXT("Server") || UfpstrueEnemyHealthBarComponent::GetConfiguredMode() == EFPEnemyHealthBarMode::Off
+				? 0 : (bHealthAndDeath ? 128 : 160);
+			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE UI_GC Role=%s Widgets=%d Expected=%d PhysicalMB=%.3f CaptureStopped=1"),
+				*Role, RemainingWidgets, ExpectedWidgets, FPlatformMemory::GetStats().UsedPhysical / (1024.0 * 1024.0));
+			if (RemainingWidgets != ExpectedWidgets) Fail(TEXT("ReleasedEnemyWidgetsRetainedAfterCaptureGC"));
+		}
+		if (!bFailed && !bFinalized)
+		{
+			bFinalized = true;
+			// 三端都写盘与释放检查完成后才允许退出，避免 DS 先走导致慢端掉线换图污染校验。
+			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE FLUSHED Role=%s AwaitingExit=1"), *Role);
+		}
+		if (!bFailed)
+		{
+			FString Command;
+			if (!ReadControl(Command)) { if (!bFailed) return true; }
+			else if (Command != TEXT("EXIT")) return true;
+		}
+		if (!bFailed) UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE COMPLETE Role=%s Csv=%s Trace=%s Duration=%.3f"),
+			*Role, *CsvPath, *TracePath, FPlatformTime::Seconds() - CaptureAt);
+		FPlatformMisc::RequestExitWithStatus(false, bFailed ? 2 : 0, TEXT("PvpPerformanceProfile"));
+		return false;
+	}
+
+	bool Tick(float)
+	{
+		if (FPlatformTime::Seconds() - StartedAt >= 300.0) Fail(TEXT("Watchdog300Seconds"));
+		if (bFlushing) return PollFlush();
+		FString Command;
+		if (!ReadControl(Command)) return bFailed ? PollFlush() : true;
+		if (Command == TEXT("EXIT")) { Fail(TEXT("ExitBeforeAllPeersFlushed")); return PollFlush(); }
+		bool bWaitingForLocalView = false;
+		if (!SampleWorld(bWaitingForLocalView))
+		{
+			if (bWaitingForLocalView && !bReady && !bStarting && !bCapturing && Command == TEXT("WAIT")) return true;
+			Fail(TEXT("WorldViewOrTimeInvalid"));
+			return PollFlush();
+		}
+		const double CaptureElapsed = bCapturing ? FPlatformTime::Seconds() - CaptureAt : 0.0;
+		const bool bDeathTransition = bHealthAndDeath && bCapturing && CaptureElapsed >= 19.5;
+		const bool bNowReady = Players == 2 && (bDeathTransition ? Enemies >= 128 && Enemies <= 160 : Enemies == 160);
+		if (bReady && (!bNowReady || (bDeathTransition && CaptureElapsed >= 23.0 && Enemies != 128)))
+		{ Fail(TEXT("PopulationChangedOutsideExplicitWorkload")); return PollFlush(); }
+		if (!bReady && bNowReady)
+		{
+			bReady = true;
+			ReadyAt = FPlatformTime::Seconds();
+			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE READY Role=%s Enemies=%d Players=%d Location=%s Rotation=%s Width=%d Height=%d"),
+				*Role, Enemies, Players, *ViewLocation.ToCompactString(), *ViewRotation.ToCompactString(), Width, Height);
+		}
+		if (!bStarting && !bCapturing)
+		{
+			if (Command == TEXT("STOP")) { Fail(TEXT("StopBeforeCapture")); return PollFlush(); }
+			if (Command == TEXT("START"))
+			{
+				if (!bReady || FPlatformTime::Seconds() - ReadyAt < 14.8) { Fail(TEXT("StartBeforeReadyAnd15SecondWarmup")); return PollFlush(); }
+				BeginCapture();
+			}
+		}
+		else
+		{
+			if (Command == TEXT("WAIT")) { Fail(TEXT("ControlRegressedAfterStart")); return PollFlush(); }
+			if (bStarting && Capture.IsValid() && Capture->State == FFPBenchmarkCsvCapture::EState::Capturing)
+			{
+				bStarting = false;
+				bCapturing = true;
+				CaptureAt = FPlatformTime::Seconds();
+				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE CAPTURING Role=%s Enemies=%d Players=%d Csv=%s Trace=%s"),
+					*Role, Enemies, Players, *CsvPath, *TracePath);
+				if (Role != TEXT("Server") && !GUsingNullRHI)
+					FScreenshotRequest::RequestScreenshot(FPaths::Combine(OutputDirectory, Role + TEXT(".png")), true, false);
+			}
+			if (bCapturing)
+			{
+				ApplyHealthWorkload();
+				if (bHealthAndDeath && !bCapturedPostDeath && Role != TEXT("Server") && !GUsingNullRHI && CaptureElapsed >= 24.0)
+				{
+					bCapturedPostDeath = true;
+					FScreenshotRequest::RequestScreenshot(FPaths::Combine(OutputDirectory, Role + TEXT("_AfterDeath.png")), true, false);
+				}
+#if CSV_PROFILER
+				if (!OwnsCsv() || !FCsvProfiler::Get()->IsCapturing() || (bCollectTrace && FTraceAuxiliary::GetTraceDestinationString() != OwnedTracePath))
+				{ Fail(TEXT("CaptureOwnershipInterrupted")); return PollFlush(); }
+#endif
+				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE SAMPLE Role=%s Enemies=%d Players=%d Elapsed=%.3f Location=%s Rotation=%s Width=%d Height=%d"),
+					*Role, Enemies, Players, FPlatformTime::Seconds() - CaptureAt, *ViewLocation.ToCompactString(), *ViewRotation.ToCompactString(), Width, Height);
+				const FPlatformMemoryStats Memory = FPlatformMemory::GetStats();
+				const double PhysicalMB = Memory.UsedPhysical / (1024.0 * 1024.0);
+				CSV_CUSTOM_STAT(fpstrueEnemyUI, ActiveWidgets, HealthBars.Widgets, ECsvCustomStatOp::Set);
+				CSV_CUSTOM_STAT(fpstrueEnemyUI, FrustumVisible, HealthBars.FrustumVisible, ECsvCustomStatOp::Set);
+				CSV_CUSTOM_STAT(fpstrueEnemyUI, ProcessPhysicalMB, PhysicalMB, ECsvCustomStatOp::Set);
+				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE UI Role=%s Mode=%s Components=%d Widgets=%d Frustum=%d World=%d Screen=%d Manual=%d Created=%llu Updates=%llu Requests=%llu Draws=%llu PhysicalMB=%.3f PeakPhysicalMB=%.3f Elapsed=%.3f"),
+					*Role, UfpstrueEnemyHealthBarComponent::GetModeName(UfpstrueEnemyHealthBarComponent::GetConfiguredMode()),
+					HealthBars.Components, HealthBars.Widgets, HealthBars.FrustumVisible, HealthBars.WorldWidgets, HealthBars.ScreenWidgets, HealthBars.ManualWorldWidgets,
+					HealthBars.Created, HealthBars.ValueUpdates, HealthBars.RedrawRequests, HealthBars.RenderTargetDraws, PhysicalMB,
+					Memory.PeakUsedPhysical / (1024.0 * 1024.0), FPlatformTime::Seconds() - CaptureAt);
+			}
+			if (Command == TEXT("STOP"))
+			{
+				if (!bCapturing || FPlatformTime::Seconds() - CaptureAt < 29.8) Fail(TEXT("StopBefore30SecondCapture"));
+				else { bFlushing = true; FlushAt = FPlatformTime::Seconds(); }
+				return PollFlush();
+			}
+		}
+		return true;
+	}
+};
+}
+#endif
+
+namespace
+{
+TRACE_DECLARE_INT_COUNTER(FpBaselineIKEvaluations, TEXT("Fpstrue/EnemyIK/EvaluationsPerWorldFrame"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineIKWorldQueries, TEXT("Fpstrue/EnemyIK/WorldQueriesPerWorldFrame"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineIKComponentQueries, TEXT("Fpstrue/EnemyIK/ComponentQueriesPerWorldFrame"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineIKReused, TEXT("Fpstrue/EnemyIK/ReusedFootprintsPerWorldFrame"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineIKFallback, TEXT("Fpstrue/EnemyIK/FallbackFootprintsPerWorldFrame"));
+TRACE_DECLARE_FLOAT_COUNTER(FpBaselineWorldWall, TEXT("Fpstrue/Baseline/WorldTickWallMs"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineGTUser, TEXT("Fpstrue/Baseline/GTUser100nsCumulative"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineGTKernel, TEXT("Fpstrue/Baseline/GTKernel100nsCumulative"));
+TRACE_DECLARE_FLOAT_COUNTER(FpBaselineWorldCpu, TEXT("Fpstrue/Baseline/WorldGameThreadCpuMs"));
+TRACE_DECLARE_INT_COUNTER(FpBaselineWorldCpuValid, TEXT("Fpstrue/Baseline/WorldGameThreadCpuValid"));
+// Shared instrumentation, not a Shipping cheat/RPC surface. It observes a local
+// World and frame boundaries; only the disposable Editor DS prepares test HP and
+// relevancy once. Engine stat-unit counters are deliberately not imitated.
+struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
+{
+	struct FThreadCpuSample
+	{
+		uint64 User100ns = 0, Kernel100ns = 0;
+		uint32 ThreadId = 0, Error = 0;
+		bool bValid = false;
+	};
+	struct FTraceAnchor
+	{
+		uint64 Frame = 0, Qpc = 0;
+		double SecondsPerCycle = 0;
+		uint32 ThreadId = 0;
+	};
+	struct FFrame
+	{
+		uint64 Frame;
+		double Elapsed, Interval, WorldTick;
+		bool bWorldTick;
+		FFpstrueFootIKFrameStats EnemyIK;
+	};
+	struct FFrameCpu
+	{
+		FThreadCpuSample PreviousEndCpu, EndCpu, WorldBeginCpu, WorldEndCpu;
+	};
+	static constexpr int32 MaxFrames = 262144;
+	TWeakObjectPtr<UWorld> World;
+	TWeakObjectPtr<ACameraActor> Camera;
+	TSet<TWeakObjectPtr<AfpstrueCharacter>> PreparedPlayers;
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> PreparedEnemies;
+	TArray<FFrame> Frames;
+	// 原始 OS 样本只在诊断开关开启时分配，不增加普通基线每个 FFrame 的驻留尺寸。
+	TArray<FFrameCpu> CpuFrames;
+	FString Role, ControlPath, Directory, Phase = TEXT("STARTING"), Reason, ViewPolicy = TEXT("Player"), FootIKQueries = TEXT("SharedCandidates");
+	FDelegateHandle StartHandle, EndHandle, FrameHandle;
+	double StartedAt = FPlatformTime::Seconds(), ReadyAt = 0, CaptureAt = 0, StopAt = 0;
+	double LastEndAt = 0, WorldStartAt = 0, LastWorldMs = 0, UnreadableAt = -1, ViewStableAt = 0;
+	uint64 LastWorldFrame = MAX_uint64;
+	FFpstrueFootIKFrameStats LastEnemyIK;
+	FThreadCpuSample PreviousEndCpu, WorldBeginCpu, LastWorldBeginCpu, LastWorldEndCpu;
+	FTraceAnchor CaptureStartAnchor, CaptureStopAnchor;
+	bool bCpuAccounting = false;
+	uint64 CpuQueryCount = 0, CpuQueryFailures = 0;
+	bool bCapturing = false, bRendered = false, bFailed = false, bStatusFailed = false;
+	int32 Enemies = 0, Players = 0, Width = 0, Height = 0, ValidationSamples = 0;
+	int32 MinEnemies = MAX_int32, MaxEnemies = 0, MinPlayers = MAX_int32, MaxPlayers = 0;
+	// Same population scan also records authority-side activity. Clients do not
+	// infer AI decisions from pose; their activity fields remain explicitly null.
+	int32 AIControllers = 0, Chasing = 0, Attacking = 0, Moving = 0;
+	int32 MinAIControllers = MAX_int32, MaxAIControllers = 0, MinChasing = MAX_int32, MaxChasing = 0;
+	int32 MinAttacking = MAX_int32, MaxAttacking = 0, MinMoving = MAX_int32, MaxMoving = 0;
+	float ViewFOV = 0;
+	FVector ViewLocation = FVector::ZeroVector;
+	FRotator ViewRotation = FRotator::ZeroRotator;
+	FFPEnemyHealthBarMetrics Bars;
+	bool bQualityApplied = false;
+	bool bScreenshotRequested = false;
+
+	// ★ 诊断边界：只在显式开关下直接读取当前 GT 的 OS 累计计时，不使用 UE 的缓存 CPU 百分比。
+	// 100ns 是 FILETIME 单位而非逐帧精度；保留原值与有符号差值，不把量化零值/跨边界突增 clamp 掉。
+	FThreadCpuSample ReadGameThreadCpu()
+	{
+		FThreadCpuSample Sample;
+		if (!bCpuAccounting || !IsInGameThread()) return Sample;
+#if PLATFORM_WINDOWS
+		Sample.ThreadId = FPlatformTLS::GetCurrentThreadId();
+		FILETIME Creation = {}, Exit = {}, Kernel = {}, User = {};
+		++CpuQueryCount;
+		if (::GetThreadTimes(::GetCurrentThread(), &Creation, &Exit, &Kernel, &User))
+		{
+			Sample.User100ns = (uint64(User.dwHighDateTime) << 32) | User.dwLowDateTime;
+			Sample.Kernel100ns = (uint64(Kernel.dwHighDateTime) << 32) | Kernel.dwLowDateTime;
+			Sample.bValid = true;
+		}
+		else { Sample.Error = uint32(::GetLastError()); ++CpuQueryFailures; }
+#endif
+		return Sample;
+	}
+
+	static bool CpuDifference(const FThreadCpuSample& Begin, const FThreadCpuSample& End, int64& User, int64& Kernel)
+	{
+		if (!Begin.bValid || !End.bValid || Begin.ThreadId != End.ThreadId) return false;
+		User = int64(End.User100ns) - int64(Begin.User100ns);
+		Kernel = int64(End.Kernel100ns) - int64(Begin.Kernel100ns);
+		return true;
+	}
+
+	static FString CpuRaw(const FThreadCpuSample& Sample, bool bUser)
+	{
+		return Sample.bValid ? FString::Printf(TEXT("%llu"), bUser ? Sample.User100ns : Sample.Kernel100ns) : FString();
+	}
+	static FString CpuDelta(bool bValid, int64 Value)
+	{
+		return bValid ? FString::Printf(TEXT("%lld"), Value) : FString();
+	}
+	static FString CpuMs(bool bValid, int64 User, int64 Kernel, const TCHAR* Missing = TEXT(""))
+	{
+		return bValid ? FString::Printf(TEXT("%.9f"), double(User + Kernel) * 0.0001) : FString(Missing);
+	}
+
+	FTraceAnchor MarkCaptureBoundary(const TCHAR* Boundary) const
+	{
+		const FTraceAnchor Anchor{GFrameCounter, FPlatformTime::Cycles64(), FPlatformTime::GetSecondsPerCycle64(), FPlatformTLS::GetCurrentThreadId()};
+		// 配对 Trace bookmark 与日志中的原始 QPC/frequency scale；不能将未校准的启动秒数直接当成 ETL/Trace 时间。
+		TRACE_BOOKMARK_CYCLES(Anchor.Qpc, TEXT("PVP_BASELINE %s role=%s frame=%llu qpc=%llu secondsPerCycle64=%.17g threadId=%u"),
+			Boundary, *Role, Anchor.Frame, Anchor.Qpc, Anchor.SecondsPerCycle, Anchor.ThreadId);
+		UE_LOG(LogTemp, Display, TEXT("PVP_BASELINE CLOCK_ANCHOR boundary=%s role=%s frame=%llu qpc=%llu secondsPerCycle64=%.17g threadId=%u"),
+			Boundary, *Role, Anchor.Frame, Anchor.Qpc, Anchor.SecondsPerCycle, Anchor.ThreadId);
+		return Anchor;
+	}
+
+	~FPvpBaselineCapture()
+	{
+		FWorldDelegates::OnWorldTickStart.Remove(StartHandle);
+		FWorldDelegates::OnWorldTickEnd.Remove(EndHandle);
+		FCoreDelegates::OnEndFrame.Remove(FrameHandle);
+	}
+
+	static FString Canonical(FString Path)
+	{
+		Path.TrimQuotesInline();
+		Path = FPaths::ConvertRelativePathToFull(Path);
+		FPaths::NormalizeFilename(Path);
+		return FPaths::CollapseRelativeDirectories(Path) ? Path : FString();
+	}
+
+	static FString Quote(FString Text)
+	{
+		Text.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Text.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		Text.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+		Text.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+		Text.ReplaceInline(TEXT("\t"), TEXT("\\t"));
+		return TEXT("\"") + Text + TEXT("\"");
+	}
+
+	static const TCHAR* Configuration()
+	{
+#if UE_BUILD_SHIPPING
+		return TEXT("Shipping");
+#elif UE_BUILD_DEVELOPMENT
+		return TEXT("Development");
+#elif UE_BUILD_TEST
+		return TEXT("Test");
+#else
+		return TEXT("Debug");
+#endif
+	}
+
+	// File replacement is atomic at the protocol boundary. The parent tolerates
+	// short sharing violations; each process is the sole writer of its role files.
+	bool SaveAtomic(const FString& Name, const FString& Contents)
+	{
+		const FString Path = FPaths::Combine(Directory, Role + Name);
+		const FString Temporary = Path + TEXT(".tmp");
+		return FFileHelper::SaveStringToFile(Contents, *Temporary, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM) &&
+			IFileManager::Get().Move(*Path, *Temporary, true, false, false, true);
+	}
+
+	FString CommonJson() const
+	{
+		const double Duration = CaptureAt > 0 ? (StopAt > 0 ? StopAt : FPlatformTime::Seconds()) - CaptureAt : 0;
+		return FString::Printf(TEXT("\"schemaVersion\":1,\"phase\":%s,\"reason\":%s,\"role\":%s,\"pid\":%u,\"enemies\":%d,\"players\":%d,\"width\":%d,\"height\":%d,\"viewLocation\":[%.6f,%.6f,%.6f],\"viewRotation\":[%.6f,%.6f,%.6f],\"frames\":%d,\"captureSeconds\":%.6f,\"buildConfiguration\":%s,\"isShipping\":%s,\"nullRhi\":%s,\"rendered\":%s,\"viewPolicy\":%s,\"fov\":%.6f,\"footIKQueries\":%s"),
+			*Quote(Phase), *Quote(Reason), *Quote(Role), FPlatformProcess::GetCurrentProcessId(), Enemies, Players, Width, Height,
+			ViewLocation.X, ViewLocation.Y, ViewLocation.Z, ViewRotation.Pitch, ViewRotation.Yaw, ViewRotation.Roll,
+			Frames.Num(), Duration, *Quote(Configuration()), UE_BUILD_SHIPPING ? TEXT("true") : TEXT("false"),
+			GUsingNullRHI ? TEXT("true") : TEXT("false"), bRendered ? TEXT("true") : TEXT("false"), *Quote(ViewPolicy), ViewFOV, *Quote(FootIKQueries));
+	}
+
+	bool Publish(const TCHAR* NewPhase)
+	{
+		Phase = NewPhase;
+		if (!SaveAtomic(TEXT(".status.json"), TEXT("{") + CommonJson() + TEXT("}\n")))
+		{
+			bStatusFailed = bFailed = true;
+			FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineStatusWrite"));
+			return false;
+		}
+		return true;
+	}
+
+	bool Fail(const TCHAR* Failure)
+	{
+		if (!bFailed) Reason = Failure;
+		bFailed = true;
+		if (bCapturing) CaptureStopAnchor = MarkCaptureBoundary(TEXT("FAILED"));
+		bCapturing = false;
+		StopAt = FPlatformTime::Seconds();
+		Publish(TEXT("FAILED"));
+		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineFailed"));
+		return false;
+	}
+
+	void BeginWorld(UWorld* InWorld, ELevelTick, float)
+	{
+		if (bCapturing && InWorld == World.Get())
+		{
+			WorldStartAt = FPlatformTime::Seconds();
+			WorldBeginCpu = ReadGameThreadCpu();
+		}
+	}
+
+	void EndWorld(UWorld* InWorld, ELevelTick, float)
+	{
+		if (bCapturing && InWorld == World.Get() && WorldStartAt > 0)
+		{
+			LastWorldEndCpu = ReadGameThreadCpu();
+			LastWorldBeginCpu = WorldBeginCpu;
+			LastWorldMs = (FPlatformTime::Seconds() - WorldStartAt) * 1000;
+			LastWorldFrame = GFrameCounter;
+			// Read the selected World's same-frame counter after its animation work.
+			// No evaluation is a valid zero sample, not a reason to discard a frame.
+			LastEnemyIK = UfpstrueFootIKAnimInstance::GetEnemyFrameStats(InWorld);
+			// 一次 World/frame 汇总，不在每条 IK 射线发计数事件；零求值是有效零，不沿用上帧。
+			TRACE_COUNTER_SET(FpBaselineIKEvaluations, LastEnemyIK.Evaluations);
+			TRACE_COUNTER_SET(FpBaselineIKWorldQueries, LastEnemyIK.WorldQueries);
+			TRACE_COUNTER_SET(FpBaselineIKComponentQueries, LastEnemyIK.ComponentQueries);
+			TRACE_COUNTER_SET(FpBaselineIKReused, LastEnemyIK.ReusedFootprints);
+			TRACE_COUNTER_SET(FpBaselineIKFallback, LastEnemyIK.FallbackFootprints);
+			TRACE_COUNTER_SET(FpBaselineWorldWall, LastWorldMs);
+			int64 User = 0, Kernel = 0;
+			const bool bWorldCpu = CpuDifference(LastWorldBeginCpu, LastWorldEndCpu, User, Kernel);
+			TRACE_COUNTER_SET(FpBaselineWorldCpuValid, bWorldCpu ? 1 : 0);
+			if (LastWorldEndCpu.bValid)
+			{
+				TRACE_COUNTER_SET(FpBaselineGTUser, int64(LastWorldEndCpu.User100ns));
+				TRACE_COUNTER_SET(FpBaselineGTKernel, int64(LastWorldEndCpu.Kernel100ns));
+				if (bWorldCpu)
+					TRACE_COUNTER_SET(FpBaselineWorldCpu, double(User + Kernel) * 0.0001);
+			}
+			WorldStartAt = 0;
+		}
+	}
+
+	void EndFrame()
+	{
+		if (!bCapturing) return;
+		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueBaseline_RecordEndFrame);
+		const double Now = FPlatformTime::Seconds();
+		const FThreadCpuSample EndCpu = ReadGameThreadCpu();
+		if (LastEndAt > 0)
+		{
+			if (Frames.Num() >= MaxFrames) { Fail(TEXT("BoundedFrameBufferExceeded")); return; }
+			const double Interval = (Now - LastEndAt) * 1000;
+			if (!FMath::IsFinite(Interval) || Interval <= 0) { Fail(TEXT("InvalidFrameClock")); return; }
+			const bool bSameWorldFrame = LastWorldFrame == GFrameCounter;
+			Frames.Add({GFrameCounter, Now - CaptureAt, Interval, LastWorldMs, bSameWorldFrame,
+				bSameWorldFrame ? LastEnemyIK : FFpstrueFootIKFrameStats{}});
+			if (bCpuAccounting) CpuFrames.Add({PreviousEndCpu, EndCpu,
+				bSameWorldFrame ? LastWorldBeginCpu : FThreadCpuSample{}, bSameWorldFrame ? LastWorldEndCpu : FThreadCpuSample{}});
+		}
+		LastEndAt = Now;
+		PreviousEndCpu = EndCpu;
+	}
+
+	bool ReadControl(FString& Command)
+	{
+		const int64 Bytes = IFileManager::Get().FileSize(*ControlPath);
+		if (Bytes > 64) return Fail(TEXT("OversizedControlFile"));
+		if (Bytes < 1 || !FFileHelper::LoadFileToString(Command, *ControlPath))
+		{
+			if (UnreadableAt < 0) UnreadableAt = FPlatformTime::Seconds();
+			if (FPlatformTime::Seconds() - UnreadableAt >= 1) return Fail(TEXT("ControlUnavailable"));
+			return false;
+		}
+		UnreadableAt = -1;
+		Command.TrimStartAndEndInline();
+		if (Command != TEXT("WAIT") && Command != TEXT("START") && Command != TEXT("STOP") && Command != TEXT("EXIT"))
+			return Fail(TEXT("InvalidControlCommand"));
+		return true;
+	}
+
+	// Count replicas, not just server intent. No fake AI, damage suppression or
+	// Shipping test RPCs. A fixed tagged camera must actually become the local view.
+	bool SampleWorld()
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueBaseline_ValidateWorldAndView);
+		UWorld* Current = World.Get();
+		if (Current == nullptr || Current->GetWorldSettings() == nullptr || Current->IsPaused() ||
+			!FMath::IsNearlyEqual(Current->GetWorldSettings()->GetEffectiveTimeDilation(), 1.0f))
+			return Fail(TEXT("WorldOrTimeChanged"));
+		Enemies = Players = 0;
+		AIControllers = Chasing = Attacking = Moving = 0;
+		Bars = {};
+		for (TActorIterator<AfpstrueEnemyCharacter> It(Current); It; ++It)
+		{
+			if (const auto* Bar = It->FindComponentByClass<UfpstrueEnemyHealthBarComponent>()) Bar->AppendMetrics(Bars);
+			if (It->IsActorBeingDestroyed() || It->IsDead()) continue;
+			++Enemies;
+			if (Role == TEXT("Server"))
+			{
+				if (const auto* AI = Cast<AfpstrueEnemyAIController>(It->GetController()))
+				{
+					++AIControllers;
+					if (AI->GetAIState() == EFPEnemyAIState::Chase) ++Chasing;
+					if (AI->GetAIState() == EFPEnemyAIState::Attack) ++Attacking;
+				}
+				if (It->GetVelocity().SizeSquared2D() > FMath::Square(5.f)) ++Moving;
+			}
+#if !UE_BUILD_SHIPPING
+			if (Role == TEXT("Server") && !PreparedEnemies.Contains(*It))
+			{
+				It->SetNetCullDistanceSquared(1.0e12f);
+				It->ForceNetUpdate();
+				PreparedEnemies.Add(*It);
+			}
+#endif
+		}
+		if (Role == TEXT("Server"))
+		{
+#if !UE_BUILD_SHIPPING
+			auto* Mode = Current->GetAuthGameMode<AfpstruePvpGameMode>();
+			if (Mode == nullptr) return Fail(TEXT("WrongServerGameMode"));
+			for (TActorIterator<AfpstrueCharacter> It(Current); It; ++It)
+			{
+				if (!Mode->IsCombatParticipant(*It) || Cast<APlayerController>(It->GetController()) == nullptr) continue;
+				++Players;
+				if (!PreparedPlayers.Contains(*It))
+				{
+					if (auto* Health = It->GetHealthComponent()) Health->SetMaxHealthAndReset(1000000.f);
+					else return Fail(TEXT("PlayerHealthMissing"));
+					PreparedPlayers.Add(*It);
+				}
+			}
+			return true;
+#else
+			return Fail(TEXT("ShippingServerPreparationUnsupported"));
+#endif
+		}
+		if (bRendered && !bQualityApplied)
+		{
+			// Apply through the supported Shipping API, not ExecCmds/cheat CVars.
+			// The launcher supplies a fresh UserDir; project Config is never saved.
+			UGameUserSettings* Settings = GEngine != nullptr ? GEngine->GetGameUserSettings() : nullptr;
+			if (Settings == nullptr) return Fail(TEXT("GameUserSettingsUnavailable"));
+			Settings->SetScreenResolution(FIntPoint(1600, 900));
+			Settings->SetFullscreenMode(EWindowMode::Windowed);
+			Settings->SetVSyncEnabled(false);
+			Settings->SetFrameRateLimit(0);
+			Settings->SetOverallScalabilityLevel(2);
+			Settings->ApplySettings(false);
+			bQualityApplied = true;
+			return false;
+		}
+		if (const auto* State = Current->GetGameState())
+			for (const APlayerState* Player : State->PlayerArray) if (IsValid(Player)) ++Players;
+		APlayerController* Local = UGameplayStatics::GetPlayerController(Current, 0);
+		if (Local == nullptr || !Local->IsLocalController() || Local->GetPawn() == nullptr || Local->AcknowledgedPawn != Local->GetPawn())
+			return false;
+		if (!Camera.IsValid())
+		{
+			if (ViewPolicy == TEXT("Overview"))
+			{
+				for (TActorIterator<ACameraActor> It(Current); It; ++It)
+					if (It->ActorHasTag(TEXT("EnemyUIProfileCamera"))) { Camera = *It; break; }
+				if (!Camera.IsValid()) return Fail(TEXT("TaggedBaselineCameraMissing"));
+			}
+			else
+			{
+				// Wait for actual possession and a camera update, then freeze that
+				// first-person view. Do not use the high arena overview by default.
+				if (Local->GetViewTarget() != Local->GetPawn() || Local->PlayerCameraManager == nullptr ||
+					Local->PlayerCameraManager->GetCameraCacheTime() <= 0) return false;
+				Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
+				const float PlayerFOV = Local->PlayerCameraManager->GetFOVAngle();
+				if (!FMath::IsFinite(PlayerFOV) || PlayerFOV <= 0 || PlayerFOV >= 180) return Fail(TEXT("PlayerViewFovInvalid"));
+				Camera = Current->SpawnActor<ACameraActor>(ViewLocation, ViewRotation);
+				if (!Camera.IsValid()) return Fail(TEXT("PlayerBaselineCameraSpawnFailed"));
+				Camera->GetCameraComponent()->SetFieldOfView(PlayerFOV);
+			}
+			Local->SetViewTarget(Camera.Get());
+			return false;
+		}
+		Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		if (Local->PlayerCameraManager == nullptr) return false;
+		ViewFOV = Local->PlayerCameraManager->GetFOVAngle();
+		if (Local->GetViewTarget() != Camera.Get() || !ViewLocation.Equals(Camera->GetActorLocation(), 1.f) ||
+			!ViewRotation.Equals(Camera->GetActorRotation(), .1f) || !FMath::IsFinite(ViewFOV) ||
+			!FMath::IsNearlyEqual(ViewFOV, Camera->GetCameraComponent()->FieldOfView, .1f))
+		{
+			if (Phase == TEXT("STARTING")) { Local->SetViewTarget(Camera.Get()); ViewStableAt = 0; return false; }
+			return Fail(TEXT("RecordedViewDrifted"));
+		}
+		if (ViewStableAt == 0) ViewStableAt = FPlatformTime::Seconds();
+		if (FPlatformTime::Seconds() - ViewStableAt < .5) return false;
+		Local->GetViewportSize(Width, Height);
+		if (bRendered && (GUsingNullRHI || Width != 1600 || Height != 900)) return Fail(TEXT("RenderedViewportMismatch"));
+		if (bRendered)
+		{
+			const auto* Settings = GEngine->GetGameUserSettings();
+			if (Settings == nullptr || Settings->IsVSyncEnabled() || Settings->GetFrameRateLimit() != 0 ||
+				Settings->GetOverallScalabilityLevel() != 2 || Settings->GetScreenResolution() != FIntPoint(1600, 900))
+				return Fail(TEXT("BaselineQualitySettingsChanged"));
+		}
+		return true;
+	}
+
+	bool Flush()
+	{
+		bCapturing = false;
+		StopAt = FPlatformTime::Seconds();
+		CaptureStopAnchor = MarkCaptureBoundary(TEXT("STOP"));
+		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueBaseline_FlushArtifacts);
+		if (Frames.Num() < 100 || StopAt - CaptureAt < 59.8 || StopAt - CaptureAt > 75)
+			return Fail(TEXT("CaptureDurationOrSamplesInvalid"));
+		FString Csv(TEXT("Frame,ElapsedSeconds,FrameEndIntervalMs,WorldTickWallMs,WorldTickValid,EnemyIKStatsValid,EnemyIKSolveWallMs,EnemyIKEvaluations,EnemyIKWorldQueries,EnemyIKComponentQueries,EnemyIKReusedFootprints,EnemyIKFallbackFootprints,CpuAccountingEnabled,GTEndCpuValid,GTEndThreadId,GTEndCpuQueryError,GTPreviousEndUser100ns,GTPreviousEndKernel100ns,GTEndUser100ns,GTEndKernel100ns,GTFrameCpuValid,GTFrameUser100nsDelta,GTFrameKernel100nsDelta,GTFrameCpuMs,GTWorldCpuValid,GTWorldBeginUser100ns,GTWorldBeginKernel100ns,GTWorldEndUser100ns,GTWorldEndKernel100ns,GTWorldUser100nsDelta,GTWorldKernel100nsDelta,GTWorldCpuMs\n"));
+		Csv.Reserve(Frames.Num() * (bCpuAccounting ? 400 : 165));
+		int32 IKValidFrames = 0, IKActiveFrames = 0;
+		double IKSolveTotalMs = 0, IKSolveMaxMs = 0;
+		uint64 IKEvaluations = 0, IKWorldQueries = 0, IKComponentQueries = 0, IKReusedFootprints = 0, IKFallbackFootprints = 0;
+		int32 CpuValidFrames = 0, CpuValidWorlds = 0, NegativeFrameCpuDeltas = 0, NegativeWorldCpuDeltas = 0;
+		int64 FrameUser100ns = 0, FrameKernel100ns = 0, WorldUser100ns = 0, WorldKernel100ns = 0;
+		double CpuPairedFrameWallMs = 0, CpuPairedWorldWallMs = 0;
+		for (int32 FrameIndex = 0; FrameIndex < Frames.Num(); ++FrameIndex)
+		{
+			const FFrame& Frame = Frames[FrameIndex];
+			const FFrameCpu EmptyCpu;
+			const FFrameCpu& Cpu = CpuFrames.IsValidIndex(FrameIndex) ? CpuFrames[FrameIndex] : EmptyCpu;
+			const FFpstrueFootIKFrameStats& IK = Frame.EnemyIK;
+			if (!FMath::IsFinite(IK.EnemySolveMs) || IK.EnemySolveMs < 0) return Fail(TEXT("InvalidEnemyIKWallClock"));
+			Csv += FString::Printf(TEXT("%llu,%.9f,%.6f,%s,%d,%d,%.6f,%u,%u,%u,%u,%u"), Frame.Frame, Frame.Elapsed, Frame.Interval,
+				Frame.bWorldTick ? *FString::Printf(TEXT("%.6f"), Frame.WorldTick) : TEXT(""), Frame.bWorldTick ? 1 : 0,
+				Frame.bWorldTick ? 1 : 0, IK.EnemySolveMs, IK.Evaluations, IK.WorldQueries, IK.ComponentQueries, IK.ReusedFootprints, IK.FallbackFootprints);
+			int64 FrameUser = 0, FrameKernel = 0, WorldUser = 0, WorldKernel = 0;
+			const bool bFrameCpu = CpuDifference(Cpu.PreviousEndCpu, Cpu.EndCpu, FrameUser, FrameKernel);
+			const bool bWorldCpu = Frame.bWorldTick && CpuDifference(Cpu.WorldBeginCpu, Cpu.WorldEndCpu, WorldUser, WorldKernel);
+			Csv += FString::Printf(TEXT(",%d,%d,%u,%u,%s,%s,%s,%s,%d,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s,%s\n"),
+				bCpuAccounting ? 1 : 0, Cpu.EndCpu.bValid ? 1 : 0, Cpu.EndCpu.ThreadId, Cpu.EndCpu.Error,
+				*CpuRaw(Cpu.PreviousEndCpu, true), *CpuRaw(Cpu.PreviousEndCpu, false), *CpuRaw(Cpu.EndCpu, true), *CpuRaw(Cpu.EndCpu, false),
+				bFrameCpu ? 1 : 0, *CpuDelta(bFrameCpu, FrameUser), *CpuDelta(bFrameCpu, FrameKernel), *CpuMs(bFrameCpu, FrameUser, FrameKernel),
+				bWorldCpu ? 1 : 0, *CpuRaw(Cpu.WorldBeginCpu, true), *CpuRaw(Cpu.WorldBeginCpu, false),
+				*CpuRaw(Cpu.WorldEndCpu, true), *CpuRaw(Cpu.WorldEndCpu, false), *CpuDelta(bWorldCpu, WorldUser), *CpuDelta(bWorldCpu, WorldKernel), *CpuMs(bWorldCpu, WorldUser, WorldKernel));
+			if (bFrameCpu)
+			{
+				++CpuValidFrames; FrameUser100ns += FrameUser; FrameKernel100ns += FrameKernel; CpuPairedFrameWallMs += Frame.Interval;
+				NegativeFrameCpuDeltas += FrameUser < 0 || FrameKernel < 0 ? 1 : 0;
+			}
+			if (bWorldCpu)
+			{
+				++CpuValidWorlds; WorldUser100ns += WorldUser; WorldKernel100ns += WorldKernel; CpuPairedWorldWallMs += Frame.WorldTick;
+				NegativeWorldCpuDeltas += WorldUser < 0 || WorldKernel < 0 ? 1 : 0;
+			}
+			if (Frame.bWorldTick)
+			{
+				++IKValidFrames;
+				IKActiveFrames += IK.Evaluations > 0 ? 1 : 0;
+				IKSolveTotalMs += IK.EnemySolveMs;
+				IKSolveMaxMs = FMath::Max(IKSolveMaxMs, IK.EnemySolveMs);
+				IKEvaluations += IK.Evaluations; IKWorldQueries += IK.WorldQueries; IKComponentQueries += IK.ComponentQueries;
+				IKReusedFootprints += IK.ReusedFootprints; IKFallbackFootprints += IK.FallbackFootprints;
+			}
+		}
+		if (!SaveAtomic(TEXT(".frames.csv"), Csv)) return Fail(TEXT("FrameArtifactWriteFailed"));
+		const FPlatformMemoryStats Memory = FPlatformMemory::GetStats();
+		Phase = TEXT("FLUSHED");
+		FString Json = TEXT("{") + CommonJson();
+		// Means include every valid World/frame, including zero-IK frames. Missing
+		// World ticks remain separately visible; never report this as on-core CPU.
+		Json += FString::Printf(TEXT(",\"enemyFootIK\":{\"sampledFrames\":%d,\"validWorldFrames\":%d,\"completeFrameCoverage\":%s,\"framesWithEvaluations\":%d,\"zeroEvaluationFrames\":%d,\"solveWallTotalMs\":%.6f,\"meanSolveWallMsPerFrame\":%.6f,\"maxSolveWallMs\":%.6f,\"evaluations\":%llu,\"worldQueries\":%llu,\"componentQueries\":%llu,\"reusedFootprints\":%llu,\"fallbackFootprints\":%llu,\"timingBoundary\":\"Enemy post-process IK solve wall scope after the main input pose; excludes main AnimBP, includes queries and leg solve, not pure CPU on-core time. Means include valid zero-evaluation frames; missing World frames are not valid zero samples.\"}"),
+			Frames.Num(), IKValidFrames, IKValidFrames == Frames.Num() ? TEXT("true") : TEXT("false"), IKActiveFrames, IKValidFrames - IKActiveFrames,
+			IKSolveTotalMs, IKSolveTotalMs / FMath::Max(1, IKValidFrames), IKSolveMaxMs,
+			IKEvaluations, IKWorldQueries, IKComponentQueries, IKReusedFootprints, IKFallbackFootprints);
+		const bool bFrameCpuPresent = CpuValidFrames > 0, bWorldCpuPresent = CpuValidWorlds > 0;
+		const bool bCpuComplete = bCpuAccounting && PLATFORM_WINDOWS && CpuFrames.Num() == Frames.Num() && CpuValidFrames == Frames.Num()
+			&& CpuValidWorlds == Frames.Num() && CpuQueryFailures == 0 && NegativeFrameCpuDeltas == 0 && NegativeWorldCpuDeltas == 0;
+		const double FrameCpuTotalMs = double(FrameUser100ns + FrameKernel100ns) * 0.0001;
+		const double WorldCpuTotalMs = double(WorldUser100ns + WorldKernel100ns) * 0.0001;
+		const auto JsonNumber = [](bool bValid, double Value) { return bValid ? FString::Printf(TEXT("%.9f"), Value) : FString(TEXT("null")); };
+		const auto JsonInteger = [](bool bValid, int64 Value) { return bValid ? FString::Printf(TEXT("%lld"), Value) : FString(TEXT("null")); };
+		Json += FString::Printf(TEXT(",\"cpuAccounting\":{\"enabled\":%s,\"platformSupported\":%s,\"valid\":%s,\"threadId\":%u,\"osQueries\":%llu,\"osQueryFailures\":%llu,\"sampledFrameIntervals\":%d,\"validFrameCpuIntervals\":%d,\"validWorldCpuIntervals\":%d,\"negativeFrameCpuDeltas\":%d,\"negativeWorldCpuDeltas\":%d,"),
+			bCpuAccounting ? TEXT("true") : TEXT("false"), PLATFORM_WINDOWS ? TEXT("true") : TEXT("false"),
+			bCpuAccounting ? (bCpuComplete ? TEXT("true") : TEXT("false")) : TEXT("null"), CaptureStartAnchor.ThreadId, CpuQueryCount, CpuQueryFailures,
+			Frames.Num(), CpuValidFrames, CpuValidWorlds, NegativeFrameCpuDeltas, NegativeWorldCpuDeltas);
+		Json += TEXT("\"frameUserTotal100ns\":") + JsonInteger(bFrameCpuPresent, FrameUser100ns)
+			+ TEXT(",\"frameKernelTotal100ns\":") + JsonInteger(bFrameCpuPresent, FrameKernel100ns)
+			+ TEXT(",\"frameCpuTotalMs\":") + JsonNumber(bFrameCpuPresent, FrameCpuTotalMs)
+			+ TEXT(",\"meanFrameCpuMs\":") + JsonNumber(bFrameCpuPresent, FrameCpuTotalMs / FMath::Max(1, CpuValidFrames))
+			+ TEXT(",\"pairedFrameWallTotalMs\":") + JsonNumber(bFrameCpuPresent, CpuPairedFrameWallMs)
+			+ TEXT(",\"frameWallMinusCpuMs\":") + JsonNumber(bFrameCpuPresent, CpuPairedFrameWallMs - FrameCpuTotalMs)
+			+ TEXT(",\"worldUserTotal100ns\":") + JsonInteger(bWorldCpuPresent, WorldUser100ns)
+			+ TEXT(",\"worldKernelTotal100ns\":") + JsonInteger(bWorldCpuPresent, WorldKernel100ns)
+			+ TEXT(",\"worldCpuTotalMs\":") + JsonNumber(bWorldCpuPresent, WorldCpuTotalMs)
+			+ TEXT(",\"meanWorldCpuMs\":") + JsonNumber(bWorldCpuPresent, WorldCpuTotalMs / FMath::Max(1, CpuValidWorlds))
+			+ TEXT(",\"pairedWorldWallTotalMs\":") + JsonNumber(bWorldCpuPresent, CpuPairedWorldWallMs)
+			+ TEXT(",\"worldWallMinusCpuMs\":") + JsonNumber(bWorldCpuPresent, CpuPairedWorldWallMs - WorldCpuTotalMs);
+		Json += TEXT(",\"source\":\"Direct Windows GetThreadTimes for the current GameThread; user+kernel cumulative FILETIME in 100ns units. No UE cached CPUTime and no QueryThreadCycleTime conversion.\",\"interpretation\":\"Per-frame deltas retain OS timer quantization, including zero or greater-than-wall samples; no clamping. Prefer cumulative/mean results over single frames. Missing samples are blank in CSV and aggregates null without valid intervals. World samples bracket only this World; frame samples bracket consecutive OnEndFrame callbacks. Measurement overhead is included. Wall minus thread CPU is NOT blocked time: it also includes runnable/preempted time, other-thread work and timer error; it does not measure worker, RenderThread or GPU execution.\"}");
+		Json += FString::Printf(TEXT(",\"traceAlignment\":{\"start\":{\"frame\":%llu,\"qpc\":%llu,\"secondsPerCycle64\":%.17g,\"threadId\":%u},\"stop\":{\"frame\":%llu,\"qpc\":%llu,\"secondsPerCycle64\":%.17g,\"threadId\":%u},\"boundary\":\"Control-phase START/STOP anchors, not individual frame boundaries. Pair bookmarks and raw Windows QPC ticks with ETL/Trace clock calibration; do not concatenate uncalibrated startup seconds.\"}"),
+			CaptureStartAnchor.Frame, CaptureStartAnchor.Qpc, CaptureStartAnchor.SecondsPerCycle, CaptureStartAnchor.ThreadId,
+			CaptureStopAnchor.Frame, CaptureStopAnchor.Qpc, CaptureStopAnchor.SecondsPerCycle, CaptureStopAnchor.ThreadId);
+		Json += FString::Printf(TEXT(",\"valid\":true,\"seed\":1337,\"map\":%s,\"validationSamples\":%d,\"minEnemies\":%d,\"maxEnemies\":%d,\"minPlayers\":%d,\"maxPlayers\":%d,\"widgets\":%d,\"worldWidgets\":%d,\"manualWorldWidgets\":%d,\"renderTargetDraws\":%llu,\"physicalMB\":%.3f,\"peakPhysicalMB\":%.3f"),
+			*Quote(World.IsValid() ? World->GetMapName() : FString()), ValidationSamples, MinEnemies, MaxEnemies, MinPlayers, MaxPlayers,
+			Bars.Widgets, Bars.WorldWidgets, Bars.ManualWorldWidgets, Bars.RenderTargetDraws,
+			Memory.UsedPhysical / 1048576.0, Memory.PeakUsedPhysical / 1048576.0);
+		Json += TEXT(",\"actualMapPackage\":") + Quote(World.IsValid() ? World->GetOutermost()->GetName() : FString());
+		if (Role == TEXT("Server"))
+			Json += FString::Printf(TEXT(",\"aiActivity\":{\"validationSamples\":%d,\"movingSpeedThresholdCmPerSecond\":5,\"controllers\":%d,\"minControllers\":%d,\"maxControllers\":%d,\"chasing\":%d,\"minChasing\":%d,\"maxChasing\":%d,\"attacking\":%d,\"minAttacking\":%d,\"maxAttacking\":%d,\"moving\":%d,\"minMoving\":%d,\"maxMoving\":%d}"),
+				ValidationSamples, AIControllers, MinAIControllers, MaxAIControllers, Chasing, MinChasing, MaxChasing,
+				Attacking, MinAttacking, MaxAttacking, Moving, MinMoving, MaxMoving);
+		else Json += TEXT(",\"aiActivity\":null");
+		Json += TEXT(",\"quality\":{");
+		const TCHAR* QualityNames[] = {TEXT("sg.ResolutionQuality"), TEXT("sg.ViewDistanceQuality"), TEXT("sg.AntiAliasingQuality"),
+			TEXT("sg.ShadowQuality"), TEXT("sg.GlobalIlluminationQuality"), TEXT("sg.ReflectionQuality"), TEXT("sg.PostProcessQuality"),
+			TEXT("sg.TextureQuality"), TEXT("sg.EffectsQuality"), TEXT("sg.FoliageQuality"), TEXT("sg.ShadingQuality"), TEXT("r.VSync"), TEXT("t.MaxFPS"),
+			TEXT("r.ScreenPercentage"), TEXT("r.DynamicRes.OperationMode"), TEXT("r.DynamicGlobalIlluminationMethod"), TEXT("r.ReflectionMethod"), TEXT("r.RayTracing")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(QualityNames); ++Index)
+		{
+			if (Index > 0) Json += TEXT(",");
+			const auto* CVar = IConsoleManager::Get().FindConsoleVariable(QualityNames[Index]);
+			Json += Quote(QualityNames[Index]) + TEXT(":") + (CVar != nullptr ? FString::Printf(TEXT("%.6f"), CVar->GetFloat()) : TEXT("null"));
+		}
+		Json += TEXT("}");
+		Json += TEXT(",\"GameThreadTimeMs\":null,\"RenderThreadTimeMs\":null,\"RHIThreadTimeMs\":null,\"GPUTimeMs\":null,");
+		Json += TEXT("\"timingPolicy\":\"FrameEndIntervalMs=wall interval between consecutive Core OnEndFrame callbacks; includes waits; not Present interval or stat-unit GT. WorldTickWallMs=selected World OnWorldTickStart/End same engine frame; includes dependent waits; missing is blank. No explicit GC or screenshot injected during capture. This observer does not start Trace or engine CSV; external diagnostic launch options, if present, add overhead and are not the uninstrumented baseline.\",");
+		Json += TEXT("\"gameplayPolicy\":\"Same Editor dedicated server for both client configurations; server prepares each player HP1000000 and enemy cull distance squared1e12 once; real AI, movement, attacks and damage remain. Client observes and fixes the recorded Player view by default; Overview requires an explicit option. No automated input or test RPC. Not Shipping dedicated-server capacity.\"}\n");
+		if (!SaveAtomic(TEXT(".summary.json"), Json)) return Fail(TEXT("SummaryArtifactWriteFailed"));
+		return Publish(TEXT("FLUSHED"));
+	}
+
+	bool Tick(float)
+	{
+		const double Now = FPlatformTime::Seconds();
+		if (Now - StartedAt >= 600) return Fail(TEXT("Watchdog600Seconds"));
+		FString Command;
+		if (!ReadControl(Command)) return !bFailed;
+		if (Phase == TEXT("FLUSHED"))
+		{
+			if (Command == TEXT("STOP")) return true;
+			if (Command != TEXT("EXIT")) return Fail(TEXT("ControlRegressedAfterFlush"));
+			if (!Publish(TEXT("COMPLETE"))) return false;
+			FPlatformMisc::RequestExitWithStatus(false, 0, TEXT("PvpBaselineComplete"));
+			return false;
+		}
+		if (Command == TEXT("EXIT")) return Fail(TEXT("ExitBeforeFlushed"));
+		const bool bWorldReady = SampleWorld();
+		if (bFailed) return false;
+		const bool bCountsReady = Enemies == 160 && Players == 2;
+		if (Phase != TEXT("STARTING") && (!bWorldReady || !bCountsReady)) return Fail(TEXT("WorldPopulationOrViewChanged"));
+		if (Phase == TEXT("STARTING") && bWorldReady && bCountsReady)
+		{
+			if (bRendered && bScreenshotRequested)
+				FScreenshotRequest::RequestScreenshot(FPaths::Combine(Directory, Role + TEXT("_Ready.png")), true, false);
+			ReadyAt = Now;
+			if (!Publish(TEXT("READY"))) return false;
+		}
+		if (Phase == TEXT("STARTING") || Phase == TEXT("READY"))
+		{
+			if (Command == TEXT("WAIT")) return true;
+			if (Command != TEXT("START") || Phase != TEXT("READY") || Now - ReadyAt < 19.8)
+				return Fail(TEXT("StartBeforeReadyOr20SecondWarmup"));
+			CaptureAt = Now;
+			LastEndAt = WorldStartAt = 0;
+			LastWorldFrame = MAX_uint64;
+			LastEnemyIK = {};
+			PreviousEndCpu = WorldBeginCpu = LastWorldBeginCpu = LastWorldEndCpu = {};
+			bCapturing = true;
+			CaptureStartAnchor = MarkCaptureBoundary(TEXT("START"));
+			return Publish(TEXT("CAPTURING"));
+		}
+		if (Phase == TEXT("CAPTURING"))
+		{
+			++ValidationSamples;
+			MinEnemies = FMath::Min(MinEnemies, Enemies); MaxEnemies = FMath::Max(MaxEnemies, Enemies);
+			MinPlayers = FMath::Min(MinPlayers, Players); MaxPlayers = FMath::Max(MaxPlayers, Players);
+			if (Role == TEXT("Server"))
+			{
+				MinAIControllers = FMath::Min(MinAIControllers, AIControllers); MaxAIControllers = FMath::Max(MaxAIControllers, AIControllers);
+				MinChasing = FMath::Min(MinChasing, Chasing); MaxChasing = FMath::Max(MaxChasing, Chasing);
+				MinAttacking = FMath::Min(MinAttacking, Attacking); MaxAttacking = FMath::Max(MaxAttacking, Attacking);
+				MinMoving = FMath::Min(MinMoving, Moving); MaxMoving = FMath::Max(MaxMoving, Moving);
+			}
+			if (Now - CaptureAt > 75) return Fail(TEXT("StopNotReceivedWithin75Seconds"));
+			if (Command == TEXT("STOP")) return Flush();
+			if (Command != TEXT("START")) return Fail(TEXT("ControlRegressedDuringCapture"));
+		}
+		return true;
+	}
+};
+
+bool StartPvpBaselineIfRequested(UWorld* World)
+{
+	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpBaseline"))) return false;
+	const auto Capture = MakeShared<FPvpBaselineCapture>();
+	Capture->World = World;
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineRole="), Capture->Role);
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineControl="), Capture->ControlPath);
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineOutput="), Capture->Directory);
+	Capture->ControlPath = FPvpBaselineCapture::Canonical(Capture->ControlPath);
+	Capture->Directory = FPvpBaselineCapture::Canonical(Capture->Directory);
+	Capture->bRendered = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineRendered"));
+	Capture->bScreenshotRequested = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineScreenshot"));
+	Capture->bCpuAccounting = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineCpuAccounting"));
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineView="), Capture->ViewPolicy);
+	FParse::Value(FCommandLine::Get(), TEXT("EnemyFootIKQueries="), Capture->FootIKQueries);
+	FString Root;
+	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRoot="), Root);
+	Root = FPvpBaselineCapture::Canonical(Root.IsEmpty() ? FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling")) : Root);
+	const bool bServer = Capture->Role == TEXT("Server");
+	const bool bValidRole = bServer || Capture->Role == TEXT("Client1") || Capture->Role == TEXT("Client2");
+	const bool bPathsValid = Root.Len() > 3 && !Capture->Directory.IsEmpty() && !Capture->Directory.Equals(Root, ESearchCase::IgnoreCase) &&
+		FPaths::IsUnderDirectory(Capture->Directory, Root) && FPaths::IsUnderDirectory(Capture->ControlPath, Capture->Directory);
+	if (!bPathsValid || !bValidRole || (Capture->ViewPolicy != TEXT("Player") && Capture->ViewPolicy != TEXT("Overview")) ||
+		(Capture->FootIKQueries != TEXT("SharedCandidates") && Capture->FootIKQueries != TEXT("Reference")) ||
+		World == nullptr || World->WorldType != EWorldType::Game || GIsEditor || bProcessBenchmarkConsumed ||
+		(bServer ? (World->GetNetMode() != NM_DedicatedServer || UE_BUILD_SHIPPING) : World->GetNetMode() != NM_Client) ||
+		(bServer && Capture->bRendered) || FParse::Param(FCommandLine::Get(), TEXT("PvpProfile")) ||
+		FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) || FParse::Param(FCommandLine::Get(), TEXT("AutoBenchmark")) ||
+		!IFileManager::Get().DirectoryExists(*Capture->Directory))
+	{
+		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineInvalidArguments"));
+		return true;
+	}
+	// Fresh output is mandatory; a previous successful file cannot satisfy a new
+	// failed run. The parent creates a new case directory and WAIT file first.
+	for (const TCHAR* Suffix : {TEXT(".status.json"), TEXT(".frames.csv"), TEXT(".summary.json")})
+		if (IFileManager::Get().FileExists(*FPaths::Combine(Capture->Directory, Capture->Role + Suffix)))
+		{
+			FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineOutputAlreadyExists"));
+			return true;
+		}
+	bProcessBenchmarkConsumed = true;
+	FMath::RandInit(1337);
+	Capture->Frames.Reserve(FPvpBaselineCapture::MaxFrames);
+	if (Capture->bCpuAccounting) Capture->CpuFrames.Reserve(FPvpBaselineCapture::MaxFrames);
+	Capture->StartHandle = FWorldDelegates::OnWorldTickStart.AddSP(Capture, &FPvpBaselineCapture::BeginWorld);
+	Capture->EndHandle = FWorldDelegates::OnWorldTickEnd.AddSP(Capture, &FPvpBaselineCapture::EndWorld);
+	Capture->FrameHandle = FCoreDelegates::OnEndFrame.AddSP(Capture, &FPvpBaselineCapture::EndFrame);
+	if (!Capture->Publish(TEXT("STARTING"))) return true;
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Capture](float Delta) { return Capture->Tick(Delta); }), .2f);
+	return true;
+}
+}
+
+EFPPvpBaselineBootstrap StartPvpBaselineClient(UGameInstance* Instance)
+{
+	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpBaseline")) || IsRunningDedicatedServer())
+		return EFPPvpBaselineBootstrap::NotRequested;
+	FString Role, Address;
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineRole="), Role);
+	if (Role == TEXT("Server")) return EFPPvpBaselineBootstrap::NotRequested;
+	const auto Reject = []()
+	{
+		// No default-map fallback: a standalone world is not a valid multiplayer
+		// baseline. Parent rejects any exit before COMPLETE, including an early
+		// initialization exit whose Windows message-loop status may still be zero.
+		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineClientBootstrapRejected"));
+		return EFPPvpBaselineBootstrap::Rejected;
+	};
+	if ((Role != TEXT("Client1") && Role != TEXT("Client2")) ||
+		!FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineConnect="), Address)) return Reject();
+	Address.TrimQuotesInline();
+	FString HostPort, Portal;
+	const FString ExpectedPortal = Role == TEXT("Client1") ? TEXT("GroupBaselineClient1") : TEXT("GroupBaselineClient2");
+	if (!Address.Split(TEXT("#"), &HostPort, &Portal) || Portal != ExpectedPortal ||
+		!HostPort.RemoveFromStart(TEXT("127.0.0.1:"), ESearchCase::CaseSensitive) || HostPort.IsEmpty() || HostPort.Len() > 5)
+		return Reject();
+	for (const TCHAR Character : HostPort)
+		if (Character < TEXT('0') || Character > TEXT('9')) return Reject();
+	const int32 Port = FCString::Atoi(*HostPort);
+	if (Port < 1024 || Port > 65000 || Address != FString::Printf(TEXT("127.0.0.1:%d#%s"), Port, *ExpectedPortal)) return Reject();
+	UEngine* Engine = Instance != nullptr ? Instance->GetEngine() : nullptr;
+	FWorldContext* Context = Instance != nullptr ? Instance->GetWorldContext() : nullptr;
+	if (Engine == nullptr || Context == nullptr || Context->OwningGameInstance.Get() != Instance ||
+		Context->WorldType != EWorldType::Game || Context->World() == nullptr || Context->PendingNetGame != nullptr || GIsEditor)
+		return Reject();
+	// Absolute travel deliberately does not inherit DefaultPlayer URL options.
+	// InitializeStandalone already supplied the dummy World; Browse owns PendingNetGame
+	// and the ordinary engine handshake/loading flow, exactly as initial URL travel.
+	const FURL URL(nullptr, *Address, TRAVEL_Absolute);
+	if (!URL.Valid || !URL.IsInternal() || URL.IsLocalInternal() || URL.Host != TEXT("127.0.0.1") ||
+		URL.Port != Port || URL.Portal != ExpectedPortal || URL.Op.Num() != 0) return Reject();
+	FString Error;
+	const EBrowseReturnVal::Type Result = Engine->Browse(*Context, URL, Error);
+	if (Result != EBrowseReturnVal::Pending && Result != EBrowseReturnVal::Success) return Reject();
+	return EFPPvpBaselineBootstrap::Started;
+}
+
+void StartPvpPerformanceProfile(UWorld* World)
+{
+	if (StartPvpBaselineIfRequested(World)) return;
+#if !UE_BUILD_SHIPPING
+	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpProfile"))) return;
+	if (World == nullptr || World->WorldType != EWorldType::Game || GIsEditor || bProcessBenchmarkConsumed)
+	{
+		UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=Unknown Reason=InvalidWorldOrDuplicateProcessRun"));
+		return;
+	}
+	bProcessBenchmarkConsumed = true;
+	const TSharedRef<FPvpPerformanceProfile> Profile = MakeShared<FPvpPerformanceProfile>();
+	Profile->World = World;
+	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRole="), Profile->Role);
+	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileControl="), Profile->ControlPath);
+	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileOutput="), Profile->OutputDirectory);
+	Profile->bCollectTrace = !FParse::Param(FCommandLine::Get(), TEXT("PvpProfileNoTrace"));
+	Profile->bFixedView = FParse::Param(FCommandLine::Get(), TEXT("PvpProfileFixedView"));
+	Profile->bHealthAndDeath = FParse::Param(FCommandLine::Get(), TEXT("PvpProfileHealthAndDeath"));
+	Profile->ControlPath.TrimQuotesInline();
+	Profile->OutputDirectory.TrimQuotesInline();
+	Profile->ControlPath = FPvpPerformanceProfile::Canonical(Profile->ControlPath);
+	Profile->OutputDirectory = FPvpPerformanceProfile::Canonical(Profile->OutputDirectory);
+	const bool bServer = Profile->Role == TEXT("Server");
+	const bool bRoleValid = bServer || Profile->Role == TEXT("Client1") || Profile->Role == TEXT("Client2");
+	const auto& Config = FFPBenchmarkConfig::Get();
+	if (!bRoleValid || (bServer ? World->GetNetMode() != NM_DedicatedServer : World->GetNetMode() != NM_Client) ||
+		!Config.HasEnemyCountOverride() || Config.EnemyCount != 160 || Config.Seed != 1337 ||
+		FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) || Config.bAutoBenchmark ||
+		!FPvpPerformanceProfile::IsProfilePath(Profile->ControlPath) || !FPvpPerformanceProfile::IsProfilePath(Profile->OutputDirectory) ||
+		!IFileManager::Get().MakeDirectory(*Profile->OutputDirectory, true))
+	{
+		UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=%s Reason=InvalidProfileArgumentsOrPath"), *Profile->Role);
+		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpPerformanceProfileArguments"));
+		return;
+	}
+	Profile->CsvPath = FPvpPerformanceProfile::Canonical(FPaths::Combine(Profile->OutputDirectory, Profile->Role + TEXT(".csv")));
+	Profile->TracePath = FPvpPerformanceProfile::Canonical(FPaths::Combine(Profile->OutputDirectory, Profile->Role + TEXT(".utrace")));
+	Profile->WorldTickStartHandle = FWorldDelegates::OnWorldTickStart.AddSP(Profile, &FPvpPerformanceProfile::BeginWorldTick);
+	Profile->WorldTickEndHandle = FWorldDelegates::OnWorldTickEnd.AddSP(Profile, &FPvpPerformanceProfile::EndWorldTick);
+	FMath::RandInit(1337);
+	UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE START Role=%s Enemies=160 Seed=1337 Warmup=15 Capture=30 Control=%s Output=%s HealthPolicy=ServerOnce1000000 RelevancyPolicy=ServerCullSquared1e12 ViewPolicy=RecordedNotFrozen"),
+		*Profile->Role, *Profile->ControlPath, *Profile->OutputDirectory);
+	UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE UI_CONFIG Role=%s Mode=%s Trace=%d NullRHI=%d FixedView=%d"), *Profile->Role,
+		UfpstrueEnemyHealthBarComponent::GetModeName(UfpstrueEnemyHealthBarComponent::GetConfiguredMode()), Profile->bCollectTrace, GUsingNullRHI, Profile->bFixedView);
+	UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE TIMING_SCOPE WorldTick=OnWorldTickStartToEndWallMs StatUnitThreads=RenderedClientOnly FrameIncludesLimiterWait=1"));
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Profile](float Delta) { return Profile->Tick(Delta); }), 0.2f);
+#endif
 }
 
 /*

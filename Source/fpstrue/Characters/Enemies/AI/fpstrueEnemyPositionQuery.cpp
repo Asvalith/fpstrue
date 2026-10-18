@@ -279,7 +279,9 @@ void UfpstrueEnvQueryTest_Position::RunTest(FEnvQueryInstance& QueryInstance) co
 	QueryInstance.Options[QueryInstance.OptionIndex].bHasNavLocations = true;
 }
 
-UEnvQuery* FPCreateEnemyPositionQuery(UObject& Outer, bool bCover)
+namespace
+{
+UEnvQuery* CreateEnemyPositionQueryTemplate(UObject& Outer, bool bCover)
 {
 	const FName QueryName(bCover ? TEXT("FPEnemyCoverPositionQuery") : TEXT("FPEnemyAttackPositionQuery"));
 	if (UEnvQuery* Existing = FindObjectFast<UEnvQuery>(&Outer, QueryName))
@@ -315,4 +317,24 @@ UEnvQuery* FPCreateEnemyPositionQuery(UObject& Outer, bool bCover)
 	}
 	Query->GetOptionsMutable().Add(Option);
 	return Query;
+}
+}
+
+UEnvQuery* UfpstrueEnemyPositionQueryTemplates::GetTemplate(bool bCover)
+{
+	TObjectPtr<UEnvQuery>& Template = bCover ? CoverTemplate : AttackTemplate;
+	if (Template == nullptr) Template = CreateEnemyPositionQueryTemplate(*this, bCover);
+	return Template;
+}
+
+UEnvQuery* FPCreateEnemyPositionQuery(UObject& Outer, bool bCover)
+{
+	if (UWorld* World = Outer.GetWorld())
+	{
+		// UE5.5 按模板 FullName 缓存实例，却按短名复制 LocalTemplate 到同一 Manager。
+		// 每个请求 Actor 各造同名图会覆写旧缓存根，GC 后留下悬空 Generator；固定共享两图，不复制请求运行状态。
+		auto* Templates = World->GetSubsystem<UfpstrueEnemyPositionQueryTemplates>();
+		return Templates != nullptr ? Templates->GetTemplate(bCover) : nullptr;
+	}
+	return CreateEnemyPositionQueryTemplate(Outer, bCover);
 }

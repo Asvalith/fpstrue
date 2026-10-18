@@ -23,7 +23,8 @@ void UfpstrueHealthComponent::ServerSetReplicatedTargetData_Implementation(FGame
 		// 当前项目均为同 ASC 通道的实例化能力；未知/非活动能力不能借目标数据 RPC 占用旧缓存。
 		ConsumeAllReplicatedData(AbilityHandle, AbilityOriginalPredictionKey);
 		// 不能把旧能力的数据交给当前装备发送拒绝 ACK：换枪后的新武器可能恰好使用相同发号。
-		// 客户端结束 Fire 时已经撤销该轮未确认估计；此处只丢弃旧轮数据，不污染新装备的裁决快照。
+		// 强取消/换装备会撤销相应估计；普通松开保留已准入射击等待原武器 ACK。
+		// 这里无法证明晚包属于哪把旧武器，只丢弃未知轮次，不伪造当前装备的逐发终结结果。
 		return;
 	}
 	Super::ServerSetReplicatedTargetData_Implementation(AbilityHandle, AbilityOriginalPredictionKey, TargetData,

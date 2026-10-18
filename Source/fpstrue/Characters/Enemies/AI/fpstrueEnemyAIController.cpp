@@ -87,6 +87,15 @@ void AfpstrueEnemyAIController::GetActorEyesViewPoint(FVector& OutLocation, FRot
 	else Super::GetActorEyesViewPoint(OutLocation, OutRotation);
 }
 
+// 巡视复用 Movement 的平滑转向；感知成功、暂停/停止或死亡时，原生旋转消费者当帧就不再朝旧巡视方向转动。
+FRotator AfpstrueEnemyAIController::GetDesiredRotation() const
+{
+	if (bIdleSearchActive && IsValid(ControlledEnemy) &&
+		(!AcceptsCombatCommands() || ControlledEnemy->IsDead() || bTargetVisible || BrainComponent == nullptr ||
+			!BrainComponent->IsRunning() || BrainComponent->IsPaused())) return ControlledEnemy->GetActorRotation();
+	return Super::GetDesiredRotation();
+}
+
 // 接管有效敌人后重建请求归属、恢复 RVO 并启动行为树；死亡或错误 Pawn 走统一停止出口。
 void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 {
@@ -577,6 +586,18 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 		ReleaseSurroundSlot();
 		SetAIState(ControlledEnemy != nullptr && ControlledEnemy->IsDead() ? EFPEnemyAIState::Dead : EFPEnemyAIState::Idle);
 		StopMovementIfNeeded();
+		// 固定出生朝向加有限视锥不能负责全周警戒：Idle 只发布下段巡视方向，Movement 按转速和原生 DeltaTime 平滑转动。
+		// 不读取隐藏玩家的位置、不增加 Tick/Timer；发现仍只由真实 Sight 确认，暂停和停止由旋转查询同步拒绝。
+		const float SafeYawSpeed = FMath::IsFinite(IdleSearchYawSpeed) ? FMath::Clamp(IdleSearchYawSpeed, 0.0f, 90.0f) : 30.0f;
+		const bool bSearch = bUsesMultiplayerTargets && !bTargetVisible && SafeYawSpeed > 0.0f && IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() &&
+			BrainComponent != nullptr && BrainComponent->IsRunning() && !BrainComponent->IsPaused() &&
+			ControlledEnemy->GetCharacterMovement() != nullptr && ControlledEnemy->GetCharacterMovement()->IsMovingOnGround();
+		ApplyRotationPolicy(AIState, false, bSearch);
+		if (bSearch)
+		{
+			const float TurnDegrees = FMath::Clamp(SafeYawSpeed * FMath::Max(1.0f, NextBehaviorDecisionDelay), 15.0f, 120.0f);
+			SetControlRotation(FRotator(0.0f, ControlledEnemy->GetActorRotation().Yaw + TurnDegrees, 0.0f));
+		}
 		return true;
 	}
 	if (!IsValid(ControlledEnemy) || ControlledEnemy->IsDead() || !IsTargetUsable(TargetCharacter))
@@ -882,7 +903,12 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 	MoveRequest.SetAcceptanceRadius(AcceptanceRadius);
 	MoveRequest.SetReachTestIncludesAgentRadius(true);
 	MoveRequest.SetCanStrafe(false);
-	const FPathFollowingRequestResult Result = MoveTo(MoveRequest);
+	FPathFollowingRequestResult Result;
+	{
+		// 只包真正提交的请求，拒绝/复用分支不伪造成独立寻路成本；包含引擎在此同步完成的工作。
+		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyAI_SubmitMoveTo);
+		Result = MoveTo(MoveRequest);
+	}
 	// ★【重要边界】[回调重入] MoveTo 可能同步结束旧请求；只有提交版本和命令入口仍有效，才缓存本次结果。
 	if (MoveRequestRevision != SubmittingRevision || !AcceptsCombatCommands()) return EMoveGoalResult::Deferred;
 	const EPathFollowingRequestResult::Type MoveResult = Result.Code;
@@ -997,7 +1023,7 @@ void AfpstrueEnemyAIController::SetAIState(EFPEnemyAIState NewState)
 }
 
 // 按行进、站定或攻击阶段选定唯一旋转来源，避免移动方向与 Controller 朝向互相争抢。
-void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget)
+void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget, bool bIdleSearch)
 {
 	// 把状态到旋转来源的映射集中设置，防止 MoveTo 与面向玩家同时争夺角色朝向。
 	if (ControlledEnemy == nullptr)
@@ -1007,11 +1033,16 @@ void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bo
 
 	if (UCharacterMovementComponent* Movement = ControlledEnemy->GetCharacterMovement())
 	{
+		// 巡视临时降低 Yaw 速度；离开 Idle、停止或发现目标时恢复原值，不覆盖敌人蓝图的战斗转速配置。
+		if (bIdleSearch && !bIdleSearchActive) IdleSearchSavedYawRate = Movement->RotationRate.Yaw;
+		if (!bIdleSearch && bIdleSearchActive) Movement->RotationRate.Yaw = IdleSearchSavedYawRate;
+		bIdleSearchActive = bIdleSearch;
+		if (bIdleSearch) Movement->RotationRate.Yaw = FMath::IsFinite(IdleSearchYawSpeed) ? FMath::Clamp(IdleSearchYawSpeed, 0.0f, 90.0f) : 30.0f;
 		// 移动朝向使用 Acceleration/RequestedVelocity，而不是直接朝玩家；RVO 的瞬时侧向避让仍可能存在。
-		// Attack 和站定的 Chase（含转向准备）使用 Controller 朝向；Idle/Dead 关闭两种来源。
+		// Attack 和站定的 Chase（含转向准备）使用 Controller 朝向；Idle 仅在巡视时使用它，Dead 关闭两种来源。
 		const bool bFaceTarget = NewState == EFPEnemyAIState::Attack || (NewState == EFPEnemyAIState::Chase && bAtRestFacingTarget);
 		Movement->bOrientRotationToMovement = NewState == EFPEnemyAIState::Chase && !bFaceTarget;
-		Movement->bUseControllerDesiredRotation = bFaceTarget;
+		Movement->bUseControllerDesiredRotation = bFaceTarget || bIdleSearch;
 	}
 }
 
@@ -1071,6 +1102,7 @@ void AfpstrueEnemyAIController::StopAI()
 	if (ControlledEnemy != nullptr)
 	{
 		SetAIState(ControlledEnemy->IsDead() ? EFPEnemyAIState::Dead : EFPEnemyAIState::Idle);
+		ApplyRotationPolicy(AIState); // 原本已经是 Idle 也要撤销巡视并恢复转速，不能被同状态短路跳过清理。
 	}
 	CommandPhase = ECommandPhase::Stopped;
 }

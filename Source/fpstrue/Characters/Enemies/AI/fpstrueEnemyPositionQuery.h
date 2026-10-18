@@ -6,9 +6,22 @@
 #include "EnvironmentQuery/EnvQueryGenerator.h"
 #include "EnvironmentQuery/EnvQueryTest.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_Point.h"
+#include "Subsystems/WorldSubsystem.h"
 #include "fpstrueEnemyPositionQuery.generated.h"
 
 class UEnvQuery;
+
+// 每个 World 只有两份不可变参数化图；UPROPERTY 真正持有到 World 退出，不依赖请求 Actor 存活或无界全局强表。
+UCLASS()
+class UfpstrueEnemyPositionQueryTemplates : public UWorldSubsystem
+{
+	GENERATED_BODY()
+public:
+	UEnvQuery* GetTemplate(bool bCover);
+private:
+	UPROPERTY(Transient) TObjectPtr<UEnvQuery> AttackTemplate;
+	UPROPERTY(Transient) TObjectPtr<UEnvQuery> CoverTemplate;
+};
 
 /** EQS 原始数据中的一个候选；排序只移动 Item，不改变这里保存的槽位身份。 */
 struct FPSTRUE_API FFPEnemyQueryPoint
@@ -76,5 +89,7 @@ public:
  * 每个 Outer 按 Attack/Cover 固定对象名只创建一次模板。
  * 调用者须用 UPROPERTY 保存返回值，并通过 FEnvQueryRequest::Execute 提交异步请求。
  * Cover 的 request owner 必须是真实敌人 Pawn，原生 PathExist 才以它为寻路起点。
+ * 正式 World 中的模板 Outer 统一为 World 子系统：避免不同 Manager 的同名模板在引擎 EQS 缓存内复制覆盖。
+ * 请求 Owner、参数、结果与取消身份仍完全独立；纯对象测试没有 World 时保留原来的 Outer 归属。
  */
 FPSTRUE_API UEnvQuery* FPCreateEnemyPositionQuery(UObject& Outer, bool bCover);

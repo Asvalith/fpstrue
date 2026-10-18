@@ -25,6 +25,9 @@
 #include "Materials/MaterialInterface.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
+#include "Engine/NetDriver.h"
+#include "Engine/NetConnection.h"
+#include "Engine/PackageMapClient.h"
 #include "TimerManager.h"
 #include "Net/UnrealNetwork.h"
 #include "Misc/CommandLine.h"
@@ -32,7 +35,7 @@
 
 /*
  * 玩家武器的单发结算与换弹事务实现。
- * GAS 独占动作互斥和连射任务；组件拥有装备、弹药、射速约束与后坐力恢复。
+ * GAS 独占动作互斥和本地连射输入；组件拥有已准入网络执行队列、装备、弹药、射速约束与后坐力恢复。
  * 角色向 ASC 提交输入；单机动画通过 Notify 提交换弹，联网由服务器时长完成。
  * 蓝图负责枪口、音效和换弹素材选择；C++ 拥有命中/弹药结算以及明确的播放身份和结束边界。
  *
@@ -53,6 +56,58 @@ constexpr float GaussianSpreadSigmaCount = 3.0f;
 constexpr float MaxTotalSpreadAngle = 45.0f;
 // 本版远端呈现采用有限的固定回退，不声称复原 UE 平滑器每一帧的实际显示时间。
 constexpr double TargetInterpolationSeconds = 0.05;
+
+// 素材替换只复用已验证的声音/特效反馈，不复制另一套射击、弹药或命中逻辑。
+void ConfigureNativeWeaponFeedback(UfpstrueWeaponComponent& Weapon, uint32 AssetLoadFlags)
+{
+	Weapon.FireSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/Sounds/Weapon/AK74/WAV_AK74M_Fire_Cue.WAV_AK74M_Fire_Cue"), nullptr, AssetLoadFlags);
+	Weapon.MuzzleEffect = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/FPS_Assault_Pack/Particles/Emitters/AR74/P_RU74_Muzzleflash.P_RU74_Muzzleflash"), nullptr, AssetLoadFlags);
+	Weapon.ImpactEffect = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/Particles/bulletvfx/Particles/VFX_Impact_Concrete.VFX_Impact_Concrete"), nullptr, AssetLoadFlags);
+	Weapon.FleshImpactEffect = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/Particles/bulletvfx/Particles/VFX_Impact_Flesh.VFX_Impact_Flesh"), nullptr, AssetLoadFlags);
+	Weapon.ImpactSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/Sounds/BulletImpact/Concrete/bullet_impact_concrete_brick_01_Cue.bullet_impact_concrete_brick_01_Cue"), nullptr, AssetLoadFlags);
+	Weapon.ImpactDecal = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Particles/Bullet_Impact_Decal.Bullet_Impact_Decal"), nullptr, AssetLoadFlags);
+}
+
+// 两种原生素材使用同一个拾取组件和重叠规则；组件自行保护同帧重复提交。
+void ConfigureNativeWeaponPickup(UfpstruePickUpComponent& Pickup, UfpstrueWeaponComponent& Weapon)
+{
+	Pickup.SetupAttachment(&Weapon);
+	Pickup.SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Pickup.SetCollisionResponseToAllChannels(ECR_Ignore);
+	Pickup.SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	Pickup.SetGenerateOverlapEvents(true);
+}
+
+#if !UE_BUILD_SHIPPING
+// 逐发核账使用跨端一致的武器身份，不能把两个玩家相同的本地发号混为一发。
+uint64 GetWeaponShotNetGuid(const AActor* Actor)
+{
+	UNetDriver* Driver = IsValid(Actor) ? Actor->GetNetDriver() : nullptr;
+	if (Driver == nullptr || !Driver->GuidCache.IsValid()) return 0;
+	return (Actor->HasAuthority() ? Driver->GuidCache->GetOrAssignNetGUID(const_cast<AActor*>(Actor))
+		: Driver->GuidCache->GetNetGUID(Actor)).ObjectId;
+}
+
+int32 GetShotPlayerId(const AfpstrueCharacter* Character)
+{
+	const APlayerState* PlayerState = IsValid(Character) ? Character->GetPlayerState() : nullptr;
+	return PlayerState != nullptr ? PlayerState->GetPlayerId() : INDEX_NONE;
+}
+
+void LogShotTimeRejection(const FFPShotRequest& Request, const AfpstrueCharacter* Character, const AActor* Weapon,
+	const TCHAR* Stage, double Now, double AllowedAge, const TCHAR* SpecificReason = nullptr)
+{
+	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest"))) return;
+	const APlayerState* Player = Character ? Character->GetPlayerState() : nullptr;
+	const UNetConnection* Connection = Character ? Character->GetNetConnection() : nullptr;
+	const TCHAR* Reason = SpecificReason ? SpecificReason : !FMath::IsFinite(Request.ServerFireTime) ? TEXT("NonFinite")
+		: Request.ServerFireTime > Now + 0.025 ? TEXT("Future") : TEXT("Stale");
+	UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_TIME_REJECT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu Stage=%s Reason=%s AgeMs=%.3f AllowedAgeMs=%.3f PingMs=%.3f InLostTotal=%d OutLostTotal=%d"),
+		Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(Weapon), Stage, Reason,
+		(Now - Request.ServerFireTime) * 1000.0, AllowedAge * 1000.0, Player ? Player->GetPingInMilliseconds() : 0.0,
+		Connection ? Connection->InTotalPacketsLost : -1, Connection ? Connection->OutTotalPacketsLost : -1);
+}
+#endif
 
 // 根据高斯分布生成散布方向；唯一调用点已校验总散布角，这里只负责方向计算。
 FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDegrees)
@@ -82,6 +137,8 @@ FVector MakeGaussianSpreadDirection(const FVector& Forward, float SpreadAngleDeg
 UfpstrueWeaponComponent::UfpstrueWeaponComponent()
 {
 	SetIsReplicatedByDefault(true);
+	// 专服物理许可必须在身体初始化前确定；生前仍不模拟，只有死亡掉落才启用 SimulatePhysics。
+	bEnablePhysicsOnDedicatedServer = true;
 }
 
 // 只订阅已经去重的射击事实和带事务身份的换弹请求；组件不从动画重新发起能力。
@@ -96,7 +153,8 @@ void UfpstrueWeaponComponent::BeginPlay()
 void UfpstrueWeaponComponent::PostRepNotifies()
 {
 	Super::PostRepNotifies();
-	if (GetNetMode() == NM_Client) RefreshNetworkEquipment();
+	// 掉落由首次状态/权威物理通知处理，不在同一批组件通知末尾重复配置碰撞、重力或物理体。
+	if (GetNetMode() == NM_Client && !bDroppedOnDeath) RefreshNetworkEquipment();
 }
 
 // 纯枪械脉冲，不改变控制旋转、弹药或伤害；拥有者预测与多播的去重仍沿用现有入口。
@@ -141,6 +199,26 @@ void UfpstrueWeaponComponent::GetLifetimeReplicatedProps(TArray<FLifetimePropert
 	DOREPLIFETIME(UfpstrueWeaponComponent, NetworkState);
 }
 
+void UfpstrueWeaponComponent::GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const
+{
+	Super::GetReplicatedCustomConditionState(OutActiveState);
+	const AActor* WeaponActor = GetOwner();
+	if (WeaponActor == nullptr || WeaponActor->GetRootComponent() != this
+		|| (!WeaponActor->IsA<AfpstrueRARWeapon>() && !WeaponActor->IsA<AfpstrueTemplateWeapon>())) return;
+	// ★【复制唯一性】按实例关闭原生根网格的第二套位姿/附着通道，不按 Owner 分支修改共享 Class 复制布局。
+	// 否则 SceneComponent::PostRepNotifies 会先消费迟到手部相对变换，把已落地枪重算回手边；旧非原生蓝图不受影响。
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, RelativeLocation, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, RelativeRotation, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, RelativeScale3D, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, AttachParent, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, AttachSocketName, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, AttachChildren, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, bShouldBeAttached, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, bShouldSnapLocationWhenAttached, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, bShouldSnapRotationWhenAttached, false);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(USceneComponent, bShouldSnapScaleWhenAttached, false);
+}
+
 // 先提交完整结果再通知监听者；强制网络更新不是可靠事件队列，只保证最新状态可继续发送。
 void UfpstrueWeaponComponent::PublishNetworkState()
 {
@@ -165,6 +243,7 @@ void UfpstrueWeaponComponent::PublishNetworkState()
 	NetworkState.FireSession = FireSession;
 	NetworkState.LastProcessedShotId = LastProcessedShotId;
 	NetworkState.ShotResult = LastShotResult;
+	NetworkState.bDroppedOnDeath = bDroppedOnDeath;
 	++NetworkState.Revision;
 	OwnerActor->ForceNetUpdate();
 }
@@ -173,15 +252,25 @@ void UfpstrueWeaponComponent::PublishNetworkState()
 void UfpstrueWeaponComponent::RefreshNetworkEquipment()
 {
 	AfpstrueCharacter* Holder = Character.Get();
+	if (bDroppedOnDeath) { ApplyDeathDropPhysics(); return; }
+	if (IsValid(Holder) && Holder->IsDead() && Holder->UsesNativePresentation())
+	{
+		DropForDeath(Holder->GetVelocity());
+		return;
+	}
 	if (!IsValid(Holder) || Holder->GetEquippedWeaponComponent() != this) return;
 	USkeletalMeshComponent* TargetMesh = Holder->IsLocallyControlled() ? Holder->GetMesh1P() : Holder->GetMesh();
 	if (TargetMesh == nullptr) return;
 	const FName Socket = Settings.GripSocketName;
-	AttachToComponent(TargetMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-		TargetMesh->DoesSocketExist(Socket) ? Socket : NAME_None);
+	// 未就绪/错误骨架不能静默改挂角色根部；保留原附着，待真实装备或附着就绪通知重试。
+	if (!TargetMesh->DoesSocketExist(Socket)
+		|| !AttachToComponent(TargetMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, Socket)) return;
+	// ★【复制顺序边界】同父级/插槽时 AttachTo 会直接返回；迟到的相对变换仍须纠正，不能只检查父子关系。
+	// 保留网格缩放并应用作者握持偏移；四元数入口同时刷新世界变换，避免枪已附着却仍停在旧生成坐标。
+	SetRelativeLocationAndRotation(GripLocationOffset, GripRotationOffset.Quaternion(), false, nullptr, ETeleportType::TeleportPhysics);
 	SetOnlyOwnerSee(false);
 	SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	// 死亡后仍可能收到旧装备/附着快照；补挂接不能重新显示尸体的手臂或武器。
+	// 死亡终态已在入口处理；正常装备只显示存活角色的本地手臂。
 	Holder->GetMesh1P()->SetHiddenInGame(Holder->IsDead() || !Holder->IsLocallyControlled(), true);
 	SetHiddenInGame(Holder->IsDead(), true);
 	if (AfpstrueRARWeapon* Rifle = Cast<AfpstrueRARWeapon>(GetOwner())) Rifle->SetViewmodelFOVEnabled(Holder->IsLocallyControlled());
@@ -196,6 +285,23 @@ void UfpstrueWeaponComponent::RefreshNetworkEquipment()
 // ★【网络边界】客户端恢复最新弹药与动作，不执行 Fire、Commit 或服务器换弹计时。
 void UfpstrueWeaponComponent::OnRep_NetworkState()
 {
+	// ★【复制顺序边界】掉落事实不能被先到的弹药 ACK 或旧装备覆盖；后续位姿优先采用权威物理。
+	if (NetworkState.bDroppedOnDeath)
+	{
+		Character = NetworkState.Holder;
+		const bool bFirstDrop = !bDroppedOnDeath;
+		bDroppedOnDeath = true;
+		if (bFirstDrop) DisableWeapon();
+		if (!bAppliedAuthoritativeDrop && !bReceivedAuthoritativePhysics)
+		{
+			const FVector Velocity = NetworkState.DropVelocity;
+			ApplyDeathDropPhysics(&NetworkState.DropTransform, &Velocity);
+		}
+		else ApplyDeathDropPhysics();
+		bAppliedAuthoritativeDrop = true;
+		return;
+	}
+	if (bDroppedOnDeath) { ApplyDeathDropPhysics(); return; }
 	// 同一武器通道的 ACK 可已带来更新弹药；旧属性快照也不能撤销新动作的本地表现。
 	if (NetworkState.Revision < LastAmmoStateRevision) return;
 	const EFPWeaponActionState Previous = LastPresentedAction;
@@ -242,14 +348,16 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 	}
 	if (NetworkState.Action == EFPWeaponActionState::Disabled)
 	{
-		EndAbilityFire();
+		EndAbilityFire(true);
+		OutstandingShots.Reset();
 		ClearRecoilState();
 		StopVisualRecoil();
 	}
 	else if (NetworkState.Action == EFPWeaponActionState::Reloading && bPredictingFire)
 	{
 		// 仅停本地表现；复制结果绝不反向结束/激活 GAS。
-		EndAbilityFire();
+		EndAbilityFire(true);
+		OutstandingShots.Reset();
 	}
 }
 
@@ -299,25 +407,31 @@ void UfpstrueWeaponComponent::BeginAbilityFire(int32 PredictionKey)
 	FirePresentationKey = PredictionKey;
 	FirePresentationShot = 0;
 	FireSession = 0;
-	PendingNetworkShotId = 0;
 	if (GetOwner()->HasAuthority()) { PublishNetworkState(); return; }
 	if (!Character->IsLocallyControlled() || PredictionKey == 0) return;
 	if (LocalFireSessionSerial == MAX_uint32) return;
 	FireSession = ++LocalFireSessionSerial;
+	FirstPredictedShotForCurrentFire = LocalShotSerial + 1;
 	if (PredictedPresentations.Num() == 8) PredictedPresentations.RemoveAt(0);
 	PredictedPresentations.Add({PredictionKey, EquipmentRevision, FireSession, 0, 0});
 	bPredictingFire = true;
-	// GA 决定何时调用下一发；武器不再启动预测或权威连射 Timer。
+	// GA 决定何时生成下一发输入；服务器唯一队列 Timer 只执行已经合法准入的请求。
 }
 
 // 结束能力只停本地预测表现；不撤销已结算子弹，不清迟到表现的去重记录。
-void UfpstrueWeaponComponent::EndAbilityFire()
+void UfpstrueWeaponComponent::EndAbilityFire(bool bDiscardOutstandingShots)
 {
 	bPredictingFire = false;
-	PendingNetworkShotId = 0;
-	// 同时只有一个本地 Fire GA；已结束会话的未确认估计不能阻止之后的合法开火。
-	// 只丢估计，不回滚权威弹药，不清表现去重或 LastPredictedShotTime 的射速预算。
-	if (GetOwner() != nullptr && !GetOwner()->HasAuthority()) OutstandingShots.Reset();
+	if (bDiscardOutstandingShots) CancelPendingNetworkShots();
+	// 正常松开不抹掉仍在途中的逐发事实，否则 ACK 前会误判满仓并拦截换弹。
+	// 未确认账本与本轮持续开火分离；强取消或装备代际更替才丢弃估计，不回滚权威弹药。
+	if (bDiscardOutstandingShots && GetOwner() != nullptr && !GetOwner()->HasAuthority())
+	{
+		// 新激活预测失败只撤销自己的区间；上一轮已准入输入仍须等待各自的终结 ACK。
+		const uint32 First = FirstPredictedShotForCurrentFire;
+		const uint32 Last = LocalShotSerial;
+		OutstandingShots.RemoveAll([First, Last](uint32 ShotId) { return First != 0 && ShotId >= First && ShotId <= Last; });
+	}
 	// 不反向取消 GA、不清历史去重；能力结束后的快照由 GA 在标签移除后发布。
 }
 
@@ -335,7 +449,8 @@ bool UfpstrueWeaponComponent::PresentPredictedShot(const FFPShotRequest& Request
 	LastPredictedShotTime = GetWorld()->GetTimeSeconds();
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_PRESENT ShotId=%u Session=%u Generation=%u Count=1"), Request.ShotId, Request.FireSession, Request.EquipmentGeneration);
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_PRESENT ShotId=%u Session=%u Generation=%u Count=1 WeaponNetGuid=%llu PlayerId=%d"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()));
 #endif
 	OnWeaponFirePerformed.Broadcast();
 	if (bPredictingFire && FirePresentationKey == PresentationKey && CanExecuteShot())
@@ -361,23 +476,38 @@ bool UfpstrueWeaponComponent::BuildShotRequest(FFPShotRequest& OutRequest)
 }
 
 // ★【网络裁决】身份、时间、客户端节奏和服务器实际射速分别校验；任何拒绝都不能扣弹或造成伤害。
-EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& Request, bool bQueueOccupied)
+EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& Request)
 {
-	auto Reject = [this, &Request](EFPShotResult Result) { AcknowledgeShot(Request, Result); return Result; };
+	auto Reject = [this, &Request](EFPShotResult Result)
+	{
+#if !UE_BUILD_SHIPPING
+		const int32 AmmoBefore = CurrentAmmo, ReserveBefore = ReserveAmmo;
+		const uint32 ExecutedBefore = LastExecutedShotId;
+#endif
+		AcknowledgeShot(Request, Result);
+#if !UE_BUILD_SHIPPING
+		if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+			UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_REJECT_BOUNDARY ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu AmmoBefore=%d AmmoAfter=%d ReserveBefore=%d ReserveAfter=%d ExecutedBefore=%u ExecutedAfter=%u"),
+				Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()),
+				AmmoBefore, CurrentAmmo, ReserveBefore, ReserveAmmo, ExecutedBefore, LastExecutedShotId);
+#endif
+		return Result;
+	};
 	const UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr;
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || !CanExecuteShot()
 		|| ASC == nullptr || !ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing)) return Reject(EFPShotResult::InvalidContext);
 	if (Request.Avatar != Character.Get() || Request.EquipmentGeneration != EquipmentRevision
 		|| Request.EquipmentGeneration == 0 || Request.FireSession == 0 || Request.ShotId == 0
-		|| Request.ShotId > MAX_int32
-		|| (FireSession != 0 && Request.FireSession != FireSession)
-		|| (FireSession == 0 && Request.FireSession <= LastRemoteFireSession)) return Reject(EFPShotResult::InvalidIdentity);
+		|| Request.ShotId > MAX_int32) return Reject(EFPShotResult::InvalidIdentity);
 	if (Request.ShotId <= LastReceivedShotId)
 	{
 		// 同一请求仍在 GA 冷却等待时，重复输入不是原请求的终结结果，不能提前释放它的弹药估计。
-		if (Request.ShotId == PendingNetworkShotId) return EFPShotResult::Queued;
+		if (PendingNetworkShots.ContainsByPredicate([&Request](const FPendingNetworkShot& Pending)
+			{ return Pending.Request.ShotId == Request.ShotId && Pending.Request.FireSession == Request.FireSession; })) return EFPShotResult::Queued;
 		return Reject(EFPShotResult::Duplicate);
 	}
+	if ((FireSession != 0 && Request.FireSession != FireSession)
+		|| (FireSession == 0 && Request.FireSession <= LastRemoteFireSession)) return Reject(EFPShotResult::InvalidIdentity);
 	// 即使本发随后被拒绝也消费编号；重复包不能等冷却结束后再次提交。
 	LastReceivedShotId = Request.ShotId;
 	const double Now = GetWorld()->GetTimeSeconds();
@@ -385,7 +515,13 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	const double OneWayDelay = PlayerState != nullptr ? PlayerState->GetPingInMilliseconds() * 0.0005 : 0.0;
 	const double MaxRequestAge = FMath::Clamp(OneWayDelay * 1.5 + 0.05, 0.10, 0.30);
 	if (!FMath::IsFinite(Request.ServerFireTime) || Request.ServerFireTime > Now + 0.025
-		|| Request.ServerFireTime < Now - MaxRequestAge) return Reject(EFPShotResult::InvalidTime);
+		|| Request.ServerFireTime < Now - MaxRequestAge)
+	{
+#if !UE_BUILD_SHIPPING
+		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Admission"), Now, MaxRequestAge);
+#endif
+		return Reject(EFPShotResult::InvalidTime);
+	}
 	const FVector Aim = Request.AimDirection;
 	if (Aim.ContainsNaN() || !Aim.IsNormalized()) return Reject(EFPShotResult::InvalidAim);
 	const double Interval = 60.0 / Settings.RoundsPerMinute;
@@ -394,45 +530,132 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	if (FireSession == 0) { FireSession = Request.FireSession; LastRemoteFireSession = FireSession; }
 	LastSubmittedFireTime = Request.ServerFireTime;
 	if (!HasAmmo()) return Reject(EFPShotResult::NoAmmo);
-	if (bQueueOccupied || PendingNetworkShotId != 0) return Reject(EFPShotResult::Busy);
-	const float Delay = GetNextShotDelay();
+	if (PendingNetworkShots.Num() >= MaxQueuedNetworkShots) return Reject(EFPShotResult::Busy);
+	const float Delay = GetNextShotDelay(true);
 	if (Delay > FMath::Min(Interval + 0.002, 0.15)) return Reject(EFPShotResult::RateLimited);
-	if (Delay > KINDA_SMALL_NUMBER)
+	const bool bMustWait = HasPendingNetworkShots() || Delay > KINDA_SMALL_NUMBER;
+	// 只记录服务器当前已授权的瞄准条件，不能让排队期间切换 ADS 改写本发散布。
+	PendingNetworkShots.Add({Request, Character->IsAiming(), FirePresentationKey});
+	if (bMustWait)
 	{
-		PendingNetworkShotId = Request.ShotId;
+		SchedulePendingNetworkShot();
 		return EFPShotResult::Queued;
 	}
 	return ExecuteNetworkShot(Request) ? EFPShotResult::Accepted : LastShotResult;
 }
 
-// 冷却到期再检查会话与生命周期；实际提交时间决定下一发，不按客户端旧时间追赶射速。
-bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Request)
+// 冷却到期再检查原入队身份与生命周期；服务器绝对节拍消费，不按客户端旧时间补射多发。
+bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested)
 {
-	if (PendingNetworkShotId == Request.ShotId) PendingNetworkShotId = 0;
+	// 只有队头可以执行；先取出自己的快照，再允许伤害/表现回调强取消余下队列。
+	if (PendingNetworkShots.IsEmpty() || PendingNetworkShots[0].Request.ShotId != Requested.ShotId
+		|| PendingNetworkShots[0].Request.EquipmentGeneration != Requested.EquipmentGeneration
+		|| PendingNetworkShots[0].Request.FireSession != Requested.FireSession)
+	{
+		AcknowledgeShot(Requested, EFPShotResult::Duplicate);
+		return false;
+	}
+	const FFPShotRequest Request = PendingNetworkShots[0].Request;
+	const bool bAimingAtAdmission = PendingNetworkShots[0].bAimingAtAdmission;
+	const int32 AdmittedPresentationKey = PendingNetworkShots[0].PresentationKey;
+	if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(NetworkShotTimerHandle);
+	PendingNetworkShots.RemoveAt(0, 1, EAllowShrinking::No);
 	EFPShotResult Result = EFPShotResult::Accepted;
+#if !UE_BUILD_SHIPPING
+	const int32 AmmoAtExecution = CurrentAmmo, ReserveAtExecution = ReserveAmmo;
+	const uint32 ExecutedAtEntry = LastExecutedShotId;
+#endif
 	const UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr;
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || !CanExecuteShot()
-		|| ASC == nullptr || !ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing)) Result = EFPShotResult::InvalidContext;
-	else if (Request.Avatar != Character.Get() || Request.EquipmentGeneration != EquipmentRevision || Request.FireSession != FireSession)
+		|| ASC == nullptr || ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Dead)
+		|| ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading)) Result = EFPShotResult::InvalidContext;
+	// 入队时已经持有有效的 GAS 授权；正常松开或下一次按下不能篡改旧会话的执行身份。
+	else if (Request.Avatar != Character.Get() || Request.EquipmentGeneration != EquipmentRevision)
 		Result = EFPShotResult::InvalidIdentity;
 	else if (Request.ShotId <= LastExecutedShotId || Request.ShotId > LastReceivedShotId) Result = EFPShotResult::Duplicate;
 	else if (!HasAmmo()) Result = EFPShotResult::NoAmmo;
 	else if (!FMath::IsFinite(Request.ServerFireTime) || Request.ServerFireTime > GetWorld()->GetTimeSeconds() + 0.025
-		|| Request.ServerFireTime < GetWorld()->GetTimeSeconds() - 0.30) Result = EFPShotResult::InvalidTime;
-	else if (GetNextShotDelay() > KINDA_SMALL_NUMBER) Result = EFPShotResult::RateLimited;
+		|| Request.ServerFireTime < GetWorld()->GetTimeSeconds() - 0.30)
+	{
+		Result = EFPShotResult::InvalidTime;
+#if !UE_BUILD_SHIPPING
+		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), 0.30);
+#endif
+	}
+	else if (GetNextShotDelay(true) > KINDA_SMALL_NUMBER) Result = EFPShotResult::RateLimited;
 	else
 	{
 		FVector Origin;
 		if (GetNetMode() != NM_Standalone && !Character->GetHistoricalViewOrigin(Request.ServerFireTime, Origin))
+		{
 			Result = EFPShotResult::InvalidTime;
+#if !UE_BUILD_SHIPPING
+			LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), 0.30, TEXT("MissingHistory"));
+#endif
+		}
 		else
 		{
 			LastExecutedShotId = Request.ShotId;
-			if (!Fire(&Request)) Result = EFPShotResult::InvalidContext;
+#if !UE_BUILD_SHIPPING
+			const int32 AmmoBefore = CurrentAmmo;
+#endif
+			if (!Fire(&Request, bAimingAtAdmission, AdmittedPresentationKey)) Result = EFPShotResult::InvalidContext;
+#if !UE_BUILD_SHIPPING
+			if (Result == EFPShotResult::Accepted && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+				UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_COMMIT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu AmmoBefore=%d AmmoAfter=%d"),
+					Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), AmmoBefore, CurrentAmmo);
+#endif
 		}
 	}
 	AcknowledgeShot(Request, Result);
+#if !UE_BUILD_SHIPPING
+	if (Result != EFPShotResult::Accepted && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_REJECT_BOUNDARY ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu AmmoBefore=%d AmmoAfter=%d ReserveBefore=%d ReserveAfter=%d ExecutedBefore=%u ExecutedAfter=%u"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()),
+			AmmoAtExecution, CurrentAmmo, ReserveAtExecution, ReserveAmmo, ExecutedAtEntry, LastExecutedShotId);
+#endif
+	SchedulePendingNetworkShot();
 	return Result == EFPShotResult::Accepted;
+}
+
+bool UfpstrueWeaponComponent::ExecuteNextPendingNetworkShot()
+{
+	if (PendingNetworkShots.IsEmpty()) return false;
+	const FFPShotRequest Request = PendingNetworkShots[0].Request;
+	return ExecuteNetworkShot(Request);
+}
+
+void UfpstrueWeaponComponent::CancelPendingNetworkShots()
+{
+	if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(NetworkShotTimerHandle);
+	if (PendingNetworkShots.IsEmpty()) return;
+	const auto Cancelled = MoveTemp(PendingNetworkShots);
+	PendingNetworkShots.Reset();
+	for (const FPendingNetworkShot& Pending : Cancelled) AcknowledgeShot(Pending.Request, EFPShotResult::Cancelled);
+}
+
+// 只调度已准入事实，不持有 Firing 标签或输入状态；绝对截止时间不会把 Tick 量化误差逐发累加。
+void UfpstrueWeaponComponent::SchedulePendingNetworkShot()
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr || GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
+	World->GetTimerManager().ClearTimer(NetworkShotTimerHandle);
+	if (!HasPendingNetworkShots()) return;
+	World->GetTimerManager().SetTimer(NetworkShotTimerHandle, this, &ThisClass::ProcessPendingNetworkShot,
+		FMath::Max(GetNextShotDelay(true), 0.001f), false);
+}
+
+// 一次世界更新最多处理一个队头；过期请求显式拒绝，绝不扩大历史窗口或在本栈补射多发。
+void UfpstrueWeaponComponent::ProcessPendingNetworkShot()
+{
+	if (!HasPendingNetworkShots()) return;
+	if (GetNextShotDelay(true) > KINDA_SMALL_NUMBER) { SchedulePendingNetworkShot(); return; }
+	const uint32 Generation = EquipmentRevision;
+	const TWeakObjectPtr<AfpstrueCharacter> Holder = Character;
+	ExecuteNextPendingNetworkShot();
+	if (EquipmentRevision != Generation || Character != Holder || !CanExecuteShot()) return;
+	// 最后一发已结算后仍走同一个服务器 Reload GA；没有活动 Fire GA 时也不能失去空仓恢复。
+	if (!HasAmmo()) RequestReload();
 }
 
 // ACK 同时给出该发裁决和权威弹药；快照负责当前状态，可靠 ACK 负责每个请求的结束事实。
@@ -452,17 +675,15 @@ void UfpstrueWeaponComponent::AcknowledgeShot(const FFPShotRequest& Request, EFP
 		LastProcessedShotId = Request.ShotId;
 		LastShotResult = Result;
 	}
-	if (Result != EFPShotResult::Queued && Result != EFPShotResult::Duplicate
-		&& Request.Avatar == Character.Get() && Request.EquipmentGeneration == EquipmentRevision
-		&& Request.FireSession == FireSession && Request.ShotId == PendingNetworkShotId) PendingNetworkShotId = 0;
 	PublishNetworkState();
 	ClientShotResult(Request.EquipmentGeneration, Request.FireSession, Request.ShotId, Result, CurrentAmmo, ReserveAmmo, NetworkState.Revision);
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SERVER_SHOT_%s ShotId=%u Session=%u Generation=%u Result=%d FireTime=%.6f ServerTime=%.6f Ammo=%d"),
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SERVER_SHOT_%s ShotId=%u Session=%u Generation=%u Result=%d FireTime=%.6f ServerTime=%.6f Ammo=%d WeaponNetGuid=%llu PlayerId=%d NextDeadline=%.6f Pending=%d"),
 			Result == EFPShotResult::Accepted ? TEXT("ACCEPT") : TEXT("REJECT"), Request.ShotId, Request.FireSession,
 			Request.EquipmentGeneration, static_cast<int32>(Result), Request.ServerFireTime,
-			GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0, CurrentAmmo);
+			GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0, CurrentAmmo, GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()),
+			NextShotTimeSeconds, PendingNetworkShots.Num());
 #endif
 }
 
@@ -484,8 +705,9 @@ void UfpstrueWeaponComponent::ClientShotResult_Implementation(uint32 EquipmentGe
 		Presented->ConfirmedShots = FMath::Max(Presented->ConfirmedShots, static_cast<int32>(ShotId));
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_ACK ShotId=%u Session=%u Generation=%u Result=%d Ammo=%d Predicted=%d"),
-			ShotId, Session, EquipmentGeneration, static_cast<int32>(Result), Ammo, Presented != nullptr && static_cast<int32>(ShotId) <= Presented->PresentedShots ? 1 : 0);
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_ACK ShotId=%u Session=%u Generation=%u Result=%d Ammo=%d Predicted=%d WeaponNetGuid=%llu PlayerId=%d Outstanding=%d StateRevision=%u"),
+			ShotId, Session, EquipmentGeneration, static_cast<int32>(Result), Ammo, Presented != nullptr && static_cast<int32>(ShotId) <= Presented->PresentedShots ? 1 : 0,
+			GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()), OutstandingShots.Num(), StateRevision);
 #endif
 	// 已播放的枪声不反向播放“撤销动画”；被拒绝的预测只释放弹药估计，不生成命中反馈。
 }
@@ -517,6 +739,7 @@ AfpstrueRARWeapon::AfpstrueRARWeapon()
 	Weapon = CreateDefaultSubobject<UfpstrueWeaponComponent>(TEXT("Weapon"));
 	SetRootComponent(Weapon);
 	Weapon->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Weapon->WeaponDisplayName = FText::FromString(TEXT("RAR 突击步枪"));
 	// 生成项目专用资产的首次 Editor 进程允许资源暂缺；发布与自动化资产门禁必须确认全部实际绑定，不能靠回退交付。
 	constexpr uint32 AssetLoadFlags = LOAD_Quiet | LOAD_NoWarn;
 	Weapon->SetSkeletalMesh(LoadObject<USkeletalMesh>(nullptr,
@@ -548,36 +771,51 @@ AfpstrueRARWeapon::AfpstrueRARWeapon()
 	Weapon->MuzzleSocketName = TEXT("SOCKET_Muzzle");
 	Weapon->MuzzleForwardAxis = FVector::RightVector;
 	// 沿用已验证的 Cascade/声音反馈，不引入 vendor 的 GameplayCore 或第二条命中结算路径。
-	Weapon->FireSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/Sounds/Weapon/AK74/WAV_AK74M_Fire_Cue.WAV_AK74M_Fire_Cue"), nullptr, AssetLoadFlags);
-	Weapon->MuzzleEffect = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/FPS_Assault_Pack/Particles/Emitters/AR74/P_RU74_Muzzleflash.P_RU74_Muzzleflash"), nullptr, AssetLoadFlags);
-	Weapon->ImpactEffect = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/Particles/bulletvfx/Particles/VFX_Impact_Concrete.VFX_Impact_Concrete"), nullptr, AssetLoadFlags);
-	Weapon->FleshImpactEffect = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/Particles/bulletvfx/Particles/VFX_Impact_Flesh.VFX_Impact_Flesh"), nullptr, AssetLoadFlags);
-	Weapon->ImpactSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/Sounds/BulletImpact/Concrete/bullet_impact_concrete_brick_01_Cue.bullet_impact_concrete_brick_01_Cue"), nullptr, AssetLoadFlags);
-	Weapon->ImpactDecal = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Particles/Bullet_Impact_Decal.Bullet_Impact_Decal"), nullptr, AssetLoadFlags);
+	ConfigureNativeWeaponFeedback(*Weapon, AssetLoadFlags);
 	Pickup = CreateDefaultSubobject<UfpstruePickUpComponent>(TEXT("Pickup"));
-	Pickup->SetupAttachment(Weapon);
-	Pickup->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	Pickup->SetCollisionResponseToAllChannels(ECR_Ignore);
-	Pickup->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
-	Pickup->SetGenerateOverlapEvents(true);
+	ConfigureNativeWeaponPickup(*Pickup, *Weapon);
 }
 
 void AfpstrueRARWeapon::OnRep_AttachmentReplication()
 {
+	// 旧手部附着不可先由 Super 应用，否则即使随后 Detach 也会把已落地枪瞬移回手边。
+	if (Weapon->IsDroppedOnDeath()) { Weapon->RefreshNetworkEquipment(); return; }
 	Super::OnRep_AttachmentReplication();
 	Weapon->RefreshNetworkEquipment();
+}
+
+void AfpstrueRARWeapon::OnRep_ReplicatedMovement()
+{
+	if (IsReplicatingMovement() && GetReplicatedMovement().bRepPhysics) Weapon->RefreshNetworkPhysics();
+	else if (Weapon->IsDroppedOnDeath()) return; // 丢弃死亡前的非物理移动快照。
+	Super::OnRep_ReplicatedMovement();
+}
+
+void AfpstrueRARWeapon::GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const
+{
+	Super::GetReplicatedCustomConditionState(OutActiveState);
+	// 根组件仍复制 NetworkState；启用移动时明确允许 Actor 物理流，运行中由原生 PreReplication 继续维护。
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(AActor, ReplicatedMovement, IsReplicatingMovement());
 }
 
 void AfpstrueRARWeapon::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		// 枪的动画仅表现弹匣/枪栓；专服保留网格插槽和业务组件，不创建纯表现动画实例。
+		Weapon->SetAnimInstanceClass(nullptr);
+		Weapon->SetDisablePostProcessBlueprint(true);
+		Weapon->SetComponentTickEnabled(false);
+		Weapon->PrimaryComponentTick.bStartWithTickEnabled = false;
+	}
 	if (GetWorld() != nullptr && GetWorld()->IsGameWorld()) SetViewmodelFOVEnabled(false);
 }
 
 // MID 由网格组件按需创建并复用；重复装备/附着快照不重复生成材质实例，也不写全局参数。
 void AfpstrueRARWeapon::SetViewmodelFOVEnabled(bool bEnabled)
 {
-	if (GetWorld() == nullptr || !GetWorld()->IsGameWorld()) return;
+	if (GetWorld() == nullptr || !GetWorld()->IsGameWorld() || GetNetMode() == NM_DedicatedServer) return;
 	const int8 Mode = bEnabled ? 1 : 0;
 	if (AppliedViewmodelFOVMode == Mode) return;
 	UMeshComponent* Meshes[] = {Weapon.Get(), Forestock.Get(), Magazine.Get(), FrontSight.Get(), RearSight.Get()};
@@ -585,10 +823,82 @@ void AfpstrueRARWeapon::SetViewmodelFOVEnabled(bool bEnabled)
 	AppliedViewmodelFOVMode = Mode;
 }
 
+// 成套模板的枪体已包含弹匣/枪栓骨骼，无 RAR 静态附件或供应方玩法蓝图。
+AfpstrueTemplateWeapon::AfpstrueTemplateWeapon()
+{
+	bReplicates = true;
+	Weapon = CreateDefaultSubobject<UfpstrueWeaponComponent>(TEXT("Weapon"));
+	SetRootComponent(Weapon);
+	Weapon->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Weapon->WeaponDisplayName = FText::FromString(TEXT("突击步枪"));
+	Weapon->GripLocationOffset = FVector(-6.236122, 3.008201, 1.059424);
+	Weapon->GripRotationOffset = FRotator(3.4989, 105.08198, 4.0575);
+	constexpr uint32 AssetLoadFlags = LOAD_Quiet | LOAD_NoWarn;
+	Weapon->SetSkeletalMesh(LoadObject<USkeletalMesh>(nullptr,
+		TEXT("/Game/FPSMPT55/Weapons/AssaultRifle/SKM_AssaultRifle.SKM_AssaultRifle"), nullptr, AssetLoadFlags));
+	if (UClass* Animation = StaticLoadClass(UAnimInstance::StaticClass(), nullptr,
+		TEXT("/Game/FirstPerson/Animations/FPSMPT/ABP_TemplateWeapon.ABP_TemplateWeapon_C"), nullptr, AssetLoadFlags)) Weapon->SetAnimInstanceClass(Animation);
+	Weapon->WeaponFireMontage = LoadObject<UAnimMontage>(nullptr,
+		TEXT("/Game/FirstPerson/Animations/FPSMPT/AM_TemplateWeapon_Fire.AM_TemplateWeapon_Fire"), nullptr, AssetLoadFlags);
+	Weapon->WeaponReloadMontage = LoadObject<UAnimMontage>(nullptr,
+		TEXT("/Game/FirstPerson/Animations/FPSMPT/AM_TemplateWeapon_Reload.AM_TemplateWeapon_Reload"), nullptr, AssetLoadFlags);
+	Weapon->WeaponEmptyReloadMontage = LoadObject<UAnimMontage>(nullptr,
+		TEXT("/Game/FirstPerson/Animations/FPSMPT/AM_TemplateWeapon_ReloadEmpty.AM_TemplateWeapon_ReloadEmpty"), nullptr, AssetLoadFlags);
+	Weapon->WeaponConfiguration = LoadObject<UfpstrueWeaponConfig>(nullptr,
+		TEXT("/Game/Config/DA_FPWeapon_Template.DA_FPWeapon_Template"), nullptr, AssetLoadFlags);
+	// muzzleFlash 的本地 X 轴已由插槽旋转至枪管 +Y；不能再套用 RAR 附件的 RightVector。
+	Weapon->MuzzleSource = Weapon;
+	Weapon->MuzzleSocketName = TEXT("muzzleFlash");
+	Weapon->MuzzleForwardAxis = FVector::ForwardVector;
+	ConfigureNativeWeaponFeedback(*Weapon, AssetLoadFlags);
+	Pickup = CreateDefaultSubobject<UfpstruePickUpComponent>(TEXT("Pickup"));
+	ConfigureNativeWeaponPickup(*Pickup, *Weapon);
+}
+
+void AfpstrueTemplateWeapon::OnRep_AttachmentReplication()
+{
+	if (Weapon->IsDroppedOnDeath()) { Weapon->RefreshNetworkEquipment(); return; }
+	Super::OnRep_AttachmentReplication();
+	Weapon->RefreshNetworkEquipment();
+}
+
+void AfpstrueTemplateWeapon::OnRep_ReplicatedMovement()
+{
+	if (IsReplicatingMovement() && GetReplicatedMovement().bRepPhysics) Weapon->RefreshNetworkPhysics();
+	else if (Weapon->IsDroppedOnDeath()) return;
+	Super::OnRep_ReplicatedMovement();
+}
+
+void AfpstrueTemplateWeapon::GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const
+{
+	Super::GetReplicatedCustomConditionState(OutActiveState);
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(AActor, ReplicatedMovement, IsReplicatingMovement());
+}
+
+void AfpstrueTemplateWeapon::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		Weapon->SetAnimInstanceClass(nullptr);
+		Weapon->SetDisablePostProcessBlueprint(true);
+		Weapon->SetComponentTickEnabled(false);
+		Weapon->PrimaryComponentTick.bStartWithTickEnabled = false;
+	}
+}
+
 //初始化UfpstruePickUpComponent组件，设置SphereRadius为32.f
 UfpstruePickUpComponent::UfpstruePickUpComponent()
 {
 	SphereRadius = 32.f;
+}
+
+// 装备恢复、第一/第三人称切换和死亡掉落都会递归显示枪械；碰撞球不能随之成为可见模型。
+void UfpstruePickUpComponent::OnHiddenInGameChanged()
+{
+	// 仅约束渲染隐藏，不修改可见附件、碰撞开关或重叠事件；直接恢复标记避免递归调用自身。
+	bHiddenInGame = true;
+	Super::OnHiddenInGameChanged();
 }
 
 //在游戏开始时绑定 OnSphereBeginOverlap 事件
@@ -657,7 +967,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 {
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || (TargetCharacter != nullptr && !TargetCharacter->HasAuthority())) return false;
 	// 任何前置条件失败都不修改双方状态，挂接成功后才提交关系；重新装备不补满弹药。
-	if (bEndingPlay || bDetaching || !IsValid(TargetCharacter) || !TargetCharacter->CanMaintainEquipment())
+	if (bEndingPlay || bDetaching || bDroppedOnDeath || !IsValid(TargetCharacter) || !TargetCharacter->CanMaintainEquipment())
 	{
 		return false;
 	}
@@ -692,12 +1002,22 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 			   *RequestedSettings.GripSocketName.ToString());
 		return false;
 	}
+	// 同一武器还要在观察端挂全身；原生/联网装备不能只验证第一人称手臂然后让世界枪掉到根节点。
+	if ((TargetCharacter->UsesNativePresentation() || GetNetMode() != NM_Standalone)
+		&& (TargetCharacter->GetMesh() == nullptr || !TargetCharacter->GetMesh()->DoesSocketExist(RequestedSettings.GripSocketName)))
+	{
+		UE_LOG(LogTemp, Error, TEXT("AttachWeapon failed: third-person body on %s does not provide socket/bone %s."),
+			*GetNameSafe(TargetCharacter), *RequestedSettings.GripSocketName.ToString());
+		return false;
+	}
 
-	FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
+	const FAttachmentTransformRules AttachmentRules = FAttachmentTransformRules::SnapToTargetNotIncludingScale;
 	if (!AttachToComponent(TargetMesh, AttachmentRules, RequestedSettings.GripSocketName))
 	{
 		return false;
 	}
+	// 首次附着与复制恢复使用同一作者偏移；SnapTo 同父级时也必须刷新相对位置，且不修改网格缩放。
+	SetRelativeLocationAndRotation(GripLocationOffset, GripRotationOffset.Quaternion(), false, nullptr, ETeleportType::TeleportPhysics);
 
 	// ★【重要边界】[状态提交] 先完成配置校验和挂接，再提交装备关系；重装只复用已有弹药，不重复初始化。
 	// 所有外部操作成功后才提交角色引用和运行时状态，失败路径不会留下半装备状态。
@@ -716,6 +1036,16 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 		ReserveAmmo = Settings.StartingReserveAmmo;
 		bAmmoInitialized = true;
 	}
+#if !UE_BUILD_SHIPPING
+	// 显式移动命中实验只隔离随机散布；不修改配置资产，也不替代正式参数的正常/弱网回归。
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeMovingHit")))
+	{
+		Settings.HipFireSpreadAngle = Settings.AimFireSpreadAngle = 0.0f;
+		Settings.ContinuousFireSpreadStep = Settings.MaxContinuousFireSpreadAngle = 0.0f;
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE TEST_CONFIG MovingHitTest=1 Spread=0 WeaponNetGuid=%llu PlayerId=%d"),
+			GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(TargetCharacter));
+	}
+#endif
 	bEquipmentEnabled = true;
 	++EquipmentRevision;
 	// 同一武器换人后，新拥有者从自己的编号开始；旧代际仍由请求中的 Generation 拦截。
@@ -723,14 +1053,14 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	LastRemoteFireSession = 0;
 	LastReceivedShotId = 0;
 	LastExecutedShotId = 0;
-	PendingNetworkShotId = 0;
+	CancelPendingNetworkShots();
 	LastProcessedShotId = 0;
 	LastShotResult = EFPShotResult::Accepted;
 	LastSubmittedFireTime = -1.0;
 	// 不重置 LastShotTimeSeconds：重新装备不能绕过真实的服务器射速预算。
 	TargetCharacter->SetEquippedWeaponComponent(this);
-	// RAR 单机预览也使用同一装配/实例材质入口；旧单机蓝图仍保留原来的表现链。
-	if (GetNetMode() != NM_Standalone || Cast<AfpstrueRARWeapon>(GetOwner()) != nullptr) RefreshNetworkEquipment();
+	// 原生武器单机预览也使用同一装配入口；RAR 另按需更新实例材质，旧单机蓝图仍保留原来的表现链。
+	if (GetNetMode() != NM_Standalone || Cast<AfpstrueRARWeapon>(GetOwner()) != nullptr || Cast<AfpstrueTemplateWeapon>(GetOwner()) != nullptr) RefreshNetworkEquipment();
 	// ★【重要边界】[回调重入] 装备通知会同步执行监听者；返回后必须复核双方关系，不能沿用广播前的成功判断。
 	// 装备广播可同步卸下/销毁角色；只有双方关系仍成立才发布弹药或让拾取物消费成功。
 	if (!IsOperational() || Character.Get() != TargetCharacter)
@@ -748,7 +1078,8 @@ void UfpstrueWeaponComponent::DetachWeapon()
 	if (bDetaching) return;
 	TGuardValue<bool> DetachingGuard(bDetaching, true);
 	AfpstrueCharacter* PreviousCharacter = Character.Get();
-	DisableWeapon();
+	// 掉落物只解除反向登记，不重新禁用、重新挂接或重置已经开始的物理运动。
+	if (!bDroppedOnDeath) DisableWeapon();
 	Character.Reset();
 	PublishNetworkState();
 	DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
@@ -756,6 +1087,81 @@ void UfpstrueWeaponComponent::DetachWeapon()
 	{
 		PreviousCharacter->ReleaseEquippedWeaponComponent(this);
 	}
+}
+
+// 角色只协调松手与布娃娃；枪独占自身动作取消、碰撞、物理复制和限时回收。
+void UfpstrueWeaponComponent::DropForDeath(const FVector& InheritedVelocity)
+{
+	if (bDroppedOnDeath) { ApplyDeathDropPhysics(); return; }
+	AfpstrueCharacter* Holder = Character.Get();
+	AActor* WeaponActor = GetOwner();
+	if (!IsValid(Holder) || !Holder->IsDead() || WeaponActor == nullptr || bEndingPlay) return;
+	// 自己看到的是第一人称枪，世界掉落必须从全身的手部开始，避免从相机附近弹出。
+	FTransform DropTransform = GetComponentTransform();
+	USkeletalMeshComponent* Body = Holder->GetMesh();
+	if (Body != nullptr && Body->DoesSocketExist(Settings.GripSocketName))
+		DropTransform = FTransform(GripRotationOffset, GripLocationOffset, GetRelativeScale3D())
+			* Body->GetSocketTransform(Settings.GripSocketName);
+	const FVector Velocity = InheritedVelocity.ContainsNaN() ? FVector::ZeroVector : InheritedVelocity;
+	bDroppedOnDeath = true;
+	NetworkState.DropTransform = DropTransform;
+	NetworkState.DropVelocity = Velocity;
+	// 禁用会先清空待执行射击并发送取消 ACK；必须在清 Owner、失去 RPC 路由之前完成。
+	DisableWeapon();
+	ApplyDeathDropPhysics(&DropTransform, &Velocity);
+	if (WeaponActor->HasAuthority())
+	{
+		WeaponActor->SetOwner(nullptr);
+		WeaponActor->SetReplicateMovement(true);
+		WeaponActor->SetLifeSpan(8.0f);
+		PublishNetworkState();
+	}
+}
+
+// 权威 FRepMovement 可比组件状态早到；不重放初始条件，不自行逐帧同步位置。
+void UfpstrueWeaponComponent::RefreshNetworkPhysics()
+{
+	bReceivedAuthoritativePhysics = true;
+	const bool bFirstDrop = !bDroppedOnDeath;
+	bDroppedOnDeath = true;
+	if (bFirstDrop) DisableWeapon();
+	ApplyDeathDropPhysics();
+}
+
+void UfpstrueWeaponComponent::ApplyDeathDropPhysics(const FTransform* InitialTransform, const FVector* InitialVelocity)
+{
+	AActor* WeaponActor = GetOwner();
+	if (WeaponActor == nullptr) return;
+	// 物理复制会持续到达，不能每包重建碰撞过滤或唤醒已经落地休眠的枪。
+	if (!bDeathDropPhysicsConfigured)
+	{
+		// 死亡掉落仅作世界表现，不新增回收弹药/再次拾取规则；先停拾取碰撞再恢复 Actor 碰撞。
+		TInlineComponentArray<UfpstruePickUpComponent*> Pickups(WeaponActor);
+		for (UfpstruePickUpComponent* Pickup : Pickups)
+		{
+			Pickup->SetGenerateOverlapEvents(false);
+			Pickup->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+		if (UAnimInstance* Animation = GetAnimInstance()) Animation->Montage_Stop(0.0f);
+		SetOnlyOwnerSee(false);
+		SetOwnerNoSee(false);
+		SetHiddenInGame(false, true);
+		SetVisibility(true, true);
+		if (AfpstrueRARWeapon* Rifle = Cast<AfpstrueRARWeapon>(WeaponActor)) Rifle->SetViewmodelFOVEnabled(false);
+		WeaponActor->SetActorEnableCollision(true);
+		SetCollisionObjectType(ECC_PhysicsBody);
+		SetCollisionResponseToAllChannels(ECR_Ignore);
+		SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+		SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+		SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		// 不与 Pawn/尸体相互推挤，避免松手第一帧枪和身体重叠造成爆炸性冲量。
+		SetEnableGravity(true);
+		bDeathDropPhysicsConfigured = true;
+	}
+	if (GetAttachParent() != nullptr) DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+	if (InitialTransform != nullptr) SetWorldTransform(*InitialTransform, false, nullptr, ETeleportType::TeleportPhysics);
+	if (!IsSimulatingPhysics()) SetSimulatePhysics(true);
+	if (InitialVelocity != nullptr) SetPhysicsLinearVelocity(*InitialVelocity);
 }
 
 // ==================== Equipment Eligibility / Read-only Action View ====================
@@ -816,60 +1222,77 @@ void UfpstrueWeaponComponent::StopFire()
 }
 
 // 一次射击的提交入口：校验射速与装备，先扣弹并命中结算，再报告这一发的事实。
-bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request)
+bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAtAdmission, int32 AdmittedPresentationKey)
 {
 	// 每发射击的提交顺序固定为“校验 -> 扣弹 -> 表现/伤害”，保证一次请求最多结算一次弹药。
-	// 空仓转换和后续调度由 Fire GA 处理；它在回调后核对激活版本，旧射击不能替新动作排任务。
-	// 最后一发仍须完成命中与表现，再由 GA 释放 Firing 标签并尝试换弹。
+	// 本地输入由 Fire GA 调度；网络执行器仅消费已准入事实，回调不能让旧装备继续排队。
+	// 最后一发仍须完成命中与表现，再由 GA 或网络执行器请求同一个服务器换弹能力。
 
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || !CanExecuteShot() || !HasAmmo()
-		|| GetNextShotDelay() > KINDA_SMALL_NUMBER) return false;
+		|| GetNextShotDelay(Request != nullptr) > KINDA_SMALL_NUMBER) return false;
 	UWorld* const World = GetWorld();
 	// 射击入口先校验持有者，再读取相机与控制器。
 	// 语法复习：弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	UCameraComponent* Camera = OwningCharacter->GetFirstPersonCameraComponent();
 	const double CurrentTimeSeconds = World->GetTimeSeconds();
-	// 同一个“已接受射击时间”服务射速和散布；先读取上次时间，再写入这次提交。
+	// 实际提交时间服务散布恢复与同帧保护；绝对下一发节拍另存，不能逐发累积 Tick 量化误差。
 	if (LastShotTimeSeconds < 0.0 || CurrentTimeSeconds - LastShotTimeSeconds > Settings.SpreadResetDelay)
 		ConsecutiveShotCount = 0;
+	const double Interval = 60.0 / Settings.RoundsPerMinute;
+	// 有持续请求时从理想节拍递增，量化误差不累积；空闲/长卡顿后重置锚点，不积攒多发额度。
+	NextShotTimeSeconds = Request == nullptr || NextShotTimeSeconds < 0.0 || CurrentTimeSeconds >= NextShotTimeSeconds + Interval
+		? CurrentTimeSeconds + Interval : NextShotTimeSeconds + Interval;
 	LastShotTimeSeconds = CurrentTimeSeconds;
 	const uint32 ShotEquipment = EquipmentRevision;
 	// ★【重要边界】[状态提交] 扣弹和本发命中先成为事实，再通知表现；回调可以中断后续连射，不能撤销这一发。
 	// 先完成扣弹与命中结算，再通知 HUD/开火表现；监听者重入不能取消一发已扣弹的命中。
 	--CurrentAmmo;
 	// ★【表现身份】外部伤害/弹道回调可重启开火；本发广播始终携带提交时的编号，不借用新激活的计数。
-	const int32 ShotKey = FirePresentationKey;
+	const int32 ShotKey = Request != nullptr ? AdmittedPresentationKey : FirePresentationKey;
 	const int32 ShotIndex = Request != nullptr ? static_cast<int32>(Request->ShotId) : FirePresentationShot + 1;
-	FirePresentationShot = ShotIndex;
-	FireLineTrace(*World, *OwningCharacter, *Camera, ShotKey, ShotIndex, Request);
+	// 旧会话排空时仍广播它自己的身份，不能把旧 ShotId 和新会话的快照进度混配。
+	if (Request == nullptr || (Request->FireSession == FireSession && Request->EquipmentGeneration == EquipmentRevision))
+		FirePresentationShot = ShotIndex;
+	FireLineTrace(*World, *OwningCharacter, *Camera, ShotKey, ShotIndex, Request,
+		Request != nullptr ? bAimingAtAdmission : OwningCharacter->IsAiming());
 	if (EquipmentRevision == ShotEquipment && IsOperational())
 		ApplyRecoil(Cast<APlayerController>(OwningCharacter->GetController()));
 	BroadcastAmmoChanged();
 	// 这是已发生的一发，而不是继续开火的许可；命中/弹药回调中断动作也不能吞掉事实事件。
 	OnWeaponFirePerformed.Broadcast();
-	// 这里只返回已完成事实；下一发和空仓转换必须由仍持有本次激活的 GA 决定。
+	// 这里只返回已完成事实；新的输入仍须通过 GAS，已准入队列只按服务器节拍排空。
 	return true;
 }
 
-// 按上一发的实际时间计算剩余冷却；GA 保存激活版本并拥有等待任务。
-float UfpstrueWeaponComponent::GetNextShotDelay() const
+// 仅已准入网络队列消化 Tick 量化误差；原单机/本地主机的 GA 冷却与回调重入仍按实际提交时刻计算。
+float UfpstrueWeaponComponent::GetNextShotDelay(bool bAdmittedNetworkSchedule) const
 {
-	const double LastShot = GetOwner() != nullptr && GetOwner()->HasAuthority() ? LastShotTimeSeconds : LastPredictedShotTime;
-	if (LastShot < 0.0 || GetWorld() == nullptr) return 0.0f;
-	return static_cast<float>(FMath::Max(0.0, LastShot + 60.0 / Settings.RoundsPerMinute - GetWorld()->GetTimeSeconds()));
+	if (GetWorld() == nullptr) return 0.0f;
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (GetOwner() != nullptr && GetOwner()->HasAuthority())
+	{
+		if (!bAdmittedNetworkSchedule)
+			return LastShotTimeSeconds < 0.0 ? 0.0f
+				: static_cast<float>(FMath::Max(0.0, LastShotTimeSeconds + 60.0 / Settings.RoundsPerMinute - Now));
+		const double Delay = NextShotTimeSeconds < 0.0 ? 0.0 : FMath::Max(0.0, NextShotTimeSeconds - Now);
+		// Timer 或同步回调不能在同一世界时间内再消费第二发；下一 Tick 才能再检查过期节拍。
+		return static_cast<float>(LastShotTimeSeconds >= 0.0 && Now <= LastShotTimeSeconds ? FMath::Max(Delay, 0.001) : Delay);
+	}
+	return LastPredictedShotTime < 0.0 ? 0.0f
+		: static_cast<float>(FMath::Max(0.0, LastPredictedShotTime + 60.0 / Settings.RoundsPerMinute - Now));
 }
 
-// 按当前瞄准和连射散布执行一条 Hitscan，结算部位伤害及物理冲量，再报告弹道结果。
+// 按本发授权的瞄准条件和连射散布执行一条 Hitscan，结算部位伤害及物理冲量，再报告弹道结果。
 void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& OwningCharacter, UCameraComponent& Camera,
-	int32 PresentationKey, int32 ShotIndex, const FFPShotRequest* Request)
+	int32 PresentationKey, int32 ShotIndex, const FFPShotRequest* Request, bool bAimingForShot)
 {
 	// 根据瞄准状态和连续射击次数计算散布，并在同一入口完成单射线查询。
 	// Fire 已校验本发的角色/相机；在外部伤害或表现回调之前直接使用这些依赖，不重复解析装备关系。
 	// 配置在首次装备时已校验并冻结，不逐发修正同一字段；运行时累计值仍需限制。
 	const float ContinuousSpreadAngle = FMath::Min(ConsecutiveShotCount * Settings.ContinuousFireSpreadStep, Settings.MaxContinuousFireSpreadAngle);
 	// 基础与连射配置各自合法不代表总和合法；总角度统一有限且不超过 45 度，避免 tan 接近 90 度。
-	const float TotalSpreadAngle = (OwningCharacter.IsAiming() ? Settings.AimFireSpreadAngle : Settings.HipFireSpreadAngle)
+	const float TotalSpreadAngle = (bAimingForShot ? Settings.AimFireSpreadAngle : Settings.HipFireSpreadAngle)
 		+ ContinuousSpreadAngle;
 	const float SpreadAngle = FMath::IsFinite(TotalSpreadAngle) ? FMath::Clamp(TotalSpreadAngle, 0.0f, MaxTotalSpreadAngle) : 0.0f;
 	++ConsecutiveShotCount;
@@ -899,9 +1322,9 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	const uint32 ShotSession = Request != nullptr ? Request->FireSession : FireSession;
 #if !UE_BUILD_SHIPPING
 	if (Request != nullptr && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE REWIND ShotId=%u FireTime=%.6f TargetTime=%.6f Hit=%s Bone=%s"),
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE REWIND ShotId=%u FireTime=%.6f TargetTime=%.6f Hit=%s Bone=%s WeaponNetGuid=%llu PlayerId=%d"),
 			Request->ShotId, Request->ServerFireTime, Request->ServerFireTime - TargetInterpolationSeconds,
-			*GetNameSafe(HitResult.GetActor()), *HitResult.BoneName.ToString());
+			*GetNameSafe(HitResult.GetActor()), *HitResult.BoneName.ToString(), GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(&OwningCharacter));
 #endif
 
 	// 只有查询真正命中后才读取目标、骨骼和物理组件；未命中只广播弹道终点供表现层使用。
@@ -910,9 +1333,19 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	{
 		const bool bCriticalHit = Settings.CriticalHitBones.Contains(HitResult.BoneName);
 		const float DamageToApply = bCriticalHit ? Settings.LineTraceHeadDamage : Settings.LineTraceDamage;
-
+#if !UE_BUILD_SHIPPING
+		const TWeakObjectPtr<AfpstrueCharacter> MovingTarget = Cast<AfpstrueCharacter>(HitActor);
+		const float TargetSpeed = MovingTarget.IsValid() ? MovingTarget->GetVelocity().Size2D() : 0.0f;
+		const float HealthBefore = MovingTarget.IsValid() ? MovingTarget->GetCurrentHealth() : 0.0f;
+#endif
 		UGameplayStatics::ApplyPointDamage(HitActor, DamageToApply, ShotDirection, HitResult, OwningCharacter.GetController(), GetOwner(),
 									   nullptr);
+#if !UE_BUILD_SHIPPING
+		if (Request != nullptr && MovingTarget.IsValid() && TargetSpeed >= 20.0f && MovingTarget->GetCurrentHealth() < HealthBefore
+			&& FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeMovingHit")))
+			UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE MOVING_HIT_SERVER PASS ShotId=%u TargetSpeed=%.2f HealthBefore=%.2f HealthAfter=%.2f WeaponNetGuid=%llu PlayerId=%d"),
+				Request->ShotId, TargetSpeed, HealthBefore, MovingTarget->GetCurrentHealth(), GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(&OwningCharacter));
+#endif
 
 		// 受伤事件可能销毁目标；仅对仍有效的非角色物理组件追加冲量。
 		UPrimitiveComponent* HitComponent = HitResult.GetComponent();
@@ -965,6 +1398,8 @@ bool UfpstrueWeaponComponent::BeginAbilityReload(int32& OutReloadId)
 	{
 		return false;
 	}
+	// 普通松开后的旧输入可能仍在排队；换弹是强打断，即使旧 Fire GA 已结束也必须清空它们。
+	CancelPendingNetworkShots();
 
 	const bool bWasEmptyReload = CurrentAmmo <= 0;
 	// ★【重要边界】[状态提交] GA 已建立动作锁并取消冲突能力；先建立事务与计时，再触发蓝图播放。
@@ -997,10 +1432,10 @@ bool UfpstrueWeaponComponent::BeginAbilityReload(int32& OutReloadId)
 		GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
 			FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::EndReload, RequestedReloadId, EFPReloadEndReason::TimedOut), Timeout, false);
 	}
-	if (!bNetworkReload || Character->IsLocallyControlled() || Character->UsesRARPresentation())
+	if (!bNetworkReload || Character->IsLocallyControlled() || Character->UsesNativePresentation())
 	{
 		// 蓝图明确提交 ReloadId/Mesh/Montage，禁止通过广播前后列表差分猜测动画归属。
-		// RAR 权威身体也消费同一事实以刷新命中骨骼；专服的枪械/第一人称表现各自在监听入口跳过。
+		// 原生权威身体也消费同一事实以刷新命中骨骼；专服的枪械/第一人称表现各自在监听入口跳过。
 		OnWeaponReloadPlaybackRequested.Broadcast(RequestedReloadId, bWasEmptyReload);
 		if (IsCurrentReload(RequestedReloadId)) OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 	}
@@ -1424,7 +1859,7 @@ void UfpstrueWeaponComponent::ResetNetworkInputGeneration()
 	if (!IsOperational() || Character != PreviousHolder) return;
 	++EquipmentRevision;
 	FireSession = LastRemoteFireSession = 0;
-	LastReceivedShotId = LastExecutedShotId = LastProcessedShotId = PendingNetworkShotId = 0;
+	LastReceivedShotId = LastExecutedShotId = LastProcessedShotId = 0;
 	LastSubmittedFireTime = -1.0;
 	LastShotResult = EFPShotResult::Accepted;
 	PublishNetworkState();
@@ -1459,7 +1894,8 @@ void UfpstrueWeaponComponent::DisableWeapon()
 		WeaponAbilities.AddTag(FpstrueGameplayTags::Ability_Aim);
 		ASC->CancelAbilities(&WeaponAbilities);
 	}
-	EndAbilityFire();
+	EndAbilityFire(true);
+	OutstandingShots.Reset();
 	ClearRecoilState();
 	StopVisualRecoil();
 	ConsecutiveShotCount = 0;
@@ -1488,7 +1924,8 @@ void UfpstrueWeaponComponent::InterruptOwnerInput()
 		WeaponAbilities.AddTag(FpstrueGameplayTags::Ability_Reload);
 		ASC->CancelAbilities(&WeaponAbilities);
 	}
-	EndAbilityFire();
+	EndAbilityFire(true);
+	OutstandingShots.Reset();
 	ClearRecoilState();
 	StopVisualRecoil();
 	CancelReload();

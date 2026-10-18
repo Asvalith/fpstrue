@@ -31,8 +31,14 @@
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/ProgressBar.h"
+#include "Components/TextBlock.h"
+#include "Animation/WidgetAnimation.h"
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "NavigationSystem.h"
+#include "NavigationPath.h"
+#include "NavigationData.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
@@ -41,12 +47,31 @@
 #include "EngineGlobals.h"
 #include "Misc/App.h"
 #include "UnrealClient.h"
+#include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 
 namespace
 {
 constexpr int32 MaxRejoinSlots = 16;
 constexpr int32 MaxPendingHandshakes = 8;
-constexpr double RejoinGraceSeconds = 30.0;
+
+// 回收登记前先核对真实持有者；死亡掉落枪由自己的有界寿命回收，不因重生/重连提前消失。
+void ReleaseNetworkPlayerWeapon(AActor* Weapon, AfpstrueCharacter* ExpectedPawn,
+	APlayerController* ExpectedController = nullptr, bool bDestroyDropped = false)
+{
+	if (!IsValid(Weapon)) return;
+	UfpstrueWeaponComponent* Component = Weapon->FindComponentByClass<UfpstrueWeaponComponent>();
+	AfpstrueCharacter* Holder = Component != nullptr ? Component->GetOwningCharacter() : nullptr;
+	if (Holder != nullptr && Holder != ExpectedPawn &&
+		(ExpectedController == nullptr || Holder->GetController() != ExpectedController)) return;
+	if (Component != nullptr && Component->IsDroppedOnDeath())
+	{
+		// ★【资源所有权】只释放匹配死 Pawn 的装备槽；终态卸下只清登记，不重置已经开始的掉落物理。
+		if (IsValid(ExpectedPawn) && ExpectedPawn->IsDead() && ExpectedPawn->GetEquippedWeaponComponent() == Component)
+			ExpectedPawn->ClearEquippedWeaponComponent(Component);
+		if (!bDestroyDropped) return;
+	}
+	Weapon->Destroy();
+}
 
 uint64 GetResumeNetGuid(const AActor* Actor)
 {
@@ -72,13 +97,153 @@ FString GenerateResumeToken()
 }
 }
 
+// 只接收已提交的显示快照，数值无效时安全回退；不拥有武器、Pawn 或另一份 Gameplay 状态。
+void UfpstruePvpIngameWidget::ApplySnapshot(float Health, float MaxHealth, bool bEquipped,
+	int32 Ammo, int32 Reserve, const FText& WeaponName)
+{
+	const float Fraction = FMath::IsFinite(Health) && FMath::IsFinite(MaxHealth) && MaxHealth > 0.0f
+		? FMath::Clamp(Health / MaxHealth, 0.0f, 1.0f) : 0.0f;
+	const int32 Magazine = bEquipped ? FMath::Max(0, Ammo) : 0;
+	const int32 ReserveCount = bEquipped ? FMath::Max(0, Reserve) : 0;
+	const FText Name = bEquipped ? WeaponName : FText::GetEmpty();
+	if (HealthFraction == Fraction && bHasEquipment == bEquipped && CurrentAmmo == Magazine
+		&& ReserveAmmo == ReserveCount && CurrentWeaponName.EqualTo(Name)) return;
+	HealthFraction = Fraction;
+	bHasEquipment = bEquipped;
+	CurrentAmmo = Magazine;
+	ReserveAmmo = ReserveCount;
+	CurrentWeaponName = Name;
+	if (++SnapshotRevision == 0) ++SnapshotRevision;
+	RefreshControls();
+	InvalidateLayoutAndVolatility();
+}
+
+// 保留原布局、字体和动画；控件名称是已经审查的 ingame 资产合同，不重建另一套界面。
+void UfpstruePvpIngameWidget::ResolveAuthoredControls()
+{
+	HealthBar = Cast<UProgressBar>(GetWidgetFromName(TEXT("血量组件")));
+	MagazineText = Cast<UTextBlock>(GetWidgetFromName(TEXT("当前子弹")));
+	ReserveText = Cast<UTextBlock>(GetWidgetFromName(TEXT("剩余子弹")));
+	WeaponNameText = Cast<UTextBlock>(GetWidgetFromName(TEXT("TextBlock_2")));
+	MatchHintText = Cast<UTextBlock>(GetWidgetFromName(TEXT("TextBlock_65")));
+	AmmoContainer = GetWidgetFromName(TEXT("子弹数"));
+	CountdownRow = GetWidgetFromName(TEXT("HorizontalBox_327"));
+}
+
+// 不增加逐帧业务更新；只有事件与构建时写入控件，UMG 自身的绘制和淡入动画仍由引擎执行。
+void UfpstruePvpIngameWidget::RefreshControls()
+{
+	if (HealthBar != nullptr)
+	{
+		HealthBar->SetPercent(HealthFraction);
+		HealthBar->SetFillColorAndOpacity(HealthFraction <= 0.3f
+			? FLinearColor(0.85f, 0.1f, 0.08f, 0.85f) : FLinearColor(0.104616f, 0.296138f, 0.158961f, 0.701961f));
+	}
+	if (MagazineText != nullptr)
+	{
+		MagazineText->SetText(FText::AsNumber(CurrentAmmo));
+		MagazineText->SetColorAndOpacity(CurrentAmmo <= 5 ? FLinearColor(0.9f, 0.15f, 0.1f)
+			: FLinearColor(0.651406f, 0.617207f, 0.473532f));
+	}
+	if (ReserveText != nullptr) ReserveText->SetText(FText::AsNumber(ReserveAmmo));
+	if (WeaponNameText != nullptr) WeaponNameText->SetText(CurrentWeaponName);
+	if (AmmoContainer != nullptr) AmmoContainer->SetVisibility(bHasEquipment ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	// PvPvE 没有单机生存倒计时；隐藏时间行而非从客户端查询不存在的单机 GameMode。
+	if (CountdownRow != nullptr) CountdownRow->SetVisibility(ESlateVisibility::Collapsed);
+	if (MatchHintText != nullptr) MatchHintText->SetText(NSLOCTEXT("fpstrue", "PvpSurvivalHint", "联机生存：抵御敌人，玩家之间可互相伤害"));
+}
+
+bool UfpstruePvpIngameWidget::HasAuthoredControls() const
+{
+	return HealthBar != nullptr && MagazineText != nullptr && ReserveText != nullptr && WeaponNameText != nullptr
+		&& MatchHintText != nullptr && AmmoContainer != nullptr && CountdownRow != nullptr;
+}
+
+// 原 Construct 业务链和属性绑定由资产接线工具停用；这里仅恢复同一布局的显示缓存与作者淡入动画。
+void UfpstruePvpIngameWidget::NativeConstruct()
+{
+	Super::NativeConstruct();
+	ResolveAuthoredControls();
+	RefreshControls();
+	if (!bPlayedFadeIn)
+	{
+		if (const auto* BlueprintClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass()))
+			for (const auto& Animation : BlueprintClass->Animations)
+				if (Animation != nullptr && Animation->GetName().StartsWith(TEXT("淡入")))
+				{
+					PlayAnimation(Animation);
+					bPlayedFadeIn = true;
+					break;
+				}
+	}
+}
+
+int32 UfpstruePvpIngameWidget::NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
+	const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId,
+	const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
+{
+	const int32 Result = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	LastPaintFrame = GFrameCounter;
+	LastPaintedSnapshotRevision = SnapshotRevision;
+	return Result;
+}
+
+bool UfpstruePvpIngameWidget::HasPaintedSnapshot() const
+{
+	// Slate 可以复用未变化的绘制缓存，不要求静止界面每帧重画；新快照必须至少真正绘制一次。
+	return IsInViewport() && IsVisible() && HasAuthoredControls() && LastPaintFrame > 0
+		&& LastPaintedSnapshotRevision == SnapshotRevision;
+}
+
+AfpstruePvpHUD::AfpstruePvpHUD()
+{
+	// 联机复制件保留原布局；原 ingame 及其单机 GameMode/倒计时链完全不改。
+	IngameWidgetClass = FSoftObjectPath(TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C"));
+}
+
+// 本地视口才创建原 UMG；父类/布局合同不符时明确回退 Canvas，不把两套 HUD 同时叠在画面上。
+bool AfpstruePvpHUD::EnsureIngameWidget()
+{
+	if (IngameWidget != nullptr) return IngameWidget->IsInViewport();
+	if (bAttemptedIngameWidget || PlayerOwner == nullptr || !PlayerOwner->IsLocalController() || !FApp::CanEverRender()) return false;
+	bAttemptedIngameWidget = true;
+	UClass* WidgetClass = IngameWidgetClass.LoadSynchronous();
+	if (WidgetClass != nullptr) IngameWidget = CreateWidget<UfpstruePvpIngameWidget>(PlayerOwner, WidgetClass);
+	if (IngameWidget != nullptr)
+	{
+		RefreshIngameSnapshot();
+		IngameWidget->AddToViewport();
+		if (IngameWidget->IsInViewport() && IngameWidget->HasAuthoredControls()) return true;
+		IngameWidget->RemoveFromParent();
+		IngameWidget = nullptr;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("PvP original ingame HUD is unavailable or not connected to its native bridge; using Canvas fallback."));
+	return false;
+}
+
+void AfpstruePvpHUD::RefreshIngameSnapshot()
+{
+	if (IngameWidget != nullptr)
+		IngameWidget->ApplySnapshot(CurrentHealth, CurrentMaxHealth, ObservedWeapon.IsValid(), CurrentAmmo, ReserveAmmo, CurrentWeaponName);
+}
+
 // HUD 的绘制仍逐帧执行；生命与弹药只在事件或 Pawn 切换时更新缓存，不逐帧搜索世界。
 void AfpstruePvpHUD::DrawHUD()
 {
 	Super::DrawHUD();
 	auto* Pawn = PlayerOwner != nullptr ? Cast<AfpstrueCharacter>(PlayerOwner->GetPawn()) : nullptr;
 	if (ObservedPawn.Get() != Pawn) BindPawn(Pawn);
-	if (Canvas == nullptr || Pawn == nullptr || !bShowHUD) return;
+	if (Pawn == nullptr || !bShowHUD)
+	{
+		if (IngameWidget != nullptr) IngameWidget->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	if (EnsureIngameWidget())
+	{
+		IngameWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		return;
+	}
+	if (Canvas == nullptr) return;
 	const auto* State = Pawn->GetPlayerState<AfpstruePvpPlayerState>();
 	DrawRect(FLinearColor(0.02f, 0.03f, 0.05f, 0.72f), 20.0f, Canvas->SizeY - 92.0f, 470.0f, 72.0f);
 	DrawText(FString::Printf(TEXT("HEALTH  %.0f     AMMO  %d / %d"), CurrentHealth, CurrentAmmo, ReserveAmmo),
@@ -103,8 +268,9 @@ void AfpstruePvpHUD::BindPawn(AfpstrueCharacter* Pawn)
 	HandleWeaponChanged(nullptr);
 	ObservedPawn = Pawn;
 	CurrentHealth = 0.0f;
+	CurrentMaxHealth = 100.0f;
 	LastDrawFrame = 0;
-	if (Pawn == nullptr) return;
+	if (Pawn == nullptr) { RefreshIngameSnapshot(); return; }
 	Pawn->OnEquippedWeaponChanged.AddUniqueDynamic(this, &ThisClass::HandleWeaponChanged);
 	if (auto* Health = Pawn->GetHealthComponent()) Health->OnHealthChanged.AddUniqueDynamic(this, &ThisClass::HandleHealthChanged);
 	HandleHealthChanged(Pawn->GetCurrentHealth());
@@ -115,6 +281,8 @@ void AfpstruePvpHUD::BindPawn(AfpstrueCharacter* Pawn)
 void AfpstruePvpHUD::HandleHealthChanged(float Health)
 {
 	CurrentHealth = Health;
+	if (const auto* Pawn = ObservedPawn.Get()) CurrentMaxHealth = Pawn->GetMaxHealth();
+	RefreshIngameSnapshot();
 }
 
 // 装备可晚于 Pawn 到达；切换订阅后立即补读弹药，不保留失效武器。
@@ -123,7 +291,10 @@ void AfpstruePvpHUD::HandleWeaponChanged(UfpstrueWeaponComponent* Weapon)
 	if (auto* Previous = ObservedWeapon.Get()) Previous->OnAmmoChanged.RemoveDynamic(this, &ThisClass::HandleAmmoChanged);
 	ObservedWeapon = Weapon;
 	CurrentAmmo = ReserveAmmo = 0;
-	if (Weapon == nullptr) return;
+	CurrentWeaponName = Weapon != nullptr
+		? (Weapon->WeaponDisplayName.IsEmpty() ? NSLOCTEXT("fpstrue", "GenericRifleName", "突击步枪") : Weapon->WeaponDisplayName)
+		: FText::GetEmpty();
+	if (Weapon == nullptr) { RefreshIngameSnapshot(); return; }
 	Weapon->OnAmmoChanged.AddUniqueDynamic(this, &ThisClass::HandleAmmoChanged);
 	HandleAmmoChanged(Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize(), Weapon->GetReserveAmmo());
 }
@@ -133,22 +304,28 @@ void AfpstruePvpHUD::HandleAmmoChanged(int32 Ammo, int32, int32 Reserve)
 {
 	CurrentAmmo = Ammo;
 	ReserveAmmo = Reserve;
+	RefreshIngameSnapshot();
 }
 
 // 验收必须见过真实绘制，且所画值仍属于当前 Pawn；仅创建 HUD 不算画面恢复。
 bool AfpstruePvpHUD::HasDrawnCurrentState(const AfpstrueCharacter* Pawn) const
 {
 	const auto* Weapon = ObservedWeapon.Get();
-	return Pawn != nullptr && ObservedPawn.Get() == Pawn && Weapon != nullptr
-		&& Pawn->GetEquippedWeaponComponent() == Weapon && LastDrawFrame > 0 && GFrameCounter - LastDrawFrame <= 5
-		&& FMath::IsNearlyEqual(CurrentHealth, Pawn->GetCurrentHealth()) && CurrentAmmo == Weapon->GetCurrentAmmo()
-		&& ReserveAmmo == Weapon->GetReserveAmmo();
+	return bShowHUD && Pawn != nullptr && ObservedPawn.Get() == Pawn
+		&& Pawn->GetEquippedWeaponComponent() == Weapon
+		&& (IngameWidget != nullptr ? IngameWidget->HasPaintedSnapshot() : LastDrawFrame > 0 && GFrameCounter - LastDrawFrame <= 5)
+		&& FMath::IsNearlyEqual(CurrentHealth, Pawn->GetCurrentHealth())
+		&& FMath::IsNearlyEqual(CurrentMaxHealth, Pawn->GetMaxHealth())
+		&& CurrentAmmo == (Weapon != nullptr ? Weapon->GetCurrentAmmo() : 0)
+		&& ReserveAmmo == (Weapon != nullptr ? Weapon->GetReserveAmmo() : 0);
 }
 
 // HUD 比 Pawn 晚退出也可安全解除绑定；弱引用不延长旧角色与武器寿命。
 void AfpstruePvpHUD::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	BindPawn(nullptr);
+	if (IngameWidget != nullptr) IngameWidget->RemoveFromParent();
+	IngameWidget = nullptr;
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -173,6 +350,75 @@ void AfpstruePvpPlayerController::ClientConnectionRejected_Implementation(const 
 	if (auto* Instance = Cast<UfpstrueMultiplayerGameInstance>(GetGameInstance())) Instance->RejectConnection(Reason);
 }
 
+void AfpstruePvpPlayerController::ClientNormalVisualRoute_Implementation(const TArray<FVector>& Points)
+{
+#if !UE_BUILD_SHIPPING
+	if (!IsLocalController() || !FParse::Param(FCommandLine::Get(), TEXT("PvpNormalPairWalk")) || Points.IsEmpty() || Points.Num() > 128) return;
+	NormalVisualRoute = Points;
+	++NormalVisualRouteRevision;
+	UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_ROUTE CLIENT Points=%d Revision=%d"), NormalVisualRoute.Num(), NormalVisualRouteRevision);
+#endif
+}
+
+// 路线规划只属于显式开发验收驱动；实际行走和攻击仍走原有 CMC/GAS 协议。
+void AfpstruePvpPlayerController::ServerRequestNormalVisualEnemyRoute_Implementation()
+{
+#if !UE_BUILD_SHIPPING
+	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpNormalFullGameplay"))) return;
+	auto* Avatar = Cast<AfpstrueCharacter>(GetPawn());
+	UNavigationSystemV1* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+	if (!Avatar || Avatar->IsDead() || !Avatar->HasEquippedWeapon() || !Navigation) return;
+	bNormalFullRouteRequested = true;
+	TArray<AfpstruePvpPlayerController*> Ready;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+		if (auto* Peer = Cast<AfpstruePvpPlayerController>(It->Get()); Peer && Peer->bNormalFullRouteRequested) Ready.Add(Peer);
+	if (Ready.Num() != 2) return; // 双端完成常规动作后才一起出发，不能一端提前杀掉另一端尚未登记的目标。
+	AfpstrueEnemyCharacter* Nearest = nullptr;
+	double Distance = TNumericLimits<double>::Max();
+	for (TActorIterator<AfpstrueEnemyCharacter> It(GetWorld()); It; ++It)
+		if (!It->IsDead() && FVector::DistSquared2D(Avatar->GetActorLocation(), It->GetActorLocation()) < Distance)
+		{ Nearest = *It; Distance = FVector::DistSquared2D(Avatar->GetActorLocation(), It->GetActorLocation()); }
+	if (!Nearest) return;
+	// 显式开发验收读回服务器活体 Pawn 与 CMC 的尺寸及实际 NavData，不手工改任何导航/碰撞属性。
+	auto LogNavigationCoverage = [Navigation](ACharacter* MovingPawn)
+	{
+		const auto* Movement = MovingPawn->GetCharacterMovement();
+		const auto* Capsule = MovingPawn->GetCapsuleComponent();
+		const FNavAgentProperties& PawnProps = MovingPawn->GetNavAgentPropertiesRef();
+		const FNavAgentProperties& MovementProps = Movement->GetNavAgentPropertiesRef();
+		const ANavigationData* Selected = Navigation->GetNavDataForProps(PawnProps, MovingPawn->GetActorLocation());
+		const FNavDataConfig* Config = Selected ? &Selected->GetConfig() : nullptr;
+		const float Radius = Capsule->GetScaledCapsuleRadius(), Height = Capsule->GetScaledCapsuleHalfHeight() * 2.0f;
+		const bool bCovered = Config && Config->AgentRadius >= Radius && Config->AgentHeight >= Height
+			&& PawnProps.AgentRadius >= Radius && PawnProps.AgentHeight >= Height;
+		UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_GAMEPLAY NAV_PAWN Pawn=%s Capsule=%.1f/%.1f PawnProps=%.1f/%.1f CMCProps=%.1f/%.1f UpdateFromCollision=%d Selected=%s Config=%.1f/%.1f Extent=%s Covered=%d"),
+			*MovingPawn->GetName(), Radius, Height, PawnProps.AgentRadius, PawnProps.AgentHeight, MovementProps.AgentRadius, MovementProps.AgentHeight,
+			Movement->ShouldUpdateNavAgentWithOwnersCollision(), *GetNameSafe(Selected), Config ? Config->AgentRadius : -1.0f,
+			Config ? Config->AgentHeight : -1.0f, Config ? *Config->DefaultQueryExtent.ToCompactString() : TEXT("None"), bCovered);
+		return bCovered;
+	};
+	if (!LogNavigationCoverage(Nearest))
+	{ UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_ROUTE FAIL Reason=EnemyNavAgentCoverage")); return; }
+	int32 RouteSlot = 0;
+	for (AfpstruePvpPlayerController* Peer : Ready)
+	{
+		auto* MovingPawn = Cast<AfpstrueCharacter>(Peer->GetPawn());
+		if (!MovingPawn || MovingPawn->IsDead()) return;
+		if (!LogNavigationCoverage(MovingPawn))
+		{ UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_ROUTE FAIL Reason=PlayerNavAgentCoverage")); return; }
+		const FVector Direction = (MovingPawn->GetActorLocation() - Nearest->GetActorLocation()).GetSafeNormal2D().RotateAngleAxis(RouteSlot++ == 0 ? 35.0 : -35.0, FVector::UpVector);
+		FNavLocation Destination;
+		if (!Navigation->ProjectPointToNavigation(Nearest->GetActorLocation() + Direction * 500.0, Destination, FVector(150,150,200))) return;
+		UNavigationPath* Path = Navigation->FindPathToLocationSynchronously(GetWorld(), MovingPawn->GetActorLocation(), Destination.Location, MovingPawn);
+		if (!Path || !Path->IsValid() || Path->IsPartial() || Path->PathPoints.IsEmpty() || Path->PathPoints.Num() > 128)
+		{ UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_GAMEPLAY ROUTE_FAIL Player=%s"), *Peer->GetName()); return; }
+		Peer->ClientNormalVisualRoute(Path->PathPoints);
+		UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_GAMEPLAY ENEMY_ROUTE Player=%s Enemy=%s Points=%d DistanceCm=%.1f Teleport=0"),
+			*Peer->GetName(), *Nearest->GetName(), Path->PathPoints.Num(), FVector::Dist2D(MovingPawn->GetActorLocation(), Nearest->GetActorLocation()));
+	}
+#endif
+}
+
 void AfpstruePvpPlayerController::ServerLeavePvp_Implementation()
 {
 	bIntentionalLeave = true;
@@ -181,10 +427,12 @@ void AfpstruePvpPlayerController::ServerLeavePvp_Implementation()
 
 void AfpstruePvpPlayerController::PawnLeavingGame()
 {
-	if (!bIntentionalLeave)
+	if (auto* Mode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
 	{
-		if (auto* Mode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
-			if (Mode->PreserveDisconnectedPlayer(this)) return;
+		if (!bIntentionalLeave && Mode->PreserveDisconnectedPlayer(this)) return;
+		// 主动退出或无法保留时，必须在 Super 销毁 Pawn 之前取得其场景拾取枪并清理。
+		// Logout 此时可能已经拿不到 Pawn，不能只依赖默认发枪记录兜底。
+		Mode->ReleasePlayerWeapon(this);
 	}
 	Super::PawnLeavingGame();
 }
@@ -247,7 +495,8 @@ void AfpstruePvpPlayerController::ClientReceiveClockSample_Implementation(uint32
 	LastClockSampleLocal = Now;
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLOCK_SAMPLE PASS RTT=%.4f Uncertainty=%.4f"), RoundTrip, ClockUncertainty);
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLOCK_SAMPLE PASS RTT=%.4f Uncertainty=%.4f Offset=%.6f Residual=%.6f BestRTT=%.6f Sequence=%u"),
+			RoundTrip, ClockUncertainty, ServerClockOffset, Residual, BestClockRoundTrip, Sequence);
 #endif
 }
 
@@ -304,12 +553,16 @@ void AfpstruePvpPlayerController::CheckVisualRecovery()
 	auto* State = GetWorld()->GetGameState<AfpstruePvpGameState>();
 	auto* Weapon = LocalPawn != nullptr ? LocalPawn->GetEquippedWeaponComponent() : nullptr;
 	auto* Viewport = GetWorld()->GetGameViewport();
+	const auto* Arms = LocalPawn != nullptr ? LocalPawn->GetMesh1P() : nullptr;
+	// 正常出生可以空手；只有实际装备后才要求视模可见，不能把隐藏双手误判为画面未恢复。
+	const bool bEquipmentReady = Arms != nullptr && Arms->IsRegistered()
+		&& (Weapon == nullptr ? Arms->bHiddenInGame
+			: !Arms->bHiddenInGame && Arms->IsVisible() && Weapon->IsRegistered() && Weapon->IsVisible()
+				&& !Weapon->bHiddenInGame && Weapon->GetSkeletalMeshAsset() != nullptr && Weapon->GetAttachParent() == Arms);
 	if (Instance == nullptr || Instance->ConnectionState != EFPConnectionState::Connected || LocalPawn == nullptr || LocalPawn->IsDead()
 		|| GetViewTarget() != LocalPawn || PlayerCameraManager == nullptr || !FMath::IsFinite(PlayerCameraManager->GetFOVAngle())
 		|| LocalPawn->GetFirstPersonCameraComponent() == nullptr || !LocalPawn->GetFirstPersonCameraComponent()->IsActive()
-		|| LocalPawn->GetMesh1P() == nullptr || !LocalPawn->GetMesh1P()->IsRegistered() || !LocalPawn->GetMesh1P()->IsVisible()
-		|| Weapon == nullptr || !Weapon->IsRegistered() || !Weapon->IsVisible() || Weapon->GetSkeletalMeshAsset() == nullptr
-		|| Weapon->GetAttachParent() != LocalPawn->GetMesh1P() || HUD == nullptr || !HUD->HasDrawnCurrentState(LocalPawn)
+		|| !bEquipmentReady || HUD == nullptr || !HUD->HasDrawnCurrentState(LocalPawn)
 		|| Viewport == nullptr || Viewport->Viewport == nullptr || Viewport->Viewport->GetSizeXY().GetMin() <= 0
 		|| State == nullptr || !State->GetEnemySignificanceCoordinator()->HasRenderedEnemies())
 	{ VisualReadyAt = 0.0; return; }
@@ -423,6 +676,7 @@ void AfpstruePvpGameState::BeginPlay()
 {
 	Super::BeginPlay();
 	EnemySignificanceCoordinator->StartMultiplayer(EnemyAnimationSharingCoordinator);
+	StartPvpPerformanceProfile(GetWorld());
 }
 
 // 地图结束时先停止新采样，再注销共享 Follower；组件 EndPlay 仍可幂等兜底。
@@ -529,6 +783,9 @@ void AfpstruePvpGameMode::UpdatePvePopulation()
 		}
 	}
 	if (FirstPlayer == nullptr) return;
+#if !UE_BUILD_SHIPPING
+	if (!bNormalVisualRoutesSent && FParse::Param(FCommandLine::Get(), TEXT("PvpNormalPairWalk"))) SendNormalVisualRoutes();
+#endif
 	AfpstrueCharacter* SmokeNearPlayer = nullptr;
 #if !UE_BUILD_SHIPPING
 	if (bSmokeTest)
@@ -629,6 +886,7 @@ AfpstrueEnemyCharacter* AfpstruePvpGameMode::SpawnPveEnemy(AfpstrueCharacter* Ne
 	for (int32 Attempt = 0; Attempt < 8; ++Attempt)
 	{
 		FVector Candidate;
+		FRotator Rotation = FRotator::ZeroRotator;
 		if (NearPlayer != nullptr)
 		{
 			const float Angle = FMath::DegreesToRadians(static_cast<float>(Attempt * 45));
@@ -639,12 +897,14 @@ AfpstrueEnemyCharacter* AfpstruePvpGameMode::SpawnPveEnemy(AfpstrueCharacter* Ne
 			AActor* Point = PveSpawnPoints[NextPveSpawnIndex++ % PveSpawnPoints.Num()];
 			if (!IsValid(Point)) continue;
 			Candidate = Point->GetActorLocation();
+			// 保留关卡作者设置的警戒方向；导航只调整位置，不能把全部敌人的视锥重置到世界 +X。
+			Rotation.Yaw = Point->GetActorRotation().Yaw;
 			if (Attempt > 0) Candidate += FVector(FMath::FRandRange(-400.0f, 400.0f), FMath::FRandRange(-400.0f, 400.0f), 0.0f);
 		}
 		FNavLocation Projected;
 		if (!Navigation->ProjectPointToNavigation(Candidate, Projected, FVector(150.0f, 150.0f, 500.0f))) continue;
 		const FVector Location = Projected.Location + FVector::UpVector * (HalfHeight + 2.0f);
-		const FRotator Rotation = NearPlayer != nullptr ? FRotator(0.0f, (NearPlayer->GetActorLocation() - Location).Rotation().Yaw, 0.0f) : FRotator::ZeroRotator;
+		if (NearPlayer != nullptr) Rotation.Yaw = (NearPlayer->GetActorLocation() - Location).Rotation().Yaw;
 		FActorSpawnParameters Parameters;
 		Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 		AfpstrueEnemyCharacter* Enemy = GetWorld()->SpawnActor<AfpstrueEnemyCharacter>(EnemyClass, Location, Rotation, Parameters);
@@ -671,6 +931,9 @@ void AfpstruePvpGameMode::RegisterPveEnemy(AfpstrueEnemyCharacter* Enemy)
 #if !UE_BUILD_SHIPPING
 			if (bSmokeTest && WeakEnemy == SmokePveEnemy && Damage > 0.0f && IsValid(DamageInstigator) && DamageInstigator->GetPawn() == SmokePvePlayer)
 				UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=PvePlayerHit Enemy=%s Health=%.1f"), *GetNameSafe(WeakEnemy.Get()), WeakEnemy->FindComponentByClass<UfpstrueHealthComponent>()->GetHealth());
+			if (FParse::Param(FCommandLine::Get(), TEXT("PvpNormalFullGameplay")) && WeakEnemy.IsValid() && Damage > 0.0f)
+				UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_GAMEPLAY ENEMY_DAMAGE Enemy=%s Health=%.1f Instigator=%s Damage=%.1f"),
+					*WeakEnemy->GetName(), WeakEnemy->FindComponentByClass<UfpstrueHealthComponent>()->GetHealth(), *GetNameSafe(DamageInstigator), Damage);
 #endif
 		});
 	}
@@ -755,6 +1018,37 @@ void AfpstruePvpGameMode::StartPveSmoke(AfpstruePvpPlayerController* Requester)
 #endif
 }
 
+#if !UE_BUILD_SHIPPING
+// 只给显式普通入口验收下发一次可行路线；初始出生点和实际武器/伤害/移动协议均不改。
+void AfpstruePvpGameMode::SendNormalVisualRoutes()
+{
+	TArray<AfpstrueCharacter*> Players;
+	for (TActorIterator<AfpstrueCharacter> It(GetWorld()); It; ++It)
+		if (IsCombatParticipant(*It) && It->HasEquippedWeapon() && It->GetPlayerState()) Players.Add(*It);
+	if (Players.Num() != 2) return;
+	Players.Sort([](const AfpstrueCharacter& A, const AfpstrueCharacter& B) { return A.GetPlayerState()->GetPlayerId() < B.GetPlayerState()->GetPlayerId(); });
+	UNavigationSystemV1* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+	if (!Navigation) return;
+	FNavLocation Destination;
+	if (!Navigation->ProjectPointToNavigation(Players[0]->GetActorLocation() + Players[0]->GetActorRightVector() * 350.0, Destination, FVector(200, 200, 200))) return;
+	UNavigationPath* Path = Navigation->FindPathToLocationSynchronously(GetWorld(), Players[1]->GetActorLocation(), Destination.Location, Players[1]);
+	if (!Path || !Path->IsValid() || Path->IsPartial() || Path->PathPoints.IsEmpty() || Path->PathPoints.Num() > 128)
+	{
+		bNormalVisualRoutesSent = true;
+		UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_ROUTE FAIL Reason=NoCompleteBoundedPath"));
+		return;
+	}
+	auto* First = Cast<AfpstruePvpPlayerController>(Players[0]->GetController());
+	auto* Second = Cast<AfpstruePvpPlayerController>(Players[1]->GetController());
+	if (!First || !Second) return;
+	bNormalVisualRoutesSent = true;
+	First->ClientNormalVisualRoute({Players[0]->GetActorLocation()});
+	Second->ClientNormalVisualRoute(Path->PathPoints);
+	UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_ROUTE SERVER Points=%d StartDistanceCm=%.1f EnemyPopulation=%d Teleport=0"),
+		Path->PathPoints.Num(), FVector::Dist2D(Players[0]->GetActorLocation(), Players[1]->GetActorLocation()), EnemyPopulation);
+}
+#endif
+
 void AfpstruePvpPlayerController::ServerBeginPveSmoke_Implementation()
 {
 #if !UE_BUILD_SHIPPING
@@ -783,9 +1077,9 @@ AfpstruePvpGameMode::AfpstruePvpGameMode()
 	// RAR 表现蓝图不继承旧 RU74 事件图；能力、伤害、输入与网络仍复用原生实现。
 	// 首次编辑器生成前可为空，交付门禁要求该类及完整动画资源存在。
 	if (UClass* PlayerBlueprint = LoadClass<AfpstrueCharacter>(nullptr,
-		TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_RARCharacter.BP_RARCharacter_C"), nullptr, LOAD_Quiet | LOAD_NoWarn))
+		TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter.BP_TemplateCharacter_C"), nullptr, LOAD_Quiet | LOAD_NoWarn))
 		DefaultPawnClass = PlayerBlueprint;
-	DefaultWeaponClass = AfpstrueRARWeapon::StaticClass();
+	DefaultWeaponClass = AfpstrueTemplateWeapon::StaticClass();
 	static ConstructorHelpers::FClassFinder<AfpstrueEnemyCharacter> EnemyBlueprint(TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP"));
 	if (EnemyBlueprint.Succeeded()) EnemyClass = EnemyBlueprint.Class;
 }
@@ -794,6 +1088,50 @@ AfpstruePvpGameMode::AfpstruePvpGameMode()
 void AfpstruePvpGameMode::BeginPlay()
 {
 	Super::BeginPlay();
+	// 仅正常联机替换关卡里的旧素材拾取物；不改原地图、单机资产或出生装备规则。
+	bool bNormalPlay = true;
+#if !UE_BUILD_SHIPPING
+	bNormalPlay = !bSmokeTest;
+#endif
+	if (HasAuthority() && GetNetMode() != NM_Standalone && bNormalPlay && DefaultWeaponClass != nullptr)
+	{
+		const auto IsUnheldLegacyPickup = [](AActor* Actor)
+		{
+			if (!IsValid(Actor) || Actor->GetOwner() != nullptr) return false;
+			UClass* Class = Actor->GetClass();
+			if (Class != AfpstrueRARWeapon::StaticClass()
+				&& Class->GetPathName() != TEXT("/Game/FirstPerson/Blueprints/weapon/BP_Weapon.BP_Weapon_C")) return false;
+			const UfpstrueWeaponComponent* Weapon = Actor->FindComponentByClass<UfpstrueWeaponComponent>();
+			return Weapon != nullptr && Weapon->GetOwningCharacter() == nullptr;
+		};
+		// 先收集再生成/销毁，避免遍历 Actor 列表时把新枪再次纳入替换。
+		TArray<TWeakObjectPtr<AActor>> Pickups;
+		for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+			if (IsUnheldLegacyPickup(*It)) Pickups.Add(*It);
+		for (const TWeakObjectPtr<AActor>& Pickup : Pickups)
+		{
+			AActor* Previous = Pickup.Get();
+			if (!IsUnheldLegacyPickup(Previous)) continue;
+			// 只复制 Actor 的关卡变换，不抄旧 RU74 网格组件的独立缩放或附着偏移。
+			const FTransform Transform = Previous->GetActorTransform();
+			if (Transform.ContainsNaN())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("PVP_PICKUP_REPLACE Rejected=%s Reason=NonFiniteActorTransform"), *Previous->GetName());
+				continue;
+			}
+			FActorSpawnParameters Parameters;
+			Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			if (AActor* Replacement = GetWorld()->SpawnActor<AActor>(DefaultWeaponClass, Transform, Parameters))
+			{
+				UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_REPLACE Old=%s New=%s Class=%s ActorScale=%s"),
+					*Previous->GetName(), *Replacement->GetName(), *Replacement->GetClass()->GetPathName(), *Transform.GetScale3D().ToCompactString());
+				// 原单机拾取物可能未开启复制；先登记网络销毁，连已加载或晚加入客户端的关卡副本一起移除。
+				Previous->SetReplicates(true);
+				Previous->Destroy();
+			}
+			else UE_LOG(LogTemp, Warning, TEXT("PVP_PICKUP_REPLACE Failed=%s OriginalRetained=true"), *Previous->GetName());
+		}
+	}
 	if (AfpstruePvpGameState* State = Cast<AfpstruePvpGameState>(GameState)) State->SetMatchActive(true);
 	TArray<AActor*> Points;
 	UGameplayStatics::GetAllActorsWithTag(this, EnemySpawnTag, Points);
@@ -832,8 +1170,14 @@ void AfpstruePvpGameMode::SampleSmokeMovement()
 void AfpstruePvpGameMode::FinishRestartPlayer(AController* NewPlayer, const FRotator& StartRotation)
 {
 	Super::FinishRestartPlayer(NewPlayer, StartRotation);
-	if (!bEndingPvp && HasAuthority()) EquipDefaultWeapon(Cast<APlayerController>(NewPlayer));
+	bool bNormalSpawn = true;
 #if !UE_BUILD_SHIPPING
+	bNormalSpawn = !bSmokeTest;
+#endif
+	if (bNormalSpawn && bProvideNearbySpawnPickup && !bEndingPvp && HasAuthority()) SpawnNearbyWeaponPickup(Cast<APlayerController>(NewPlayer));
+#if !UE_BUILD_SHIPPING
+	// 自动发枪仅是联网回归的显式前置；正常玩法必须经过场景拾取，不能修改出生装备规则。
+	if (bSmokeTest && !bEndingPvp && HasAuthority()) EquipDefaultWeapon(Cast<APlayerController>(NewPlayer));
 	const AfpstrueCharacter* Character = IsValid(NewPlayer) ? Cast<AfpstrueCharacter>(NewPlayer->GetPawn()) : nullptr;
 	if (bSmokeTest && !bEndingPvp && HasAuthority() && IsValid(Character) && !Character->IsDead() && Character->HasEquippedWeapon())
 	{
@@ -844,6 +1188,54 @@ void AfpstruePvpGameMode::FinishRestartPlayer(AController* NewPlayer, const FRot
 			*GetNameSafe(Character->GetPlayerState()), *GetNameSafe(GameState), GameState != nullptr ? GameState->PlayerArray.Num() : -1);
 	}
 #endif
+}
+
+// 每个控制器至多登记一把尚未拾取的出生补给；重生/离场只删除无主补给，不删除别人已拾走或死亡掉落的枪。
+void AfpstruePvpGameMode::ReleaseUnclaimedSpawnPickup(APlayerController* Player)
+{
+	TWeakObjectPtr<AActor> Previous;
+	SpawnPickups.RemoveAndCopyValue(Player, Previous);
+	if (AActor* Actor = Previous.Get())
+		if (const UfpstrueWeaponComponent* Weapon = Actor->FindComponentByClass<UfpstrueWeaponComponent>();
+			Weapon && !Actor->GetOwner() && !Weapon->GetOwningCharacter() && !Weapon->IsDroppedOnDeath()) Actor->Destroy();
+}
+
+// 找到近处同层可走到的地面，并检查中间没有墙；找不到就不生成，不把枪丢进深渊或隔墙另一侧。
+void AfpstruePvpGameMode::SpawnNearbyWeaponPickup(APlayerController* Player)
+{
+	ReleaseUnclaimedSpawnPickup(Player);
+	AfpstrueCharacter* Pawn = IsValid(Player) ? Cast<AfpstrueCharacter>(Player->GetPawn()) : nullptr;
+	UWorld* World = GetWorld();
+	if (!HasAuthority() || bEndingPvp || !IsValid(Pawn) || Pawn->IsDead() || Pawn->HasEquippedWeapon() || !DefaultWeaponClass || !World) return;
+	UNavigationSystemV1* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!Navigation) return;
+	FCollisionQueryParams Query(SCENE_QUERY_STAT(FpstrueSpawnPickup), false, Pawn);
+	const FVector Forward = Pawn->GetActorForwardVector();
+	const FVector Right = Pawn->GetActorRightVector();
+	for (const FVector Offset : {Forward * 210.0, Right * 210.0, -Right * 210.0, -Forward * 210.0})
+	{
+		FNavLocation Floor;
+		if (!Navigation->ProjectPointToNavigation(Pawn->GetActorLocation() + Offset, Floor, FVector(60, 60, 150))) continue;
+		FHitResult Ground;
+		if (!World->LineTraceSingleByChannel(Ground, Floor.Location + FVector(0, 0, 150), Floor.Location - FVector(0, 0, 100), ECC_Visibility, Query)
+			|| Ground.ImpactNormal.Z < 0.7f || FMath::Abs(Ground.ImpactPoint.Z - (Pawn->GetActorLocation().Z - Pawn->GetSimpleCollisionHalfHeight())) > 100.0) continue;
+		const FVector Location = Ground.ImpactPoint + FVector(0, 0, 45);
+		FHitResult Wall;
+		if (World->SweepSingleByChannel(Wall, Pawn->GetActorLocation(), Location, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(12.0f), Query)) continue;
+		// 同伴胶囊通常忽略 Visibility，却会阻挡玩家；补给不能放在近处同伴背后让新玩家一直顶着人走。
+		if (World->SweepSingleByObjectType(Wall, Pawn->GetActorLocation(), Location, FQuat::Identity, FCollisionObjectQueryParams(ECC_Pawn),
+			FCollisionShape::MakeSphere(Pawn->GetSimpleCollisionRadius()), Query)) continue;
+		FActorSpawnParameters Spawn;
+		Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		if (AActor* Pickup = World->SpawnActor<AActor>(DefaultWeaponClass, Location, FRotator(0, Pawn->GetActorRotation().Yaw, 0), Spawn))
+		{
+			Pickup->SetReplicates(true);
+			SpawnPickups.Add(Player, Pickup);
+			UE_LOG(LogTemp, Display, TEXT("PVP_SPAWN_PICKUP Player=%s Pickup=%s DistanceCm=%.1f Grounded=1 NeedsOverlap=1"),
+				*Player->GetName(), *Pickup->GetName(), FVector::Dist2D(Pawn->GetActorLocation(), Location));
+		}
+		return;
+	}
 }
 
 // 死亡资格和待重生记录先提交，再计分；外部回调不能重复接纳同一次死亡。
@@ -882,6 +1274,9 @@ void AfpstruePvpGameMode::HandlePlayerEliminated(AfpstrueCharacter* Victim, ACon
 	}
 	State->AddElimination();
 #if !UE_BUILD_SHIPPING
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpNormalFullGameplay")))
+		UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_GAMEPLAY SERVER_DEATH Victim=%s Deaths=%d Killer=%s Eliminations=%d"),
+			*Victim->GetName(), VictimState ? VictimState->GetDeaths() : -1, *GetNameSafe(Killer), State->GetEliminationCount());
 	if (bSmokeTest && VictimState != nullptr && VictimState->GetDeaths() == PreviousDeaths + 1)
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=Death victim=%s deaths=%d killer=%s kills=%d eliminations=%d"),
 			*Player->GetName(), VictimState->GetDeaths(), *GetNameSafe(Killer), KillerState != nullptr ? KillerState->GetKills() : 0, State->GetEliminationCount());
@@ -913,6 +1308,9 @@ void AfpstruePvpGameMode::RespawnPlayer(TWeakObjectPtr<APlayerController> Player
 	RestartPlayer(Player);
 #if !UE_BUILD_SHIPPING
 	const AfpstrueCharacter* NewPawn = IsValid(Player) ? Cast<AfpstrueCharacter>(Player->GetPawn()) : nullptr;
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpNormalFullGameplay")) && NewPawn && !NewPawn->IsDead())
+		UE_LOG(LogTemp, Display, TEXT("PVP_NORMAL_GAMEPLAY SERVER_RESPAWN Pawn=%s Health=%.1f EmptyHands=%d"),
+			*NewPawn->GetName(), NewPawn->GetCurrentHealth(), !NewPawn->HasEquippedWeapon());
 	if (bSmokeTest && IsValid(NewPawn) && NewPawn != EliminatedPawn.Get() && !NewPawn->IsDead() && NewPawn->HasEquippedWeapon())
 	{
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=Respawn player=%s pawn=%s"), *Player->GetName(), *NewPawn->GetName());
@@ -957,9 +1355,16 @@ void AfpstruePvpGameMode::EquipDefaultWeapon(APlayerController* Player)
 // 外部武器Actor不由Pawn销毁自动回收，所以由对局在换Pawn和离场时显式释放。
 void AfpstruePvpGameMode::ReleasePlayerWeapon(APlayerController* Player)
 {
-	TWeakObjectPtr<AActor> Weapon;
-	if (!PlayerWeapons.RemoveAndCopyValue(TWeakObjectPtr<APlayerController>(Player), Weapon)) return;
-	if (AActor* Actor = Weapon.Get()) Actor->Destroy();
+	TWeakObjectPtr<AActor> RecordedWeapon;
+	PlayerWeapons.RemoveAndCopyValue(TWeakObjectPtr<APlayerController>(Player), RecordedWeapon);
+	AfpstrueCharacter* Pawn = IsValid(Player) ? Cast<AfpstrueCharacter>(Player->GetPawn()) : nullptr;
+	UfpstrueWeaponComponent* Equipped = Pawn != nullptr ? Pawn->GetEquippedWeaponComponent() : nullptr;
+	AActor* CurrentWeapon = IsValid(Equipped) && Equipped->GetOwningCharacter() == Pawn ? Equipped->GetOwner() : nullptr;
+	// ★【资源所有权】场景拾取不经过默认发枪记录；以当前装备补齐清理，不能留下已脱离旧 Pawn 的枪。
+	// 记录先移除，实际引用先捕获；销毁回调不能重新消费旧记录，也不能误删已交给另一位玩家的武器。
+	AActor* RecordedActor = RecordedWeapon.Get();
+	ReleaseNetworkPlayerWeapon(RecordedActor, Pawn, Player);
+	if (CurrentWeapon != RecordedActor) ReleaseNetworkPlayerWeapon(CurrentWeapon, Pawn, Player);
 }
 
 // 新连接先完成持有者握手，随后才创建新 Pawn 或绑定保留 Pawn；不能先发满血新角色再偷偷覆盖它。
@@ -999,6 +1404,8 @@ void AfpstruePvpGameMode::CompleteConnectionHandshake(AfpstruePvpPlayerControlle
 	if (Error.IsEmpty() && NewToken.IsEmpty()) Error = TEXT("secure_ticket_unavailable");
 	if (!Error.IsEmpty())
 	{
+		// 只记录原因，不输出票据；区分正常过期、并发占用与真正的恢复链路错误。
+		UE_LOG(LogTemp, Display, TEXT("PVP_RESUME SERVER_REJECT Reason=%s"), *Error);
 		PendingConnectionHandshakes.Remove(Player);
 		Player->bIntentionalLeave = true;
 		Player->ClientConnectionRejected(Error);
@@ -1027,23 +1434,31 @@ void AfpstruePvpGameMode::CompleteConnectionHandshake(AfpstruePvpPlayerControlle
 		if (IsValid(TemporaryState) && TemporaryState != State) TemporaryState->Destroy();
 	}
 	AfpstrueCharacter* Pawn = Slot.Pawn.Get();
-	if (bRestored && IsValid(Pawn) && !Pawn->IsDead() && Slot.Weapon.IsValid() && Pawn->HasEquippedWeapon())
+	UfpstrueWeaponComponent* RetainedWeapon = IsValid(Pawn) ? Pawn->GetEquippedWeaponComponent() : nullptr;
+	const bool bValidEquipment = RetainedWeapon == nullptr || (IsValid(RetainedWeapon)
+		&& RetainedWeapon->GetOwningCharacter() == Pawn && IsValid(RetainedWeapon->GetOwner()));
+	if (bRestored && IsValid(Pawn) && !Pawn->IsDead() && bValidEquipment)
 	{
 		Player->Possess(Pawn);
 		Pawn->GetCharacterMovement()->bRunPhysicsWithNoController = Slot.bPreviousPhysicsWithoutController;
 		Pawn->GetAbilitySystemComponent()->InitAbilityActorInfo(Pawn, Pawn);
-		Pawn->GetEquippedWeaponComponent()->ResetNetworkInputGeneration();
-		Slot.Weapon->SetOwner(Pawn);
-		PlayerWeapons.Add(Player, Slot.Weapon);
+		// 空手不需要制造一把枪来完成恢复；拾取枪以 Pawn 的实际装备为准，不依赖默认发枪登记。
+		if (RetainedWeapon != nullptr)
+		{
+			RetainedWeapon->ResetNetworkInputGeneration();
+			AActor* WeaponActor = RetainedWeapon->GetOwner();
+			WeaponActor->SetOwner(Pawn);
+			PlayerWeapons.Add(Player, WeaponActor);
+			WeaponActor->ForceNetUpdate();
+		}
 		Player->SetControlRotation(Slot.ViewRotation);
 		Player->ClientSetRotation(Slot.ViewRotation, true);
 		Pawn->ForceNetUpdate();
-		Slot.Weapon->ForceNetUpdate();
 	}
 	else
 	{
 		// 离线期间死亡或 Pawn/装备已被销毁，只恢复服务器当前成绩并按重生规则生成，不回滚到离线前满血。
-		if (AActor* OldWeapon = Slot.Weapon.Get()) OldWeapon->Destroy();
+		ReleaseNetworkPlayerWeapon(Slot.Weapon.Get(), Pawn);
 		if (Pawn != nullptr) Pawn->Destroy();
 		RestartPlayer(Player);
 		Pawn = Cast<AfpstrueCharacter>(Player->GetPawn());
@@ -1074,12 +1489,22 @@ bool AfpstruePvpGameMode::PreserveDisconnectedPlayer(AfpstruePvpPlayerController
 	if (Slot->bDisconnected) return true;
 	AfpstrueCharacter* Pawn = Cast<AfpstrueCharacter>(Player->GetPawn());
 	Slot->bDisconnected = true;
-	Slot->ExpiresAt = GetWorld()->GetTimeSeconds() + RejoinGraceSeconds;
+	Slot->ExpiresAt = GetWorld()->GetTimeSeconds() + FMath::Clamp(ReconnectGraceSeconds, 5.0f, 120.0f);
 	Slot->Pawn = Pawn;
 	Slot->State = State;
 	Slot->bDeathRecorded = Pawn != nullptr && Pawn->IsDead();
 	Slot->ViewRotation = Player->GetControlRotation();
-	PlayerWeapons.RemoveAndCopyValue(Player, Slot->Weapon);
+	TWeakObjectPtr<AActor> RecordedWeapon;
+	PlayerWeapons.RemoveAndCopyValue(Player, RecordedWeapon);
+	UfpstrueWeaponComponent* Equipped = Pawn != nullptr ? Pawn->GetEquippedWeaponComponent() : nullptr;
+	Slot->Weapon = IsValid(Equipped) && Equipped->GetOwningCharacter() == Pawn ? Equipped->GetOwner() : nullptr;
+	// 装备可能来自场景拾取而不是默认发枪；只保留当前枪，失效旧记录不能覆盖真实装备。
+	if (AActor* PreviousWeapon = RecordedWeapon.Get(); PreviousWeapon != nullptr && PreviousWeapon != Slot->Weapon.Get())
+	{
+		const auto* PreviousComponent = PreviousWeapon->FindComponentByClass<UfpstrueWeaponComponent>();
+		if (PreviousComponent == nullptr || PreviousComponent->GetOwningCharacter() == nullptr)
+			ReleaseNetworkPlayerWeapon(PreviousWeapon, Pawn, Player);
+	}
 	FTimerHandle Timer;
 	if (PendingRespawns.RemoveAndCopyValue(Player, Timer)) GetWorldTimerManager().ClearTimer(Timer);
 	State->SetRetainedForReconnect(true);
@@ -1144,7 +1569,7 @@ void AfpstruePvpGameMode::SweepRejoinSlots()
 		if (It.Value().bDisconnected && (It.Value().ExpiresAt <= Now || !It.Value().State.IsValid())) { Expired.Add(It.Value()); It.RemoveCurrent(); }
 	for (const FRejoinSlot& Slot : Expired)
 	{
-		if (auto* Weapon = Slot.Weapon.Get()) Weapon->Destroy();
+		ReleaseNetworkPlayerWeapon(Slot.Weapon.Get(), Slot.Pawn.Get());
 		if (auto* Pawn = Slot.Pawn.Get()) Pawn->Destroy();
 		if (auto* State = Slot.State.Get()) { State->SetRetainedForReconnect(false); State->Destroy(); }
 	}
@@ -1159,7 +1584,7 @@ void AfpstruePvpGameMode::ClearRejoinSlots()
 	for (const auto& Entry : EndingSlots)
 	{
 		if (!Entry.Value.bDisconnected) continue;
-		if (auto* Weapon = Entry.Value.Weapon.Get()) Weapon->Destroy();
+		ReleaseNetworkPlayerWeapon(Entry.Value.Weapon.Get(), Entry.Value.Pawn.Get(), nullptr, bEndingPvp);
 		if (auto* Pawn = Entry.Value.Pawn.Get()) Pawn->Destroy();
 		if (auto* State = Entry.Value.State.Get()) { State->SetRetainedForReconnect(false); State->Destroy(); }
 	}
@@ -1170,6 +1595,7 @@ void AfpstruePvpGameMode::Logout(AController* Exiting)
 {
 	if (APlayerController* Player = Cast<APlayerController>(Exiting))
 	{
+		ReleaseUnclaimedSpawnPickup(Player);
 		FTimerHandle Timer;
 		if (PendingRespawns.RemoveAndCopyValue(TWeakObjectPtr<APlayerController>(Player), Timer)) GetWorldTimerManager().ClearTimer(Timer);
 		PendingConnectionHandshakes.Remove(Cast<AfpstruePvpPlayerController>(Player));
@@ -1198,6 +1624,10 @@ void AfpstruePvpGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (AfpstruePvpGameState* State = Cast<AfpstruePvpGameState>(GameState)) State->SetMatchActive(false);
 	for (auto& Entry : PendingRespawns) GetWorldTimerManager().ClearTimer(Entry.Value);
 	PendingRespawns.Reset();
+	const auto EndingPickups = MoveTemp(SpawnPickups);
+	SpawnPickups.Reset();
+	for (const auto& Entry : EndingPickups)
+		if (AActor* Pickup = Entry.Value.Get(); Pickup && !Pickup->GetOwner()) Pickup->Destroy();
 	const TMap<TWeakObjectPtr<APlayerController>, TWeakObjectPtr<AActor>> EndingWeapons = MoveTemp(PlayerWeapons);
 	PlayerWeapons.Reset();
 	for (const auto& Entry : EndingWeapons) if (AActor* Weapon = Entry.Value.Get()) Weapon->Destroy();
@@ -1216,6 +1646,19 @@ void UfpstrueMultiplayerGameInstance::HostPvp()
 		return;
 	}
 	UGameplayStatics::OpenLevel(this, FName(*Map), true, TEXT("listen?game=/Script/fpstrue.fpstruePvpGameMode"));
+}
+
+void UfpstrueMultiplayerGameInstance::StartGameInstance()
+{
+	const EFPPvpBaselineBootstrap Bootstrap = StartPvpBaselineClient(this);
+	if (Bootstrap == EFPPvpBaselineBootstrap::NotRequested)
+	{
+		Super::StartGameInstance();
+		return;
+	}
+	// Match the native startup lifecycle after Browse succeeds or becomes pending.
+	// Rejected diagnostics must neither broadcast successful startup nor fall back.
+	if (Bootstrap == EFPPvpBaselineBootstrap::Started) BroadcastOnStart();
 }
 
 // 连接监督器属于 GameInstance：Ticker 跨 World 存活，旧操作只有编号匹配才可以推进下一次旅行。
@@ -1268,7 +1711,7 @@ void UfpstrueMultiplayerGameInstance::SaveResumeCache()
 	const FString Content = FString::Printf(TEXT("FPSTRUE_RESUME_1\n%s\n%s\n%lld\n"), *ResumeServerAddress, *ResumeToken,
 		(FDateTime::UtcNow() + FTimespan::FromDays(1.0)).GetTicks());
 	if (!FFileHelper::SaveStringToFile(Content, *Temporary, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)
-		|| IFileManager::Get().Move(*ResumeCacheFile, *Temporary, true, false, false, true) != COPY_OK)
+		|| !IFileManager::Get().Move(*ResumeCacheFile, *Temporary, true, false, false, true))
 		UE_LOG(LogTemp, Warning, TEXT("Resume cache could not be saved; reconnect is available only while this process remains alive."));
 }
 
@@ -1393,7 +1836,21 @@ void UfpstrueMultiplayerGameInstance::AcceptConnectionToken(AfpstruePvpPlayerCon
 	SetConnectionState(EFPConnectionState::WaitingReady);
 }
 
-// BeginPlayingState 只说明控制器进入 Playing；属性集、装备、成绩与时钟仍须分别到达，不能称全世界原子快照。
+// 空手与持枪共用生命和能力就绪检查；装备是可选状态，而非连接成功的前置条件。
+bool UfpstrueMultiplayerGameInstance::IsPawnStateReady(const AfpstrueCharacter* Pawn, const AfpstruePvpPlayerState* State)
+{
+	if (!IsValid(Pawn) || Pawn->IsDead() || State == nullptr || Pawn->GetPlayerState() != State) return false;
+	const auto* ASC = Pawn->GetHealthComponent();
+	const auto* Weapon = Pawn->GetEquippedWeaponComponent();
+	return ASC != nullptr && ASC->GetHealthAttributeSet() != nullptr
+		&& (Weapon == nullptr || (IsValid(Weapon) && Weapon->GetOwningCharacter() == Pawn))
+		&& ASC->FindAbilitySpecFromClass(UfpstrueFireAbility::StaticClass()) != nullptr
+		&& ASC->FindAbilitySpecFromClass(UfpstrueReloadAbility::StaticClass()) != nullptr
+		&& ASC->FindAbilitySpecFromClass(UfpstrueAimAbility::StaticClass()) != nullptr
+		&& ASC->FindAbilitySpecFromClass(UfpstrueSprintAbility::StaticClass()) != nullptr;
+}
+
+// BeginPlayingState 只说明控制器进入 Playing；属性集、成绩与时钟仍须分别到达，不能称全世界原子快照。
 bool UfpstrueMultiplayerGameInstance::TickConnection(float)
 {
 	const double Now = FPlatformTime::Seconds();
@@ -1415,22 +1872,16 @@ bool UfpstrueMultiplayerGameInstance::TickConnection(float)
 	auto* Player = ConnectingController.Get();
 	auto* Pawn = Player != nullptr ? Cast<AfpstrueCharacter>(Player->GetPawn()) : nullptr;
 	auto* State = Player != nullptr ? Player->GetPlayerState<AfpstruePvpPlayerState>() : nullptr;
-	auto* ASC = Pawn != nullptr ? Pawn->GetHealthComponent() : nullptr;
 	auto* Weapon = Pawn != nullptr ? Pawn->GetEquippedWeaponComponent() : nullptr;
-	if (ConnectionState != EFPConnectionState::WaitingReady || ResumeToken.IsEmpty() || !IsValid(Pawn) || Pawn->IsDead()
-		|| Pawn->GetPlayerState() != State || State == nullptr || State->GetPlayerId() != ResumeId || GetWorld()->GetGameState() == nullptr
-		|| ASC == nullptr || ASC->GetHealthAttributeSet() == nullptr || Weapon == nullptr || Weapon->GetOwningCharacter() != Pawn
-		|| !Player->HasServerTimeSample() || ASC->FindAbilitySpecFromClass(UfpstrueFireAbility::StaticClass()) == nullptr
-		|| ASC->FindAbilitySpecFromClass(UfpstrueReloadAbility::StaticClass()) == nullptr
-		|| ASC->FindAbilitySpecFromClass(UfpstrueAimAbility::StaticClass()) == nullptr
-		|| ASC->FindAbilitySpecFromClass(UfpstrueSprintAbility::StaticClass()) == nullptr) return true;
+	if (ConnectionState != EFPConnectionState::WaitingReady || ResumeToken.IsEmpty() || !IsPawnStateReady(Pawn, State)
+		|| State->GetPlayerId() != ResumeId || GetWorld()->GetGameState() == nullptr || !Player->HasServerTimeSample()) return true;
 	RetryCount = 0;
 	LastConnectionError.Reset();
 	const uint32 ReadyRevision = OperationRevision;
 	SetConnectionState(EFPConnectionState::Connected);
 	if (ReadyRevision != OperationRevision || ConnectionState != EFPConnectionState::Connected || ConnectingController != Player) return true;
 	UE_LOG(LogTemp, Display, TEXT("PVP_RESUME CLIENT_READY ResumeId=%d Restored=%d Pawn=%s PS=%s Health=%.1f Ammo=%d Kills=%d Deaths=%d Dead=%d PawnNetGuid=%llu StateNetGuid=%llu"),
-		ResumeId, bRestoredConnection, *Pawn->GetName(), *State->GetName(), Pawn->GetCurrentHealth(), Weapon->GetCurrentAmmo(), State->GetKills(), State->GetDeaths(), Pawn->IsDead(),
+		ResumeId, bRestoredConnection, *Pawn->GetName(), *State->GetName(), Pawn->GetCurrentHealth(), Weapon != nullptr ? Weapon->GetCurrentAmmo() : 0, State->GetKills(), State->GetDeaths(), Pawn->IsDead(),
 		GetResumeNetGuid(Pawn), GetResumeNetGuid(State));
 	return true;
 }

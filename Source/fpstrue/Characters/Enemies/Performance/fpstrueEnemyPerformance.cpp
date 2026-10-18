@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
+#include "Characters/Shared/fpstrueFootIK.h"
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -205,6 +206,8 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	// 插件缺失只跳过 Gameplay 评分；自定义 Render 预算仍需独立执行。客户端绝不写入服务器玩法档位。
 	if (GetOwner()->HasAuthority())
 	{
+		// Wall scope 包括插件可能执行的并行评分与同步等待，不冒充纯 on-core 时间。
+		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemySignificance_GameplayUpdate);
 		TArray<FTransform, TInlineAllocator<8>> GameplayViewpoints;
 		if (bMultiplayerMode)
 		{
@@ -246,6 +249,9 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		return;
 	}
 
+	int32 FullBudgetDowngradeCount = 0, RayTracingBudgetRejectedCount = 0, ShadowBudgetRejectedCount = 0;
+	{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemySignificance_RenderScoreAndBudget);
 	// Render 层：相机视锥、屏占比和相机距离只服务于渲染分级。
 	FFPEnemyRenderViewContext ViewContext;
 	///采样阶段：统一视点、FOV、宽高比和采样时刻
@@ -309,7 +315,6 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	};
 
 	// Render Tier 预算：先尊重自然档位，再限制 Full 档总量。
-	int32 FullBudgetDowngradeCount = 0;
 	// 禁用分档时 ResolveNaturalRenderSignificanceTier 已返回 Full，无须再次覆盖全体。
 	if (Policy.bEnableRenderTiering)
 	{
@@ -323,7 +328,6 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	}
 
 	// 光追预算：只让 Full 且在距离内的高排序敌人参与动态 BLAS。
-	int32 RayTracingBudgetRejectedCount = 0;
 	if (Policy.bEnableRayTracingBudget)
 	{
 		const int32 EligibleRayTracingCount = SelectTopK(Policy.MaxRayTracingEnemies,
@@ -340,7 +344,6 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	}
 
 	// 阴影预算：扩展视锥、距离和 Render Tier 共同决定候选资格。
-	int32 ShadowBudgetRejectedCount = 0;
 	if (Policy.bEnableShadowBudget)
 	{
 		const int32 EligibleShadowCount = SelectTopK(Policy.MaxShadowCastingEnemies,
@@ -355,6 +358,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 			Candidates[Entry.CandidateIndex].bShouldCastShadow = true;
 		}
 		ShadowBudgetRejectedCount = EligibleShadowCount - TopKHeap.Num();
+	}
 	}
 
 	// ★【重要边界】[线程交接] 预算选择完成后在当前游戏线程统一写回组件；候选裸指针只用于本轮同步处理，不作为 Worker 或跨轮数据。
@@ -379,6 +383,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 void UfpstrueEnemySignificanceCoordinator::ApplyAndRecordCandidates(int32 FullBudgetDowngradeCount,
 																	int32 ShadowBudgetRejectedCount, int32 RayTracingBudgetRejectedCount)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemySignificance_ApplyPresentationBudget);
 	// 统一应用结果并在同一位置记录消融所需的 CSV 指标。
 	// 注意：统一采样不等于所有消费者必须无条件重写；组件内部仍应通过状态比较避免重复修改渲染状态。
 	const FFPEnemyRenderSignificancePolicy& Policy = ActiveRenderPolicy;
@@ -770,6 +775,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	if (!RegisteredActorHandles.Contains(EnemyKey) && !PendingActorRegistrations.Contains(EnemyKey))
 	{
+		if (auto* IK = Cast<UfpstrueFootIKAnimInstance>(CharacterMesh->GetPostProcessInstance())) IK->ResetFootPlacement();
 		PendingActorRegistrations.Add(EnemyKey);
 		// ★【重要边界】[回调重入] 注册会同步交付句柄；先登记 pending，等插件调用返回后才能按新资格撤销，不能在句柄回调里反注册。
 		SharingManager->RegisterActorWithSkeleton(
@@ -806,6 +812,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 	const bool bWasRegistered = RegisteredActorHandles.Remove(EnemyKey) > 0;
 	if (bWasPending || bWasRegistered)
 	{
+		if (auto* IK = Cast<UfpstrueFootIKAnimInstance>(Enemy->GetMesh()->GetPostProcessInstance())) IK->ResetFootPlacement();
 		// ★【重要边界】[资源所有权] 先移除本地登记再让插件注销；其余敌人的句柄可能同步更新，弱引用和 handle 都不是 Actor 所有权。
 		SharingManager->UnregisterActor(Enemy);
 

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Blueprint/UserWidget.h"
 #include "Engine/GameInstance.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameStateBase.h"
@@ -22,6 +23,44 @@ class UfpstrueMultiplayerGameInstance;
 class UfpstrueEnemySignificanceCoordinator;
 class UfpstrueEnemyAnimationSharingCoordinator;
 class UfpstrueWeaponComponent;
+class UProgressBar;
+class UTextBlock;
+
+// 原 ingame 布局的只读表现桥；由 HUD 推送当前值，不查询单机 GameMode 或在 UMG 属性绑定里轮询角色。
+UCLASS(Blueprintable)
+class FPSTRUE_API UfpstruePvpIngameWidget : public UUserWidget
+{
+	GENERATED_BODY()
+public:
+	// 构建前也可接收快照；NativeConstruct 会补读缓存，重连或晚创建不会漏掉之前的事件。
+	void ApplySnapshot(float Health, float MaxHealth, bool bEquipped, int32 Ammo, int32 Reserve, const FText& WeaponName);
+	bool HasAuthoredControls() const;
+	bool HasPaintedSnapshot() const;
+protected:
+	virtual void NativeConstruct() override;
+	virtual int32 NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect,
+		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+private:
+	friend class FFpstrueMultiplayerHudRebindTest;
+	void ResolveAuthoredControls();
+	void RefreshControls();
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> HealthBar;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> MagazineText;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> ReserveText;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> WeaponNameText;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> MatchHintText;
+	UPROPERTY(Transient) TObjectPtr<UWidget> AmmoContainer;
+	UPROPERTY(Transient) TObjectPtr<UWidget> CountdownRow;
+	float HealthFraction = 1.0f;
+	int32 CurrentAmmo = 0;
+	int32 ReserveAmmo = 0;
+	bool bHasEquipment = false;
+	bool bPlayedFadeIn = false;
+	FText CurrentWeaponName;
+	mutable uint64 LastPaintFrame = 0;
+	uint32 SnapshotRevision = 0;
+	mutable uint32 LastPaintedSnapshotRevision = 0;
+};
 
 // 联机界面只展示拥有者当前 Pawn 的状态；换 Pawn 或重连时重新订阅并补读快照。
 UCLASS()
@@ -29,22 +68,31 @@ class FPSTRUE_API AfpstruePvpHUD : public AHUD
 {
 	GENERATED_BODY()
 public:
+	AfpstruePvpHUD();
 	virtual void DrawHUD() override;
 	bool HasDrawnCurrentState(const AfpstrueCharacter* Pawn) const;
 protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	// 只在本地有画面时加载；专服不为 HUD 保活整套 UMG/动画资源。
+	UPROPERTY(EditDefaultsOnly, Category = "Multiplayer|UI") TSoftClassPtr<UfpstruePvpIngameWidget> IngameWidgetClass;
 private:
 	friend class FFpstrueMultiplayerHudRebindTest;
 	void BindPawn(AfpstrueCharacter* Pawn);
+	bool EnsureIngameWidget();
+	void RefreshIngameSnapshot();
 	UFUNCTION() void HandleHealthChanged(float Health);
 	UFUNCTION() void HandleWeaponChanged(UfpstrueWeaponComponent* Weapon);
 	UFUNCTION() void HandleAmmoChanged(int32 Ammo, int32 Magazine, int32 Reserve);
 	TWeakObjectPtr<AfpstrueCharacter> ObservedPawn;
 	TWeakObjectPtr<UfpstrueWeaponComponent> ObservedWeapon;
+	UPROPERTY(Transient) TObjectPtr<UfpstruePvpIngameWidget> IngameWidget;
 	float CurrentHealth = 0.0f;
+	float CurrentMaxHealth = 100.0f;
 	int32 CurrentAmmo = 0;
 	int32 ReserveAmmo = 0;
 	uint64 LastDrawFrame = 0;
+	bool bAttemptedIngameWidget = false;
+	FText CurrentWeaponName;
 };
 
 UENUM(BlueprintType)
@@ -73,6 +121,11 @@ public:
 	virtual void PawnLeavingGame() override;
 	UFUNCTION(Server, Reliable) void ServerSubmitConnectionToken(const FString& Token);
 	UFUNCTION(Server, Reliable) void ServerLeavePvp();
+	// 仅开发实机验收读取服务器导航路线；客户端仍通过正常 CMC 输入行走，不传送 Pawn。
+	const TArray<FVector>& GetNormalVisualRoute() const { return NormalVisualRoute; }
+	int32 GetNormalVisualRouteRevision() const { return NormalVisualRouteRevision; }
+	// 只返回开发验收路线数据；不移动角色、不生成敌人，也不接纳客户端伤害或目标坐标。
+	UFUNCTION(Server, Reliable) void ServerRequestNormalVisualEnemyRoute();
 
 protected:
 	virtual void BeginPlayingState() override;
@@ -85,6 +138,10 @@ private:
 	UFUNCTION(Client, Reliable) void ClientBeginConnectionHandshake();
 	UFUNCTION(Client, Reliable) void ClientConnectionAccepted(const FString& Token, int32 ResumeId, bool bRestored);
 	UFUNCTION(Client, Reliable) void ClientConnectionRejected(const FString& Reason);
+	UFUNCTION(Client, Reliable) void ClientNormalVisualRoute(const TArray<FVector>& Points);
+	TArray<FVector> NormalVisualRoute;
+	int32 NormalVisualRouteRevision = 0;
+	bool bNormalFullRouteRequested = false;
 	FString AssignedRejoinToken;
 	bool bConnectionHandshakeComplete = false;
 	bool bIntentionalLeave = false;
@@ -192,7 +249,7 @@ private:
 };
 
 // 沿用原 Pvp 类名的 PvPvE 自由对战；玩家互伤与敌人同场，不启动单机的死亡即失败流程。
-UCLASS()
+UCLASS(Config = Game)
 class FPSTRUE_API AfpstruePvpGameMode : public AGameModeBase
 {
 	GENERATED_BODY()
@@ -220,7 +277,7 @@ public:
 protected:
 	// 世界开始后将复制的对局状态置为活动。
 	virtual void BeginPlay() override;
-	// 完成服务器占有后自动装备本局默认武器，初始生成和重生共用此入口。
+	// 初始生成和重生都从空手开始；只有显式开发烟测在完成占有后自动装备默认武器。
 	virtual void FinishRestartPlayer(AController* NewPlayer, const FRotator& StartRotation) override;
 	virtual void HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer) override;
 	// 世界退出先拒绝新事务，再停止全部重生Timer和清理武器。
@@ -228,8 +285,14 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Multiplayer|Respawn", meta = (ClampMin = "0.1"))
 	float RespawnDelay = 3.0f;
+	// 包含客户端冷启动及地图加载的恢复预算；离线角色仍可受伤，过期即回收，不能由客户端延长。
+	UPROPERTY(Config, EditDefaultsOnly, Category = "Multiplayer|Connection", meta = (ClampMin = "5", ClampMax = "120"))
+	float ReconnectGraceSeconds = 90.0f;
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Multiplayer|Equipment")
 	TSubclassOf<AActor> DefaultWeaponClass;
+	// 分散出生仍保留；只在落点附近提供一把需走近拾取的枪，不把满弹装备直接送进手中。
+	UPROPERTY(Config, EditDefaultsOnly, Category = "Multiplayer|Equipment")
+	bool bProvideNearbySpawnPickup = true;
 	// PvPvE 分帧补充敌人；不复用“单个玩家死亡就全局失败”的单机结算规则。
 	UPROPERTY(Config, EditDefaultsOnly, Category = "Multiplayer|PvE")
 	TSubclassOf<AfpstrueEnemyCharacter> EnemyClass;
@@ -243,6 +306,7 @@ protected:
 	FName EnemySpawnTag = TEXT("EnemySpawn");
 
 private:
+	friend class AfpstruePvpPlayerController;
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
 	void UpdatePvePopulation();
@@ -261,6 +325,8 @@ private:
 	double NextEnemySpawnTime = 0.0;
 	int32 NextPveSpawnIndex = 0;
 #if !UE_BUILD_SHIPPING
+	void SendNormalVisualRoutes();
+	bool bNormalVisualRoutesSent = false;
 	TWeakObjectPtr<AfpstrueCharacter> SmokePvePlayer;
 	TWeakObjectPtr<AfpstrueEnemyCharacter> SmokePveEnemy;
 	TWeakObjectPtr<AfpstrueCharacter> SmokeOfflineTarget;
@@ -292,11 +358,14 @@ private:
 	void RespawnPlayer(TWeakObjectPtr<APlayerController> Player, TWeakObjectPtr<AfpstrueCharacter> EliminatedPawn);
 	// 在服务器生成持枪Actor，完整装备成功后才保存清理关系。
 	void EquipDefaultWeapon(APlayerController* Player);
+	void SpawnNearbyWeaponPickup(APlayerController* Player);
+	void ReleaseUnclaimedSpawnPickup(APlayerController* Player);
 	// 先移出记录再销毁武器，组件退出回调不能重复清理同一条记录。
 	void ReleasePlayerWeapon(APlayerController* Player);
 
 	TMap<TWeakObjectPtr<APlayerController>, FTimerHandle> PendingRespawns;
 	TMap<TWeakObjectPtr<APlayerController>, TWeakObjectPtr<AActor>> PlayerWeapons;
+	TMap<TWeakObjectPtr<APlayerController>, TWeakObjectPtr<AActor>> SpawnPickups;
 	bool bEndingPvp = false;
 #if !UE_BUILD_SHIPPING
 	void SampleSmokeMovement();
@@ -318,6 +387,9 @@ class FPSTRUE_API UfpstrueMultiplayerGameInstance : public UGameInstance
 public:
 	virtual void Init() override;
 	virtual void Shutdown() override;
+	// Only an explicitly requested loopback performance baseline bypasses the
+	// Shipping startup URL filter; normal startup/travel remains engine-owned.
+	virtual void StartGameInstance() override;
 	// 使用配置的PvP地图或当前GameDefaultMap开启监听服务器。
 	UFUNCTION(Exec)
 	void HostPvp();
@@ -341,6 +413,9 @@ protected:
 private:
 	friend class AfpstruePvpPlayerController;
 	friend class FFpstrueMultiplayerConnectionRevisionTest;
+	friend class FFpstrueMultiplayerResumeSessionTest;
+	// 空手是合法就绪状态；有装备时才要求其持有者关系已经解析，能力与生命仍必须就绪。
+	static bool IsPawnStateReady(const AfpstrueCharacter* Pawn, const AfpstruePvpPlayerState* State);
 	bool TickConnection(float DeltaSeconds);
 	void StartClientTravel(uint32 Revision);
 	void SetConnectionState(EFPConnectionState State);

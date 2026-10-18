@@ -13,7 +13,19 @@ class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
 class APlayerController;
 class UInputComponent;
+class UWorld;
+class UGameInstance;
 struct FFPBenchmarkCsvCapture;
+
+// GameState supplies only the World. Explicit PvpBaseline is shared by Editor-game
+// and Shipping clients; legacy PvpProfile/CSV/diagnostic gameplay stays non-Shipping.
+FPSTRUE_API void StartPvpPerformanceProfile(UWorld* World);
+
+// Shipping intentionally ignores general command-line map/URL overrides. This
+// explicit diagnostic bootstrap accepts only a local baseline peer; it neither
+// exposes arbitrary travel nor changes the normal JoinPvp/reconnect protocol.
+enum class EFPPvpBaselineBootstrap : uint8 { NotRequested, Started, Rejected };
+FPSTRUE_API EFPPvpBaselineBootstrap StartPvpBaselineClient(UGameInstance* Instance);
 
 // Copyright Epic Games, Inc. All Rights Reserved.
 

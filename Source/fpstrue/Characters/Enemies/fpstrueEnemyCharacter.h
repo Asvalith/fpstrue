@@ -4,8 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "Blueprint/UserWidget.h"
 #include "AbilitySystemInterface.h"
 #include "Components/SkinnedMeshComponent.h"
+#include "Components/WidgetComponent.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Runtime/fpstrueRuntime.h"
@@ -19,6 +21,111 @@ class UfpstrueEnemyCombatComponent;
 class UfpstrueHealthComponent;
 class UMeshComponent;
 class UAnimMontage;
+class UProgressBar;
+class UWidgetComponent;
+class APlayerController;
+class APlayerCameraManager;
+
+// 四种模式只改变本地血条表现；非 Shipping 的对照参数不改变生命、AI 或网络规则。
+enum class EFPEnemyHealthBarMode : uint8
+{
+	Off,
+	Screen,
+	WorldAlways,
+	WorldEvent
+};
+
+struct FPSTRUE_API FFPEnemyHealthBarMetrics
+{
+	int32 Components = 0;
+	int32 Widgets = 0;
+	int32 FrustumVisible = 0;
+	int32 WorldWidgets = 0;
+	int32 ScreenWidgets = 0;
+	int32 ManualWorldWidgets = 0;
+	uint64 Created = 0;
+	uint64 ValueUpdates = 0;
+	uint64 RedrawRequests = 0;
+	uint64 RenderTargetDraws = 0;
+	uint64 ViewSamples = 0;
+	uint64 ViewCacheHits = 0;
+};
+
+// 数值通过事件写入，WorldEvent 只在数值变化或重新进入视野时重绘纹理；组件 Tick 仅更新本地朝向/视锥。
+UCLASS(NotBlueprintable)
+class FPSTRUE_API UfpstrueEnemyHealthBarComponent : public UWidgetComponent
+{
+	GENERATED_BODY()
+public:
+	UfpstrueEnemyHealthBarComponent();
+	void Configure(EFPEnemyHealthBarMode InMode);
+	void SetHealthFraction(float Fraction);
+	void ReleasePresentation();
+	EFPEnemyHealthBarMode GetPresentationMode() const { return Mode; }
+	bool IsInLocalView() const { return bInLocalView; }
+	// 与运行时相同的视锥/朝向入口，也允许自动化在没有真实 viewport 的世界中验证边界。
+	void UpdateForView(const FVector& CameraLocation, const FRotator& CameraRotation, float HorizontalFOV, float AspectRatio);
+	void AppendMetrics(FFPEnemyHealthBarMetrics& Metrics) const;
+	static EFPEnemyHealthBarMode GetConfiguredMode();
+	static const TCHAR* GetModeName(EFPEnemyHealthBarMode InMode);
+	static FFPEnemyHealthBarMetrics CollectMetrics(UWorld* World);
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+protected:
+	virtual bool ShouldDrawWidget() const override;
+	virtual void DrawWidgetToRenderTarget(float DeltaTime) override;
+private:
+	friend class FFpstrueWorldHealthBarViewCacheTest;
+	// 只缓存同一 World 的当前帧数值；对象身份均为弱引用，不延长视点或关卡生命周期。
+	struct FViewSnapshot
+	{
+		FVector Location = FVector::ZeroVector;
+		FVector Forward = FVector::ForwardVector, Right = FVector::RightVector, Up = FVector::UpVector;
+		FRotator Facing = FRotator::ZeroRotator;
+		double HalfFOVTan = 1.0, InverseAspect = 1.0;
+		TWeakObjectPtr<APlayerController> Viewer;
+		TWeakObjectPtr<APlayerCameraManager> CameraManager;
+	};
+	struct FViewCache
+	{
+		struct FEntry { uint64 Frame = MAX_uint64; FViewSnapshot View; };
+		TMap<TWeakObjectPtr<UWorld>, FEntry> Worlds;
+		FDelegateHandle CleanupHandle;
+		FViewCache();
+		~FViewCache();
+		void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
+	};
+	static FViewCache& GetViewCache();
+	static FViewSnapshot BuildViewSnapshot(const FVector& Location, const FRotator& Rotation, float HorizontalFOV, float AspectRatio);
+	static bool SampleLocalView(UWorld* World, FViewSnapshot& OutView);
+	// 采样器只在本次同步调用中借用；测试可验证真实缓存而不伪造 viewport 或增加公开测试接口。
+	static bool ResolveViewSnapshot(UWorld* World, uint64 Frame, bool bUseCache, FViewSnapshot& OutView, bool& bCacheHit,
+		TFunctionRef<bool(UWorld*, FViewSnapshot&)> Sampler);
+	void UpdateForView(const FViewSnapshot& View);
+	void RequestEventRedraw();
+	EFPEnemyHealthBarMode Mode = EFPEnemyHealthBarMode::WorldEvent;
+	bool bInLocalView = false;
+	bool bReleased = true;
+	float LastFraction = -1.0f;
+	uint64 Created = 0, ValueUpdates = 0, RedrawRequests = 0, RenderTargetDraws = 0;
+	uint64 ViewSamples = 0, ViewCacheHits = 0;
+};
+
+// 敌人头顶血条只保存显示比例；真实生命仍由 HealthComponent/GAS 持有，不另做扣血。
+UCLASS(NotBlueprintable)
+class FPSTRUE_API UfpstrueEnemyHealthBarWidget : public UUserWidget
+{
+	GENERATED_BODY()
+public:
+	UfpstrueEnemyHealthBarWidget(const FObjectInitializer& ObjectInitializer);
+	// 构建前收到的复制值也先缓存，真正创建控件时补上；不使用逐帧属性绑定。
+	void SetHealthFraction(float Fraction);
+	float GetHealthFraction() const { return HealthFraction; }
+protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
+private:
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> HealthProgress;
+	float HealthFraction = 1.0f;
+};
 
 // 只复制可恢复的表现状态；客户端不据此运行行为树、开伤害窗口或提交伤害。
 USTRUCT()
@@ -156,6 +263,10 @@ protected:
 	// 语法复习：UPROPERTY + TObjectPtr 是 UE5 的强 GC 引用；组件内存仍由 UObject 生命周期管理。
 	TObjectPtr<UfpstrueHealthComponent> HealthComponent;
 
+	// 位置锚定敌人身体 Mesh，跟随客户端网络平滑；Screen 仅负责各客户端投影/正对屏幕，不挂到玩家或相机。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health|Presentation")
+	TObjectPtr<UWidgetComponent> HealthBar;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<UfpstrueEnemyCombatComponent> CombatComponent;
 
@@ -249,6 +360,9 @@ private:
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
 	friend class FFpstrueMultiplayerClientPerformanceTest;
 	friend class FFpstrueMultiplayerAuthorityPoseTest;
+
+	// 先订阅再读当前生命，兼容晚加入和属性先到；死亡后迟到的血量事件不能重新显示血条。
+	UFUNCTION() void RefreshHealthBar(float NewHealth);
 
 	// ==================== 战斗与受击内部桥接 ====================
 

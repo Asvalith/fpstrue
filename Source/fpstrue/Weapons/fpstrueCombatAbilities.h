@@ -63,9 +63,8 @@ private:
 	// 每次只结算/表现一发；空仓或失去执行资格时结束能力，等待下一发的任务与能力同生共灭。
 	UFUNCTION()
 	void Pulse();
-	// 逐发 TargetData 消费后立即清缓存；最多等待一发冷却，不让可靠消息积压变成补射。
+	// 逐发 TargetData 消费后立即清缓存；能力只负责准入，武器排空已经授权的有界执行队列。
 	void HandleShotData(const FGameplayAbilityTargetDataHandle& Data, FGameplayTag ApplicationTag);
-	UFUNCTION() void ExecutePendingShot();
 	// 没有逐发输入的服务器能力不能永久持有 Firing；持续输入会重置空闲保护。
 	UFUNCTION()
 	void HandleAimTimeout();
@@ -74,9 +73,8 @@ private:
 	FDelegateHandle ShotDataHandle;
 	UPROPERTY()
 	TObjectPtr<UAbilityTask_WaitDelay> AimTimeoutTask;
-	UPROPERTY() TObjectPtr<UAbilityTask_WaitDelay> PendingShotTask;
-	FFPShotRequest PendingShot;
-	bool bHasPendingShot = false;
+	// 正常松开立即释放输入能力，已准入输入由武器排空，不阻塞下一次合法按下。
+	bool bInputReleased = false;
 	// 外部通知可同步结束并重新激活同一个能力实例，旧 Pulse 不能替新动作安排任务。
 	uint32 ActivationRevision = 0;
 	bool bEnding = false;

@@ -403,6 +403,11 @@ Saved/
 # Local scratch work and extracted reference material
 /tmp/
 
+# Third-party source packs stay local; project-derived animation blueprints,
+# montages and FootIK assets under Content/FirstPerson remain versioned.
+/Content/FPSMPT55/
+/Content/Mage/
+
 # OS files
 .DS_Store
 Thumbs.db

@@ -50,6 +50,8 @@ public:
 	virtual ETeamAttitude::Type GetTeamAttitudeTowards(const AActor& Other) const override;
 	// 视觉观察点使用 Pawn 视点及真实朝向；没有 Pawn 时使用引擎默认实现。
 	virtual void GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const override;
+	// CharacterMovement 原生旋转查询；巡视资格失效时立即返回当前朝向，暂停 BT 也不会继续转动。
+	virtual FRotator GetDesiredRotation() const override;
 
 	// 单机由 GameMode 注入目标；多人从感知缓存选目标，再取得该玩家专属的包围管理器。
 	void InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager);
@@ -114,6 +116,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
 	float IdleDecisionInterval = 1.0f;
 
+	// 多人未发现目标时随既有 Idle 决策原地巡视；0 关闭，不读取未感知玩家的位置，也不新增 Tick/Timer。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0", ClampMax = "90.0", Units = "deg/s"))
+	float IdleSearchYawSpeed = 30.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.0"))
 	float FarDecisionDistance = 3000.0f;
 
@@ -162,6 +168,7 @@ private:
 	friend class FFpstrueEnemyLowHealthRetreatTest;
 	friend class FFpstrueMultiplayerPveAuthorityTest;
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
+	friend class FFPEnemyIdleSearchSightTest;
 	enum class ECommandPhase : uint8 { Stopped, Accepting, ChangingContext, Stopping };
 	enum class EMoveGoalResult : uint8
 	{
@@ -236,7 +243,7 @@ private:
 	// 修改唯一 AI 状态，供决策和动画共享读取。
 	void SetAIState(EFPEnemyAIState NewState);
 	// Chase 行进时面向路径，到位后面向目标；到位不是新攻击事务，不新增一份 AI 状态。
-	void ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget = false);
+	void ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget = false, bool bIdleSearch = false);
 
 	// 公共清理：由停止入口和叶子按需调用，不重复维护移动缓存和群体资源。
 	// 仅在确实移动时调用 StopMovement；攻击可保留已经提交的目标缓存。
@@ -270,6 +277,8 @@ private:
 	double TargetForgetTime = 0.0;
 	bool bTargetVisible = false;
 	bool bUsesMultiplayerTargets = false;
+	bool bIdleSearchActive = false;
+	float IdleSearchSavedYawRate = 0.0f;
 
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;

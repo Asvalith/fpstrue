@@ -31,6 +31,13 @@ jobs:
           lfs: true
           clean: true
           persist-credentials: false
+      - name: Check automation gates without launching Unreal
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\Tools\Networking\BuildPvpDelivery.ps1 -SelfTest
+          & .\Tools\Networking\RunPvpSmoke.ps1 -SelfTest
+          & .\Tools\Performance\TestRenderCostConfig.ps1
       - name: Build, test, package and verify
         shell: powershell
         env:

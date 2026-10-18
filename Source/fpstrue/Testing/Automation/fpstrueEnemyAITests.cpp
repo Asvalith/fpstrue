@@ -9,6 +9,7 @@
 #include "Characters/Enemies/AI/fpstrueEnemyPositionQuery.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Player/fpstrueCharacter.h"
+#include "Game/fpstrueMultiplayer.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "BehaviorTree/BlackboardData.h"
@@ -35,6 +36,7 @@
 #include "Perception/AIPerceptionSystem.h"
 #include "Perception/AISense_Sight.h"
 #include "UObject/UnrealType.h"
+#include "UObject/StrongObjectPtr.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Animation/AnimNotifyQueue.h"
@@ -557,6 +559,140 @@ bool FFPEnemySightOcclusionTest::RunTest(const FString& Parameters)
 	Enemy->SetActorRotation(FRotator::ZeroRotator);
 	TestTrue(TEXT("Turning back rediscovers a target through the real sight system"), TickUntilVisible(true));
 	Controller->StopAI();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyIdleSearchSightTest,
+	"fpstrue.AI.Perception.MultiplayerIdleSearchAndStop",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 不注入刺激、不指定敌人目标：真实 BT 巡视、Movement 平滑转身和 Sight 共同发现背后的已入场玩家。
+bool FFPEnemyIdleSearchSightTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Idle search world has the real AI system"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	AActor* Floor = World->SpawnActor<AActor>();
+	AActor* Wall = World->SpawnActor<AActor>();
+	if (!TestNotNull(TEXT("Idle search floor"), Floor) || !TestNotNull(TEXT("Idle search wall"), Wall)) return false;
+	const auto AddBox = [](AActor* Owner, const FVector& Extent, const FVector& Location)
+	{
+		UBoxComponent* Box = NewObject<UBoxComponent>(Owner);
+		Owner->AddInstanceComponent(Box);
+		Owner->SetRootComponent(Box);
+		Box->SetBoxExtent(Extent);
+		Box->SetCollisionResponseToAllChannels(ECR_Block);
+		Box->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Box->RegisterComponent();
+		Owner->SetActorLocation(Location);
+		return Box;
+	};
+	AddBox(Floor, FVector(10000.0f, 10000.0f, 20.0f), FVector(0.0f, 0.0f, -116.0f));
+	UBoxComponent* WallBox = AddBox(Wall, FVector(40.0f, 300.0f, 300.0f), FVector(-500.0f, 0.0f, 100.0f));
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
+		AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("Idle search observer"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>(FVector(-1000.0f, 0.0f, 0.0f), FRotator::ZeroRotator);
+	APlayerController* Player = World->SpawnActor<APlayerController>();
+	if (!TestNotNull(TEXT("Idle search controller"), Controller) || !TestNotNull(TEXT("Idle search target"), Target) ||
+		!TestNotNull(TEXT("An admitted player controller"), Player)) return false;
+	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	// 只补齐原生 Pawn 的本地输入资产前置，不发送输入；玩家控制器 Possess 仍经过真实入场链。
+	for (const FName ActionName : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+		TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+	{
+		FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(Target->GetClass(), ActionName);
+		if (!TestNotNull(TEXT("Idle search player retains its declared input action contract"), Property)) return false;
+		Property->SetObjectPropertyValue_InContainer(Target, NewObject<UInputAction>(Target));
+	}
+	Player->Possess(Target);
+	Controller->IdleDecisionInterval = 0.1f;
+	Controller->IdleSearchYawSpeed = 90.0f;
+	Controller->Possess(Enemy);
+	// 临时世界没有网络驱动，只固定多人选敌模式；目标入场资格、BT、旋转、遮挡和视距仍走生产实现。
+	Controller->bUsesMultiplayerTargets = true;
+	Controller->InitializeCombatContext(nullptr, nullptr);
+	UAIPerceptionSystem* PerceptionSystem = UAIPerceptionSystem::GetCurrent(World);
+	if (!TestNotNull(TEXT("Real idle search sight system"), PerceptionSystem) ||
+		!TestNotNull(TEXT("Real idle search brain"), Controller->GetBrainComponent())) return false;
+	PerceptionSystem->RegisterSourceForSenseClass(UAISense_Sight::StaticClass(), *Target);
+	const auto TickFor = [&](float Seconds)
+	{
+		for (int32 Frame = 0; Frame < FMath::CeilToInt(Seconds / 0.02f); ++Frame)
+			if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+		return true;
+	};
+	const double OriginalYawRate = Enemy->GetCharacterMovement()->RotationRate.Yaw;
+	// 首轮 BT 有真实随机错峰和 latent 调度；先等巡视分支启动，再测完整的旋转时间窗，不能把等待时间当作 Movement 执行时间。
+	float SearchStartWait = 0.0f;
+	while ((!Controller->bIdleSearchActive || !Enemy->GetCharacterMovement()->IsMovingOnGround()) && SearchStartWait < 1.0f)
+	{
+		if (!TickFor(0.02f)) return false;
+		SearchStartWait += 0.02f;
+	}
+	if (!TestTrue(TEXT("The real idle branch starts and the observer is grounded within its startup budget"),
+		Controller->bIdleSearchActive && Enemy->GetCharacterMovement()->IsMovingOnGround())) return false;
+	const float SearchStartYaw = Enemy->GetActorRotation().Yaw;
+	if (!TickFor(0.3f)) return false;
+	const float InitialYaw = Enemy->GetActorRotation().Yaw;
+	const float SearchYawDelta = FMath::FindDeltaAngleDegrees(SearchStartYaw, InitialYaw);
+	AddInfo(FString::Printf(TEXT("Idle search rotation sample: startupWait=%.3f startYaw=%.3f endYaw=%.3f delta=%.3f requestedWindow=0.300 yawRate=%.3f"),
+		SearchStartWait, SearchStartYaw, InitialYaw, SearchYawDelta, Enemy->GetCharacterMovement()->RotationRate.Yaw));
+	TestTrue(TEXT("Idle search is active without assigning an unseen target"), Controller->bIdleSearchActive && Controller->GetTargetCharacter() == nullptr);
+	TestTrue(TEXT("Movement turns gradually rather than snapping to the next ninety-degree heading"), SearchYawDelta > 0.0f && SearchYawDelta <= 29.0f);
+	TestFalse(TEXT("Idle search does not enable a new controller Actor Tick"), Controller->PrimaryActorTick.bCanEverTick);
+	Controller->GetBrainComponent()->PauseLogic(TEXT("Idle search pause boundary"));
+	const FRotator PausedRotation = Enemy->GetActorRotation();
+	if (!TickFor(0.3f)) return false;
+	TestTrue(TEXT("Pausing the brain immediately freezes an already published search turn"), Enemy->GetActorRotation().Equals(PausedRotation, 0.01f));
+	Controller->GetBrainComponent()->ResumeLogic(TEXT("Idle search resume boundary"));
+	if (!TickFor(4.5f)) return false;
+	TestNull(TEXT("A complete search sweep does not discover a player through a real wall"), Controller->GetTargetCharacter());
+	TestNull(TEXT("The wall-hidden player has never been injected as a cached target"), Controller->TargetCharacter.Get());
+	WallBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Enemy->SetActorRotation(FRotator::ZeroRotator);
+	Controller->SetControlRotation(FRotator::ZeroRotator);
+	bool bDiscovered = false;
+	for (int32 Frame = 0; Frame < 200; ++Frame)
+	{
+		if (!TickFor(0.02f)) return false;
+		if (Controller->GetTargetCharacter() == Target) { bDiscovered = true; break; }
+	}
+	if (!TestTrue(TEXT("Without manual facing or fake stimuli, the search sweep discovers the player behind it"), bDiscovered)) return false;
+	if (!TickFor(0.2f)) return false;
+	TestFalse(TEXT("Acquiring a real target exits idle search"), Controller->bIdleSearchActive);
+	TestEqual(TEXT("Acquiring a target restores the authored movement yaw rate"), Enemy->GetCharacterMovement()->RotationRate.Yaw, OriginalYawRate);
+	Target->SetActorLocation(FVector(6000.0f, 0.0f, 0.0f));
+	Controller->NotifyCombatTargetUnavailable(Target);
+	Controller->GetPerceptionComponent()->RequestStimuliListenerUpdate();
+	if (!TickFor(5.0f)) return false;
+	TestNull(TEXT("Search does not acquire an admitted player outside the existing forty-five-meter sight range"), Controller->GetTargetCharacter());
+	TestNull(TEXT("Out-of-range search does not retain a live actor target"), Controller->TargetCharacter.Get());
+	TestTrue(TEXT("An unseen player leaves the real brain searching rather than permanently frozen"), Controller->bIdleSearchActive);
+	Controller->StopAI();
+	const FRotator StoppedRotation = Enemy->GetActorRotation();
+	if (!TickFor(0.3f)) return false;
+	TestTrue(TEXT("StopAI immediately stops the in-progress search turn"), Enemy->GetActorRotation().Equals(StoppedRotation, 0.01f));
+	TestFalse(TEXT("StopAI clears search ownership"), Controller->bIdleSearchActive);
+	TestEqual(TEXT("StopAI restores the authored movement yaw rate"), Enemy->GetCharacterMovement()->RotationRate.Yaw, OriginalYawRate);
+	TestFalse(TEXT("A stale idle request cannot restart a stopped controller"), Controller->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Idle));
+	Controller->UnPossess();
+	Controller->Possess(Enemy);
+	Controller->bUsesMultiplayerTargets = true;
+	Controller->InitializeCombatContext(nullptr, nullptr);
+	if (!TickFor(0.3f)) return false;
+	UGameplayStatics::ApplyDamage(Enemy, 1000.0f, Player, Target, nullptr);
+	TestTrue(TEXT("Death follows the real damage and AI stop path"), Enemy->IsDead());
+	TestFalse(TEXT("Death cancels search ownership"), Controller->bIdleSearchActive);
+	const FRotator DeadRotation = Enemy->GetActorRotation();
+	if (!TickFor(0.3f)) return false;
+	TestTrue(TEXT("A dead enemy cannot keep turning toward an old search heading"), Enemy->GetActorRotation().Equals(DeadRotation, 0.01f));
 	return true;
 }
 
@@ -1374,6 +1510,120 @@ bool FFpstrueEnemyPositionQueryRuntimeTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Production cover query cannot succeed without navigation"), Results[4]->IsSuccessful());
 	TestEqual(TEXT("Missing navigation never publishes raw attack positions"), Results[3]->Items.Num(), 0);
 	TestEqual(TEXT("Missing navigation never publishes raw cover positions"), Results[4]->Items.Num(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyPositionQueryGcLifetimeTest,
+	"fpstrue.AI.EQS.TwoOwnersInflightGcAndRecreate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 真正入队的 EQS 在下一次 Tick 前跨过 GC；先用弱句柄检测旧图悬空，失败时 Abort，不能故意调用已释放生成器。
+bool FFpstrueEnemyPositionQueryGcLifetimeTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
+	UWorld* World = Fixture.GetTestWorld();
+	TStrongObjectPtr<UWorld> KeepWorld(World);
+	UEnvQueryManager* Queries = UEnvQueryManager::GetCurrent(World);
+	if (!TestNotNull(TEXT("Lifetime fixture uses the real EQS manager"), Queries)) return false;
+	const auto SpawnOwner = [&]()
+	{
+		auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
+			FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Enemy != nullptr)
+		{
+			Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+			Enemy->FinishSpawning(FTransform::Identity);
+			Enemy->SetActorEnableCollision(false);
+			Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+		}
+		return Enemy;
+	};
+	AfpstrueEnemyCharacter* Owners[2] = {SpawnOwner(), SpawnOwner()};
+	if (!TestNotNull(TEXT("First real request owner"), Owners[0]) || !TestNotNull(TEXT("Second real request owner"), Owners[1])) return false;
+	TStrongObjectPtr<UEnvQuery> HeldTemplates[4];
+	for (int32 Index = 0; Index < 4; ++Index) HeldTemplates[Index].Reset(FPCreateEnemyPositionQuery(*Owners[Index / 2], Index % 2 != 0));
+	TWeakObjectPtr<UEnvQuery> CanonicalAttack = HeldTemplates[0].Get(), CanonicalCover = HeldTemplates[1].Get();
+	TSharedPtr<FEnvQueryInstance> Instances[8];
+	TSharedPtr<FEnvQueryResult> Results[8];
+	TWeakObjectPtr<UEnvQueryGenerator> Generators[8];
+	TArray<int32> QueryIds;
+	ON_SCOPE_EXIT
+	{
+		// 所有退出先撤销真实委托，局部结果数组和临时 World 才能安全离开作用域。
+		for (const int32 QueryId : QueryIds) Queries->AbortQuery(QueryId);
+	};
+	const auto Queue = [&](int32 Index, AfpstrueEnemyCharacter* Owner, UEnvQuery* Template)
+	{
+		FEnvQueryRequest Request(Template, Owner);
+		const float OriginX = Owner == Owners[0] ? 111.0f : 222.0f;
+		Request.SetFloatParam(TEXT("OriginX"), OriginX).SetFloatParam(TEXT("OriginY"), 0).SetFloatParam(TEXT("OriginZ"), 0);
+		Request.SetFloatParam(TEXT("ThreatX"), 1000).SetFloatParam(TEXT("ThreatY"), 0).SetFloatParam(TEXT("ThreatZ"), 0);
+		Request.SetFloatParam(TEXT("Cover"), Index % 2 != 0 ? 1.0f : 0.0f);
+		Request.SetFloatParam(TEXT("InnerCount"), 4).SetFloatParam(TEXT("OuterCount"), 5);
+		Instances[Index] = Queries->PrepareQueryInstance(Request, EEnvQueryRunMode::AllMatching);
+		if (!Instances[Index].IsValid() || Instances[Index]->Options.Num() != 1) return false;
+		Generators[Index] = Instances[Index]->Options[0].Generator;
+		TestTrue(TEXT("Request Owner remains per-instance, not on the shared graph"), Instances[Index]->Owner.Get() == Owner);
+		TestEqual(TEXT("Origin parameter remains independent in every request"), Instances[Index]->NamedParams.FindChecked(TEXT("OriginX")), OriginX);
+		const int32 QueryId = Queries->RunQuery(Instances[Index], FQueryFinishedSignature::CreateLambda(
+			[&, Index](TSharedPtr<FEnvQueryResult> Result) { Results[Index] = Result; }));
+		if (QueryId == INDEX_NONE) return false;
+		QueryIds.Add(QueryId);
+		return true;
+	};
+	const auto CheckGenerators = [&](int32 Count, const TCHAR* Phase)
+	{
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+		bool bAllValid = true;
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const bool bValid = Generators[Index].IsValid();
+			AddInfo(FString::Printf(TEXT("EQS_GC Phase=%s Query=%d GeneratorAlive=%d"), Phase, Index, bValid));
+			bAllValid &= TestTrue(FString::Printf(TEXT("In-flight generator %d survives real GC during %s"), Index, Phase), bValid);
+		}
+		return bAllValid;
+	};
+	const auto Finish = [&](int32 First, int32 Last)
+	{
+		for (int32 Frame = 0; Frame < 200; ++Frame)
+		{
+			bool bFinished = true;
+			for (int32 Index = First; Index < Last; ++Index) bFinished &= Results[Index].IsValid();
+			if (bFinished) return true;
+			if (!Fixture.TickTestWorld(0.01f)) { Fixture.ForwardErrorMessages(this); return false; }
+		}
+		return false;
+	};
+	for (int32 Index = 0; Index < 4; ++Index)
+		if (!TestTrue(TEXT("The real manager queues each Owner/Attack/Cover combination"), Queue(Index, Owners[Index / 2], HeldTemplates[Index].Get()))) return false;
+	// 旧代码在这里保留了原模板的强引用，仍会因同名 LocalTemplate 覆写而丢失旧缓存生成器。
+	if (!CheckGenerators(4, TEXT("BothOwnersAlive"))) return false;
+	Owners[0]->Destroy();
+	HeldTemplates[0].Reset(); HeldTemplates[1].Reset();
+	if (!CheckGenerators(4, TEXT("FirstOwnerDestroyed")) || !TestTrue(TEXT("All four genuine asynchronous queries finish"), Finish(0, 4))) return false;
+	TestEqual(TEXT("Destroyed first Owner's attack completes as OwnerLost"), Results[0]->GetRawStatus(), EEnvQueryStatus::OwnerLost);
+	TestEqual(TEXT("Destroyed first Owner's cover completes as OwnerLost"), Results[1]->GetRawStatus(), EEnvQueryStatus::OwnerLost);
+	TestTrue(TEXT("Surviving Owner's attack still executes"), Results[2]->GetRawStatus() != EEnvQueryStatus::OwnerLost);
+	TestTrue(TEXT("Surviving Owner's cover still executes"), Results[3]->GetRawStatus() != EEnvQueryStatus::OwnerLost);
+	if (!Queue(4, Owners[1], HeldTemplates[2].Get()) || !Queue(5, Owners[1], HeldTemplates[3].Get())) return false;
+	Owners[1]->Destroy();
+	HeldTemplates[2].Reset(); HeldTemplates[3].Reset();
+	if (!CheckGenerators(6, TEXT("AllOwnersDestroyed"))) return false;
+	if (!TestTrue(TEXT("World keeps exactly the canonical attack template alive after every caller leaves"), CanonicalAttack.IsValid()) ||
+		!TestTrue(TEXT("World keeps the canonical cover template alive after every caller leaves"), CanonicalCover.IsValid())) return false;
+	auto* NewOwner = SpawnOwner();
+	if (!TestNotNull(TEXT("A new real request Owner can join after collection"), NewOwner)) return false;
+	HeldTemplates[0].Reset(FPCreateEnemyPositionQuery(*NewOwner, false));
+	HeldTemplates[1].Reset(FPCreateEnemyPositionQuery(*NewOwner, true));
+	TestTrue(TEXT("New Owner reuses canonical attack rather than replacing an in-flight local graph"), HeldTemplates[0].Get() == CanonicalAttack.Get());
+	TestTrue(TEXT("New Owner reuses canonical cover rather than replacing an in-flight local graph"), HeldTemplates[1].Get() == CanonicalCover.Get());
+	if (!Queue(6, NewOwner, HeldTemplates[0].Get()) || !Queue(7, NewOwner, HeldTemplates[1].Get()) ||
+		!CheckGenerators(8, TEXT("NewOwnerQueued")) || !TestTrue(TEXT("Old and new Owner's real asynchronous requests finish"), Finish(4, 8))) return false;
+	TestEqual(TEXT("Last old Owner's pending attack completes as OwnerLost"), Results[4]->GetRawStatus(), EEnvQueryStatus::OwnerLost);
+	TestEqual(TEXT("Last old Owner's pending cover completes as OwnerLost"), Results[5]->GetRawStatus(), EEnvQueryStatus::OwnerLost);
+	TestTrue(TEXT("New Owner's attack executes after GC/rejoin"), Results[6]->GetRawStatus() != EEnvQueryStatus::OwnerLost);
+	TestTrue(TEXT("New Owner's cover executes after GC/rejoin"), Results[7]->GetRawStatus() != EEnvQueryStatus::OwnerLost);
 	return true;
 }
 
