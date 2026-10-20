@@ -2330,95 +2330,83 @@ bool InspectPassThrough(UAnimBlueprint* Blueprint, USkeletalMesh* Mesh)
 	return true;
 }
 
+// 仅维护玩家的薄后处理图；敌人不生成、不绑定脚部IK资产。
 void Prepare(const TArray<FString>& Args)
 {
 	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
 	if ((Args.Num() > 0 && !bApply) || !GEditor || GEditor->PlayWorld)
 	{ Error(TEXT("Usage: fp.PrepareFootIK [Apply], no active PIE.")); return; }
 	TStrongObjectPtr<UBlueprint> Player(Load<UBlueprint>(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter")));
-	TStrongObjectPtr<UBlueprint> Enemy(Load<UBlueprint>(TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP")));
 	auto* PlayerDefaults = Player.IsValid() && Player->GeneratedClass ? Cast<AfpstrueCharacter>(Player->GeneratedClass->GetDefaultObject()) : nullptr;
-	auto* EnemyDefaults = Enemy.IsValid() && Enemy->GeneratedClass ? Cast<AfpstrueEnemyCharacter>(Enemy->GeneratedClass->GetDefaultObject()) : nullptr;
-	USkeletalMesh* Meshes[] = {PlayerDefaults ? PlayerDefaults->GetMesh()->GetSkeletalMeshAsset() : nullptr,
-		EnemyDefaults ? EnemyDefaults->GetMesh()->GetSkeletalMeshAsset() : nullptr};
-	TStrongObjectPtr<UAnimSequence> Idles[] = {
-		TStrongObjectPtr<UAnimSequence>(Load<UAnimSequence>(TEXT("/Game/FPSMPT55/Animations/TPP/AR/A_TPP_AR_Idle"))),
-		TStrongObjectPtr<UAnimSequence>(Load<UAnimSequence>(TEXT("/Game/EnemyWarriorAnimPack/Animations/InPlace/Misc/EnemyWarrior_Idle_InP")))};
-	const TCHAR* Names[] = {TEXT("ABP_PlayerFootIK"), TEXT("ABP_EnemyFootIK")};
-	TStrongObjectPtr<UAnimBlueprint> Blueprints[2]; FSoleCalibration Calibrations[2];
-	bool NeedsCalibration[2] = {};
-	int32 Missing = 0, Recalibrate = 0;
-	for (int32 Kind = 0; Kind < 2; ++Kind)
+	USkeletalMesh* Mesh = PlayerDefaults ? PlayerDefaults->GetMesh()->GetSkeletalMeshAsset() : nullptr;
+	TStrongObjectPtr<UAnimSequence> Idle(Load<UAnimSequence>(TEXT("/Game/FPSMPT55/Animations/TPP/AR/A_TPP_AR_Idle")));
+	FSoleCalibration Calibration;
+	if (!MeasureSoles(Mesh, Idle.Get(), Calibration)) return;
+	const TCHAR* Name = TEXT("ABP_PlayerFootIK");
+	const FString Path = FootIKDirectory + Name;
+	const bool bMissing = !FPackageName::DoesPackageExist(Path);
+	TStrongObjectPtr<UAnimBlueprint> Blueprint(bMissing ? nullptr : Load<UAnimBlueprint>(Path));
+	bool bNeedsCalibration = bMissing;
+	if (!bMissing)
 	{
-		if (!MeasureSoles(Meshes[Kind], Idles[Kind].Get(), Calibrations[Kind])) return;
-		const FString Path = FootIKDirectory + Names[Kind];
-		if (!FPackageName::DoesPackageExist(Path)) { ++Missing; NeedsCalibration[Kind] = true; continue; }
-		Blueprints[Kind].Reset(Load<UAnimBlueprint>(Path));
-		if (!InspectPassThrough(Blueprints[Kind].Get(), Meshes[Kind])) return;
-		const auto* Defaults = Cast<UfpstrueFootIKAnimInstance>(Blueprints[Kind]->GeneratedClass->GetDefaultObject());
-		if (!Defaults) { Error(TEXT("Foot IK output CDO is not the shared native class.")); return; }
+		if (!InspectPassThrough(Blueprint.Get(), Mesh)) return;
+		const auto* Defaults = Cast<UfpstrueFootIKAnimInstance>(Blueprint->GeneratedClass->GetDefaultObject());
+		if (!Defaults) { Error(TEXT("Player Foot IK output CDO is not the native class.")); return; }
 		const auto SameProbes = [](const TArray<FVector>& A, const TArray<FVector>& B)
 		{
 			if (A.Num() != B.Num()) return false;
 			for (int32 Index = 0; Index < A.Num(); ++Index) if (!A[Index].Equals(B[Index], 0.01)) return false;
 			return true;
 		};
-		NeedsCalibration[Kind] = Blueprints[Kind]->GetOutermost()->GetMetaData()->GetValue(Blueprints[Kind].Get(), CalibrationKey) != CalibrationVersion
-			|| !Defaults->LeftSoleOffset.Equals(Calibrations[Kind].Offset[0], 0.01)
-			|| !Defaults->RightSoleOffset.Equals(Calibrations[Kind].Offset[1], 0.01)
-			|| !Defaults->LeftSoleNormal.Equals(Calibrations[Kind].Normal[0], 0.001)
-			|| !Defaults->RightSoleNormal.Equals(Calibrations[Kind].Normal[1], 0.001)
-			|| !SameProbes(Defaults->LeftSoleProbes, Calibrations[Kind].Probes[0])
-			|| !SameProbes(Defaults->RightSoleProbes, Calibrations[Kind].Probes[1])
-			|| !SameProbes(Defaults->LeftToeProbes, Calibrations[Kind].ToeProbes[0])
-			|| !SameProbes(Defaults->RightToeProbes, Calibrations[Kind].ToeProbes[1])
-			|| Defaults->LeftSoleVertices != Calibrations[Kind].Vertices[0] || Defaults->RightSoleVertices != Calibrations[Kind].Vertices[1];
-		if (NeedsCalibration[Kind]) ++Recalibrate;
+		bNeedsCalibration = Blueprint->GetOutermost()->GetMetaData()->GetValue(Blueprint.Get(), CalibrationKey) != CalibrationVersion
+			|| !Defaults->LeftSoleOffset.Equals(Calibration.Offset[0], 0.01)
+			|| !Defaults->RightSoleOffset.Equals(Calibration.Offset[1], 0.01)
+			|| !Defaults->LeftSoleNormal.Equals(Calibration.Normal[0], 0.001)
+			|| !Defaults->RightSoleNormal.Equals(Calibration.Normal[1], 0.001)
+			|| !SameProbes(Defaults->LeftSoleProbes, Calibration.Probes[0])
+			|| !SameProbes(Defaults->RightSoleProbes, Calibration.Probes[1])
+			|| !SameProbes(Defaults->LeftToeProbes, Calibration.ToeProbes[0])
+			|| !SameProbes(Defaults->RightToeProbes, Calibration.ToeProbes[1])
+			|| Defaults->LeftSoleVertices != Calibration.Vertices[0] || Defaults->RightSoleVertices != Calibration.Vertices[1];
 	}
-	if (!bApply || Missing + Recalibrate == 0)
+	if (!bApply || !bNeedsCalibration)
 	{
-		UE_LOG(LogTemp, Display, TEXT("FOOT_IK PREPARE_PASS Mode=%s NeedsRepair=%d Missing=%d Recalibrate=%d AssetsSaved=false MainGraphsAndThirdPartyAssetsUntouched=true"),
-			bApply ? TEXT("Apply") : TEXT("Check"), Missing + Recalibrate, Missing, Recalibrate);
+		UE_LOG(LogTemp, Display, TEXT("FOOT_IK PREPARE_PASS Mode=%s NeedsRepair=%d Missing=%d AssetsSaved=false PlayerOnly=true MainGraphsAndThirdPartyAssetsUntouched=true"),
+			bApply ? TEXT("Apply") : TEXT("Check"), bNeedsCalibration, bMissing);
 		return;
 	}
 	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/FootIKCalibration") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	for (int32 Kind = 0; Kind < 2; ++Kind)
-		if (Blueprints[Kind].IsValid() && NeedsCalibration[Kind]
-			&& !FpstruePvpAssetPreparation::BackupAsset(FPackageName::LongPackageNameToFilename(Blueprints[Kind]->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
+	if (Blueprint.IsValid() && !FpstruePvpAssetPreparation::BackupAsset(
+		FPackageName::LongPackageNameToFilename(Blueprint->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
 	TArray<UPackage*> Packages;
-	for (int32 Kind = 0; Kind < 2; ++Kind)
+	if (!Blueprint.IsValid())
 	{
-		if (!NeedsCalibration[Kind]) continue;
-		if (!Blueprints[Kind].IsValid())
-		{
-			Blueprints[Kind].Reset(AnimBlueprint(Names[Kind], UfpstrueFootIKAnimInstance::StaticClass(), Meshes[Kind], Packages, FootIKDirectory));
-			if (!Blueprints[Kind].IsValid()) { Error(TEXT("Foot IK AnimBP creation failed; no assets saved.")); return; }
-			FGraphBuilder Graph = Builder(Blueprints[Kind].Get());
-			if (!Graph.bOK) { Error(TEXT("Foot IK generated AnimGraph unavailable.")); return; }
-			auto* Input = Graph.Node<UAnimGraphNode_LinkedInputPose>(TEXT("接收主动画图最终姿态；原生 FootIK Proxy 在当前帧输入姿态上修正腿部，不查询上一帧已修正脚骨。"));
-			Input->AllocateDefaultPins(); FinishGraph(Graph, Input);
-			if (!Graph.bOK || !FpstruePvpAssetPreparation::Compile(Blueprints[Kind].Get()))
-			{ Error(TEXT("Foot IK passthrough graph compile failed; no assets saved.")); return; }
-			Blueprints[Kind]->GetOutermost()->GetMetaData()->SetValue(Blueprints[Kind].Get(), CalibrationKey, CalibrationVersion);
-		}
-		auto* Defaults = Cast<UfpstrueFootIKAnimInstance>(Blueprints[Kind]->GeneratedClass->GetDefaultObject());
-		if (!Defaults) { Error(TEXT("Foot IK generated CDO missing; no assets saved.")); return; }
-		Blueprints[Kind]->Modify(); Defaults->Modify();
-		Defaults->LeftSoleOffset = Calibrations[Kind].Offset[0]; Defaults->RightSoleOffset = Calibrations[Kind].Offset[1];
-		Defaults->LeftSoleNormal = Calibrations[Kind].Normal[0]; Defaults->RightSoleNormal = Calibrations[Kind].Normal[1];
-		Defaults->LeftSoleProbes = Calibrations[Kind].Probes[0]; Defaults->RightSoleProbes = Calibrations[Kind].Probes[1];
-		Defaults->LeftToeProbes = Calibrations[Kind].ToeProbes[0]; Defaults->RightToeProbes = Calibrations[Kind].ToeProbes[1];
-		Defaults->LeftSoleVertices = Calibrations[Kind].Vertices[0]; Defaults->RightSoleVertices = Calibrations[Kind].Vertices[1];
-		Blueprints[Kind]->GetOutermost()->GetMetaData()->SetValue(Blueprints[Kind].Get(), CalibrationKey, CalibrationVersion);
-		Packages.AddUnique(Blueprints[Kind]->GetOutermost());
+		Blueprint.Reset(AnimBlueprint(Name, UfpstrueFootIKAnimInstance::StaticClass(), Mesh, Packages, FootIKDirectory));
+		if (!Blueprint.IsValid()) { Error(TEXT("Player Foot IK AnimBP creation failed; no assets saved.")); return; }
+		FGraphBuilder Graph = Builder(Blueprint.Get());
+		if (!Graph.bOK) { Error(TEXT("Player Foot IK generated AnimGraph unavailable.")); return; }
+		auto* Input = Graph.Node<UAnimGraphNode_LinkedInputPose>(TEXT("接收玩家主动画图最终姿态；原生Proxy在当前帧输入姿态上修正腿部。"));
+		Input->AllocateDefaultPins(); FinishGraph(Graph, Input);
+		if (!Graph.bOK || !FpstruePvpAssetPreparation::Compile(Blueprint.Get()))
+		{ Error(TEXT("Player Foot IK passthrough graph compile failed; no assets saved.")); return; }
 	}
+	auto* Defaults = Cast<UfpstrueFootIKAnimInstance>(Blueprint->GeneratedClass->GetDefaultObject());
+	if (!Defaults) { Error(TEXT("Player Foot IK generated CDO missing; no assets saved.")); return; }
+	Blueprint->Modify(); Defaults->Modify();
+	Defaults->LeftSoleOffset = Calibration.Offset[0]; Defaults->RightSoleOffset = Calibration.Offset[1];
+	Defaults->LeftSoleNormal = Calibration.Normal[0]; Defaults->RightSoleNormal = Calibration.Normal[1];
+	Defaults->LeftSoleProbes = Calibration.Probes[0]; Defaults->RightSoleProbes = Calibration.Probes[1];
+	Defaults->LeftToeProbes = Calibration.ToeProbes[0]; Defaults->RightToeProbes = Calibration.ToeProbes[1];
+	Defaults->LeftSoleVertices = Calibration.Vertices[0]; Defaults->RightSoleVertices = Calibration.Vertices[1];
+	Blueprint->GetOutermost()->GetMetaData()->SetValue(Blueprint.Get(), CalibrationKey, CalibrationVersion);
+	Packages.AddUnique(Blueprint->GetOutermost());
 	for (UPackage* Package : Packages) Package->MarkPackageDirty();
-	if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, false)) { Error(TEXT("Foot IK save failed. Backup: ") + Backup); return; }
-	UE_LOG(LogTemp, Display, TEXT("FOOT_IK PREPARE_PASS Mode=Apply PackagesSaved=%d Created=%d Recalibrated=%d Backup=%s MainGraphsAndThirdPartyAssetsUntouched=true"),
-		Packages.Num(), Missing, Recalibrate, *Backup);
+	if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, false)) { Error(TEXT("Player Foot IK save failed. Backup: ") + Backup); return; }
+	UE_LOG(LogTemp, Display, TEXT("FOOT_IK PREPARE_PASS Mode=Apply PackagesSaved=%d Created=%d Backup=%s PlayerOnly=true MainGraphsAndThirdPartyAssetsUntouched=true"),
+		Packages.Num(), bMissing, *Backup);
 }
 FAutoConsoleCommand Command(TEXT("fp.PrepareFootIK"),
-	TEXT("Check actual player/enemy leg chains and CPU-skinned sole calibration. Apply creates only two skeleton-specific passthrough FootIK AnimBPs, or backs up and recalibrates known project outputs."),
+	TEXT("Check player leg chains and CPU-skinned sole calibration. Apply maintains only the player passthrough FootIK AnimBP."),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&Prepare));
 }
 
@@ -2461,7 +2449,6 @@ struct FWalkState
 	int32 CombatRouteRevision = 0;
 	int32 CombatRoutePoint = 0;
 	double CombatPhaseAt = 0.0;
-	double FootIKEnemyObserveStarted = 0.0;
 	float CombatEnemyInitialHealth = 0.0f;
 	bool bCombatFireHeld = false;
 	bool bEnemyHitCaptured = false;
@@ -2776,13 +2763,6 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				if (Route.IsValidIndex(CombatRoutePoint)) Original->AddMovementInput((Route[CombatRoutePoint] - Original->GetActorLocation()).GetSafeNormal2D(), 1.0f, false);
 				else if (bClear) Original->AddMovementInput((Enemy->GetActorLocation() - Original->GetActorLocation()).GetSafeNormal2D(), 1.0f, false);
 				return;
-			}
-			// 仅脚部 IK 实机验收留出真实敌人追击画面；敌人继续正常 BT/攻击，不写入位置、生命或 AI 决策。
-			if (FParse::Param(FCommandLine::Get(), TEXT("PvpFootIKReview")))
-			{
-				const double WorldTime = CurrentWorld->GetTimeSeconds();
-				if (FootIKEnemyObserveStarted <= 0.0) FootIKEnemyObserveStarted = WorldTime;
-				if (WorldTime - FootIKEnemyObserveStarted < 4.0) { SetFire(false); return; }
 			}
 			// 两个真实玩家都反击敌人；不能让先到的一人只挨打，等待另一条路线上的观察者。
 			{

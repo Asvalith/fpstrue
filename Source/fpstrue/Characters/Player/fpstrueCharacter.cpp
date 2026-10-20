@@ -936,7 +936,7 @@ void AfpstrueCharacter::BeginPlay()
 {
 	//开始游戏时基函数调用
 	Super::BeginPlay();
-	if (UsesTemplatePresentation()) UfpstrueFootIKAnimInstance::Install(this, false);
+	if (UsesTemplatePresentation()) UfpstrueFootIKAnimInstance::Install(this);
 	if (GetNetMode() == NM_DedicatedServer)
 	{
 		// 组件初始化/自动激活可能重启 Tick；在完整初始化之后再次关闭纯视模工作。

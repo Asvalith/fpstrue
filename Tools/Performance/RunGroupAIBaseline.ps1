@@ -8,16 +8,21 @@ input acceptance. Existing UI CSV profiles and historical evidence are retained.
 param(
     [string]$ProjectRoot = 'E:/ueprojrct/fpstrue_safe2',
     [string]$EngineRoot = 'E:/program/ue554/UE_5.5',
-    [string]$Map = '/Game/PerformanceCandidates/GroupAITerrain/GroupAITerrain160',
+    [string]$Map = '/Game/PerformanceCandidates/EnemyUI160/EnemyUI160_ArenaOverview55x192',
     [ValidateSet('Editor','Shipping')][string[]]$BuildKinds = @('Editor','Shipping'),
     [string]$ShippingClientExecutable = '',
     [ValidateSet('Client1','Client2')][string]$RenderRole = 'Client1',
     [ValidateSet('Player','Overview')][string]$View = 'Player',
-    [ValidateSet('SharedCandidates','Reference')][string]$FootIKQueries = 'SharedCandidates',
+    [ValidateSet('Reference','Tiered')][string]$EnemyReplication = 'Tiered',
+    [ValidateSet('Reference','Simple')][string]$EnemyHitProxies = 'Reference',
+    # Reference preserves the historical launch. Parallel changes only the DS
+    # threading gate; it does not force CVars, animation flags or gameplay LOD.
+    [ValidateSet('Reference','Parallel')][string[]]$ServerAnimationThreads = @('Reference'),
     [ValidateRange(1,5)][int]$Repeat = 3,
     [ValidateRange(1024,65000)][int]$Port = 17871,
     [ValidateRange(180,900)][int]$TimeoutSeconds = 600,
-    [string]$RunName = ('GroupAITerrainBaseline_' + (Get-Date -Format 'yyyyMMdd_HHmmss')),
+    [string]$RunName = ('GroupAIBaseline_' + (Get-Date -Format 'yyyyMMdd_HHmmss')),
+    [string]$OutputRoot = '',
     [switch]$PresentMon,
     [switch]$CaptureScreenshots,
     [switch]$DiagnosticTrace,
@@ -30,7 +35,10 @@ param(
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
-$FootIKQueries=if($FootIKQueries -ieq 'Reference'){'Reference'}else{'SharedCandidates'}
+$EnemyReplication=if($EnemyReplication -ieq 'Reference'){'Reference'}else{'Tiered'}
+$EnemyHitProxies=if($EnemyHitProxies -ieq 'Simple'){'Simple'}else{'Reference'}
+$ServerAnimationThreads=@($ServerAnimationThreads | ForEach-Object {if($_ -ieq 'Parallel'){'Parallel'}else{'Reference'}})
+if($ServerAnimationThreads.Count -eq 0 -or @($ServerAnimationThreads | Select-Object -Unique).Count -ne $ServerAnimationThreads.Count){throw 'Provide one or two distinct server animation-thread modes.'}
 if ($RunName -notmatch '^[A-Za-z0-9_-]+$' -or $Map -notmatch '^/Game/[A-Za-z0-9_/]+$') { throw 'Invalid run or map package name.' }
 $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
 $EngineRoot = [IO.Path]::GetFullPath($EngineRoot)
@@ -39,7 +47,8 @@ $Project = Join-Path $ProjectRoot 'fpstrue.uproject'
 $Editor = Join-Path $EngineRoot 'Engine/Binaries/Win64/UnrealEditor-Cmd.exe'
 $Module = Join-Path $ProjectRoot 'Binaries/Win64/UnrealEditor-fpstrue.dll'
 $MapFile = Join-Path $ProjectRoot ('Content/' + $Map.Substring(6) + '.umap')
-$OutputRoot = Join-Path $ProjectRoot 'Saved/Profiling'
+$OutputRoot = [IO.Path]::GetFullPath($(if($OutputRoot){$OutputRoot}else{Join-Path $ProjectRoot 'Saved/Profiling'}))
+if($OutputRoot.TrimEnd('\','/').Length -le 3){throw 'OutputRoot must be an explicit non-root directory.'}
 $Run = Join-Path $OutputRoot $RunName
 $DiagnosticRoot=[IO.Path]::GetFullPath($DiagnosticRoot)
 $DiagnosticRun=Join-Path $DiagnosticRoot $RunName
@@ -47,7 +56,7 @@ if($DiagnosticTraceOnly -and -not $DiagnosticTrace){throw 'DiagnosticTraceOnly r
 if($DiagnosticScheduler -and (-not $DiagnosticTrace -or -not $DiagnosticTraceOnly -or $PresentMon)){
     throw 'DiagnosticScheduler requires a single Editor DiagnosticTraceOnly run without PresentMon.'
 }
-if($DiagnosticTrace -and ($Repeat -ne 1 -or $BuildKinds.Count -ne 1 -or $BuildKinds[0] -ne 'Editor')){
+if($DiagnosticTrace -and ($Repeat -ne 1 -or $BuildKinds.Count -ne 1 -or $BuildKinds[0] -ne 'Editor' -or $ServerAnimationThreads.Count -ne 1)){
     throw 'DiagnosticTrace is an independent Editor-only single repeat, never a Shipping or formal repeated baseline.'
 }
 if($DiagnosticTrace -and ([IO.Path]::GetPathRoot($DiagnosticRoot) -ine 'C:\' -or $DiagnosticRoot.TrimEnd('\').Length -le 3)){
@@ -59,12 +68,19 @@ $Cases = @()
 for ($Round=1; $Round -le $Repeat; ++$Round) {
     $Order = @($BuildKinds)
     if ($Round % 2 -eq 0) { [array]::Reverse($Order) }
-    foreach ($Kind in $Order) { $Cases += [pscustomobject]@{Kind=$Kind;Round=$Round;Name=('{0}_R{1}' -f $Kind,$Round)} }
+    $ThreadOrder=@($ServerAnimationThreads)
+    if($Round % 2 -eq 0){[array]::Reverse($ThreadOrder)}
+    foreach ($Kind in $Order) { foreach($Threads in $ThreadOrder){
+        $Name=if($ServerAnimationThreads.Count -eq 1 -and $Threads -eq 'Reference'){('{0}_R{1}' -f $Kind,$Round)}else{('{0}_{1}_R{2}' -f $Kind,$Threads,$Round)}
+        $Cases += [pscustomobject]@{Kind=$Kind;ServerAnimationThreads=$Threads;Round=$Round;Name=$Name}
+    } }
 }
 if ($DryRun) {
     [pscustomobject]@{Run=$Run;Map=$Map;Cases=$Cases;Server='Frozen Editor -server';Clients=2;RenderedClients=1;
         Resolution='1600x900';Quality='High / scalability level 2; engine feature defaults retained';WarmupSeconds=20;CaptureSeconds=60;
-        Population=160;Seed=1337;View=$View;FootIKQueries=$FootIKQueries;PresentMon=[bool]$PresentMon;
+        Population=160;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;PresentMon=[bool]$PresentMon;ServerAnimationThreads=$ServerAnimationThreads;
+        AnimationThreading='Reference adds no engine threading option; Parallel adds -useperfthreads to the Editor dedicated server only. Runtime gates are snapshots, not proof of Worker dispatch.';
+        NetworkCounters='Per-role START/STOP parent-connection In/OutTotalBytes/Packets, including engine connection/PacketOverhead accounting; stable identities, no wrap/reset/reconnect concatenation; not NIC/per-Actor traffic.';
         Diagnostic=[ordered]@{Enabled=[bool]$DiagnosticTrace;TraceOnly=[bool]$DiagnosticTraceOnly;Output=$DiagnosticRun;ServerCsvFrames=$DiagnosticServerCsvFrames;
             CpuAccounting=[bool]$DiagnosticTrace;Scheduler=[ordered]@{Requested=[bool]$DiagnosticScheduler;Recorder='One named WPR CPU.Verbose.File instance; UE contextswitch/stacksampling remain disabled';RequiresAdministrator=$true;
                 Analysis='ETL existence is not proof of complete Running/Ready/Wait data; verify coverage, PID/TID mappings, lost events and QPC alignment offline.'};
@@ -264,10 +280,64 @@ function Get-Percentile([double[]]$Values,[double]$Fraction) {
     $Sorted=@($Values | Sort-Object)
     $Sorted[[Math]::Max(0,[Math]::Min($Sorted.Count-1,[Math]::Ceiling($Fraction*$Sorted.Count)-1))]
 }
+function Assert-BaselineNetworkCounters($Summary,[string]$Role) {
+    $Network=$Summary.networkConnections
+    $Expected=if($Role -eq 'Server'){2}else{1}
+    $Required=@('valid','driverObjectId','driverName','expectedConnections','identitySamples','startSeconds','stopSeconds','windowSeconds','startQpc','stopQpc','secondsPerCycle64','connections','totals','accounting')
+    if($null -eq $Network -or @($Required | Where-Object {$_ -cnotin $Network.PSObject.Properties.Name}).Count -or
+        $Network.valid -ne $true -or $Network.expectedConnections -ne $Expected -or @($Network.connections).Count -ne $Expected -or
+        $Network.identitySamples -ne $Summary.validationSamples -or $Network.identitySamples -lt 100 -or
+        [string]::IsNullOrWhiteSpace($Network.driverName) -or [string]$Network.driverObjectId -notmatch '^\d+$'){
+        throw ('Missing or invalid stable network connection coverage: '+$Role)
+    }
+    foreach($Field in @('startSeconds','stopSeconds','windowSeconds','secondsPerCycle64')){
+        if($null -eq $Network.$Field -or [double]::IsNaN([double]$Network.$Field) -or [double]::IsInfinity([double]$Network.$Field)){throw ('Invalid network clock: '+$Role)}
+    }
+    $Duration=[double]$Network.windowSeconds
+    if($Duration -lt 59.8 -or $Duration -gt 75 -or [Math]::Abs($Duration-[double]$Summary.captureSeconds) -gt 0.25 -or
+        [Math]::Abs(([double]$Network.stopSeconds-[double]$Network.startSeconds)-$Duration) -gt 0.00001 -or
+        [string]$Network.startQpc -notmatch '^\d+$' -or [string]$Network.stopQpc -notmatch '^\d+$' -or
+        [uint64]$Network.stopQpc -le [uint64]$Network.startQpc -or [double]$Network.secondsPerCycle64 -le 0 -or
+        [Math]::Abs(([uint64]$Network.stopQpc-[uint64]$Network.startQpc)*[double]$Network.secondsPerCycle64-$Duration) -gt 0.01){throw ('Network counter window mismatch: '+$Role)}
+    $Ids=@{}
+    $Totals=@{inBytes=[long]0;outBytes=[long]0;inPackets=[long]0;outPackets=[long]0}
+    foreach($Connection in @($Network.connections)){
+        if($null -eq $Connection -or [string]$Connection.objectId -notmatch '^\d+$' -or [string]$Connection.engineConnectionId -notmatch '^\d+$' -or
+            [string]::IsNullOrWhiteSpace($Connection.objectName) -or [string]::IsNullOrWhiteSpace($Connection.remoteAddress) -or $Ids.ContainsKey([string]$Connection.objectId)){
+            throw ('Duplicate or invalid network identity: '+$Role)
+        }
+        $Ids[[string]$Connection.objectId]=$true
+        foreach($Name in @('inBytes','outBytes','inPackets','outPackets')){
+            $Counter=$Connection.$Name
+            if($null -eq $Counter -or @('start','end','delta','perSecond' | Where-Object {$_ -cnotin $Counter.PSObject.Properties.Name}).Count){throw ('Missing network counter '+$Role+'/'+$Name)}
+            foreach($Field in @('start','end','delta')){
+                if([string]$Counter.$Field -notmatch '^\d+$' -or [long]$Counter.$Field -gt [int]::MaxValue){throw ('Negative/overflowed native int32 network counter: '+$Role+'/'+$Name)}
+            }
+            $Delta=[long]$Counter.end-[long]$Counter.start
+            if($Delta -lt 0 -or $Delta -ne [long]$Counter.delta){throw ('Reset/regressed network counter: '+$Role+'/'+$Name)}
+            $ExpectedRate=$Delta/$Duration
+            if($null -eq $Counter.perSecond -or [double]::IsNaN([double]$Counter.perSecond) -or [double]::IsInfinity([double]$Counter.perSecond) -or
+                [Math]::Abs([double]$Counter.perSecond-$ExpectedRate) -gt [Math]::Max(0.00001,[Math]::Abs($ExpectedRate)*1e-8)){throw ('Network rate mismatch: '+$Role+'/'+$Name)}
+            $Totals[$Name]+=$Delta
+        }
+    }
+    foreach($Name in @('inBytes','outBytes','inPackets','outPackets')){
+        $Total=$Network.totals.$Name
+        $ExpectedRate=$Totals[$Name]/$Duration
+        if($null -eq $Total -or [string]$Total.delta -notmatch '^\d+$' -or [long]$Total.delta -ne $Totals[$Name] -or
+            $null -eq $Total.perSecond -or [double]::IsNaN([double]$Total.perSecond) -or [double]::IsInfinity([double]$Total.perSecond) -or
+            [Math]::Abs([double]$Total.perSecond-$ExpectedRate) -gt [Math]::Max(0.00001,[Math]::Abs($ExpectedRate)*1e-8)){
+            throw ('Network role total mismatch: '+$Role+'/'+$Name)
+        }
+    }
+    return $Network
+}
 $Fingerprint=Get-BaselineFingerprint
 $FingerprintText=$Fingerprint | ConvertTo-Json -Depth 4 -Compress
 $Experiment=[ordered]@{Created=(Get-Date).ToString('o');Map=$Map;Cases=$Cases;Fingerprint=$Fingerprint;WarmupSeconds=20;CaptureSeconds=60;
-    Resolution='1600x900';Quality=2;Population=160;Clients=2;RenderedRole=$RenderRole;Seed=1337;View=$View;FootIKQueries=$FootIKQueries;
+    Resolution='1600x900';Quality=2;Population=160;Clients=2;RenderedRole=$RenderRole;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;ServerAnimationThreads=$ServerAnimationThreads;
+    AnimationThreading='Reference preserves historical engine defaults; Parallel adds only DS -useperfthreads. No per-instance/CVar forcing; compare actual runtime gate snapshots and independent traces.';
+    NetworkCounters='Stable parent connections, START/STOP cumulative deltas; engine connection accounting incl. PacketOverhead, not NIC or per-Actor bytes. Server retains all 160 AI relevance. Replication, hit-proxy and threading modes are recorded separately; change one factor per comparison.';
     Backend='Same Editor dedicated server for Editor and Shipping client cases';
     ExitPolicy='Independent per-role controls; clients COMPLETE + natural exit 0, then server EXIT';
     Diagnostic=[bool]$DiagnosticTrace;
@@ -288,7 +358,7 @@ foreach ($Case in $Cases) {
     # normal disconnect/default-map loading after its samples were already flushed.
     $Controls=@{}
     foreach($Role in @('Server','Client1','Client2')){$Controls[$Role]=Join-Path $CaseRoot ($Role+'.control.txt')}
-    $Result=[ordered]@{Name=$Case.Name;Kind=$Case.Kind;Round=$Case.Round;FootIKQueries=$FootIKQueries;Valid=$false;Error=$null;Processes=@();Roles=@{};PresentMon=$null}
+    $Result=[ordered]@{Name=$Case.Name;Kind=$Case.Kind;Round=$Case.Round;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;ServerAnimationThreads=$Case.ServerAnimationThreads;Valid=$false;Error=$null;Processes=@();Roles=@{};PresentMon=$null}
     $DiagnosticInfo=$null;$DiagnosticCase=$null;$ObservedRolePhases=@{};$Scheduler=$null
     if($DiagnosticTrace){
         $DiagnosticCase=Join-Path $DiagnosticRun $Case.Name
@@ -331,12 +401,13 @@ foreach ($Case in $Cases) {
             if($IsEditor){$Arguments+=('"'+$Project+'"')}
             $Arguments+=@($Travel,'-NoLiveCoding','-NoP4','-NoSplash','-NoSteam','-NoSound','-Unattended','-PvpBaseline',
                 ('-PvpBaselineRole='+$Role),('-PvpBaselineControl="'+$RoleControl+'"'),('-PvpBaselineOutput="'+$CaseRoot+'"'),
-                ('-PvpProfileRoot="'+$OutputRoot+'"'),('-PvpBaselineView='+$View),('-EnemyFootIKQueries='+$FootIKQueries),
+                ('-PvpProfileRoot="'+$OutputRoot+'"'),('-PvpBaselineView='+$View),('-EnemyReplication='+$EnemyReplication),('-EnemyHitProxies='+$EnemyHitProxies),
                 ('-UserDir="'+$User+'"'),('-abslog="'+(Join-Path $CaseRoot ($Role+'.log'))+'"'))
             if($IsEditor){$Arguments+=@('-DDC=InstalledNoZenLocalFallback','-DDC-ForceMemoryCache')}
             if($Role -eq 'Server') {
                 $Arguments+=@('-server','-NullRHI',('-port='+$Port),'-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyPopulation=160',
                     '-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemySpawnInterval=0.05','-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyRespawnDelay=600')
+                if($Case.ServerAnimationThreads -eq 'Parallel'){$Arguments+='-useperfthreads'}
             } else {
                 # Shipping intentionally ignores a positional travel URL. Both
                 # client builds use the same bounded loopback benchmark entry;
@@ -455,8 +526,27 @@ foreach ($Case in $Cases) {
             if($null -eq $Status -or $Status.phase -ne 'COMPLETE'){throw ('Missing COMPLETE: '+$Entry.Role)}
             $Summary=Get-Content -LiteralPath (Join-Path $CaseRoot ($Entry.Role+'.summary.json')) -Raw | ConvertFrom-Json
             if(-not $Summary.valid){throw ('Invalid summary: '+$Entry.Role)}
-            if($Summary.schemaVersion -ne 1 -or $Summary.role -cne $Entry.Role -or $Summary.pid -ne $Entry.Id -or $Summary.validationSamples -lt 100){throw ('Summary identity or validation coverage mismatch: '+$Entry.Role)}
-            if($Summary.footIKQueries -cne $FootIKQueries -or $Status.footIKQueries -cne $FootIKQueries){throw ('Native Foot IK query mode mismatch: '+$Entry.Role)}
+            if($Summary.schemaVersion -ne 2 -or $Summary.role -cne $Entry.Role -or $Summary.pid -ne $Entry.Id -or $Summary.validationSamples -lt 100){throw ('Summary identity or validation coverage mismatch: '+$Entry.Role)}
+            if($Summary.enemyReplication -cne $EnemyReplication -or $Status.enemyReplication -cne $EnemyReplication){throw ('Native replication A/B mode mismatch: '+$Entry.Role)}
+            $Animation=$Summary.animationDiagnostics
+            if($null -eq $Animation -or $null -eq $Animation.start -or $null -eq $Animation.stop -or
+                $Animation.start.enemies -ne 160 -or $Animation.stop.enemies -ne 160){throw ('Missing boundary animation diagnostics: '+$Entry.Role)}
+            $ExpectedPerfThreads=$Entry.Role -eq 'Server' -and $Case.ServerAnimationThreads -eq 'Parallel'
+            foreach($Snapshot in @($Animation.start,$Animation.stop)){
+                if([bool]$Snapshot.forceUsePerfThreads -ne $ExpectedPerfThreads){throw ('Animation threading launch mismatch: '+$Entry.Role)}
+                if($Entry.Role -eq 'Server' -and ($Snapshot.netMode -ne 1 -or -not $Snapshot.dedicatedServer -or
+                    [bool]$Snapshot.shouldUseThreadingForPerformance -ne $ExpectedPerfThreads)){throw 'Dedicated-server threading gate mismatch.'}
+                $ExpectedSimple=if($EnemyHitProxies -eq 'Simple'){160}else{0}
+                if($Snapshot.simpleHitProxyEnemies -ne $ExpectedSimple){throw ('Actual enemy hit-proxy mode mismatch: '+$Entry.Role)}
+                if($EnemyHitProxies -eq 'Simple'){
+                    $ExpectedQueries=if($Entry.Role -eq 'Server'){320}else{0}
+                    if($Snapshot.hitProxyComponents.count -ne 320 -or $Snapshot.hitProxyComponents.queryEnabled -ne $ExpectedQueries -or
+                        $Snapshot.mesh.collisionEnabled -ne 0 -or $Snapshot.mesh.validBodyInstances -ne 0){
+                        throw ('Simplified hit proxies did not replace live skeletal collision: '+$Entry.Role)
+                    }
+                }
+            }
+            $NetworkCounters=Assert-BaselineNetworkCounters $Summary $Entry.Role
             if($DiagnosticTrace -and $Entry.Role -in @('Server',$RenderRole)){
                 $Cpu=$Summary.cpuAccounting
                 if($null -eq $Cpu -or -not $Cpu.enabled -or -not $Cpu.platformSupported -or -not $Cpu.valid -or
@@ -491,6 +581,16 @@ foreach ($Case in $Cases) {
                 if($Summary.fov -le 0 -or [Math]::Abs([double]$Summary.fov-$ReferenceFov) -gt 0.1){throw 'Actual FOV changed between cases.'}
             }
             $Rows=@(Import-Csv -LiteralPath (Join-Path $CaseRoot ($Entry.Role+'.frames.csv')))
+            $ExpectedColumns='Frame,ElapsedSeconds,FrameEndIntervalMs,WorldTickWallMs,WorldTickValid,CpuAccountingEnabled,GTEndCpuValid,GTEndThreadId,GTEndCpuQueryError,GTPreviousEndUser100ns,GTPreviousEndKernel100ns,GTEndUser100ns,GTEndKernel100ns,GTFrameCpuValid,GTFrameUser100nsDelta,GTFrameKernel100nsDelta,GTFrameCpuMs,GTWorldCpuValid,GTWorldBeginUser100ns,GTWorldBeginKernel100ns,GTWorldEndUser100ns,GTWorldEndKernel100ns,GTWorldUser100nsDelta,GTWorldKernel100nsDelta,GTWorldCpuMs'
+            if($Rows.Count -eq 0 -or ($Rows[0].PSObject.Properties.Name -join ',') -cne $ExpectedColumns){throw 'Expected exact schema-2 frame columns.'}
+            foreach($Row in $Rows){
+                if($Row.WorldTickValid -cnotin @('0','1')){throw 'Invalid selected-World frame validity.'}
+                if($Row.WorldTickValid -eq '0'){
+                    if(-not [string]::IsNullOrEmpty($Row.WorldTickWallMs)){throw 'An absent World frame contains a stale wall time.'}
+                } elseif([string]::IsNullOrWhiteSpace($Row.WorldTickWallMs) -or [double]::IsNaN([double]$Row.WorldTickWallMs) -or
+                    [double]::IsInfinity([double]$Row.WorldTickWallMs) -or [double]$Row.WorldTickWallMs -lt 0){throw 'Invalid selected-World tick wall time.'}
+            }
+            if($Entry.Role -eq 'Server' -and @($Rows | Where-Object WorldTickValid -eq '1').Count -eq 0){throw 'Server has no valid World samples.'}
             if($DiagnosticTrace){
                 $DiagnosticInfo.Roles[$Entry.Role+'.BaselineWindow']=[ordered]@{FirstGlobalFrame=$Rows[0].Frame;LastGlobalFrame=$Rows[-1].Frame;
                     FirstElapsedSeconds=$Rows[0].ElapsedSeconds;LastElapsedSeconds=$Rows[-1].ElapsedSeconds;Samples=$Rows.Count;
@@ -509,48 +609,10 @@ foreach ($Case in $Cases) {
             $WorldTickResult=if($WorldTicks.Count){[ordered]@{Samples=$WorldTicks.Count;MeanMs=($WorldTicks | Measure-Object -Average).Average;
                 P95Ms=(Get-Percentile $WorldTicks 0.95);P99Ms=(Get-Percentile $WorldTicks 0.99);
                 Boundary='World tick wall scope, including dependent waits; not stat-unit GameThread time.'}}else{$null}
-            # The native counter is per selected World/engine frame. Keep valid
-            # zero-evaluation frames in the denominator; absent World ticks are
-            # explicitly uncovered, never silently turned into valid zero work.
-            $IKSummary=$Summary.enemyFootIK
-            $IKCountColumns=[ordered]@{EnemyIKEvaluations='evaluations';EnemyIKWorldQueries='worldQueries';EnemyIKComponentQueries='componentQueries';
-                EnemyIKReusedFootprints='reusedFootprints';EnemyIKFallbackFootprints='fallbackFootprints'}
-            foreach($Row in $Rows){
-                if($Row.EnemyIKStatsValid -cnotin @('0','1') -or $Row.EnemyIKStatsValid -cne $Row.WorldTickValid){throw 'Foot IK frame validity does not match the selected World/frame.'}
-                if([string]::IsNullOrWhiteSpace($Row.EnemyIKSolveWallMs) -or [double]::IsNaN([double]$Row.EnemyIKSolveWallMs) -or
-                    [double]::IsInfinity([double]$Row.EnemyIKSolveWallMs) -or [double]$Row.EnemyIKSolveWallMs -lt 0){throw 'Invalid enemy IK solve wall time.'}
-                foreach($Column in $IKCountColumns.Keys){if($Row.$Column -notmatch '^\d+$'){throw ('Invalid Foot IK frame count: '+$Column)}}
-                if($Row.EnemyIKStatsValid -eq '0' -and ([double]$Row.EnemyIKSolveWallMs -ne 0 -or
-                    @($IKCountColumns.Keys | Where-Object {[uint64]$Row.$_ -ne 0}).Count)){throw 'A missing World frame contains stale Foot IK measurements.'}
-            }
-            $IKRows=@($Rows | Where-Object EnemyIKStatsValid -eq '1')
-            $IKActiveFrames=@($IKRows | Where-Object {[uint64]$_.EnemyIKEvaluations -gt 0}).Count
-            $IKRequiredFields=@('sampledFrames','validWorldFrames','completeFrameCoverage','framesWithEvaluations','zeroEvaluationFrames',
-                'solveWallTotalMs','meanSolveWallMsPerFrame','maxSolveWallMs','evaluations','worldQueries','componentQueries','reusedFootprints','fallbackFootprints','timingBoundary')
-            if($null -eq $IKSummary -or @($IKRequiredFields | Where-Object {$_ -cnotin $IKSummary.PSObject.Properties.Name}).Count){throw 'Missing native Foot IK summary fields.'}
-            if($null -eq $IKSummary -or $IKSummary.sampledFrames -ne $Rows.Count -or $IKSummary.validWorldFrames -ne $IKRows.Count -or
-                [bool]$IKSummary.completeFrameCoverage -ne ($IKRows.Count -eq $Rows.Count) -or $IKSummary.framesWithEvaluations -ne $IKActiveFrames -or
-                $IKSummary.zeroEvaluationFrames -ne ($IKRows.Count-$IKActiveFrames)){throw 'Foot IK summary frame coverage mismatch.'}
-            foreach($Column in $IKCountColumns.Keys){
-                $Total=($IKRows | Measure-Object -Property $Column -Sum).Sum
-                $NativeTotal=$IKSummary.($IKCountColumns[$Column])
-                if([string]$NativeTotal -notmatch '^\d+$' -or [double]$NativeTotal -ne [double]$Total){throw ('Foot IK summary count mismatch: '+$Column)}
-            }
-            foreach($Field in @('solveWallTotalMs','meanSolveWallMsPerFrame','maxSolveWallMs')){
-                $Value=$IKSummary.$Field
-                if($null -eq $Value -or [double]::IsNaN([double]$Value) -or [double]::IsInfinity([double]$Value) -or [double]$Value -lt 0){throw ('Invalid native Foot IK wall timing: '+$Field)}
-            }
-            $IKWallTotal=($IKRows | Measure-Object -Property EnemyIKSolveWallMs -Sum).Sum
-            $IKWallMean=if($IKRows.Count){$IKWallTotal/$IKRows.Count}else{0.0}
-            $IKWallMax=if($IKRows.Count){($IKRows | Measure-Object -Property EnemyIKSolveWallMs -Maximum).Maximum}else{0.0}
-            $IKRoundingTolerance=[Math]::Max(0.000001,$Rows.Count*0.00000051)
-            if([Math]::Abs([double]$IKSummary.solveWallTotalMs-[double]$IKWallTotal) -gt $IKRoundingTolerance -or
-                [Math]::Abs([double]$IKSummary.meanSolveWallMsPerFrame-[double]$IKWallMean) -gt 0.0000011 -or
-                [Math]::Abs([double]$IKSummary.maxSolveWallMs-[double]$IKWallMax) -gt 0.0000011){throw 'Foot IK summary timing differs from frame samples.'}
             $Result.Roles[$Entry.Role]=[ordered]@{Samples=$Values.Count;FrameEndIntervalMeanMs=$Mean;P95Ms=(Get-Percentile $Values 0.95);
                 P99Ms=(Get-Percentile $Values 0.99);MaxMs=($Values | Measure-Object -Maximum).Maximum;EquivalentFPS=1000.0/$Mean;
                 FramesOver16_667Percent=100.0*@($Values | Where-Object {$_ -gt (1000.0/60.0)}).Count/$Values.Count;
-                WorldTickWall=$WorldTickResult;EnemyFootIK=$IKSummary;AIActivity=$Summary.aiActivity;RawSummary=$Summary}
+                WorldTickWall=$WorldTickResult;AIActivity=$Summary.aiActivity;NetworkConnections=$NetworkCounters;RawSummary=$Summary}
         }
         if((Get-BaselineFingerprint | ConvertTo-Json -Depth 4 -Compress) -ne $FingerprintText){throw 'Inputs changed during case.'}
         if($DiagnosticTrace){
@@ -624,22 +686,20 @@ foreach ($Case in $Cases) {
     if(-not $Result.Valid){throw ('Baseline stopped; invalid evidence retained: '+$CaseRoot)}
 }
 $Aggregates=@()
-foreach($Kind in $BuildKinds){
-    $Runs=@($Results | Where-Object Kind -eq $Kind)
+foreach($Kind in $BuildKinds){ foreach($Threads in $ServerAnimationThreads){
+    $Runs=@($Results | Where-Object {$_.Kind -eq $Kind -and $_.ServerAnimationThreads -eq $Threads})
     $Frames=@($Runs | ForEach-Object {$_.Roles[$RenderRole].FrameEndIntervalMeanMs})
-    $IKRuns=@($Runs | ForEach-Object {$_.Roles[$RenderRole].EnemyFootIK})
-    $IKComplete=@($IKRuns | Where-Object {-not $_.completeFrameCoverage}).Count -eq 0
-    $Aggregates+=[pscustomobject]@{Build=$Kind;Repeats=$Runs.Count;RenderedRole=$RenderRole;FootIKQueries=$FootIKQueries;
+    $Aggregates+=[pscustomobject]@{Build=$Kind;ServerAnimationThreads=$Threads;ServerBuild='Editor dedicated server';Repeats=$Runs.Count;RenderedRole=$RenderRole;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;
         MeanFrameEndIntervalMs=($Frames | Measure-Object -Average).Average;
         MeanRunP95Ms=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].P95Ms}) | Measure-Object -Average).Average;
         MeanRunP99Ms=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].P99Ms}) | Measure-Object -Average).Average;
         MeanRunOver16_667Percent=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].FramesOver16_667Percent}) | Measure-Object -Average).Average;
         MeanServerWorldTickWallMs=(@($Runs | ForEach-Object {$_.Roles.Server.WorldTickWall.MeanMs}) | Measure-Object -Average).Average;
-        EnemyIKCompleteFrameCoverage=$IKComplete;
-        MeanEnemyIKSolveWallMsPerFrame=if($IKComplete){($IKRuns | Measure-Object -Property meanSolveWallMsPerFrame -Average).Average}else{$null};
-        MeanEnemyIKWorldQueriesPerFrame=if($IKComplete){(@($IKRuns | ForEach-Object {$_.worldQueries/$_.validWorldFrames}) | Measure-Object -Average).Average}else{$null};
-        MeanEnemyIKComponentQueriesPerFrame=if($IKComplete){(@($IKRuns | ForEach-Object {$_.componentQueries/$_.validWorldFrames}) | Measure-Object -Average).Average}else{$null}}
-}
+        MeanServerOutBytesPerSecond=(@($Runs | ForEach-Object {$_.Roles.Server.NetworkConnections.totals.outBytes.perSecond}) | Measure-Object -Average).Average;
+        MeanServerOutPacketsPerSecond=(@($Runs | ForEach-Object {$_.Roles.Server.NetworkConnections.totals.outPackets.perSecond}) | Measure-Object -Average).Average;
+        MeanRenderedClientInBytesPerSecond=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].NetworkConnections.totals.inBytes.perSecond}) | Measure-Object -Average).Average;
+        NetworkBoundary='Mean of independent per-run engine connection-counter rates. Server totals sum two peers. Not NIC, per-Actor replication or exact cross-role byte matching.'}
+} }
 Write-BaselineJson $Aggregates (Join-Path $Run 'summary.json')
 Write-Output ('Completed separate build baselines: '+$Run)
 $Aggregates | Format-Table -AutoSize

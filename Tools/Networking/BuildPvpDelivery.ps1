@@ -21,7 +21,7 @@ param(
     [switch]$SelfTest,
     [string]$ValidateAutomationReport = '',
     [ValidateRange(1, 65534)][int]$Port = 7797,
-    [ValidateRange(1, 10000)][int]$MinimumTests = 83,
+    [ValidateRange(1, 10000)][int]$MinimumTests = 92,
     [ValidateRange(1, 16)][int]$MaxParallelActions = 4,
     [ValidateRange(1, 2000)][int]$MinimumDeliveryFreeGB = 50
 )
@@ -44,6 +44,7 @@ $RequiredAutomationTests = @(
     'fpstrue.AI.EQS.TemplateAndItemIdentity'
     'fpstrue.AI.EQS.TwoOwnersInflightGcAndRecreate'
     'fpstrue.AI.Perception.MultiplayerIdleSearchAndStop'
+    'fpstrue.AI.Perception.AuthoritativeGunshotInvestigation'
     'fpstrue.AI.Perception.SightOcclusionAndFacing'
     'fpstrue.AI.Surround.CacheAndSlotOwnership'
     'fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig'
@@ -80,7 +81,7 @@ $RequiredAutomationTests = @(
     'fpstrue.Gameplay.Weapon.VisualRecoil.RetriggerAndStepSize'
     'fpstrue.Gameplay.Weapon.VisualRecoil.ViewIsolation'
     'fpstrue.Multiplayer.Animation.BodyDefaultsAndViewSeparation'
-    'fpstrue.Multiplayer.Animation.FootIK.AirDeathAndSharingReset'
+    'fpstrue.Multiplayer.Animation.FootIK.AirDeathAndReset'
     'fpstrue.Multiplayer.Animation.FootIK.AssetBindingsAndOwnerIsolation'
     'fpstrue.Multiplayer.Animation.FootIK.GroundAndSlopePose'
     'fpstrue.Multiplayer.Animation.RARAbilityPresentationAndCancel'
@@ -100,10 +101,12 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Movement.SavedModesReplayAndAuthority'
     'fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget'
     'fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState'
+    'fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference'
     'fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle'
     'fpstrue.Multiplayer.PvPvE.ClientSnapshotIsPresentationOnly'
     'fpstrue.Multiplayer.PvPvE.EnemyHealthBarAnchorAndHealth'
     'fpstrue.Multiplayer.PvPvE.ServerCombatAndSingleCommit'
+    'fpstrue.Multiplayer.PvPvE.SimpleHitProxyLifecycle'
     'fpstrue.Multiplayer.PvPvE.TargetDeathDestroyAndResourceRelease'
     'fpstrue.Multiplayer.PvPvE.WorldSharedNavigationBudget'
     'fpstrue.Multiplayer.Reconnect.CancelInvalidatesOldTravelAndRetry'
@@ -117,9 +120,11 @@ $RequiredAutomationTests = @(
     'fpstrue.Performance.Benchmark.PauseWatchdogAndExitContract'
     'fpstrue.Performance.Benchmark.SampleValidation'
     'fpstrue.Performance.Significance.RenderPriorityOrder'
+    'fpstrue.Performance.Significance.RenderScoringSnapshotEquivalence'
     'fpstrue.Performance.Significance.RenderTopKSelection'
     'fpstrue.Performance.Significance.ScopedCombatProtection'
     'fpstrue.Rendering.EnemyBudget.MeshOwnershipAndDeath'
+    'fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle'
     'fpstrue.Rendering.EnemyBudget.TierHysteresis'
 )
 

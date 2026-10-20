@@ -17,7 +17,7 @@ enum class EFPEnemyRenderSignificanceTier : uint8
 };
 
 /**
- * 敌人全局渲染显著性策略，由 GameMode 配置、Coordinator 校验和消费。
+ * 敌人全局渲染显著性策略，单机由 GameMode、多人由本端 Coordinator 配置并校验和消费。
  *
  * 四个权重会在运行时归一化，不要求手工相加为 1。Gameplay Significance 仍按玩法目标距离和交互状态独立计算，
  * 本结构只控制渲染评分、档位、LOD、动画、阴影和硬件光追预算。
@@ -146,6 +146,39 @@ struct FFPEnemyRenderSignificanceSample
 	float Distance = MAX_flt;
 	bool bInPrimaryFrustum = false;
 	bool bInExpandedFrustum = false;
+};
+
+/**
+ * 本轮相机和策略的纯值派生数据。Coordinator 只构造一次，所有敌人复用相机坐标轴、投影参数和评分常量。
+ * 不保存 Actor/组件引用，也不缓存跨轮结果；玩家转镜、FOV 或策略改变后，下一轮会重新构造。
+ * EvaluateBounds 保留原有球形 Bounds 评分公式，不增加距离早退、不改变 Top-K 优先级或玩法档位。
+ */
+struct FPSTRUE_API FFPEnemyRenderScoringContext
+{
+	FFPEnemyRenderScoringContext(const FFPEnemyRenderViewContext& ViewContext, const FFPEnemyRenderSignificancePolicy& Policy);
+
+	// LastPrimaryFrustumTime 是调用者独占的历史值；纯数学计算不访问 World 或可变 UObject。
+	FFPEnemyRenderSignificanceSample EvaluateBounds(const FVector& BoundsOrigin, float BoundsRadius,
+		float& LastPrimaryFrustumTime) const;
+
+private:
+	FVector ViewLocation;
+	FVector ForwardAxis;
+	FVector RightAxis;
+	FVector UpAxis;
+	float TimeSeconds;
+	float HorizontalTangent;
+	float VerticalTangent;
+	float ExpandedFrustumMargin;
+	float RecentGraceSeconds;
+	float ScreenRadiusForFullScore;
+	float NearDistance;
+	float DistanceRange;
+	float FrustumWeight;
+	float ScreenCoverageWeight;
+	float RecentFrustumWeight;
+	float DistanceWeight;
+	float WeightSum;
 };
 
 /**
@@ -278,7 +311,7 @@ protected:
 	// 组件退出时清理 Timer。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	// 多人配置属于本端表现策略；不把服务器相机或某个客户端的预算复制给其他玩家。
+	// 多人协调器各端独立启停；下方 RenderPolicy 只控制本端表现，不复制某个客户端的相机或预算。
 	UPROPERTY(EditDefaultsOnly, Category = "Performance|Multiplayer")
 	bool bEnableMultiplayerSignificance = true;
 	UPROPERTY(EditDefaultsOnly, Category = "Performance|Multiplayer", meta = (ClampMin = "0.1"))

@@ -1,7 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
-#include "Characters/Shared/fpstrueFootIK.h"
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -24,8 +23,84 @@
 #include "Engine/SkeletalMesh.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeExit.h"
+#include "Math/RotationMatrix.h"
 
 CSV_DEFINE_CATEGORY(fpstrueSignificance, true);
+
+// 把随视点/策略变化的公共计算移出每敌人评分；保留除法和加法顺序，避免改动临界评分与预算选择。
+FFPEnemyRenderScoringContext::FFPEnemyRenderScoringContext(const FFPEnemyRenderViewContext& ViewContext,
+	const FFPEnemyRenderSignificancePolicy& Policy)
+	: ViewLocation(ViewContext.ViewLocation), TimeSeconds(ViewContext.TimeSeconds)
+{
+	const FRotationMatrix ViewRotationMatrix(ViewContext.ViewRotation);
+	ForwardAxis = ViewRotationMatrix.GetUnitAxis(EAxis::X);
+	RightAxis = ViewRotationMatrix.GetUnitAxis(EAxis::Y);
+	UpAxis = ViewRotationMatrix.GetUnitAxis(EAxis::Z);
+	const float HalfHorizontalFOVRadians = FMath::DegreesToRadians(FMath::Clamp(ViewContext.HorizontalFOVDegrees, 5.0f, 170.0f) * 0.5f);
+	HorizontalTangent = FMath::Max(FMath::Tan(HalfHorizontalFOVRadians), 0.01f);
+	VerticalTangent = HorizontalTangent / FMath::Max(ViewContext.AspectRatio, 0.1f);
+	ExpandedFrustumMargin = FMath::Max(Policy.ExpandedFrustumMargin, 0.0f);
+	RecentGraceSeconds = FMath::Max(Policy.RecentFrustumGraceSeconds, 0.0f);
+	ScreenRadiusForFullScore = FMath::Max(Policy.ScreenRadiusForFullScore, 0.001f);
+	NearDistance = FMath::Max(Policy.NearDistance, 0.0f);
+	DistanceRange = FMath::Max(Policy.FarDistance, NearDistance + 1.0f) - NearDistance;
+	FrustumWeight = FMath::Max(Policy.FrustumWeight, 0.0f);
+	ScreenCoverageWeight = FMath::Max(Policy.ScreenCoverageWeight, 0.0f);
+	RecentFrustumWeight = FMath::Max(Policy.RecentFrustumWeight, 0.0f);
+	DistanceWeight = FMath::Max(Policy.DistanceWeight, 0.0f);
+	WeightSum = FMath::Max(FrustumWeight + ScreenCoverageWeight + RecentFrustumWeight + DistanceWeight, KINDA_SMALL_NUMBER);
+}
+
+FFPEnemyRenderSignificanceSample FFPEnemyRenderScoringContext::EvaluateBounds(const FVector& BoundsOrigin,
+	float BoundsRadius, float& LastPrimaryFrustumTime) const
+{
+	FFPEnemyRenderSignificanceSample Sample;
+	// 将包围球转换到相机坐标，估算屏幕中心位置及半径，保留边缘部分可见的候选。
+	const FVector ToEnemy = BoundsOrigin - ViewLocation;
+	Sample.Distance = ToEnemy.Size();
+	const float ForwardDistance = FVector::DotProduct(ToEnemy, ForwardAxis);
+	const float HorizontalDistance = FVector::DotProduct(ToEnemy, RightAxis);
+	const float VerticalDistance = FVector::DotProduct(ToEnemy, UpAxis);
+	const float SafeForwardDistance = FMath::Max(ForwardDistance, 1.0f);
+	const float ProjectedHorizontalRadius = BoundsRadius / (SafeForwardDistance * HorizontalTangent);
+	const float ProjectedVerticalRadius = BoundsRadius / (SafeForwardDistance * VerticalTangent);
+	const float NormalizedHorizontalPosition = HorizontalDistance / (SafeForwardDistance * HorizontalTangent);
+	const float NormalizedVerticalPosition = VerticalDistance / (SafeForwardDistance * VerticalTangent);
+
+	// 主视锥给予更高优先级；扩展视锥作为镜头边缘缓冲，不检查墙体是否遮住敌人。
+	// 不将远距或背面对象提前清零，以免改变近期可见性评分。
+	const bool bBoundsInFront = ForwardDistance + BoundsRadius > 0.0f;
+	// 用归一化屏幕范围加包围球半径检测相交；Margin 控制额外的镜头边缘宽限。
+	const auto IntersectsFrustum = [bBoundsInFront, NormalizedHorizontalPosition, NormalizedVerticalPosition,
+		ProjectedHorizontalRadius, ProjectedVerticalRadius](float Margin)
+	{
+		return bBoundsInFront && FMath::Abs(NormalizedHorizontalPosition) <= 1.0f + Margin + ProjectedHorizontalRadius &&
+			FMath::Abs(NormalizedVerticalPosition) <= 1.0f + Margin + ProjectedVerticalRadius;
+	};
+	Sample.bInPrimaryFrustum = IntersectsFrustum(0.0f);
+	Sample.bInExpandedFrustum = IntersectsFrustum(ExpandedFrustumMargin);
+	Sample.FrustumFactor = Sample.bInPrimaryFrustum ? 1.0f : (Sample.bInExpandedFrustum ? 0.5f : 0.0f);
+	// 刚离开主视锥的敌人短暂保留部分分数，降低转镜时的档位抖动。
+	if (Sample.bInPrimaryFrustum)
+	{
+		LastPrimaryFrustumTime = TimeSeconds;
+		Sample.RecentFrustumFactor = 1.0f;
+	}
+	else if (RecentGraceSeconds > 0.0f)
+	{
+		const float TimeSincePrimaryFrustum = TimeSeconds - LastPrimaryFrustumTime;
+		Sample.RecentFrustumFactor = 1.0f - FMath::Clamp(TimeSincePrimaryFrustum / RecentGraceSeconds, 0.0f, 1.0f);
+	}
+	// 屏占比只奖励扩展视锥中的对象；距离独立平滑衰减，各输入最终限制到零至一。
+	const float ProjectedScreenRadius = ForwardDistance > 0.0f ? FMath::Max(ProjectedHorizontalRadius, ProjectedVerticalRadius) : 0.0f;
+	Sample.ScreenCoverageFactor = Sample.bInExpandedFrustum
+		? FMath::Clamp(ProjectedScreenRadius / ScreenRadiusForFullScore, 0.0f, 1.0f) : 0.0f;
+	Sample.DistanceFactor = 1.0f - FMath::Clamp((Sample.Distance - NearDistance) / DistanceRange, 0.0f, 1.0f);
+	// 权重归一化后合成纯渲染分数，攻击或受击不会提高这个分数和预算排序。
+	Sample.Score = FMath::Clamp((Sample.FrustumFactor * FrustumWeight + Sample.ScreenCoverageFactor * ScreenCoverageWeight +
+		Sample.RecentFrustumFactor * RecentFrustumWeight + Sample.DistanceFactor * DistanceWeight) / WeightSum, 0.0f, 1.0f);
+	return Sample;
+}
 
 /*
  * 多敌人的重要性集中采样与预算分配器。
@@ -164,6 +239,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
 	Candidates.Reset();
 	// 类型迭代只发现本 World 已存在的敌人；晚复制、相关性重建和重连无需额外维护一份客户端注册表。
+	// 多人 GameMode 的 PveEnemies 是人口管理登记，并未覆盖任意脚本/流送后的生成，不能直接代替全部敌人发现。
 	if (bMultiplayerMode)
 	{
 		for (TActorIterator<AfpstrueEnemyCharacter> It(GetWorld()); It; ++It)
@@ -265,13 +341,14 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		ViewportWidth > 0 && ViewportHeight > 0 ? static_cast<float>(ViewportWidth) / static_cast<float>(ViewportHeight) : 16.0f / 9.0f;
 	ViewContext.TimeSeconds = GetWorld()->GetTimeSeconds();
 	const FFPEnemyRenderSignificancePolicy& Policy = ActiveRenderPolicy;
+	const FFPEnemyRenderScoringContext ScoringContext(ViewContext, Policy);
 
 	// 采样阶段不改组件状态，确保所有敌人使用同一帧的观察条件；这也是“统一时钟”的含义。
 	// ★【重要边界】[预算保护] Gameplay 评分控制决策和移动，Render 快照控制表现预算；统一采样时刻不代表共享评分或高层行为。
 	for (FEnemyRenderCandidate& Candidate : Candidates)
 	{
 		AfpstrueEnemyCharacter* Enemy = Candidate.Enemy;
-		Candidate.Sample = Enemy->EvaluateRenderSignificance(ViewContext, Policy);
+		Candidate.Sample = Enemy->EvaluateRenderSignificance(ScoringContext);
 		Enemy->GetRenderBudgetEligibility(Candidate.bShadowEligible, Candidate.bRayTracingEligible);
 		Candidate.PriorityKey.Score = Candidate.Sample.Score;
 		Candidate.PriorityKey.TieBreakId = Enemy->GetUniqueID();
@@ -775,7 +852,6 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
 	if (!RegisteredActorHandles.Contains(EnemyKey) && !PendingActorRegistrations.Contains(EnemyKey))
 	{
-		if (auto* IK = Cast<UfpstrueFootIKAnimInstance>(CharacterMesh->GetPostProcessInstance())) IK->ResetFootPlacement();
 		PendingActorRegistrations.Add(EnemyKey);
 		// ★【重要边界】[回调重入] 注册会同步交付句柄；先登记 pending，等插件调用返回后才能按新资格撤销，不能在句柄回调里反注册。
 		SharingManager->RegisterActorWithSkeleton(
@@ -812,7 +888,6 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 	const bool bWasRegistered = RegisteredActorHandles.Remove(EnemyKey) > 0;
 	if (bWasPending || bWasRegistered)
 	{
-		if (auto* IK = Cast<UfpstrueFootIKAnimInstance>(Enemy->GetMesh()->GetPostProcessInstance())) IK->ResetFootPlacement();
 		// ★【重要边界】[资源所有权] 先移除本地登记再让插件注销；其余敌人的句柄可能同步更新，弱引用和 handle 都不是 Actor 所有权。
 		SharingManager->UnregisterActor(Enemy);
 

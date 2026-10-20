@@ -2,6 +2,7 @@
 
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 #include "Async/Future.h"
+#include "Animation/AnimInstance.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
@@ -13,19 +14,23 @@
 #include "Game/fpstrueGameMode.h"
 #include "Game/fpstrueMultiplayer.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
-#include "Characters/Shared/fpstrueFootIK.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
+#include "Components/ShapeComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/PendingNetGame.h"
+#include "Engine/NetConnection.h"
+#include "Engine/NetDriver.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerStart.h"
 #include "GameFramework/PlayerState.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/GameUserSettings.h"
@@ -38,6 +43,7 @@
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformTLS.h"
 #include "Misc/Paths.h"
+#include "Misc/App.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/FileHelper.h"
@@ -49,6 +55,9 @@
 #include "ProfilingDebugging/CountersTrace.h"
 #include "ProfilingDebugging/MiscTrace.h"
 #include "ProfilingDebugging/TraceAuxiliary.h"
+#include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/SkeletalBodySetup.h"
 #include "UnrealClient.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
@@ -704,11 +713,6 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 
 namespace
 {
-TRACE_DECLARE_INT_COUNTER(FpBaselineIKEvaluations, TEXT("Fpstrue/EnemyIK/EvaluationsPerWorldFrame"));
-TRACE_DECLARE_INT_COUNTER(FpBaselineIKWorldQueries, TEXT("Fpstrue/EnemyIK/WorldQueriesPerWorldFrame"));
-TRACE_DECLARE_INT_COUNTER(FpBaselineIKComponentQueries, TEXT("Fpstrue/EnemyIK/ComponentQueriesPerWorldFrame"));
-TRACE_DECLARE_INT_COUNTER(FpBaselineIKReused, TEXT("Fpstrue/EnemyIK/ReusedFootprintsPerWorldFrame"));
-TRACE_DECLARE_INT_COUNTER(FpBaselineIKFallback, TEXT("Fpstrue/EnemyIK/FallbackFootprintsPerWorldFrame"));
 TRACE_DECLARE_FLOAT_COUNTER(FpBaselineWorldWall, TEXT("Fpstrue/Baseline/WorldTickWallMs"));
 TRACE_DECLARE_INT_COUNTER(FpBaselineGTUser, TEXT("Fpstrue/Baseline/GTUser100nsCumulative"));
 TRACE_DECLARE_INT_COUNTER(FpBaselineGTKernel, TEXT("Fpstrue/Baseline/GTKernel100nsCumulative"));
@@ -736,11 +740,23 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		uint64 Frame;
 		double Elapsed, Interval, WorldTick;
 		bool bWorldTick;
-		FFpstrueFootIKFrameStats EnemyIK;
 	};
 	struct FFrameCpu
 	{
 		FThreadCpuSample PreviousEndCpu, EndCpu, WorldBeginCpu, WorldEndCpu;
+	};
+	struct FConnectionCounters
+	{
+		TWeakObjectPtr<UNetConnection> Connection;
+		uint32 ObjectId = 0, EngineConnectionId = 0;
+		FString ObjectName, RemoteAddress;
+		int64 InBytes = 0, OutBytes = 0, InPackets = 0, OutPackets = 0;
+	};
+	struct FNetworkBoundary
+	{
+		double Seconds = 0;
+		uint64 Qpc = 0;
+		TArray<FConnectionCounters> Connections;
 	};
 	static constexpr int32 MaxFrames = 262144;
 	TWeakObjectPtr<UWorld> World;
@@ -750,12 +766,16 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	TArray<FFrame> Frames;
 	// 原始 OS 样本只在诊断开关开启时分配，不增加普通基线每个 FFrame 的驻留尺寸。
 	TArray<FFrameCpu> CpuFrames;
-	FString Role, ControlPath, Directory, Phase = TEXT("STARTING"), Reason, ViewPolicy = TEXT("Player"), FootIKQueries = TEXT("SharedCandidates");
+	FString Role, ControlPath, Directory, Phase = TEXT("STARTING"), Reason, ViewPolicy = TEXT("Player");
+	FString EnemyReplication = TEXT("Tiered");
+	FString AnimationStartSnapshot = TEXT("null");
+	TWeakObjectPtr<UNetDriver> NetworkDriver;
+	FNetworkBoundary NetworkStart, NetworkStop;
+	uint32 NetworkIdentitySamples = 0;
 	FDelegateHandle StartHandle, EndHandle, FrameHandle;
 	double StartedAt = FPlatformTime::Seconds(), ReadyAt = 0, CaptureAt = 0, StopAt = 0;
 	double LastEndAt = 0, WorldStartAt = 0, LastWorldMs = 0, UnreadableAt = -1, ViewStableAt = 0;
 	uint64 LastWorldFrame = MAX_uint64;
-	FFpstrueFootIKFrameStats LastEnemyIK;
 	FThreadCpuSample PreviousEndCpu, WorldBeginCpu, LastWorldBeginCpu, LastWorldEndCpu;
 	FTraceAnchor CaptureStartAnchor, CaptureStopAnchor;
 	bool bCpuAccounting = false;
@@ -853,6 +873,197 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return TEXT("\"") + Text + TEXT("\"");
 	}
 
+	// 仅在采集边界读取实例与共享资产配置，不在逐帧/人口校验循环遍历 PhysicsAsset。
+	// 这些值描述门禁与实际组件配置，不宣称任何一次动画任务已经派发到 Worker。
+	FString BuildAnimationSnapshot() const
+	{
+		check(IsInGameThread());
+		UWorld* Current = World.Get();
+		int32 Alive = 0, Meshes = 0, MeshTickEnabled = 0, EveryFrameMeshTicks = 0, URO = 0, LeaderFollowers = 0;
+		int32 MainInstances = 0, MainMultithreaded = 0, MainCanParallel = 0, MainRootMotionEverything = 0;
+		int32 PostInstances = 0, PostCanParallel = 0, PostDisabled = 0, SimpleEnemies = 0, FullAuthorityPose = 0;
+		int32 MeshCollisionEnabled = 0, MeshPhysicsStates = 0, ValidMeshBodyInstances = 0, ConstraintEntries = 0;
+		int32 HitProxyComponents = 0, QueryEnabledHitProxies = 0, HitProxyPhysicsStates = 0;
+		int32 GameplayTiers[3] = {}, RenderTiers[3] = {}, VisibilityOptions[5] = {};
+		TMap<const UPhysicsAsset*, int32> AssetReferences;
+		if (Current != nullptr) for (TActorIterator<AfpstrueEnemyCharacter> It(Current); It; ++It)
+		{
+			const AfpstrueEnemyCharacter* Enemy = *It;
+			if (Enemy->IsActorBeingDestroyed() || Enemy->IsDead()) continue;
+			++Alive;
+			SimpleEnemies += Enemy->UsesSimpleHitProxies() ? 1 : 0;
+			FullAuthorityPose += Enemy->RequiresFullAuthorityPose() ? 1 : 0;
+			++GameplayTiers[FMath::Clamp(int32(Enemy->GetGameplaySignificanceTier()), 0, 2)];
+			++RenderTiers[FMath::Clamp(int32(Enemy->GetRenderSignificanceTier()), 0, 2)];
+			// 查询代理与 Mesh 的资产 Body 数是不同口径；组件可不创建 Chaos 物理状态。
+			TInlineComponentArray<UShapeComponent*> Shapes;
+			Enemy->GetComponents(Shapes);
+			for (const UShapeComponent* Shape : Shapes)
+			{
+				if (Shape->GetFName() != TEXT("EnemyHeadHitProxy") && Shape->GetFName() != TEXT("EnemyBodyHitProxy")) continue;
+				++HitProxyComponents;
+				const ECollisionEnabled::Type Collision = Shape->GetCollisionEnabled();
+				QueryEnabledHitProxies += Collision == ECollisionEnabled::QueryOnly || Collision == ECollisionEnabled::QueryAndPhysics ? 1 : 0;
+				HitProxyPhysicsStates += Shape->IsPhysicsStateCreated() ? 1 : 0;
+			}
+			const USkeletalMeshComponent* Mesh = Enemy->GetMesh();
+			if (Mesh == nullptr) continue;
+			++Meshes;
+			MeshTickEnabled += Mesh->IsComponentTickEnabled() ? 1 : 0;
+			EveryFrameMeshTicks += Mesh->IsComponentTickEnabled() && Mesh->GetComponentTickInterval() <= KINDA_SMALL_NUMBER ? 1 : 0;
+			URO += Mesh->bEnableUpdateRateOptimizations ? 1 : 0;
+			LeaderFollowers += Mesh->LeaderPoseComponent.IsValid() ? 1 : 0;
+			PostDisabled += Mesh->GetDisablePostProcessBlueprint() ? 1 : 0;
+			MeshCollisionEnabled += Mesh->GetCollisionEnabled() != ECollisionEnabled::NoCollision ? 1 : 0;
+			MeshPhysicsStates += Mesh->IsPhysicsStateCreated() ? 1 : 0;
+			for (const FBodyInstance* Body : Mesh->Bodies) ValidMeshBodyInstances += Body != nullptr && Body->IsValidBodyInstance() ? 1 : 0;
+			ConstraintEntries += Mesh->Constraints.Num();
+			++VisibilityOptions[FMath::Clamp(int32(Mesh->VisibilityBasedAnimTickOption), 0, 4)];
+			if (const UAnimInstance* Anim = Mesh->GetAnimInstance())
+			{
+				++MainInstances;
+				MainMultithreaded += Anim->bUseMultiThreadedAnimationUpdate ? 1 : 0;
+				MainCanParallel += Anim->CanRunParallelWork() ? 1 : 0;
+				MainRootMotionEverything += Anim->RootMotionMode == ERootMotionMode::RootMotionFromEverything ? 1 : 0;
+			}
+			if (const UAnimInstance* Post = Mesh->GetPostProcessInstance())
+			{
+				++PostInstances;
+				PostCanParallel += Post->CanRunParallelWork() ? 1 : 0;
+			}
+			if (const UPhysicsAsset* Asset = Mesh->GetPhysicsAsset()) ++AssetReferences.FindOrAdd(Asset);
+		}
+		const auto Boolean = [](bool bValue) { return bValue ? TEXT("true") : TEXT("false"); };
+		FString Json = FString::Printf(TEXT("{\"netMode\":%d,\"dedicatedServer\":%s,\"shouldUseThreadingForPerformance\":%s,\"forceUsePerfThreads\":%s,\"oneThread\":%s,\"noPerfThreads\":%s,\"projectAllowsMultithreadedAnimation\":%s,\"enemies\":%d,\"simpleHitProxyEnemies\":%d,\"fullAuthorityPoseEnemies\":%d,\"cvars\":{"),
+			Current != nullptr ? int32(Current->GetNetMode()) : -1, Boolean(IsRunningDedicatedServer()), Boolean(FApp::ShouldUseThreadingForPerformance()),
+			Boolean(FParse::Param(FCommandLine::Get(), TEXT("useperfthreads"))), Boolean(FParse::Param(FCommandLine::Get(), TEXT("onethread"))),
+			Boolean(FParse::Param(FCommandLine::Get(), TEXT("noperfthreads"))), Boolean(GetDefault<UEngine>()->bAllowMultiThreadedAnimationUpdate),
+			Alive, SimpleEnemies, FullAuthorityPose);
+		const TCHAR* Names[] = {TEXT("a.ParallelAnimUpdate"), TEXT("a.ParallelAnimEvaluation"), TEXT("a.ForceParallelAnimUpdate"), TEXT("a.ParallelAnimInterpolation")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Names); ++Index)
+		{
+			if (Index > 0) Json += TEXT(",");
+			const IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(Names[Index]);
+			Json += Quote(Names[Index]) + TEXT(":") + (CVar != nullptr ? FString::FromInt(CVar->GetInt()) : TEXT("null"));
+		}
+		Json += FString::Printf(TEXT("},\"mesh\":{\"count\":%d,\"tickEnabled\":%d,\"everyFrameTick\":%d,\"uroEnabled\":%d,\"leaderPoseFollowers\":%d,\"postProcessDisabled\":%d,\"collisionEnabled\":%d,\"physicsStatesCreated\":%d,\"validBodyInstances\":%d,\"constraintInstanceEntries\":%d,\"gameplayTiers\":[%d,%d,%d],\"renderTiers\":[%d,%d,%d],\"visibilityOptionsByEnum\":[%d,%d,%d,%d,%d]},"),
+			Meshes, MeshTickEnabled, EveryFrameMeshTicks, URO, LeaderFollowers, PostDisabled, MeshCollisionEnabled, MeshPhysicsStates, ValidMeshBodyInstances, ConstraintEntries,
+			GameplayTiers[0], GameplayTiers[1], GameplayTiers[2], RenderTiers[0], RenderTiers[1], RenderTiers[2], VisibilityOptions[0], VisibilityOptions[1], VisibilityOptions[2], VisibilityOptions[3], VisibilityOptions[4]);
+		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"hitProxyComponents\":{\"count\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d},\"physicsAssetConfiguration\":["),
+			MainInstances, MainMultithreaded, MainCanParallel, MainRootMotionEverything, PostInstances, PostCanParallel, HitProxyComponents, QueryEnabledHitProxies, HitProxyPhysicsStates);
+		TArray<const UPhysicsAsset*> Assets;
+		AssetReferences.GetKeys(Assets);
+		Assets.Sort([](const UPhysicsAsset& Left, const UPhysicsAsset& Right) { return Left.GetPathName() < Right.GetPathName(); });
+		for (int32 Index = 0; Index < Assets.Num(); ++Index)
+		{
+			const UPhysicsAsset* Asset = Assets[Index];
+			int32 Bodies = 0, Shapes = 0;
+			for (const USkeletalBodySetup* Body : Asset->SkeletalBodySetups)
+				if (Body != nullptr) { ++Bodies; Shapes += Body->AggGeom.GetElementCount(); }
+			if (Index > 0) Json += TEXT(",");
+			Json += FString::Printf(TEXT("{\"asset\":%s,\"meshReferences\":%d,\"authoredBodies\":%d,\"authoredShapes\":%d,\"authoredConstraints\":%d}"),
+				*Quote(Asset->GetPathName()), AssetReferences.FindChecked(Asset), Bodies, Shapes, Asset->ConstraintSetup.Num());
+		}
+		Json += TEXT("],\"boundary\":\"Two GameThread boundary snapshots outside timed frame capture. Authored PhysicsAsset counts are configuration, not active Chaos shape counts; valid BodyInstance/created-state counts are separate. Eligibility flags do not prove dispatch or worker execution; verify in an independent Trace. No CVar, instance, collision or LOD is changed by this observer.\"}");
+		return Json;
+	}
+
+	// ★ 两个边界才读累计流量；运行中只校验连接身份/状态，不能把重连后的新计数拼接成同一窗口。
+	bool CollectNetworkConnections(TArray<UNetConnection*>& Connections)
+	{
+		UNetDriver* Driver = World.IsValid() ? World->GetNetDriver() : nullptr;
+		if (!Driver || (NetworkDriver.IsValid() && NetworkDriver.Get() != Driver)) return Fail(TEXT("NetworkDriverChanged"));
+		if (Role == TEXT("Server"))
+		{
+			if (Driver->ServerConnection != nullptr || Driver->ClientConnections.Num() != 2) return Fail(TEXT("ExpectedTwoServerConnections"));
+			for (UNetConnection* Connection : Driver->ClientConnections) Connections.Add(Connection);
+		}
+		else
+		{
+			if (!Driver->ServerConnection || !Driver->ClientConnections.IsEmpty()) return Fail(TEXT("ExpectedOneClientServerConnection"));
+			Connections.Add(Driver->ServerConnection);
+		}
+		for (int32 Index = 0; Index < Connections.Num(); ++Index)
+		{
+			UNetConnection* Connection = Connections[Index];
+			if (!IsValid(Connection) || Connection->GetDriver() != Driver || Connection->GetConnectionState() != USOCK_Open
+				|| Connection->GetUChildConnection() || !Connection->Children.IsEmpty() || Connection->IsInternalAck())
+				return Fail(TEXT("NetworkConnectionNotOpenOrNotDedicatedPeer"));
+			for (int32 Previous = 0; Previous < Index; ++Previous)
+				if (Connections[Previous] == Connection) return Fail(TEXT("DuplicateNetworkConnection"));
+		}
+		if (!NetworkStart.Connections.IsEmpty())
+		{
+			if (NetworkStart.Connections.Num() != Connections.Num()) return Fail(TEXT("NetworkConnectionCountChanged"));
+			for (const FConnectionCounters& Initial : NetworkStart.Connections)
+				if (!Initial.Connection.IsValid() || !Connections.Contains(Initial.Connection.Get())) return Fail(TEXT("NetworkConnectionReplaced"));
+		}
+		NetworkDriver = Driver;
+		return true;
+	}
+
+	bool ReadNetworkBoundary(FNetworkBoundary& Boundary)
+	{
+		TArray<UNetConnection*> Connections;
+		if (!CollectNetworkConnections(Connections)) return false;
+		Boundary.Seconds = FPlatformTime::Seconds(); Boundary.Qpc = FPlatformTime::Cycles64();
+		for (UNetConnection* Connection : Connections)
+		{
+			FConnectionCounters Counters;
+			Counters.Connection = Connection; Counters.ObjectId = Connection->GetUniqueID();
+			Counters.EngineConnectionId = Connection->GetConnectionHandle().GetParentConnectionId();
+			Counters.ObjectName = Connection->GetPathName(); Counters.RemoteAddress = Connection->LowLevelGetRemoteAddress(true);
+			Counters.InBytes = Connection->InTotalBytes; Counters.OutBytes = Connection->OutTotalBytes;
+			Counters.InPackets = Connection->InTotalPackets; Counters.OutPackets = Connection->OutTotalPackets;
+			// UE5.5 累计字段为 int32；任何负值/倒退均使本轮无效，不能用无符号转换隐藏回绕或重置。
+			if (Counters.RemoteAddress.IsEmpty() || Counters.InBytes < 0 || Counters.OutBytes < 0 || Counters.InPackets < 0 || Counters.OutPackets < 0)
+				return Fail(TEXT("NetworkCounterNegativeOrAddressMissing"));
+			Boundary.Connections.Add(MoveTemp(Counters));
+		}
+		return true;
+	}
+
+	bool BuildNetworkJson(FString& Json)
+	{
+		const double Duration = NetworkStop.Seconds - NetworkStart.Seconds;
+		if (!NetworkDriver.IsValid() || NetworkStart.Connections.IsEmpty() || NetworkIdentitySamples < 100
+			|| !FMath::IsFinite(Duration) || Duration < 59.8 || Duration > 75
+			|| FMath::Abs(Duration - (StopAt - CaptureAt)) > 0.25) return Fail(TEXT("NetworkCounterWindowInvalid"));
+		Json = FString::Printf(TEXT("{\"valid\":true,\"driverObjectId\":%u,\"driverName\":%s,\"expectedConnections\":%d,\"identitySamples\":%u,\"startSeconds\":%.9f,\"stopSeconds\":%.9f,\"windowSeconds\":%.9f,\"startQpc\":%llu,\"stopQpc\":%llu,\"secondsPerCycle64\":%.17g,\"connections\":["),
+			NetworkDriver->GetUniqueID(), *Quote(NetworkDriver->GetPathName()), Role == TEXT("Server") ? 2 : 1, NetworkIdentitySamples,
+			NetworkStart.Seconds, NetworkStop.Seconds, Duration, NetworkStart.Qpc, NetworkStop.Qpc, FPlatformTime::GetSecondsPerCycle64());
+		int64 Totals[4] = {};
+		for (int32 Index = 0; Index < NetworkStart.Connections.Num(); ++Index)
+		{
+			const FConnectionCounters& Begin = NetworkStart.Connections[Index];
+			const FConnectionCounters* End = NetworkStop.Connections.FindByPredicate([&](const FConnectionCounters& Item) { return Item.Connection == Begin.Connection; });
+			if (!End || Begin.ObjectId != End->ObjectId || Begin.EngineConnectionId != End->EngineConnectionId
+				|| Begin.ObjectName != End->ObjectName || Begin.RemoteAddress != End->RemoteAddress) return Fail(TEXT("NetworkIdentityChangedAtStop"));
+			if (Index > 0) Json += TEXT(",");
+			Json += FString::Printf(TEXT("{\"objectId\":%u,\"engineConnectionId\":%u,\"objectName\":%s,\"remoteAddress\":%s"),
+				Begin.ObjectId, Begin.EngineConnectionId, *Quote(Begin.ObjectName), *Quote(Begin.RemoteAddress));
+			const int64 Starts[] = {Begin.InBytes, Begin.OutBytes, Begin.InPackets, Begin.OutPackets};
+			const int64 Ends[] = {End->InBytes, End->OutBytes, End->InPackets, End->OutPackets};
+			const TCHAR* Names[] = {TEXT("inBytes"), TEXT("outBytes"), TEXT("inPackets"), TEXT("outPackets")};
+			for (int32 Counter = 0; Counter < 4; ++Counter)
+			{
+				if (Ends[Counter] < Starts[Counter] || Ends[Counter] > MAX_int32) return Fail(TEXT("NetworkCounterRegressedOrOverflowed"));
+				const int64 Delta = Ends[Counter] - Starts[Counter]; Totals[Counter] += Delta;
+				Json += FString::Printf(TEXT(",\"%s\":{\"start\":%lld,\"end\":%lld,\"delta\":%lld,\"perSecond\":%.9f}"), Names[Counter], Starts[Counter], Ends[Counter], Delta, double(Delta) / Duration);
+			}
+			Json += TEXT("}");
+		}
+		Json += TEXT("],\"totals\":{");
+		const TCHAR* Names[] = {TEXT("inBytes"), TEXT("outBytes"), TEXT("inPackets"), TEXT("outPackets")};
+		for (int32 Counter = 0; Counter < 4; ++Counter)
+		{
+			if (Counter > 0) Json += TEXT(",");
+			Json += FString::Printf(TEXT("\"%s\":{\"delta\":%lld,\"perSecond\":%.9f}"), Names[Counter], Totals[Counter], double(Totals[Counter]) / Duration);
+		}
+		Json += TEXT("},\"accounting\":\"Selected World's UNetDriver parent connections, direct UNetConnection In/OutTotalBytes and In/OutTotalPackets snapshots once at START and STOP on GameThread; includes connection protocol/ACK and engine PacketOverhead accounting, not NIC capture, payload-only bytes or per-Actor traffic. Roles have independently observed START/STOP boundaries; do not require exact cross-role byte equality. int32 wrap/reset/replaced/disconnected connections invalidate the run; no counter clamping or reconnect concatenation.\"}");
+		return true;
+	}
+
 	static const TCHAR* Configuration()
 	{
 #if UE_BUILD_SHIPPING
@@ -879,11 +1090,12 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	FString CommonJson() const
 	{
 		const double Duration = CaptureAt > 0 ? (StopAt > 0 ? StopAt : FPlatformTime::Seconds()) - CaptureAt : 0;
-		return FString::Printf(TEXT("\"schemaVersion\":1,\"phase\":%s,\"reason\":%s,\"role\":%s,\"pid\":%u,\"enemies\":%d,\"players\":%d,\"width\":%d,\"height\":%d,\"viewLocation\":[%.6f,%.6f,%.6f],\"viewRotation\":[%.6f,%.6f,%.6f],\"frames\":%d,\"captureSeconds\":%.6f,\"buildConfiguration\":%s,\"isShipping\":%s,\"nullRhi\":%s,\"rendered\":%s,\"viewPolicy\":%s,\"fov\":%.6f,\"footIKQueries\":%s"),
+		return FString::Printf(TEXT("\"schemaVersion\":2,\"phase\":%s,\"reason\":%s,\"role\":%s,\"pid\":%u,\"enemies\":%d,\"players\":%d,\"width\":%d,\"height\":%d,\"viewLocation\":[%.6f,%.6f,%.6f],\"viewRotation\":[%.6f,%.6f,%.6f],\"frames\":%d,\"captureSeconds\":%.6f,\"buildConfiguration\":%s,\"isShipping\":%s,\"nullRhi\":%s,\"rendered\":%s,\"viewPolicy\":%s,\"fov\":%.6f,\"enemyReplication\":%s"),
 			*Quote(Phase), *Quote(Reason), *Quote(Role), FPlatformProcess::GetCurrentProcessId(), Enemies, Players, Width, Height,
 			ViewLocation.X, ViewLocation.Y, ViewLocation.Z, ViewRotation.Pitch, ViewRotation.Yaw, ViewRotation.Roll,
 			Frames.Num(), Duration, *Quote(Configuration()), UE_BUILD_SHIPPING ? TEXT("true") : TEXT("false"),
-			GUsingNullRHI ? TEXT("true") : TEXT("false"), bRendered ? TEXT("true") : TEXT("false"), *Quote(ViewPolicy), ViewFOV, *Quote(FootIKQueries));
+			GUsingNullRHI ? TEXT("true") : TEXT("false"), bRendered ? TEXT("true") : TEXT("false"), *Quote(ViewPolicy), ViewFOV,
+			*Quote(EnemyReplication));
 	}
 
 	bool Publish(const TCHAR* NewPhase)
@@ -927,15 +1139,6 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			LastWorldBeginCpu = WorldBeginCpu;
 			LastWorldMs = (FPlatformTime::Seconds() - WorldStartAt) * 1000;
 			LastWorldFrame = GFrameCounter;
-			// Read the selected World's same-frame counter after its animation work.
-			// No evaluation is a valid zero sample, not a reason to discard a frame.
-			LastEnemyIK = UfpstrueFootIKAnimInstance::GetEnemyFrameStats(InWorld);
-			// 一次 World/frame 汇总，不在每条 IK 射线发计数事件；零求值是有效零，不沿用上帧。
-			TRACE_COUNTER_SET(FpBaselineIKEvaluations, LastEnemyIK.Evaluations);
-			TRACE_COUNTER_SET(FpBaselineIKWorldQueries, LastEnemyIK.WorldQueries);
-			TRACE_COUNTER_SET(FpBaselineIKComponentQueries, LastEnemyIK.ComponentQueries);
-			TRACE_COUNTER_SET(FpBaselineIKReused, LastEnemyIK.ReusedFootprints);
-			TRACE_COUNTER_SET(FpBaselineIKFallback, LastEnemyIK.FallbackFootprints);
 			TRACE_COUNTER_SET(FpBaselineWorldWall, LastWorldMs);
 			int64 User = 0, Kernel = 0;
 			const bool bWorldCpu = CpuDifference(LastWorldBeginCpu, LastWorldEndCpu, User, Kernel);
@@ -945,7 +1148,9 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				TRACE_COUNTER_SET(FpBaselineGTUser, int64(LastWorldEndCpu.User100ns));
 				TRACE_COUNTER_SET(FpBaselineGTKernel, int64(LastWorldEndCpu.Kernel100ns));
 				if (bWorldCpu)
+				{
 					TRACE_COUNTER_SET(FpBaselineWorldCpu, double(User + Kernel) * 0.0001);
+				}
 			}
 			WorldStartAt = 0;
 		}
@@ -963,8 +1168,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			const double Interval = (Now - LastEndAt) * 1000;
 			if (!FMath::IsFinite(Interval) || Interval <= 0) { Fail(TEXT("InvalidFrameClock")); return; }
 			const bool bSameWorldFrame = LastWorldFrame == GFrameCounter;
-			Frames.Add({GFrameCounter, Now - CaptureAt, Interval, LastWorldMs, bSameWorldFrame,
-				bSameWorldFrame ? LastEnemyIK : FFpstrueFootIKFrameStats{}});
+			Frames.Add({GFrameCounter, Now - CaptureAt, Interval, LastWorldMs, bSameWorldFrame});
 			if (bCpuAccounting) CpuFrames.Add({PreviousEndCpu, EndCpu,
 				bSameWorldFrame ? LastWorldBeginCpu : FThreadCpuSample{}, bSameWorldFrame ? LastWorldEndCpu : FThreadCpuSample{}});
 		}
@@ -1076,16 +1280,57 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			}
 			else
 			{
-				// Wait for actual possession and a camera update, then freeze that
-				// first-person view. Do not use the high arena overview by default.
+				// 保留真实第一人称组件高度和FOV，但以唯一出生点为锚；不把已被推移Pawn、
+				// SpringArm运行时socket或CameraManager表现缓存的世界位置冻结成不同实验视点。
 				if (Local->GetViewTarget() != Local->GetPawn() || Local->PlayerCameraManager == nullptr ||
 					Local->PlayerCameraManager->GetCameraCacheTime() <= 0) return false;
-				Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
+				const AfpstrueCharacter* Player = Cast<AfpstrueCharacter>(Local->GetPawn());
+				const UCameraComponent* PlayerCamera = Player != nullptr ? Player->GetFirstPersonCameraComponent() : nullptr;
+				const USceneComponent* PawnRoot = Player != nullptr ? Player->GetRootComponent() : nullptr;
+				if (PlayerCamera == nullptr || PawnRoot == nullptr) return Fail(TEXT("PlayerBaselineCameraComponentMissing"));
+				const FName StartTag(*FString::Printf(TEXT("GroupBaseline%s"), *Role));
+				const APlayerStart* PlayerStart = nullptr;
+				for (TActorIterator<APlayerStart> It(Current); It; ++It)
+				{
+					if (It->PlayerStartTag != StartTag) continue;
+					if (PlayerStart != nullptr) return Fail(TEXT("DuplicatePlayerBaselineStart"));
+					PlayerStart = *It;
+				}
+				if (PlayerStart == nullptr) return Fail(TEXT("TaggedPlayerBaselineStartMissing"));
+				// 只累积作者局部变换，不读取会随Pawn移动/相机延迟变化的ComponentToWorld。
+				// 当前第一人称臂长为0；不支持的socket/伸臂配置明确拒绝，不悄悄近似。
+				FTransform CameraRelativeToPawn = FTransform::Identity;
+				TSet<const USceneComponent*> Visited;
+				for (const USceneComponent* Segment = PlayerCamera; Segment != PawnRoot; Segment = Segment->GetAttachParent())
+				{
+					if (Segment == nullptr || Segment->GetOwner() != Player || Visited.Contains(Segment))
+						return Fail(TEXT("PlayerBaselineCameraHierarchyInvalid"));
+					Visited.Add(Segment);
+					if (Segment->IsUsingAbsoluteLocation() || Segment->IsUsingAbsoluteRotation() || Segment->IsUsingAbsoluteScale())
+						return Fail(TEXT("PlayerBaselineAbsoluteCameraUnsupported"));
+					if (const USpringArmComponent* Arm = Cast<USpringArmComponent>(Segment))
+						if (!FMath::IsNearlyZero(Arm->TargetArmLength) || !Arm->SocketOffset.IsNearlyZero() || !Arm->TargetOffset.IsNearlyZero())
+							return Fail(TEXT("PlayerBaselineSpringArmOffsetsUnsupported"));
+					if (!Segment->GetAttachSocketName().IsNone() &&
+						(Cast<USpringArmComponent>(Segment->GetAttachParent()) == nullptr || Segment->GetAttachSocketName() != USpringArmComponent::SocketName))
+						return Fail(TEXT("PlayerBaselineAnimatedSocketUnsupported"));
+					CameraRelativeToPawn = CameraRelativeToPawn * Segment->GetRelativeTransform();
+				}
+				const FTransform StartTransform = PlayerStart->GetActorTransform();
+				const FTransform AnchoredCamera = CameraRelativeToPawn * StartTransform;
+				if (StartTransform.ContainsNaN() || CameraRelativeToPawn.ContainsNaN() || AnchoredCamera.ContainsNaN() ||
+					!ensureMsgf(AnchoredCamera.GetRelativeTransform(StartTransform).Equals(CameraRelativeToPawn, 0.001f),
+						TEXT("Baseline camera must preserve its authored relative transform at the tagged PlayerStart")))
+					return Fail(TEXT("PlayerBaselineCameraTransformInvalid"));
+				ViewLocation = AnchoredCamera.GetLocation();
+				ViewRotation = AnchoredCamera.Rotator();
 				const float PlayerFOV = Local->PlayerCameraManager->GetFOVAngle();
 				if (!FMath::IsFinite(PlayerFOV) || PlayerFOV <= 0 || PlayerFOV >= 180) return Fail(TEXT("PlayerViewFovInvalid"));
 				Camera = Current->SpawnActor<ACameraActor>(ViewLocation, ViewRotation);
 				if (!Camera.IsValid()) return Fail(TEXT("PlayerBaselineCameraSpawnFailed"));
 				Camera->GetCameraComponent()->SetFieldOfView(PlayerFOV);
+				UE_LOG(LogTemp, Display, TEXT("PVP_BASELINE VIEW_ANCHOR role=%s startTag=%s relative=%s location=%s rotation=%s fov=%.3f"),
+					*Role, *StartTag.ToString(), *CameraRelativeToPawn.ToHumanReadableString(), *ViewLocation.ToString(), *ViewRotation.ToString(), PlayerFOV);
 			}
 			Local->SetViewTarget(Camera.Get());
 			return false;
@@ -1119,14 +1364,15 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		bCapturing = false;
 		StopAt = FPlatformTime::Seconds();
 		CaptureStopAnchor = MarkCaptureBoundary(TEXT("STOP"));
+		if (!ReadNetworkBoundary(NetworkStop)) return false;
+		const FString AnimationStopSnapshot = BuildAnimationSnapshot();
+		FString NetworkJson;
+		if (!BuildNetworkJson(NetworkJson)) return false;
 		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueBaseline_FlushArtifacts);
 		if (Frames.Num() < 100 || StopAt - CaptureAt < 59.8 || StopAt - CaptureAt > 75)
 			return Fail(TEXT("CaptureDurationOrSamplesInvalid"));
-		FString Csv(TEXT("Frame,ElapsedSeconds,FrameEndIntervalMs,WorldTickWallMs,WorldTickValid,EnemyIKStatsValid,EnemyIKSolveWallMs,EnemyIKEvaluations,EnemyIKWorldQueries,EnemyIKComponentQueries,EnemyIKReusedFootprints,EnemyIKFallbackFootprints,CpuAccountingEnabled,GTEndCpuValid,GTEndThreadId,GTEndCpuQueryError,GTPreviousEndUser100ns,GTPreviousEndKernel100ns,GTEndUser100ns,GTEndKernel100ns,GTFrameCpuValid,GTFrameUser100nsDelta,GTFrameKernel100nsDelta,GTFrameCpuMs,GTWorldCpuValid,GTWorldBeginUser100ns,GTWorldBeginKernel100ns,GTWorldEndUser100ns,GTWorldEndKernel100ns,GTWorldUser100nsDelta,GTWorldKernel100nsDelta,GTWorldCpuMs\n"));
+		FString Csv(TEXT("Frame,ElapsedSeconds,FrameEndIntervalMs,WorldTickWallMs,WorldTickValid,CpuAccountingEnabled,GTEndCpuValid,GTEndThreadId,GTEndCpuQueryError,GTPreviousEndUser100ns,GTPreviousEndKernel100ns,GTEndUser100ns,GTEndKernel100ns,GTFrameCpuValid,GTFrameUser100nsDelta,GTFrameKernel100nsDelta,GTFrameCpuMs,GTWorldCpuValid,GTWorldBeginUser100ns,GTWorldBeginKernel100ns,GTWorldEndUser100ns,GTWorldEndKernel100ns,GTWorldUser100nsDelta,GTWorldKernel100nsDelta,GTWorldCpuMs\n"));
 		Csv.Reserve(Frames.Num() * (bCpuAccounting ? 400 : 165));
-		int32 IKValidFrames = 0, IKActiveFrames = 0;
-		double IKSolveTotalMs = 0, IKSolveMaxMs = 0;
-		uint64 IKEvaluations = 0, IKWorldQueries = 0, IKComponentQueries = 0, IKReusedFootprints = 0, IKFallbackFootprints = 0;
 		int32 CpuValidFrames = 0, CpuValidWorlds = 0, NegativeFrameCpuDeltas = 0, NegativeWorldCpuDeltas = 0;
 		int64 FrameUser100ns = 0, FrameKernel100ns = 0, WorldUser100ns = 0, WorldKernel100ns = 0;
 		double CpuPairedFrameWallMs = 0, CpuPairedWorldWallMs = 0;
@@ -1135,20 +1381,18 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			const FFrame& Frame = Frames[FrameIndex];
 			const FFrameCpu EmptyCpu;
 			const FFrameCpu& Cpu = CpuFrames.IsValidIndex(FrameIndex) ? CpuFrames[FrameIndex] : EmptyCpu;
-			const FFpstrueFootIKFrameStats& IK = Frame.EnemyIK;
-			if (!FMath::IsFinite(IK.EnemySolveMs) || IK.EnemySolveMs < 0) return Fail(TEXT("InvalidEnemyIKWallClock"));
-			Csv += FString::Printf(TEXT("%llu,%.9f,%.6f,%s,%d,%d,%.6f,%u,%u,%u,%u,%u"), Frame.Frame, Frame.Elapsed, Frame.Interval,
-				Frame.bWorldTick ? *FString::Printf(TEXT("%.6f"), Frame.WorldTick) : TEXT(""), Frame.bWorldTick ? 1 : 0,
-				Frame.bWorldTick ? 1 : 0, IK.EnemySolveMs, IK.Evaluations, IK.WorldQueries, IK.ComponentQueries, IK.ReusedFootprints, IK.FallbackFootprints);
+			Csv += FString::Printf(TEXT("%llu,%.9f,%.6f,%s,%d"), Frame.Frame, Frame.Elapsed, Frame.Interval,
+				Frame.bWorldTick ? *FString::Printf(TEXT("%.6f"), Frame.WorldTick) : TEXT(""), Frame.bWorldTick ? 1 : 0);
 			int64 FrameUser = 0, FrameKernel = 0, WorldUser = 0, WorldKernel = 0;
 			const bool bFrameCpu = CpuDifference(Cpu.PreviousEndCpu, Cpu.EndCpu, FrameUser, FrameKernel);
 			const bool bWorldCpu = Frame.bWorldTick && CpuDifference(Cpu.WorldBeginCpu, Cpu.WorldEndCpu, WorldUser, WorldKernel);
-			Csv += FString::Printf(TEXT(",%d,%d,%u,%u,%s,%s,%s,%s,%d,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s,%s\n"),
+			Csv += FString::Printf(TEXT(",%d,%d,%u,%u,%s,%s,%s,%s,%d,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s,%s"),
 				bCpuAccounting ? 1 : 0, Cpu.EndCpu.bValid ? 1 : 0, Cpu.EndCpu.ThreadId, Cpu.EndCpu.Error,
 				*CpuRaw(Cpu.PreviousEndCpu, true), *CpuRaw(Cpu.PreviousEndCpu, false), *CpuRaw(Cpu.EndCpu, true), *CpuRaw(Cpu.EndCpu, false),
 				bFrameCpu ? 1 : 0, *CpuDelta(bFrameCpu, FrameUser), *CpuDelta(bFrameCpu, FrameKernel), *CpuMs(bFrameCpu, FrameUser, FrameKernel),
 				bWorldCpu ? 1 : 0, *CpuRaw(Cpu.WorldBeginCpu, true), *CpuRaw(Cpu.WorldBeginCpu, false),
 				*CpuRaw(Cpu.WorldEndCpu, true), *CpuRaw(Cpu.WorldEndCpu, false), *CpuDelta(bWorldCpu, WorldUser), *CpuDelta(bWorldCpu, WorldKernel), *CpuMs(bWorldCpu, WorldUser, WorldKernel));
+			Csv += TEXT("\n");
 			if (bFrameCpu)
 			{
 				++CpuValidFrames; FrameUser100ns += FrameUser; FrameKernel100ns += FrameKernel; CpuPairedFrameWallMs += Frame.Interval;
@@ -1159,26 +1403,14 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				++CpuValidWorlds; WorldUser100ns += WorldUser; WorldKernel100ns += WorldKernel; CpuPairedWorldWallMs += Frame.WorldTick;
 				NegativeWorldCpuDeltas += WorldUser < 0 || WorldKernel < 0 ? 1 : 0;
 			}
-			if (Frame.bWorldTick)
-			{
-				++IKValidFrames;
-				IKActiveFrames += IK.Evaluations > 0 ? 1 : 0;
-				IKSolveTotalMs += IK.EnemySolveMs;
-				IKSolveMaxMs = FMath::Max(IKSolveMaxMs, IK.EnemySolveMs);
-				IKEvaluations += IK.Evaluations; IKWorldQueries += IK.WorldQueries; IKComponentQueries += IK.ComponentQueries;
-				IKReusedFootprints += IK.ReusedFootprints; IKFallbackFootprints += IK.FallbackFootprints;
-			}
+
 		}
 		if (!SaveAtomic(TEXT(".frames.csv"), Csv)) return Fail(TEXT("FrameArtifactWriteFailed"));
 		const FPlatformMemoryStats Memory = FPlatformMemory::GetStats();
 		Phase = TEXT("FLUSHED");
 		FString Json = TEXT("{") + CommonJson();
-		// Means include every valid World/frame, including zero-IK frames. Missing
-		// World ticks remain separately visible; never report this as on-core CPU.
-		Json += FString::Printf(TEXT(",\"enemyFootIK\":{\"sampledFrames\":%d,\"validWorldFrames\":%d,\"completeFrameCoverage\":%s,\"framesWithEvaluations\":%d,\"zeroEvaluationFrames\":%d,\"solveWallTotalMs\":%.6f,\"meanSolveWallMsPerFrame\":%.6f,\"maxSolveWallMs\":%.6f,\"evaluations\":%llu,\"worldQueries\":%llu,\"componentQueries\":%llu,\"reusedFootprints\":%llu,\"fallbackFootprints\":%llu,\"timingBoundary\":\"Enemy post-process IK solve wall scope after the main input pose; excludes main AnimBP, includes queries and leg solve, not pure CPU on-core time. Means include valid zero-evaluation frames; missing World frames are not valid zero samples.\"}"),
-			Frames.Num(), IKValidFrames, IKValidFrames == Frames.Num() ? TEXT("true") : TEXT("false"), IKActiveFrames, IKValidFrames - IKActiveFrames,
-			IKSolveTotalMs, IKSolveTotalMs / FMath::Max(1, IKValidFrames), IKSolveMaxMs,
-			IKEvaluations, IKWorldQueries, IKComponentQueries, IKReusedFootprints, IKFallbackFootprints);
+		Json += TEXT(",\"networkConnections\":") + NetworkJson;
+		Json += TEXT(",\"animationDiagnostics\":{\"start\":") + AnimationStartSnapshot + TEXT(",\"stop\":") + AnimationStopSnapshot + TEXT("}");
 		const bool bFrameCpuPresent = CpuValidFrames > 0, bWorldCpuPresent = CpuValidWorlds > 0;
 		const bool bCpuComplete = bCpuAccounting && PLATFORM_WINDOWS && CpuFrames.Num() == Frames.Num() && CpuValidFrames == Frames.Num()
 			&& CpuValidWorlds == Frames.Num() && CpuQueryFailures == 0 && NegativeFrameCpuDeltas == 0 && NegativeWorldCpuDeltas == 0;
@@ -1252,6 +1484,12 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		if (Command == TEXT("EXIT")) return Fail(TEXT("ExitBeforeFlushed"));
 		const bool bWorldReady = SampleWorld();
 		if (bFailed) return false;
+		if (bCapturing)
+		{
+			TArray<UNetConnection*> Connections;
+			if (!CollectNetworkConnections(Connections)) return false;
+			++NetworkIdentitySamples;
+		}
 		const bool bCountsReady = Enemies == 160 && Players == 2;
 		if (Phase != TEXT("STARTING") && (!bWorldReady || !bCountsReady)) return Fail(TEXT("WorldPopulationOrViewChanged"));
 		if (Phase == TEXT("STARTING") && bWorldReady && bCountsReady)
@@ -1266,10 +1504,11 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			if (Command == TEXT("WAIT")) return true;
 			if (Command != TEXT("START") || Phase != TEXT("READY") || Now - ReadyAt < 19.8)
 				return Fail(TEXT("StartBeforeReadyOr20SecondWarmup"));
-			CaptureAt = Now;
+			AnimationStartSnapshot = BuildAnimationSnapshot();
+			CaptureAt = FPlatformTime::Seconds();
+			if (!ReadNetworkBoundary(NetworkStart)) return false;
 			LastEndAt = WorldStartAt = 0;
 			LastWorldFrame = MAX_uint64;
-			LastEnemyIK = {};
 			PreviousEndCpu = WorldBeginCpu = LastWorldBeginCpu = LastWorldEndCpu = {};
 			bCapturing = true;
 			CaptureStartAnchor = MarkCaptureBoundary(TEXT("START"));
@@ -1309,7 +1548,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	Capture->bScreenshotRequested = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineScreenshot"));
 	Capture->bCpuAccounting = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineCpuAccounting"));
 	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineView="), Capture->ViewPolicy);
-	FParse::Value(FCommandLine::Get(), TEXT("EnemyFootIKQueries="), Capture->FootIKQueries);
+	FParse::Value(FCommandLine::Get(), TEXT("EnemyReplication="), Capture->EnemyReplication);
 	FString Root;
 	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRoot="), Root);
 	Root = FPvpBaselineCapture::Canonical(Root.IsEmpty() ? FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling")) : Root);
@@ -1318,7 +1557,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	const bool bPathsValid = Root.Len() > 3 && !Capture->Directory.IsEmpty() && !Capture->Directory.Equals(Root, ESearchCase::IgnoreCase) &&
 		FPaths::IsUnderDirectory(Capture->Directory, Root) && FPaths::IsUnderDirectory(Capture->ControlPath, Capture->Directory);
 	if (!bPathsValid || !bValidRole || (Capture->ViewPolicy != TEXT("Player") && Capture->ViewPolicy != TEXT("Overview")) ||
-		(Capture->FootIKQueries != TEXT("SharedCandidates") && Capture->FootIKQueries != TEXT("Reference")) ||
+		(Capture->EnemyReplication != TEXT("Tiered") && Capture->EnemyReplication != TEXT("Reference")) ||
 		World == nullptr || World->WorldType != EWorldType::Game || GIsEditor || bProcessBenchmarkConsumed ||
 		(bServer ? (World->GetNetMode() != NM_DedicatedServer || UE_BUILD_SHIPPING) : World->GetNetMode() != NM_Client) ||
 		(bServer && Capture->bRendered) || FParse::Param(FCommandLine::Get(), TEXT("PvpProfile")) ||

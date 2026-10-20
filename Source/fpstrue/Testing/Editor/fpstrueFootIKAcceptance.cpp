@@ -3,22 +3,16 @@
 #if WITH_EDITOR && !UE_BUILD_SHIPPING
 #include "Characters/Shared/fpstrueFootIK.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
-#include "Engine/Engine.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
-#include "Misc/Paths.h"
-#include "HAL/FileManager.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "Rendering/SkinWeightVertexBuffer.h"
-#include "UnrealClient.h"
 
 namespace FpstrueFootIKAcceptance
 {
@@ -43,18 +37,12 @@ struct FMeshSample
 	FPlantSample Feet[2];
 	FVertexMotionSample Motion[2];
 	TWeakObjectPtr<UfpstrueFootIKAnimInstance> IKInstance;
-	float LastYaw = 0;
-	bool bHasYaw = false;
 };
 struct FWorldSample
 {
 	TMap<TWeakObjectPtr<USkeletalMeshComponent>, FMeshSample> Meshes;
 	float NextSample = 0;
-	float NextFrame = 0;
-	int32 Frame = 0;
 	bool bStarted = false;
-	FString CaptureDirectory;
-	FString PendingFrame;
 };
 TMap<TWeakObjectPtr<UWorld>, FWorldSample> Worlds;
 
@@ -160,42 +148,15 @@ float MeasureVertexMotion(FVertexMotionSample& Previous, const FFloorSample& Flo
 	return Displacement;
 }
 
-FString PosePhase(ACharacter* Character, const FMeshSample& Previous, float NowYaw)
+FString PosePhase(const AfpstrueCharacter* Character)
 {
 	if (Character->GetCharacterMovement()->IsFalling()) return TEXT("Air");
-	if (const AfpstrueCharacter* Player = Cast<AfpstrueCharacter>(Character))
-	{
-		if (Player->GetBodyFacingState().TurnDirection != 0) return TEXT("Turn");
-	}
-	else if (Previous.bHasYaw && FMath::Abs(FMath::FindDeltaAngleDegrees(Previous.LastYaw, NowYaw)) > 3.0f)
-		return TEXT("Turn");
+	if (Character->GetBodyFacingState().TurnDirection != 0) return TEXT("Turn");
 	const double Speed = Character->GetVelocity().Size2D();
 	return Speed <= 3.0 ? TEXT("Idle") : (Speed > 450.0 ? TEXT("Sprint") : TEXT("Walk"));
 }
 
-// A recently rendered body is not enough: both measured soles must actually
-// project inside this peer's viewport and not be hidden behind map geometry.
-bool FeetVisible(UWorld* World, ACharacter* Character, const FVector Soles[2])
-{
-	APlayerController* Viewer = World->GetFirstPlayerController();
-	if (!Viewer || !Viewer->IsLocalController()) return false;
-	int32 Width = 0, Height = 0; Viewer->GetViewportSize(Width, Height);
-	if (Width <= 0 || Height <= 0) return false;
-	FVector Eye; FRotator View; Viewer->GetPlayerViewPoint(Eye, View);
-	FCollisionQueryParams Query(SCENE_QUERY_STAT(FpstrueFootIKReviewVisibility), true, Character);
-	Query.AddIgnoredActor(Viewer->GetPawn());
-	for (int32 Side = 0; Side < 2; ++Side)
-	{
-		FVector2D Pixel;
-		if (!Viewer->ProjectWorldLocationToScreen(Soles[Side], Pixel, true)
-			|| Pixel.X < 20 || Pixel.Y < 20 || Pixel.X > Width - 20 || Pixel.Y > Height - 20) return false;
-		FHitResult Hit;
-		if (World->LineTraceSingleByChannel(Hit, Eye, Soles[Side] + FVector(0,0,3), ECC_Visibility, Query)) return false;
-	}
-	return true;
-}
-
-void SampleCharacter(UWorld* World, FWorldSample& Session, ACharacter* Character, const TCHAR* Kind)
+void SampleCharacter(UWorld* World, FWorldSample& Session, AfpstrueCharacter* Character, const TCHAR* Kind)
 {
 	USkeletalMeshComponent* Mesh = Character->GetMesh();
 	if (!Mesh) return;
@@ -204,9 +165,7 @@ void SampleCharacter(UWorld* World, FWorldSample& Session, ACharacter* Character
 	auto* IK = Cast<UfpstrueFootIKAnimInstance>(Mesh->GetPostProcessInstance());
 	const float Now = World->GetTimeSeconds();
 	FMeshSample& History = Session.Meshes.FindOrAdd(Mesh);
-	const float Yaw = Character->GetActorRotation().Yaw;
-	const FString Phase = PosePhase(Character, History, Yaw);
-	History.LastYaw = Yaw; History.bHasYaw = true;
+	const FString Phase = PosePhase(Character);
 	if (!IK)
 	{
 		UE_LOG(LogTemp, Display, TEXT("PVP_FOOT_IK_REVIEW MISSING Peer=%s Kind=%s Pawn=%s Phase=%s Time=%.4f PostProcess=%s Leader=%s"),
@@ -222,7 +181,6 @@ void SampleCharacter(UWorld* World, FWorldSample& Session, ACharacter* Character
 	const auto& Debug = IK->GetFootIKDebug();
 	TArray<FMatrix44f> Matrices;
 	Mesh->GetCurrentRefToLocalMatrices(Matrices, 0);
-	FVector MeasuredSoles[2]; bool bMeasuredFeet[2] = {};
 	for (int32 Side = 0; Side < 2; ++Side)
 	{
 		const TArray<int32>& Vertices = Side == 0 ? IK->LeftSoleVertices : IK->RightSoleVertices;
@@ -231,7 +189,6 @@ void SampleCharacter(UWorld* World, FWorldSample& Session, ACharacter* Character
 		TArray<FVector> Positions;
 		const bool bCPU = SkinSole(Mesh, Vertices, Matrices, Positions);
 		const FFloorSample Floor = bCPU ? MeasureFloor(World, Character, Vertices, Positions) : FFloorSample();
-		MeasuredSoles[Side] = Floor.Sole; bMeasuredFeet[Side] = bCPU && Floor.bHit;
 		float PlantAge = 0, SampleDelta = 0; bool bPlantChanged = false; int32 DisplacementVertex = INDEX_NONE;
 		const float Displacement = MeasureVertexMotion(History.Motion[Side], Floor, Vertices, Positions, Now, SampleDelta, DisplacementVertex);
 		const float Slip = MeasurePlant(History.Feet[Side], Floor, bPlanted, PlantRevision, Vertices, Positions, Now, PlantAge, bPlantChanged);
@@ -247,22 +204,8 @@ void SampleCharacter(UWorld* World, FWorldSample& Session, ACharacter* Character
 			Displacement, SampleDelta, DisplacementVertex, *GetNameSafe(Support ? Support->GetOwner() : nullptr),
 			*GetPathNameSafe(Support), Support ? static_cast<int32>(Support->CanCharacterStepUpOn.GetValue()) : INDEX_NONE);
 	}
-	// Facing already owns its >=40 consecutive PNGs. Never contend with its
-	// FScreenshotRequest or compress duplicate waiting/idle frames a second time.
-	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpFacingReview"))
-		&& FParse::Param(FCommandLine::Get(), TEXT("PvpNormalFullGameplay")) && FCString::Strcmp(Kind, TEXT("Enemy")) == 0
-		&& Session.Frame < 20 && Now >= Session.NextFrame && bMeasuredFeet[0] && bMeasuredFeet[1]
-		&& Mesh->WasRecentlyRendered(0.2f) && FeetVisible(World, Character, MeasuredSoles)
-		&& !Session.CaptureDirectory.IsEmpty() && !FScreenshotRequest::IsScreenshotRequested()
-		&& World->GetNetMode() != NM_DedicatedServer && GEngine && GEngine->GameViewport)
-	{
-		Session.NextFrame = Now + 1.0f;
-		const TCHAR* Motion = Character->GetVelocity().Size2D() > 3.0 ? TEXT("Moving") : TEXT("Standing");
-		Session.PendingFrame = Session.CaptureDirectory / FString::Printf(TEXT("FootIK_%05d_%s_%s_%s.png"), ++Session.Frame, Kind, *Phase, Motion);
-		FScreenshotRequest::RequestScreenshot(Session.PendingFrame, false, false);
-		UE_LOG(LogTemp, Display, TEXT("PVP_FOOT_IK_REVIEW FRAME_REQUEST Kind=%s Phase=%s Motion=%s Time=%.4f FeetInViewport=1 FeetUnoccluded=1 LimitHz=1 LimitFrames=20 File=%s"),
-			Kind, *Phase, Motion, Now, *Session.PendingFrame);
-	}
+	// Player Facing screenshots remain owned by the ordinary rendered acceptance driver.
+
 }
 
 void Tick(UWorld* World, ELevelTick, float)
@@ -274,39 +217,18 @@ void Tick(UWorld* World, ELevelTick, float)
 	if (!Session.bStarted)
 	{
 		Session.bStarted = true;
-		FString Base;
-		if (FParse::Value(FCommandLine::Get(), TEXT("PvpSmokeCaptureDir="), Base))
-		{
-			Session.CaptureDirectory = Base / TEXT("FootIK");
-			IFileManager::Get().MakeDirectory(*Session.CaptureDirectory, true);
-		}
 		UE_LOG(LogTemp, Display, TEXT("PVP_FOOT_IK_REVIEW BEGIN SampleHz=10 CpuSubsetOnly=1 ActualFloorQueries=1 NoGameplayMutation=1 MorphClothExcluded=1"));
-	}
-	if (!Session.PendingFrame.IsEmpty() && IFileManager::Get().FileSize(*Session.PendingFrame) > 0)
-	{
-		UE_LOG(LogTemp, Display, TEXT("PVP_FOOT_IK_REVIEW FRAME_SAVED File=%s"), *Session.PendingFrame);
-		Session.PendingFrame.Reset();
 	}
 	if (Now < Session.NextSample) return;
 	Session.NextSample = Now + 0.1f;
-	AfpstrueCharacter* Local = nullptr;
 	TArray<AfpstrueCharacter*, TInlineAllocator<2>> Players;
 	for (TActorIterator<AfpstrueCharacter> It(World); It; ++It)
 	{
 		if (It->IsDead()) continue;
-		if (It->IsLocallyControlled()) Local = *It;
 		Players.Add(*It);
 	}
-	// Functional one-enemy pass samples real nearby AI. Never CPU-skin a crowd.
-	TArray<AfpstrueEnemyCharacter*, TInlineAllocator<4>> Nearby;
-	for (TActorIterator<AfpstrueEnemyCharacter> It(World); It; ++It)
-		if (!It->IsDead() && Local && FVector::DistSquared(It->GetActorLocation(), Local->GetActorLocation()) <= FMath::Square(3000.0f))
-			Nearby.Add(*It);
-	Nearby.Sort([Local](const AfpstrueEnemyCharacter& A, const AfpstrueEnemyCharacter& B)
-		{ return FVector::DistSquared(A.GetActorLocation(), Local->GetActorLocation()) < FVector::DistSquared(B.GetActorLocation(), Local->GetActorLocation()); });
 	for (AfpstrueCharacter* Player : Players)
 		SampleCharacter(World, Session, Player, Player->IsLocallyControlled() ? TEXT("LocalPlayer") : TEXT("RemotePlayer"));
-	for (int32 Index = 0; Index < FMath::Min(2, Nearby.Num()); ++Index) SampleCharacter(World, Session, Nearby[Index], TEXT("Enemy"));
 }
 
 void Cleanup(UWorld* World, bool, bool) { Worlds.Remove(World); }

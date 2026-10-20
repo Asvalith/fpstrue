@@ -57,6 +57,10 @@ public:
 	void InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager);
 	// 主动离开/恢复期限结束可立即撤销目标；死亡和 EndPlay 也会通过绑定进入同一清理。
 	void NotifyCombatTargetUnavailable(AfpstrueCharacter* UnavailableTarget);
+	// 仅从服务器已接受的真实开火事务调用；一次事件交给原生 Hearing 分发，不逐敌人同步查询/寻路。
+	// 事件坐标由服务器提供，客户端预测、拒绝的射击与纯表现重播不得调用。
+	static bool ReportAuthoritativeGunshot(AfpstrueCharacter* Source, const FVector& NoiseLocation,
+		float Loudness = 1.0f, float MaxRange = 4500.0f);
 
 	// Benchmark 消融入口：单独关闭 PathFollowingComponent Tick。
 	void ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick);
@@ -147,6 +151,20 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0"))
 	float TargetMemorySeconds = 5.0f;
 
+	// 枪声只能授予有界的位置调查，不能授予可见目标/攻击资格；同一轮连续开火不延长硬期限。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.1"))
+	float NoiseInvestigationSeconds = 4.0f;
+
+	// 短时间内只合并记忆，不反复唤醒树；路径仍复用统一去重、失败退避及群体请求预算。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.1"))
+	float NoiseMergeInterval = 0.5f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0"))
+	float NoiseMergeDistance = 150.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.1"))
+	float NoiseInvestigationCooldown = 1.5f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float LowHealthRetreatThreshold = 0.3f;
 
@@ -169,6 +187,7 @@ private:
 	friend class FFpstrueMultiplayerPveAuthorityTest;
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	friend class FFPEnemyIdleSearchSightTest;
+	friend class FFPEnemyHearingInvestigationTest;
 	enum class ECommandPhase : uint8 { Stopped, Accepting, ChangingContext, Stopping };
 	enum class EMoveGoalResult : uint8
 	{
@@ -210,6 +229,10 @@ private:
 	void HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus);
 	// 只在需要换目标时遍历感知组件已有的可见玩家缓存，不逐敌人扫描整个世界。
 	void SelectPerceivedTarget();
+	// 只读取事件携带的位置；不能通过声源 Actor 或其 SurroundManager 读取隐藏玩家的实时位置。
+	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
+	// 到位、不可达、过期统一结束声音调查；保留注入身份以便单机 Sight 日后重新发现。
+	void FinishNoiseInvestigation(bool bApplyCooldown = true);
 	UFUNCTION() void HandleCombatTargetDied(AfpstrueCharacter* DeadTarget);
 	UFUNCTION() void HandleCombatTargetEndPlay(AActor* EndingTarget, EEndPlayReason::Type EndPlayReason);
 
@@ -279,6 +302,9 @@ private:
 	bool bUsesMultiplayerTargets = false;
 	bool bIdleSearchActive = false;
 	float IdleSearchSavedYawRate = 0.0f;
+	bool bInvestigatingNoise = false;
+	double LastAcceptedNoiseTime = -TNumericLimits<double>::Max();
+	double NextNoiseInvestigationTime = 0.0;
 
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;

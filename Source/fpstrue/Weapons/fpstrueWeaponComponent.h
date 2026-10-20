@@ -490,6 +490,8 @@ private:
 		FFPShotRequest Request;
 		bool bAimingAtAdmission = false;
 		int32 PresentationKey = 0;
+		// 同进程单调时钟只测准入后的等待，不能与客户端时钟相减来估计网络单向延迟。
+		double AdmissionMonotonicSeconds = 0.0;
 	};
 	TArray<FPendingNetworkShot, TInlineAllocator<MaxQueuedNetworkShots>> PendingNetworkShots;
 	uint32 LastProcessedShotId = 0;

@@ -331,3 +331,186 @@ Frame 平均节省 0.676 ms、P95 节省 0.719 ms。Draw Calls 未得到实质�
 | 可选深挖，不是重跑旧实验 | 查询对应 GPU Pass 的精确生产链 | 现有 Trace 缺 query/payload/fence 到 Pass 的直接关联 |
 
 **后续只做新的判定，不重做已经得到答案的测试。** 若以 60 FPS 交付为目标，先对当前配置做动态镜头和正常玩法回归，再针对零敌人也存在的场景绘制、阴影与 GPU 大项做单变量 A/B。若要回答“具体哪个 Pass 让历史查询结果晚到”，需补同一 query 的提交、GPU 队列和 fence 关联证据；不能从当前帧最大的 GPU Pass 猜测。实验通过条件始终是整帧与尾帧、消费者计数、画质/玩法和运行完整性同时成立。
+
+## 2026-10-20：联网 160 AI 命中代理候选、线程对照与验收边界
+
+**状态：查询响应修正后的 Simple B3 已完成 Editor／Shipping 客户端各三轮，共六个有效 case，作为本轮当前基线；Reference 命中体内部的线程 A/B 另有三轮、共六个有效 case。Simple B2 后续发现查询响应遗漏及 Sight 遮挡回归，全部降为 `PreQueryResponseFix` 修正前诊断，不作为最终验收或等价收益。修后正常本地双渲染及硬断恢复通过，但视觉质量尚未完整验收；弱网旧失败未重跑，不能宣称弱网闭环通过。** 原始报告的 `Valid=true` 表示采集协议通过，不抹去数据，也不等于候选玩法语义正确。各批次独立保留，不拼接历史单机、旧视点协议或修正前 Simple 数字。
+
+### 实现及正确性边界
+
+- 活体敌人改为根组件驱动的“头部球体＋身体胶囊”两个 `QueryOnly` 命中代理；不读取全身骨骼位置。头／身体射线分别归一为 `head`／`spine_03`，沿用爆头、伤害上下文及死亡冲量入口。近远距离使用一致几何规则，玩家 PvP 历史形状回溯保持原样。
+- 这是**统一的近似命中模型**，不再精确匹配挥动四肢、低头等动画轮廓；“保留爆头身份”不等于与旧骨骼几何完全等价。没有用散布或距离掩盖这项玩法取舍，也没有新增敌人历史姿态回溯。
+- 修正前 Simple B2 采集边界均确认服务器 160 个敌人共 **320 个启用查询的代理**，旧活体 Mesh 的物理状态／有效 BodyInstance 均为 **0**；客户端代理启用查询数为 **0**。保留完整 PhysicsAsset 资产供死亡恢复，而不是同时维护新旧两套活体形状。Reference 配置快照保留 **2880 个有效骨骼 BodyInstance（160×18）**、代理查询数为 0；此处只比较实际配置数量，不据此推算时间节省比例。减少 Body 不代表已保留原 Mesh 的其他查询响应，正是本轮后续审计发现的缺口。
+- Simple 候选不再一律为了被射击而刷新完整姿态；需要的攻击、受击及 Root Motion 保护仍保留，死亡前补求值并恢复原 PhysicsAsset 布娃娃。客户端表现预算不决定服务器命中几何。修正前 Simple B2 的服务器边界快照均为 Gameplay Full 160／Reduced 0／Background 0，**不能用这批成绩证明中远档降频收益**；完整姿态保护资格是边界状态，不是全窗口实际求值次数。
+- Simple B2 专用服务器显式使用 `-useperfthreads`；Reference 命中体内部线程 A/B 另比较是否添加该参数。快照记录项目／实例并行资格及 CVars，但**资格为真不等于已经证明 Worker 实际派发或关键路径收益**。相机坐标轴、FOV 系数和评分公共因子每轮复用，原评分与 Top-K 规则保持。
+
+### 保留真实失败，修复线程安全边界
+
+**另一个真实反例：查询几何简化不能静默删掉查询通道。** B2 中 Reference 的追击数量范围为 19–51，而修正前 Simple 为 143–152。实际 `enemy_BP.uasset`（SHA256 `DE84B167E871D24AA416AAE4FBE18E9F2125D1844949744D80F5FD260783F08D`）的 Mesh 保存的是 Custom 响应，仅把 Pawn／Vehicle 设为 Ignore，其余默认 Block，因此 Visibility／Camera 实际为 Block；根胶囊则显式忽略 Visibility／Camera。原生 Sight 使用复杂 Visibility 射线，近战遮挡也使用该通道。仅启用 WeaponTrace 的新代理意外让敌人失去原有查询遮挡，这是功能回归，不是性能收益。活动差异不能全部按这条原因定量归属，但已经足以否定“相同感知条件”的假设。
+
+修复保持两个简化形状、不重建旧活体 Mesh 物理：在退出旧 Mesh 物理前按值复制原查询响应容器和 ObjectType，保留既有 Pawn 忽略／WeaponTrace 阻挡契约，其余通道继承作者配置。客户端代理仍 NoCollision，Overlap 事件／导航影响／模拟仍关闭。扩展既有 `SimpleHitProxyLifecycle`，用真实复杂 Visibility 射线验证另一个 AI 能遮挡、作者 Ignore 时不误遮挡，并核对 Camera Overlap 等自定义响应及实际蓝图。**恢复通道语义不意味着两种几何的轮廓或逐帧感知结果完全等价**。修后完整回归 `Automation_QueryResponse` 再次为 92 通过（79 clean＋13 warned，0 failed／notRun），不是沿用修前报告。
+
+首次启用服务端性能线程后，正常联网试跑在玩家 FootIK 的世界查询处触发 `IsInGameThread()` 断言，证据保留于 [失败服务器日志](/E:/ueprojrct/fpstrue_safe2/Saved/Networking/PvpSmoke_20261020_101650_737c5fce/Server.log)。原因是引擎可以在 `Proxy::PreUpdate` 前读取并行资格，不能依赖上一轮贴地状态动态切换门禁。
+
+修复为玩家 FootIK `CanRunParallelWork()` 始终返回 false，地面资格只控制是否查询、不再控制线程许可；初始化、空中、落地前及死亡阶段都保持同一同步契约。该约束会使安装后处理的玩家身体同步求值，但不修改敌人或全局并行开关。未初始化实例测试使用合法的 `USkeletalMeshComponent` Outer。失败试跑不删除，也不计为通过样本。
+
+### 功能与联网验收
+
+| 验收 | 实际结果 | 不能据此宣称 |
+| --- | --- | --- |
+| 通道修正前冻结代码自动化回归 | **92 项通过：79 clean、13 warned、0 failed、0 notRun** | 不是 92 个公网／画面场景，也不是无告警；没有覆盖后来发现的查询响应回归 |
+| 通道修正后完整自动化回归 `Automation_QueryResponse` | **92 项通过：79 clean、13 warned、0 failed、0 notRun**；扩展的 `SimpleHitProxyLifecycle` 与 `SightOcclusionAndFacing` 均成功 | 覆盖真实 complex Visibility 射线与查询响应，不证明两种命中几何轮廓完全等价，也不是画面验收 |
+| 先前正常本地双客户端、PvE 与硬断恢复 | 通过；Client1 34 次预测对应 34 次 Accepted，缺失终结 ACK／重复表现／意外拒绝均为 0；硬停客户端进程后重启恢复 | 此轮客户端为 NullRHI；没有验证渲染画面恢复，也不是自动断线重试验收；Accepted 不等于每发都几何命中 |
+| 修后正常本地双渲染、PvE 与硬断恢复 `112023_d4535a13` | **StrictExperience 通过**；主动端为 **Client2**，34 次预测／34 次 Accepted，缺失终结 ACK／重复表现／意外拒绝均为 0；`RenderedRecoveryVerified=true` | Client1 为观察端而非第二个完成 34 发的主动端；不是双端对称操作、自动重试、公网或弱网验收；`VisualQualityReviewed=false` |
+| 弱网双渲染旧样本 | **失败，修后尚未重跑**；出方向 100±20 ms、2% 丢包，首发在准入处因 `AgeMs=645.522 > AllowedAgeMs=300.000` 被拒绝，随后等待证据超时 | 后续战斗、死亡、重连及渲染恢复未被完整覆盖，不能把“拒绝有 ACK”算作弱网玩法通过，也不能用新的正常网络通过覆盖旧失败 |
+
+修后正常双渲染使用 Development Editor 专服＋两个 D3D12 offscreen 客户端，工业玩法图，未注入延迟或丢包。硬停 Client2 后重启，同一 Pawn／PlayerState 网络身份保留；离线保留时血量 **90**，恢复时为 **80**，没有回滚离线受伤；弹药 **27**、Kills 1／Deaths 0 保留。恢复 PNG 已生成，场景、持枪视模、HUD 27／59 与敌人可见，但截图仍显示 **Preparing Shaders (9)**，敌人材质暂呈灰色。因此这是渲染恢复证据，不是完整视觉预热就绪或连续移动／射击／换弹动画质量通过。Client2 预测至终结 ACK 的同客户端单调时钟 P50／P95／Max 为 **51.807／79.383／251.618 ms**，不是网络 RTT，也不是隔离出的传输耗时。
+
+证据：[冻结回归索引](/C:/UEBuild/FPSAcceptance_20261020/Automation_Frozen/index.json)、[修后完整回归索引](/C:/UEBuild/FPSAcceptance_20261020/Automation_QueryResponse/index.json)、[先前 NullRHI 正常联网报告](/E:/ueprojrct/fpstrue_safe2/Saved/Networking/PvpSmoke_20261020_102428_709f075a/Report.json)、[修后正常双渲染报告](/E:/ueprojrct/fpstrue_safe2/Saved/Networking/PvpSmoke_20261020_112023_d4535a13/Report.json)、[恢复画面](/E:/ueprojrct/fpstrue_safe2/Saved/Networking/PvpSmoke_20261020_112023_d4535a13/Visual/Client2Resume/restored.png)、[弱网双渲染失败报告](/E:/ueprojrct/fpstrue_safe2/Saved/Networking/PvpSmoke_20261020_103025_9bae05a8/Report.json)。延迟注入值是配置方向口径，不直接当作测得 RTT；本轮没有扩大服务器允许年龄以放过失败样本。
+
+### 修正前 Simple B2：PreQueryResponseFix，保留数据而非最终基线
+
+**以下两张帧时表与网络表全部属于 `PreQueryResponseFix`。** `Simple160Final_20261020_B2` 名称保留原样，但文件名中的 Final 不赋予最终验收资格。该版代理只保留 WeaponTrace 响应，遗漏原 Mesh 的其他查询响应；Sight 遮挡与 AI 活动分布发生变化，不能把它与 Reference 的差值全部算作动画／物理等价优化收益。
+
+该批使用扁平的 `EnemyUI160_ArenaOverview55x192`，160 AI、两个连接、种子 1337、20 秒预热及至少 60 秒采集；仅 Client1 DX12 渲染，Client2 和服务器为 NullRHI。输出 1600×900，Scalability 各级 2、ScreenPercentage 87、FOV 90、VSync Off、`t.MaxFPS=0`；保留当前引擎特性默认值。本地三个进程竞争同一台机器资源，不是三台独立硬件。
+
+地图重建后为两个客户端指定不同的作者 `PlayerStartTag`，并保留地图作者相机；B2 实际使用 **Player** 视点，而非俯视相机，六轮 Client1 位置／旋转均为 `(-350,-900,164)`／`(0,90,0)`。旧 `AnimationThreads160_AB_20261020` 第三个 case 因 `Camera changed between repeated/build cases` 作废，前两个旧 case 也不与 B2 拼接成完整对照；不从旧协议提取均值补新表。
+
+下面的客户端数值为 `OnEndFrame` 间隔，含整条本地执行与节拍影响，**不是纯 CPU 执行时间**。服务器 World 列为该 World Tick 的墙钟范围，包含依赖与等待，不是 on-core 时间、不是完整服务器帧间隔，也不能用 `1000/World` 推导服务器 FPS／承载能力。Editor 与 Shipping 行只切换客户端构建，**服务器始终是同一个 Development Editor 专用服务器，不是 Shipping Server**。各轮 `Valid=true`，进程自然退出；本轮无性能 Trace。
+
+#### PreQueryResponseFix：Editor 客户端，三轮独立结果
+
+| 轮次 | 客户端平均帧间隔 / ms | 客户端 P95 / ms | 客户端 P99 / ms | 客户端 ＞16.667 ms / % | 服务器 World 均值 / ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R1 | 18.928 | 25.775 | 29.949 | 71.962 | 11.500 |
+| R2 | 20.451 | 28.249 | 31.570 | 83.526 | 11.732 |
+| R3 | 18.377 | 23.462 | 27.958 | 70.894 | 11.341 |
+| 三轮等权均值 | **19.252** | **25.828** | **29.826** | **75.461** | **11.524** |
+
+#### PreQueryResponseFix：Shipping 客户端，三轮独立结果
+
+| 轮次 | 客户端平均帧间隔 / ms | 客户端 P95 / ms | 客户端 P99 / ms | 客户端 ＞16.667 ms / % | 服务器 World 均值 / ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R1 | 10.346 | 14.970 | 18.671 | 2.510 | 11.725 |
+| R2 | 10.790 | 15.605 | 19.377 | 3.432 | 11.912 |
+| R3 | 11.899 | 17.929 | 21.398 | 8.518 | 11.826 |
+| 三轮等权均值 | **11.012** | **16.168** | **19.815** | **4.820** | **11.821** |
+
+均值行的 P95／P99 是**各轮分位数的算术平均**，不是合并六轮或三轮全部帧后重新计算的分位数。Shipping R3 的 P95 已超过 16.667 ms，不能宣称锁定 60 FPS。该批画质、视点和人口门禁一致，但查询响应回归使其不能作为最终玩法验收或等价优化基线；不与 9 月单机成绩或 10 月旧协议直接相减。服务器完整 FrameEnd 的三轮均值另为 Editor 客户端组 **46.395 ms**、Shipping 客户端组 **46.419 ms**，不可用上表约 11.5～11.8 ms 的 World 范围代替。
+
+### PreQueryResponseFix：同窗口网络计量
+
+| 客户端构建 | 服务器总出方向 / B/s | 服务器总出包 / packet/s | Client1 入方向 / B/s |
+| --- | ---: | ---: | ---: |
+| Editor 三轮等权均值 | 23735.128 | 43.554 | 11867.804 |
+| Shipping 三轮等权均值 | 22183.231 | 43.083 | 11094.123 |
+
+这些是各轮独立 START／STOP 的 `UNetConnection` 累计差值速率，服务器总量包含两个连接及引擎协议／ACK／PacketOverhead 计量，不是 NIC 抓包、纯 AI Payload 或每 Actor 带宽；各端窗口独立，不能强求跨端字节完全相等。仍使用 Tiered 复制策略，并保持 160 AI 相关性，未借裁剪客户端副本数量换成绩。该版 Editor 三轮追击人口范围 **143～152**、攻击 **8～17**、移动 **11～73**；Shipping 三轮追击 **144～152**、攻击 **8～16**、移动 **16～55**，始终 160 个控制器。活动分布明显不同于下述 Reference 命中体，因此低流量也不能单独解释为网络调度收益；不是 160 个单位同时攻击的容量证明。
+
+### Reference 命中体内部线程 A/B：B2 三轮、六个 case 门禁通过
+
+`AnimationThreads160_AB_20261020_B2` 始终固定 `EnemyHitProxies=Reference` 与 `EnemyReplication=Tiered`，服务器和两个客户端均为 Development Editor。唯一显式线程条件是服务器是否增加 `-useperfthreads`：Reference 不加，Parallel 增加；不强制改动画 CVars、实例标志或命中几何。顺序为 R1 Reference→Parallel、R2 Parallel→Reference、R3 Reference→Parallel。沿用新版作者出生点相对相机协议、160 AI、两个玩家、种子 1337、20 秒预热及完整采集窗口，各角色自然 exit0，六个 case 均 `Valid=true`，无强杀。
+
+| 轮次 | 服务器线程模式 | 服务器 World 均值 / ms | 服务器 FrameEnd 均值 / ms | Client1 FrameEnd 均值 / ms | 服务器总出方向 / B/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| R1 | Reference | 47.998 | 48.569 | 20.908 | 58261.455 |
+| R1 | Parallel | 41.687 | 42.227 | 21.487 | 59428.287 |
+| R2 | Parallel | 42.807 | 43.367 | 21.677 | 56072.112 |
+| R2 | Reference | 44.454 | 44.990 | 21.066 | 57937.860 |
+| R3 | Reference | 45.699 | 46.256 | 21.903 | 57601.146 |
+| R3 | Parallel | 40.914 | 41.453 | 20.657 | 59278.955 |
+| 三轮等权均值 | **Reference** | **46.050** | **46.605** | **21.292** | **57933.487** |
+| 三轮等权均值 | **Parallel** | **41.803** | **42.349** | **21.274** | **58259.785** |
+
+服务器 World 三轮范围为 Reference **44.454～47.998 ms**、Parallel **40.914～42.807 ms**；完整 FrameEnd 范围分别为 **44.990～48.569 ms**、**41.453～43.367 ms**。World 观察均值差 **4.247 ms**，各轮方向相同；客户端 FrameEnd 均值仅差约 **0.019 ms**，不能把服务端改进包装成客户端帧率收益。上述 World 仍是墙钟范围而非 on-core 时间，FrameEnd 包含等待与节拍，两者不互相替代。
+
+| 活动与配置 | Reference 线程组 | Parallel 线程组 |
+| --- | --- | --- |
+| 控制器与存活敌人数 | 全窗口均为 160 | 全窗口均为 160 |
+| 追击人口范围 | 19～51 | 20～46 |
+| 攻击人口范围 | 4～17 | 5～16 |
+| 移动人口范围（速度＞5 cm/s） | 0～36 | 0～22 |
+| 各边界有效骨骼 BodyInstance | 2880 | 2880 |
+| 各边界启用的简化命中代理 | 0 | 0 |
+| 各边界完整权威姿态资格 | 160 | 160 |
+| `FApp::ShouldUseThreadingForPerformance()` | false | true |
+
+六轮 Client1 视点签名相同：位置 `(-350,-900,164)`、旋转 `(0,90,0)`、FOV 90；画质签名唯一，输出 1600×900、High 2、ScreenPercentage 87。各轮输入指纹门禁通过，但真实追击／攻击／移动人口不是逐帧完全一致。**这是同 Reference 命中方案中的线程门禁对照，不把全部差值归因于动画 Worker 执行，更不与有查询响应回归的 Simple B2 相减。** `-useperfthreads` 影响性能线程门禁，不只对应一段动画函数；实例资格和 FApp 读回不等于实际 Worker 派发证明。
+
+网络均值分别为 Reference **83.918 packet/s**、Client1 入方向 **28967.896 B/s**，Parallel **86.119 packet/s**、Client1 入方向 **29133.994 B/s**。均属引擎连接计量，不作为独立网络优化结论。
+
+### 查询响应修正后 Simple B3：当前联网 160 AI 基线
+
+`Simple160Final_20261020_B3` 使用修正后构建及独立新 Stage，未复用 B2 的结果。六个 case 均 `Valid=true`，18 个角色进程全部自然 exit0、无强制终止。顺序为 R1 Editor→Shipping、R2 Shipping→Editor、R3 Editor→Shipping；固定 `EnemyHitProxies=Simple`、`EnemyReplication=Tiered`，仅服务器增加 `-useperfthreads`。**Editor／Shipping 标签只区分客户端，服务器始终是同一 Development Editor 专用服务器，不是 Shipping Server 容量测试。**
+
+人口／地图／视点协议与线程 A/B B2 相同：扁平 `EnemyUI160_ArenaOverview55x192`、160 AI、2 个玩家、种子 1337、20 秒预热和至少 60 秒采集。Client1 为唯一 DX12 渲染端，Client2 与服务器 NullRHI；本机三个进程共享硬件。六轮视点签名唯一：位置 `(-350,-900,164)`、旋转 `(0,90,0)`、FOV 90；输出 1600×900、各 Scalability 2、ScreenPercentage 87、VSync Off、`t.MaxFPS=0`，无动态分辨率。不把正常双渲染 smoke 的截图或开销混入这组性能数据。
+
+| 客户端／轮次 | 客户端 FrameEnd 均值 / ms | 客户端 P95 / ms | 客户端 P99 / ms | 客户端 ＞16.667 ms / % | 服务器 World 均值 / ms | 服务器 FrameEnd 均值 / ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Editor R1 | 15.769 | 26.118 | 30.511 | 45.489 | 10.924 | 41.296 |
+| Editor R2 | 21.774 | 29.174 | 33.403 | 91.597 | 11.863 | 46.578 |
+| Editor R3 | 21.439 | 28.609 | 33.113 | 91.962 | 12.813 | 46.448 |
+| **Editor 三轮等权均值** | **19.660** | **27.967** | **32.342** | **76.350** | **11.867** | **44.774** |
+| Shipping R1 | 11.240 | 17.302 | 20.838 | 6.796 | 12.116 | 44.631 |
+| Shipping R2 | 11.481 | 16.678 | 19.331 | 5.032 | 13.132 | 46.436 |
+| Shipping R3 | 8.780 | 13.641 | 17.165 | 1.294 | 10.458 | 40.098 |
+| **Shipping 三轮等权均值** | **10.500** | **15.874** | **19.111** | **4.374** | **11.902** | **43.722** |
+
+均值行 P95／P99 仍为各轮分位数的算术平均，不是合并帧后的分位数。Editor 客户端三轮均值范围 **15.769～21.774 ms**，Shipping **8.780～11.481 ms**，存在明显轮间波动，不能只取最好一轮或宣称稳定 60 FPS；Shipping R1／R2 的 P95 仍超过 16.667 ms，三轮 P99 全部超过。服务器 World 范围分别为 Editor 组 **10.924～12.813 ms**、Shipping 组 **10.458～13.132 ms**；完整 FrameEnd 范围分别为 **41.296～46.578 ms**、**40.098～46.436 ms**。World 是含依赖等待的选定 World Tick 墙钟范围，FrameEnd 是完整端帧间隔；**不能用约 11.9 ms 的 World 换算服务器 FPS，或把两列之差直接判为睡眠／调度等待。** 独立 Trace 才能进一步分解。
+
+| 活动与边界配置 | Editor 客户端组三轮 | Shipping 客户端组三轮 |
+| --- | --- | --- |
+| 全窗口敌人／控制器／玩家 | 160／160／2 | 160／160／2 |
+| 追击人口范围 | 54～92 | 54～96 |
+| 攻击人口范围 | 7～17 | 9～17 |
+| 移动人口范围（速度＞5 cm/s） | 3～41 | 3～42 |
+| 每端各 START／STOP 的 Simple 敌人数 | 160 | 160 |
+| 服务器旧 Mesh：有效 BodyInstance／物理状态／碰撞启用数 | 0／0／0 | 0／0／0 |
+| 服务器代理：组件／查询启用／物理状态数 | 320／320／320 | 320／320／320 |
+| 两客户端各自代理：组件／查询启用／物理状态数 | 320／0／0 | 320／0／0 |
+
+36 个角色边界快照一致符合代理／人口门禁；原 PhysicsAsset 仍配置 18 bodies／18 shapes／17 constraints、引用数 160，这些是资产配置，**不是活跃 Chaos Shape 数**。服务器完整权威姿态保护资格在六轮边界为 **8～15**，Gameplay 分布出现 Full 157～160、Reduced 0～3、Background 0，不能据此证明大规模中远档或 160 单位同时攻击的性能。两个客户端仅负责本地表现：Client1 的共享姿态 follower 边界为 136～143，Client2 为 135～141，不承担权威查询。所有端敌人主动画并行资格 160、后处理实例数 0；服务器 FApp 性能线程门禁为 true、强制线程标志为 true，客户端强制标志为 false。**这些读回仅证明配置与资格，不替代实际 Worker 事件证据。**
+
+| 客户端构建 | 服务器总出方向 / B/s | 服务器总出包 / packet/s | Client1 入方向 / B/s |
+| --- | ---: | ---: | ---: |
+| Editor 三轮等权均值 | 44946.659 | 59.593 | 22467.889 |
+| Shipping 三轮等权均值 | 46640.805 | 62.888 | 23323.816 |
+
+网络仍为各角色独立 START／STOP 的连接累计差值速率，包括两个服务器连接的协议／ACK／PacketOverhead，不是纯 AI Payload／NIC／每 Actor 流量。修后 Simple 的追击与攻击人口不与 Reference 或修正前 Simple 逐帧相同，两个简化形状也不等价于原全骨骼轮廓，因此**本节给出当前构建基线，不把跨批差值全部归因动画多线程、物理维护或复制调度**，不据流量下降单独声称网络优化完成。
+
+证据：[修后 Simple B3 六轮结果](/C:/UEBuild/FPSBaselines/Simple160Final_20261020_B3/results.json)、[修后 Simple B3 汇总](/C:/UEBuild/FPSBaselines/Simple160Final_20261020_B3/summary.json)、[修后 Simple B3 输入协议与指纹](/C:/UEBuild/FPSBaselines/Simple160Final_20261020_B3/experiment.json)。B2 修正前数据继续保留在上文，不被 B3 覆盖，也不参与本节均值。
+
+### 后续证据门禁与原始来源
+
+查询响应修正后的 Simple 已重新构建，修后 92 项回归与 B3 六个性能 case 均通过各自门禁；修正前 B2 只作发现回归的诊断记录。独立 Trace 的实际 Worker 与执行／等待证据见下节，不拿资格开关或 Body 数量代替计时。当前仍未完成修后弱网重跑、完整视觉预热及连续操作画面验收，不能把本轮固定视点基线视为所有玩法和网络条件的最终通过。
+
+修正前诊断：[Simple B2 六轮结果](/C:/UEBuild/FPSBaselines/Simple160Final_20261020_B2/results.json)、[Simple B2 汇总](/C:/UEBuild/FPSBaselines/Simple160Final_20261020_B2/summary.json)、[Simple B2 输入协议与指纹](/C:/UEBuild/FPSBaselines/Simple160Final_20261020_B2/experiment.json)。同 Reference 命中体内部线程对照：[线程 A/B 六轮结果](/C:/UEBuild/FPSBaselines/AnimationThreads160_AB_20261020_B2/results.json)、[线程 A/B 汇总](/C:/UEBuild/FPSBaselines/AnimationThreads160_AB_20261020_B2/summary.json)、[线程 A/B 输入协议与指纹](/C:/UEBuild/FPSBaselines/AnimationThreads160_AB_20261020_B2/experiment.json)。巨大的原始日志、CSV 和 Trace 保留本机证据目录，不随本节提交。
+
+### 修后独立 Trace：实际 Worker 与执行／等待分离
+
+`Simple160Trace_20261020_B3` 使用相同 Simple＋Parallel 场地、160 AI 和两个玩家，单独增加 CPU／Task／Frame 命名 Trace 及 Windows `GetThreadTimes` 统计，不与无 Trace 的 B3 均值混合。完整原始帧序列与 `FEngineLoop::Tick` 事件逐一匹配，唯一有效完整窗口为 **52.9459111–114.980772 秒，共 1339 帧**；不沿用历史 1555 帧分母。原生调用树 `Count=1340`、`NumFrames=1339`，保留该计数差异而不冒充帧数；另核对 1339 个完整 Tick 事件的累计时长与调用树根相差约 0.7 微秒，分母始终使用经过验证的 1339 帧。
+
+- 四条实际线程 `Foreground Worker #0/#1`、`Background Worker #0/#1` 均出现原生带 `_WorkerThread` 后缀的动画事件，其中 `SkeletalComponentAnimEvaluate_WorkerThread` 为 **17,914 次**，`ProxyUpdateAnimation_WorkerThread` 同为 17,914 次。原生后缀根据 `IsInGameThread()` 选择，事件同时带实际线程名，因此不是仅凭配置判断。合计 109,669 个动画子事件含多层嵌套，**不当作独立动画次数**，也不宣称 160 个 AI 每帧都完整求值或已把 Event Graph 全搬到 Worker；没有逐对象归属所有事件。
+- 完整引擎 Tick scope 均值 **46.328 ms**；同窗口帧末配对墙钟 **46.329 ms**、GameThread 累计 CPU **14.073 ms**。World 配对墙钟 **13.969 ms**、累计 CPU **12.836 ms**。线程被调度的 CPU 比例约为整帧 30.38%、World 91.89%，不能把 World 内主要执行成本和整帧节拍等待混为一谈。
+- `Game thread idle time` 在 `Game thread tick wait time` 下，均值 **31.737 ms**；本机引擎 `UEngine::UpdateTimeAndHandleMaxTickRate` 的同名统计包围节拍等待。它解释了这次整帧中明确的大块空闲，但本轮未读回实际动态最大 TickRate，不能只凭 BaseEngine 的默认 30 就断言全部节拍来源或 Windows 超睡原因。
+- 所有 `WaitUntilTasksComplete` 合计 Inclusive 约 **8.64 ms/帧**，Exclusive 约 **0.71 ms/帧**；大部分包含嵌套任务工作，不能称 8.64 ms 纯阻塞。没有 OS 调度 ETL，仍不能把“墙钟减线程 CPU”完全拆成阻塞与 Ready／抢不到 CPU。
+
+| 当前 GameThread 埋点范围 | 均值 / ms 每完整帧 | 解释 |
+| --- | ---: | --- |
+| `Char Tick` | 4.369 | 移动调用链的 Inclusive，含子工作 |
+| `NetBroadcastTickTime` | 3.889 | 复制调用链的 Inclusive，不是纯包大小开销 |
+| `SkinnedMeshComp Tick` | 1.801 | 所有对应 GT 上下文合计，包含玩家 IK 等子项 |
+| 玩家 `FpstrueFootIK_Solve` | 0.506 | 2678 次，即每帧合计两次；嵌在动画中，不再加到上一行 |
+| GT Physics Start＋End 两段 | 0.413 | 不包含全部 Worker 物理成本，不能当整机物理耗时 |
+| `UpdateKinematicBonesToAnim` | 0.070 | 2678 次；不是恢复 160 个敌人的旧活体骨骼物理 |
+| `EnemySignificanceCoordinator` | 0.050 | 集中调度不是当前主要执行热点 |
+
+这些行并非互斥分区，**不能相加**；GT 的各 Exclusive 节点则已检查与根 Inclusive 闭合。当前应继续盯移动、复制及客户端实际绘制依赖，而不是凭历史 14.41 ms 再宣布当前 Chaos 或玩家 IK 为主瓶颈。该次诊断存在命名事件、线程 CPU 查询和 Trace 成本；不据它与旧版本、不同活动分布的诊断相减来计算纯收益。这里是引擎埋点调用树，不是 Windows 采样调用栈，也未完成当前客户端 GPU／RHI 的新归因。
+
+证据：[Trace 窗口校准](/C:/UEBuild/FPSDiagnostics/Simple160Trace_20261020_B3_Analysis/CaptureWindow.json)、[当前分析](/C:/UEBuild/FPSDiagnostics/Simple160Trace_20261020_B3_Analysis/CurrentAnalysis.json)、[GT 调用树](/C:/UEBuild/FPSDiagnostics/Simple160Trace_20261020_B3_Analysis/GTCalltree.csv)、[实际 Worker 事件](/C:/UEBuild/FPSDiagnostics/Simple160Trace_20261020_B3_Analysis/WorkerAnimationEvents.csv)、[诊断服务器摘要](/C:/UEBuild/FPSBaselines/Simple160Trace_20261020_B3/Editor_Parallel_R1/Server.summary.json)。源 Trace 位于 `C:/UEBuild/FPSDiagnostics/Simple160Trace_20261020_B3/Editor_Parallel_R1/`，采集及离线 Insights 均正常退出，独占窗口已释放给 Co-op。
+
+### 最终构建身份与提交范围
+
+修后 Editor DLL SHA256 为 `9A3A4A260ADC35D840F06209597960DA02C244FF20BF227488ECDA0216BAA0E6`，实际 `Stage_QueryResponse/Windows/fpstrue/Binaries/Win64/fpstrue-Win64-Shipping.exe` 为 `6EC48133960A46ED4321F84EA86D69C7A78FA0F817FB67D1C0BBF22456B86D2B`。两目标编译通过；仅原生逻辑改变、UHT 无生成变更，重新 Stage 使用同一既有 Cook 数据，旧包与旧日志均保留。不是新 Linux Server／公网配对验收。
+
+最终离线工具复验为交付 62 项、网络解析 65 项、逐发计时解析 22 项及 Render-wait 层级／边界自测通过。功能冗余检查保留生命周期、重入、射击准入与执行期二次校验，不为减少行数删除必要保护。提交包含已授权的敌人 IK／复杂地形专项撤除及对应平地场地、实现、测试、工具和文档；用户原有 `Content/StarterContent/Architecture/Floor_400x400.uasset` 改动明确排除并保留在工作树。

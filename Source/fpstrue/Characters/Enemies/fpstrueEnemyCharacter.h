@@ -25,6 +25,8 @@ class UProgressBar;
 class UWidgetComponent;
 class APlayerController;
 class APlayerCameraManager;
+class USphereComponent;
+class UCapsuleComponent;
 
 // 四种模式只改变本地血条表现；非 Shipping 的对照参数不改变生命、AI 或网络规则。
 enum class EFPEnemyHealthBarMode : uint8
@@ -171,6 +173,13 @@ public:
 	// 敌人与玩家共享 GE 生命结算；现有 AI/攻击事务不因此改为另一套决策系统。
 	virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override { return HealthComponent.Get(); }
 
+	// 活体使用两个根组件查询代理并继承原Mesh查询通道；简化几何不冒充原PA轮廓，不改玩家历史回溯或伤害权限。
+	bool UsesSimpleHitProxies() const { return bUseSimpleHitProxies; }
+	// 基线读取实际保护条件；普通服务器姿态不再受本地相机/阴影名额控制。
+	bool RequiresFullAuthorityPose() const;
+	// 原生射线命中代理后补齐部位身份，沿用现有爆头与死亡冲量入口；不伪造历史姿态。
+	void ResolveHitProxyBone(FHitResult& Hit) const;
+
 	// ==================== 状态查询 ====================
 
 	// AI、GameMode 和 Significance 读取 HealthComponent 的死亡事实。
@@ -198,8 +207,7 @@ public:
 	// ==================== Render Significance 接口 ====================
 
 	// Coordinator 调用：从相机视锥、屏占比和距离生成纯渲染样本。
-	FFPEnemyRenderSignificanceSample EvaluateRenderSignificance(const FFPEnemyRenderViewContext& ViewContext,
-																const FFPEnemyRenderSignificancePolicy& Policy);
+	FFPEnemyRenderSignificanceSample EvaluateRenderSignificance(const FFPEnemyRenderScoringContext& ScoringContext);
 	// Coordinator 调用：结合滞回和延迟得到自然 Render Tier。
 	EFPEnemyRenderSignificanceTier ResolveNaturalRenderSignificanceTier(const FFPEnemyRenderSignificanceSample& Sample,
 																		const FFPEnemyRenderSignificancePolicy& Policy);
@@ -244,6 +252,8 @@ protected:
 
 	// 读取 Benchmark 开关、初始化移动/碰撞并注册 Gameplay Significance。
 	virtual void BeginPlay() override;
+	// 组件与蓝图默认值就绪后封闭敌人后处理通道，不修改共享SkeletalMesh或玩家实例。
+	virtual void PostInitializeComponents() override;
 	// 退出共享系统、Significance 和组件事件。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	// 在通用伤害处理前记录命中方向、位置和骨骼，供受击/死亡冲量使用。
@@ -269,6 +279,16 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<UfpstrueEnemyCombatComponent> CombatComponent;
+
+	// 无 Socket 绑定、无重叠事件、无导航影响；客户端只保留组件身份，不创建权威命中查询。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	TObjectPtr<USphereComponent> EnemyHeadHitProxy;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	TObjectPtr<UCapsuleComponent> EnemyBodyHitProxy;
+
+	// 近远距离使用相同几何规则。命令行Reference只用于同一二进制的完整骨骼对照。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	bool bEnableSimpleHitProxies = true;
 
 	// ==================== AI 与战斗配置 ====================
 
@@ -328,6 +348,20 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance", meta = (ClampMin = "1.0"))
 	float BackgroundDecisionIntervalMultiplier = 2.0f;
 
+	// 仅网络权威端收紧 Actor 复制频率；不是客户端渲染档位，也不是每连接独立频率或相关性裁剪。
+	// -EnemyReplication=Reference 保留资产原始频率，用于同一160敌人负载的单变量对照。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance|Networking")
+	bool bEnableNetworkReplicationTiering = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance|Networking", meta = (ClampMin = "1.0", Units = "Hz"))
+	float FullReplicationFrequencyCap = 30.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance|Networking", meta = (ClampMin = "1.0", Units = "Hz"))
+	float ReducedReplicationFrequencyCap = 15.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Performance|Networking", meta = (ClampMin = "1.0", Units = "Hz"))
+	float BackgroundReplicationFrequencyCap = 5.0f;
+
 	// ==================== Blueprint 表现事件 ====================
 
 	// 明确的播放命令：蓝图把 AttackId 原样交给 Combat 的 PlayAttackMontageForAttack。
@@ -360,6 +394,8 @@ private:
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
 	friend class FFpstrueMultiplayerClientPerformanceTest;
 	friend class FFpstrueMultiplayerAuthorityPoseTest;
+	friend class FFpstrueEnemyReplicationTieringTest;
+	friend class FFpstrueEnemySimpleHitProxyTest;
 
 	// 先订阅再读当前生命，兼容晚加入和属性先到；死亡后迟到的血量事件不能重新显示血条。
 	UFUNCTION() void RefreshHealthBar(float NewHealth);
@@ -390,11 +426,20 @@ private:
 	void ApplySignificance(float Significance);
 	// 根据 Gameplay Tier 调整 CharacterMovement Tick 间隔。
 	void ApplyGameplaySignificanceIntervals();
+	// 读取所有参与者聚合后的 GameplayTier，保护攻击/受击，仅修改复制调度上限，不改决策/移动。
+	void ApplyNetworkReplicationPolicy();
+	// 显式命令行A/B入口可单测，不依赖全局命令行静态缓存或覆盖蓝图默认值。
+	static bool IsReferenceReplicationRequested(const TCHAR* CommandLine);
+	// BeginPlay配置一次，Simple继承原Mesh对象类型及查询响应，死亡时关闭；切换LOD不重建PhysicsAsset或代理。
+	void ConfigureHitProxies(bool bSimpleMode);
+	void DisableHitProxies();
 
 	// ==================== Render 分级与动画共享 ====================
 
 	// 把当前 Render Tier 和预算结果写入 SkeletalMeshComponent。
 	void ApplyRenderSignificanceSettings();
+	// 敌人不再使用脚部后处理；初始化/共享/死亡路径统一清理实例，主AnimInstance与命中骨骼仍保留。
+	UFUNCTION() void DisableEnemyPostProcessAnimation();
 	// 存活时消费预算，死亡后关闭主 Mesh 与附件的阴影/光追；普通可见性和布娃娃不受影响。
 	void ApplyRenderBudgetMeshFlags();
 	// 判断本敌人是否满足成为低风险 Animation Sharing Follower 的条件。
@@ -408,6 +453,8 @@ private:
 
 	// HealthComponent 保存死亡事实；这里只记录死亡副作用是否已经执行。
 	bool bDeathEffectsApplied = false;
+	bool bUseSimpleHitProxies = false;
+	bool bRemovingEnemyPostProcess = false;
 	UPROPERTY(ReplicatedUsing = OnRep_NetworkPresentation)
 	FFPEnemyNetworkPresentation NetworkPresentation;
 	// 客户端自己的播放实例只用于停止表现，绝不绑定服务器攻击事务或执行伤害。
@@ -417,6 +464,10 @@ private:
 	bool bAuthoredUpdateRateOptimizations = false;
 	EVisibilityBasedAnimTickOption AuthoredAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 	bool bRegisteredWithSignificanceManager = false;
+	bool bCapturedAuthoredReplicationFrequency = false;
+	bool bReferenceEnemyReplication = false;
+	float AuthoredNetUpdateFrequency = 0.0f;
+	float AuthoredMinNetUpdateFrequency = 0.0f;
 	// 主线程集中采样后交给插件评分；Update 同步等待评分完成，期间这些值不再修改。
 	FVector SignificancePositionSnapshot = FVector::ZeroVector;
 	bool bHasSignificancePositionSnapshot = false;

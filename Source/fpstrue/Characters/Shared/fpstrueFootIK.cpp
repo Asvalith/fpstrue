@@ -4,35 +4,12 @@
 #include "BonePose.h"
 #include "TwoBoneIK.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/BoxComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/StaticMeshComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Weapons/fpstrueWeaponComponent.h"
 #include "Engine/World.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Parse.h"
-#include "Misc/ScopeExit.h"
-#include "PhysicsEngine/BodyInstance.h"
-#include "Physics/PhysicsInterfaceCore.h"
-#include "Physics/PhysicsFiltering.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "UObject/ObjectKey.h"
-
-namespace
-{
-TWeakObjectPtr<UWorld> EnemyIKMeasuredWorld;
-uint64 EnemyIKMeasuredFrame = MAX_uint64;
-FFpstrueFootIKFrameStats EnemyIKFrameStats;
-
-bool UseReferenceEnemyQueries()
-{
-	// 同一构建可 A/B；只切换查询实现，不关闭 IK、改变重要性档位或减少角色/探点。
-	static const bool bReference = [] { FString Mode; FParse::Value(FCommandLine::Get(), TEXT("EnemyFootIKQueries="), Mode); return Mode == TEXT("Reference"); }();
-	return bReference;
-}
-}
 
 struct FFpstrueFootIKProxy : FAnimInstanceProxy
 {
@@ -65,15 +42,11 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 	double PreviousTime = -1.0;
 	FVector PreviousLocation = FVector::ZeroVector;
 	bool bEligible = false;
-	bool bExactQuery = false;
 	bool bSettledIdle = false;
-	bool bEnemy = false, bReuseCandidates = false, bVerifyCandidates = false;
 	TWeakObjectPtr<ACharacter> QueryOwner;
 	FFpstrueFootIKDebug Debug;
-	using FSupportCandidates = TArray<UPrimitiveComponent*, TInlineAllocator<4>>;
 	void CoverFootprint(ACharacter* Character, int32 Side, const FBox& Bounds,
-		const FCollisionObjectQueryParams& Objects, const FCollisionQueryParams& Query,
-		FSupportCandidates* Candidates = nullptr, bool* bSweepAmbiguous = nullptr)
+		const FCollisionObjectQueryParams& Objects, const FCollisionQueryParams& Query)
 	{
 		if (!Bounds.IsValid) return;
 		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueFootIK_FootprintSweep);
@@ -85,9 +58,6 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		// 射线之间也可能有窄路沿；薄盒覆盖整个鞋底投影，不以增大角色胶囊来绕过碰撞。
 		for (const FHitResult& Hit : Hits)
 		{
-			if (bSweepAmbiguous && Hit.bStartPenetrating) *bSweepAmbiguous = true;
-			// 候选必须在 walkable/最高面筛选之前收集；脚边墙顶、第二个台阶也可能支撑某个探点。
-			if (Candidates && Hit.GetComponent() && !Cast<APawn>(Hit.GetActor())) Candidates->AddUnique(Hit.GetComponent());
 			if (Cast<APawn>(Hit.GetActor()) || !Hit.GetComponent() || !Character->GetCharacterMovement()->IsWalkable(Hit)) continue;
 			if (!Ground[Side].bValid || Hit.ImpactPoint.Z > Ground[Side].Position.Z)
 			{
@@ -95,45 +65,6 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 				Ground[Side].Surface = Hit.GetComponent()->GetComponentTransform(); Ground[Side].Identity = FObjectKey(Hit.GetComponent());
 			}
 		}
-	}
-
-	// ★ 等价边界：组件入口是单命中，只有一个匹配查询 shape 才能替代世界 Multi 的该组件结果。
-	// 这些条件每次从当前物理体读取；不跨帧保存组件、几何或“看起来平”的支撑面。
-	bool CanReuseCandidates(const FSupportCandidates& Candidates, UWorld* World,
-		const FCollisionObjectQueryParams& Objects, const FCollisionQueryParams& Query) const
-	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueFootIK_CandidateQualification);
-		if (Candidates.IsEmpty() || Candidates.Num() > 4 || Query.bIgnoreBlocks || Query.bIgnoreTouches
-			|| Query.bSkipNarrowPhase || Query.IgnoreMask != 0 || Objects.IgnoreMask != 0) return false;
-		for (UPrimitiveComponent* Component : Candidates)
-		{
-			if (!IsValid(Component) || Component->GetWorld() != World || !Component->IsRegistered()
-				|| !Component->IsPhysicsStateCreated() || Component->Mobility != EComponentMobility::Static
-				|| !Component->IsQueryCollisionEnabled() || Component->IsSimulatingPhysics()
-				|| (Component->GetClass() != UStaticMeshComponent::StaticClass() && Component->GetClass() != UBoxComponent::StaticClass())) return false;
-			FBodyInstance* Body = Component->GetBodyInstance(NAME_None, false);
-			if (!Body || Body->WeldParent || !Body->IsValidBodyInstance() || !CollisionEnabledHasQuery(Body->GetCollisionEnabled())) return false;
-			bool bReusable = false;
-			FPhysicsCommand::ExecuteRead(Body->GetPhysicsActorHandle(), [&](const FPhysicsActorHandle& Actor)
-			{
-				if (!FPhysicsInterface::IsStatic(Actor)) return;
-				PhysicsInterfaceTypes::FInlineShapeArray Shapes;
-				FillInlineShapeArray_AssumesLocked(Shapes, Actor);
-				const uint32 ComplexityFlag = Query.bTraceComplex ? EPDF_ComplexCollision : EPDF_SimpleCollision;
-				int32 MatchingShapes = 0;
-				for (const FPhysicsShapeHandle& Shape : Shapes)
-				{
-					if (!Body->IsShapeBoundToBody(Shape)) return;
-					const FCollisionFilterData Filter = FPhysicsInterface::GetQueryFilter(Shape);
-					if (!(Filter.Word3 & ComplexityFlag)) continue;
-					if (!FPhysicsInterface::IsQueryShape(Shape)
-						|| !(Objects.GetQueryBitfield() & ECC_TO_BITFIELD(GetCollisionChannel(Filter.Word3))) || ++MatchingShapes > 1) return;
-				}
-				bReusable = MatchingShapes == 1;
-			});
-			if (!bReusable) return false;
-		}
-		return true;
 	}
 
 	bool FindWorldSupport(ACharacter* Character, const FVector& Start, const FVector& End,
@@ -147,48 +78,17 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		return false;
 	}
 
-	bool FindCandidateSupport(ACharacter* Character, const FSupportCandidates& Candidates, const FVector& Start,
-		const FVector& End, const FCollisionQueryParams& Query, FHitResult& Support, bool& bAmbiguous)
-	{
-		bool bFound = false;
-		for (UPrimitiveComponent* Component : Candidates)
-		{
-			FHitResult Hit; ++Debug.ComponentTraceCount;
-			if (!Component->LineTraceComponent(Hit, Start, End, Query)) continue;
-			// 从表面内部开始的退化射线使用世界入口的原始初始重叠语义，不猜测接触法线。
-			if (Hit.bStartPenetrating || Hit.Time <= UE_SMALL_NUMBER || !FMath::IsFinite(Hit.Time)
-				|| Hit.ImpactPoint.ContainsNaN() || Hit.ImpactNormal.ContainsNaN()) { bAmbiguous = true; continue; }
-			// ★ UE5.5 组件几何射线的成功返回不代表 bBlockingHit 已置位；其内部转换没有 ObjectMask。
-			// 仅本次 Object Multi 已准入且单查询 shape 验证通过的候选，恢复 ObjectQuery 的“命中即 Block”语义。
-			// 不对普通 Channel overlap、动态体或未准入组件做此转换；可走角度仍交给 CMC 判断。
-			Hit.bBlockingHit = true;
-			// 坡面/平面接缝的并列命中不能借用 Sweep 的组件顺序代替 Raycast 的排序。
-			if (bFound && FMath::Abs(Hit.Time - Support.Time) * FVector::Distance(Start, End) <= 0.01
-				&& !Hit.ImpactNormal.Equals(Support.ImpactNormal, 0.001)) bAmbiguous = true;
-			if (Character->GetCharacterMovement()->IsWalkable(Hit) && (!bFound || Hit.Time < Support.Time))
-			{ Support = Hit; bFound = true; }
-		}
-		return bFound;
-	}
-
-	// 先确定是否需要独立贴地；仅玩家和近处敌人同步求值，远处/空中/共享动画保留原更新方式。
+	// 先确定玩家是否需要独立贴地；其他角色、空中与共享动画不执行此后处理的世界查询。
 	virtual void PreUpdate(UAnimInstance* Instance, float DeltaSeconds) override
 	{
+		check(IsInGameThread());
 		FAnimInstanceProxy::PreUpdate(Instance, DeltaSeconds);
 		auto* IK = CastChecked<UfpstrueFootIKAnimInstance>(Instance);
-		auto* Character = Cast<ACharacter>(Instance->TryGetPawnOwner());
+		auto* Character = Cast<AfpstrueCharacter>(Instance->TryGetPawnOwner());
 		auto* Mesh = Instance->GetSkelMeshComponent();
-		bEnemy = Character && Character->IsA<AfpstrueEnemyCharacter>();
-		bReuseCandidates = bEnemy && IK->bReuseEnemyQueryCandidates && !UseReferenceEnemyQueries();
-		bVerifyCandidates = bReuseCandidates && IK->bVerifyEnemyCandidateQueries;
 		Delta = FMath::Max(0.0f, DeltaSeconds);
 		bool bActive = Character && Mesh == Character->GetMesh() && !Mesh->LeaderPoseComponent.IsValid() && !Mesh->IsSimulatingPhysics()
-			&& Character->GetCharacterMovement()->IsMovingOnGround();
-		if (auto* Player = Cast<AfpstrueCharacter>(Character)) bActive &= !Player->IsDead();
-		if (auto* Enemy = Cast<AfpstrueEnemyCharacter>(Character))
-			bActive &= !Enemy->IsDead() && ((Enemy->HasAuthority()
-				? Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full
-				: Enemy->GetRenderSignificanceTier() == EFPEnemyRenderSignificanceTier::Full) || Enemy->IsAttacking());
+			&& Character->GetCharacterMovement()->IsMovingOnGround() && !Character->IsDead();
 		const double Now = Character ? Character->GetWorld()->GetTimeSeconds() : 0.0;
 		const FVector Location = Character ? Character->GetActorLocation() : FVector::ZeroVector;
 		if (!bActive || bActive != bEligible || IK->bResetRequested || Now - PreviousTime > 0.15 || FVector::DistSquared(Location, PreviousLocation) > FMath::Square(100.0))
@@ -198,8 +98,8 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		}
 		IK->bResetRequested = false;
 		bEligible = bActive; PreviousTime = Now; PreviousLocation = Location;
-		bExactQuery = bEligible;
-		IK->bRequireSynchronousEvaluation = bExactQuery; QueryOwner = Character;
+		// 资格只控制是否查询地面，不改变动画任务的线程许可；本类始终由Game Thread求值。
+		QueryOwner = Character;
 		Ground[0] = FGround(); Ground[1] = FGround();
 		Debug.bEnabled = bEligible; Debug.bLeftPlanted = Debug.bRightPlanted = false; Debug.PelvisOffset = 0.0f;
 		if (!bEligible) return;
@@ -210,7 +110,6 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 			const auto* Animation = Cast<UfpstruePlayerAnimInstance>(Mesh->GetAnimInstance());
 			bSettledIdle &= Player->GetBodyFacingState().TurnDirection == 0 && (!Animation || Animation->TurnAlpha < 0.05f);
 		}
-		if (const auto* Enemy = Cast<AfpstrueEnemyCharacter>(Character)) bSettledIdle &= !Enemy->IsAttacking();
 		Bottom = Location - FVector(0, 0, Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
 		SoleOffsets[0] = IK->LeftSoleOffset; SoleOffsets[1] = IK->RightSoleOffset;
 		SoleNormals[0] = IK->LeftSoleNormal; SoleNormals[1] = IK->RightSoleNormal;
@@ -225,22 +124,6 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		if (!bEligible) return true;
 		// 每次求值/每脚批次计时；不为每条探针再生成一个事件，避免诊断放大查询开销。
 		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueFootIK_Solve);
-		const uint64 SolveStartedAt = bEnemy ? FPlatformTime::Cycles64() : 0;
-		const FFpstrueFootIKDebug Before = Debug;
-		ON_SCOPE_EXIT
-		{
-			if (bEnemy && QueryOwner.IsValid())
-			{
-				if (EnemyIKMeasuredFrame != GFrameCounter || EnemyIKMeasuredWorld != QueryOwner->GetWorld())
-				{ EnemyIKMeasuredFrame = GFrameCounter; EnemyIKMeasuredWorld = QueryOwner->GetWorld(); EnemyIKFrameStats = {}; }
-				EnemyIKFrameStats.EnemySolveMs += FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - SolveStartedAt);
-				++EnemyIKFrameStats.Evaluations;
-				EnemyIKFrameStats.WorldQueries += Debug.TraceCount - Before.TraceCount;
-				EnemyIKFrameStats.ComponentQueries += Debug.ComponentTraceCount - Before.ComponentTraceCount;
-				EnemyIKFrameStats.ReusedFootprints += Debug.ReusedFootprints - Before.ReusedFootprints;
-				EnemyIKFrameStats.FallbackFootprints += Debug.FallbackFootprints - Before.FallbackFootprints;
-			}
-		};
 		const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
 		const auto Index = [&Bones](const TCHAR* Name)
 		{
@@ -258,7 +141,6 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 			Query.AddIgnoredActor(Player->GetEquippedWeaponComponent()->GetOwner());
 		FCollisionObjectQueryParams Objects;
 		Objects.AddObjectTypesToQuery(ECC_WorldStatic); Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
-		if (bExactQuery)
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueFootIK_RawSupportBatch);
 			// 当前主图姿态求值后才查询地面，避免转身、停步及长帧时使用上一帧脚点造成穿插。
@@ -354,12 +236,7 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 			for (const FVector& Probe : Probes)
 				FinalBounds += BlendedTarget + Rotations[Side].RotateVector(Probe * MeshWorld.GetScale3D() * Raw[Side].GetScale3D());
 			// 锁脚、旋转和权重混合会改变最终鞋底投影，不能只沿用原始动画脚位查到的支撑面。
-			FSupportCandidates Candidates;
-			bool bSweepAmbiguous = false;
-			CoverFootprint(Character, Side, FinalBounds, Objects, Query, bReuseCandidates ? &Candidates : nullptr, &bSweepAmbiguous);
-			const bool bUseCandidates = bReuseCandidates && !bSweepAmbiguous && CanReuseCandidates(Candidates, Character->GetWorld(), Objects, Query);
-			if (bUseCandidates) ++Debug.ReusedFootprints;
-			else if (bReuseCandidates) ++Debug.FallbackFootprints;
+			CoverFootprint(Character, Side, FinalBounds, Objects, Query);
 			double RequiredLift = 0.0;
 			TArray<FHitResult> ProbeHits;
 			{
@@ -368,25 +245,8 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 			{
 				const FVector Point = BlendedTarget + Rotations[Side].RotateVector(Probe * MeshWorld.GetScale3D() * Raw[Side].GetScale3D());
 				const FVector Start(Point.X, Point.Y, Bottom.Z + 45), End(Point.X, Point.Y, Bottom.Z - 45);
-				FHitResult ProbeSupport; bool bFound = false, bAmbiguous = false; ++Debug.ProbeTraceCount;
-				if (bUseCandidates) bFound = FindCandidateSupport(Character, Candidates, Start, End, Query, ProbeSupport, bAmbiguous);
-				if (!bUseCandidates || bAmbiguous) bFound = FindWorldSupport(Character, Start, End, Objects, Query, ProbeSupport, ProbeHits);
-				else if (bVerifyCandidates)
-				{
-					FHitResult Reference;
-					const bool bReferenceFound = FindWorldSupport(Character, Start, End, Objects, Query, Reference, ProbeHits);
-					if (bFound != bReferenceFound || (bFound && (!ProbeSupport.ImpactPoint.Equals(Reference.ImpactPoint, 0.01)
-						|| !ProbeSupport.ImpactNormal.Equals(Reference.ImpactNormal, 0.001))))
-					{
-						if (Debug.CandidateMismatches < 4) UE_LOG(LogTemp, Display,
-							TEXT("Foot IK candidate oracle mismatch side=%d found=%d/%d candidate=%s point=%s normal=%s time=%.9f block=%d reference=%s point=%s normal=%s time=%.9f block=%d start=%s candidates=%d"),
-							Side, bFound, bReferenceFound, *GetNameSafe(ProbeSupport.GetComponent()), *ProbeSupport.ImpactPoint.ToString(), *ProbeSupport.ImpactNormal.ToString(), ProbeSupport.Time, ProbeSupport.bBlockingHit,
-							*GetNameSafe(Reference.GetComponent()), *Reference.ImpactPoint.ToString(), *Reference.ImpactNormal.ToString(), Reference.Time, Reference.bBlockingHit, *Start.ToString(), Candidates.Num());
-						++Debug.CandidateMismatches;
-					}
-					// Oracle 模式始终输出原结果：差异不能被后续腿长限制掩盖，也不让验证本身改变玩法。
-					bFound = bReferenceFound; ProbeSupport = Reference;
-				}
+				FHitResult ProbeSupport; ++Debug.ProbeTraceCount;
+				const bool bFound = FindWorldSupport(Character, Start, End, Objects, Query, ProbeSupport, ProbeHits);
 				// 薄盒可能先擦到路沿侧壁；逐点检查最终鞋底下的台面，只抬升、不压低摆腿。
 				if (bFound) RequiredLift = FMath::Max(RequiredLift,
 					(0.7 - FVector::DotProduct(Point - ProbeSupport.ImpactPoint, ProbeSupport.ImpactNormal)) / ProbeSupport.ImpactNormal.Z);
@@ -453,17 +313,10 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 	}
 };
 
-FFpstrueFootIKFrameStats UfpstrueFootIKAnimInstance::GetEnemyFrameStats(const UWorld* World)
+void UfpstrueFootIKAnimInstance::Install(ACharacter* Character)
 {
-	check(IsInGameThread());
-	return World && EnemyIKMeasuredWorld == World && EnemyIKMeasuredFrame == GFrameCounter ? EnemyIKFrameStats : FFpstrueFootIKFrameStats();
-}
-
-void UfpstrueFootIKAnimInstance::Install(ACharacter* Character, bool bEnemy)
-{
-	if (!Character || !Character->GetMesh()->GetSkeletalMeshAsset()) return;
-	const TCHAR* Path = bEnemy ? TEXT("/Game/FirstPerson/Animations/FootIK/ABP_EnemyFootIK.ABP_EnemyFootIK_C")
-		: TEXT("/Game/FirstPerson/Animations/FootIK/ABP_PlayerFootIK.ABP_PlayerFootIK_C");
+	if (!Cast<AfpstrueCharacter>(Character) || !Character->GetMesh()->GetSkeletalMeshAsset()) return;
+	const TCHAR* Path = TEXT("/Game/FirstPerson/Animations/FootIK/ABP_PlayerFootIK.ABP_PlayerFootIK_C");
 	if (UClass* Class = LoadClass<UfpstrueFootIKAnimInstance>(nullptr, Path, nullptr, LOAD_Quiet | LOAD_NoWarn))
 	{
 		if (Character->GetMesh()->GetPostProcessInstance() && Character->GetMesh()->GetPostProcessInstance()->GetClass() == Class
@@ -483,7 +336,9 @@ FFpstrueFootIKDebug UfpstrueFootIKAnimInstance::GetFootIKDebug() const
 {
 	FFpstrueFootIKDebug Result = Debug;
 	if (GetSkelMeshComponent() && GetSkelMeshComponent()->LeaderPoseComponent.IsValid())
+	{
 		Result.bEnabled = Result.bLeftPlanted = Result.bRightPlanted = false;
+	}
 	return Result;
 }
 

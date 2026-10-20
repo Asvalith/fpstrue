@@ -34,6 +34,8 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AIPerceptionSystem.h"
+#include "Perception/AISenseConfig_Hearing.h"
+#include "Perception/AISense_Hearing.h"
 #include "Perception/AISense_Sight.h"
 #include "UObject/UnrealType.h"
 #include "UObject/StrongObjectPtr.h"
@@ -77,6 +79,172 @@ bool ReportBehaviorSightStimulus(AfpstrueEnemyAIController* Controller, AActor* 
 	Perception->ProcessStimuli();
 	return true;
 }
+
+// 边界注入仍经过生产感知组件；与下方实际 ReportNoiseEvent 分发测试分开，不冒充真实听觉范围验收。
+void ReportBehaviorHearingStimulus(AfpstrueEnemyAIController& Controller, AActor& Source, const FVector& Location,
+	bool bSensed = true, FName Tag = TEXT("Weapon.Gunshot"))
+{
+	FAIStimulus Stimulus(*GetDefault<UAISense_Hearing>(), bSensed ? 1.0f : 0.0f, Location,
+		Controller.GetPawn()->GetActorLocation(), bSensed ? FAIStimulus::SensingSucceeded : FAIStimulus::SensingFailed, Tag);
+	Stimulus.SetWantsNotifyOnlyOnValueChange(false);
+	Controller.GetPerceptionComponent()->RegisterStimulus(&Source, Stimulus);
+	Controller.GetPerceptionComponent()->ProcessStimuli();
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyHearingInvestigationTest,
+	"fpstrue.AI.Perception.AuthoritativeGunshotInvestigation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 真实原生 Hearing 分发验证墙后/距离，组件刺激验证合并、视觉优先、硬期限与暂停/死亡/Stop 资格。
+bool FFPEnemyHearingInvestigationTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Hearing fixture creates the native AI system"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
+		FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("Hearing listener pawn"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	Enemy->SetActorEnableCollision(false);
+	Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AActor* Wall = World->SpawnActor<AActor>();
+	if (!TestNotNull(TEXT("Hearing controller"), Controller) || !TestNotNull(TEXT("Noise source"), Target) ||
+		!TestNotNull(TEXT("Real occluder"), Wall)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	Target->SetActorLocation(FVector(1000.0f, 0.0f, 0.0f));
+	UBoxComponent* WallBox = NewObject<UBoxComponent>(Wall);
+	Wall->AddInstanceComponent(WallBox);
+	Wall->SetRootComponent(WallBox);
+	WallBox->SetBoxExtent(FVector(50.0f, 2000.0f, 2000.0f));
+	WallBox->SetCollisionResponseToAllChannels(ECR_Block);
+	WallBox->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	WallBox->RegisterComponent();
+	Wall->SetActorLocation(FVector(300.0f, 0.0f, 0.0f));
+	Controller->Possess(Enemy);
+	Controller->InitializeCombatContext(Target, nullptr);
+	if (!TestNotNull(TEXT("Real hearing brain"), Controller->GetBrainComponent())) return false;
+	// ★【测试隔离边界】只关闭TickEnabled并不可靠：BT收到唤醒消息时ScheduleNextTick会自行重新启用。
+	// 取消Brain TickFunction注册（不注销组件/不Pause/不Stop），保留真实感知和生产命令资格，
+	// 防止无NavMesh临时世界的真实叶子提前结束调查；下方再显式执行该叶子验证寻路失败收口。
+	Controller->GetBrainComponent()->PrimaryComponentTick.UnRegisterTickFunction();
+	TestFalse(TEXT("Isolated lifetime test has no scheduler-registered Brain tick"),
+		Controller->GetBrainComponent()->PrimaryComponentTick.IsTickFunctionRegistered());
+	Controller->NoiseInvestigationSeconds = 0.35f;
+	Controller->NoiseMergeInterval = 0.1f;
+	Controller->NoiseInvestigationCooldown = 0.1f;
+	UAIPerceptionSystem* Perception = UAIPerceptionSystem::GetCurrent(World);
+	if (!TestNotNull(TEXT("Real perception event router"), Perception)) return false;
+	Perception->RegisterSourceForSenseClass(UAISense_Sight::StaticClass(), *Target);
+	const auto TickFor = [&](float Seconds)
+	{
+		for (int32 Frame = 0; Frame < FMath::CeilToInt(Seconds / 0.01f); ++Frame)
+			if (!Fixture.TickTestWorld(0.01f)) { Fixture.ForwardErrorMessages(this); return false; }
+		return true;
+	};
+	if (!TickFor(0.05f)) return false;
+	const UAISenseConfig_Hearing* HearingConfig = Cast<UAISenseConfig_Hearing>(Controller->GetPerceptionComponent()->GetSenseConfig(
+		UAISense::GetSenseID<UAISense_Hearing>()));
+	TestTrue(TEXT("The real listener has bounded native Hearing configured"), HearingConfig != nullptr && HearingConfig->HearingRange == 4500.0f);
+	TestNull(TEXT("Real wall keeps the source outside combat visibility"), Controller->GetTargetCharacter());
+	TestFalse(TEXT("Null source cannot submit gunshot semantics"), AfpstrueEnemyAIController::ReportAuthoritativeGunshot(nullptr, FVector::ZeroVector));
+	TestFalse(TEXT("Invalid location cannot submit gunshot semantics"), AfpstrueEnemyAIController::ReportAuthoritativeGunshot(Target, FAISystem::InvalidLocation));
+	TestFalse(TEXT("Silent or malformed input cannot submit gunshot semantics"), AfpstrueEnemyAIController::ReportAuthoritativeGunshot(Target, FVector::ZeroVector, 0.0f));
+	Target->SetRole(ROLE_SimulatedProxy);
+	TestFalse(TEXT("A non-authoritative source cannot report predicted gunfire"), AfpstrueEnemyAIController::ReportAuthoritativeGunshot(Target, Target->GetActorLocation()));
+	Target->SetRole(ROLE_Authority);
+	TestTrue(TEXT("An authoritative out-of-range noise is accepted by the router"),
+		AfpstrueEnemyAIController::ReportAuthoritativeGunshot(Target, FVector(7000.0f, 0.0f, 0.0f)));
+	if (!TickFor(0.05f)) return false;
+	TestFalse(TEXT("The actual Hearing range excludes an out-of-range event"), Controller->bInvestigatingNoise);
+	const FVector HeardLocation(650.0f, 0.0f, 0.0f);
+	TestTrue(TEXT("One authoritative event enters the real Hearing system"),
+		AfpstrueEnemyAIController::ReportAuthoritativeGunshot(Target, HeardLocation, 1.0f, 1000.0f));
+	if (!TickFor(0.05f)) return false;
+	if (!TestTrue(TEXT("Native Hearing can begin a bounded investigation through a real wall"), Controller->bInvestigatingNoise)) return false;
+	TestFalse(TEXT("Hearing does not grant sight"), Controller->bTargetVisible);
+	TestTrue(TEXT("Memory stores the noise position, not source transform"), Controller->LastKnownTargetLocation.Equals(HeardLocation));
+	TestNull(TEXT("Hearing cannot expose a combat target"), Controller->GetTargetCharacter());
+	const double OriginalDeadline = Controller->TargetForgetTime;
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation + FVector(20.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("Nearby repeated gunfire coalesces without moving the goal"), Controller->LastKnownTargetLocation.Equals(HeardLocation));
+	TestEqual(TEXT("Repeated gunfire cannot renew the hard deadline"), Controller->TargetForgetTime, OriginalDeadline);
+	Target->SetActorLocation(FVector(12000.0f, 9000.0f, 0.0f));
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	TestTrue(TEXT("An unheard source movement cannot update the frozen investigation"), Controller->LastKnownTargetLocation.Equals(HeardLocation));
+	TestTrue(TEXT("Investigation reuses the bounded search branch"), Controller->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	TestNull(TEXT("The search Blackboard does not leak the hidden actor"), Controller->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
+	for (const EFPEnemyBehaviorAction Action : {EFPEnemyBehaviorAction::TryAttack, EFPEnemyBehaviorAction::SustainAttack,
+		EFPEnemyBehaviorAction::MaintainCombatPosition, EFPEnemyBehaviorAction::Surround})
+		TestFalse(TEXT("Hearing alone cannot attack or request hidden surround slots"), Controller->ExecuteBehaviorAction(Action));
+	if (!TickFor(0.11f)) return false;
+	const FVector MovedNoise(1000.0f, 0.0f, 0.0f);
+	ReportBehaviorHearingStimulus(*Controller, *Target, MovedNoise);
+	TestTrue(TEXT("A later spatially distinct event can refresh the fixed noise goal"), Controller->LastKnownTargetLocation.Equals(MovedNoise));
+	TestEqual(TEXT("Goal refresh still cannot extend investigation lifetime"), Controller->TargetForgetTime, OriginalDeadline);
+	ReportBehaviorHearingStimulus(*Controller, *Target, FVector(2000.0f, 0.0f, 0.0f), false);
+	TestTrue(TEXT("A failed hearing stimulus cannot move or erase valid memory"), Controller->LastKnownTargetLocation.Equals(MovedNoise));
+	if (!TickFor(0.3f)) return false;
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	TestFalse(TEXT("The existing decision sample expires the investigation without a new timer"), Controller->bInvestigatingNoise);
+	TestFalse(TEXT("Expired sound leaves no valid search decision"), Controller->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	const double CompletionCooldown = Controller->NextNoiseInvestigationTime;
+	AddInfo(FString::Printf(TEXT("Hearing completion boundary: now=%.6f originalDeadline=%.6f nextAllowed=%.6f brainTickRegistered=%d"),
+		World->GetTimeSeconds(), OriginalDeadline, CompletionCooldown,
+		Controller->GetBrainComponent()->PrimaryComponentTick.IsTickFunctionRegistered() ? 1 : 0));
+	TestTrue(TEXT("Completing the transaction publishes a future cooldown before callbacks"), CompletionCooldown > World->GetTimeSeconds());
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation);
+	TestFalse(TEXT("Continuous gunfire cannot bypass the completion cooldown"), Controller->bInvestigatingNoise);
+	TestEqual(TEXT("A denied stimulus preserves the completion deadline"), Controller->NextNoiseInvestigationTime, CompletionCooldown);
+	if (!TickFor(0.12f)) return false;
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation);
+	TestTrue(TEXT("A genuinely new investigation may start after cooldown"), Controller->bInvestigatingNoise);
+	// 无 NavMesh 的真实 MoveTo 失败必须收口，而不是每声枪响重新提交同一失败路径。
+	TestTrue(TEXT("The search leaf executes using existing MoveTo ownership"), Controller->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Pursue));
+	TestFalse(TEXT("Actual navigation failure completes the noise transaction"), Controller->bInvestigatingNoise);
+	if (!TickFor(0.12f)) return false;
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation);
+	if (!ReportBehaviorSightStimulus(Controller, Target, true, FVector(900.0f, 100.0f, 0.0f), *this)) return false;
+	TestFalse(TEXT("Successful sight replaces noise-only investigation"), Controller->bInvestigatingNoise);
+	const FVector VisualLocation = Controller->LastKnownTargetLocation;
+	ReportBehaviorHearingStimulus(*Controller, *Target, FVector(2000.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("Hearing cannot overwrite a current visual location"), Controller->LastKnownTargetLocation.Equals(VisualLocation));
+	Controller->NotifyCombatTargetUnavailable(Target);
+	Controller->InitializeCombatContext(Target, nullptr);
+	Controller->GetBrainComponent()->PauseLogic(TEXT("Hearing pause boundary"));
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation);
+	TestFalse(TEXT("A paused brain does not start a new noise investigation"), Controller->bInvestigatingNoise);
+	Controller->GetBrainComponent()->ResumeLogic(TEXT("Hearing resume boundary"));
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation);
+	TestTrue(TEXT("Resuming permits a later hearing event"), Controller->bInvestigatingNoise);
+	Controller->SetRole(ROLE_SimulatedProxy);
+	ReportBehaviorHearingStimulus(*Controller, *Target, MovedNoise);
+	TestTrue(TEXT("A non-authoritative controller cannot change its stored sound"), Controller->LastKnownTargetLocation.Equals(HeardLocation));
+	Controller->SetRole(ROLE_Authority);
+	Controller->StopAI();
+	ReportBehaviorHearingStimulus(*Controller, *Target, MovedNoise);
+	TestFalse(TEXT("StopAI clears investigation and rejects stale stimuli"), Controller->bInvestigatingNoise);
+	TestTrue(TEXT("StopAI clears all last-known location data"), Controller->LastKnownTargetLocation.IsZero());
+	Controller->UnPossess();
+	Controller->Possess(Enemy);
+	Controller->GetBrainComponent()->PrimaryComponentTick.UnRegisterTickFunction();
+	Controller->InitializeCombatContext(Target, nullptr);
+	ReportBehaviorHearingStimulus(*Controller, *Target, HeardLocation);
+	TestTrue(TEXT("New possession has a fresh hearing lifetime"), Controller->bInvestigatingNoise);
+	UGameplayStatics::ApplyDamage(Enemy, 10000.0f, nullptr, Target, nullptr);
+	TestTrue(TEXT("Death follows the real damage path"), Enemy->IsDead());
+	ReportBehaviorHearingStimulus(*Controller, *Target, MovedNoise);
+	TestFalse(TEXT("Death clears memory and rejects all later hearing events"), Controller->bInvestigatingNoise);
+	UGameplayStatics::ApplyDamage(Target, 10000.0f, nullptr, nullptr, nullptr);
+	TestFalse(TEXT("A dead player cannot report new gunfire"), AfpstrueEnemyAIController::ReportAuthoritativeGunshot(Target, HeardLocation));
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeStructureTest, "fpstrue.AI.BehaviorTree.DefaultStructure",

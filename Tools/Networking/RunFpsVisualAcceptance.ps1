@@ -85,7 +85,7 @@ function New-PrivateUserDirectory([string]$path) {
     Set-Acl -LiteralPath $path -AclObject $acl
 }
 try {
-    Start-AcceptancePeer 'Server' ($shared + @(('"' + $map + '?game=/Script/fpstrue.fpstruePvpGameMode"'),'-server','-NullRHI','-Unattended',
+    Start-AcceptancePeer 'Server' ($shared + @(('"' + $map + '?game=/Script/fpstrue.fpstruePvpGameMode"'),'-server','-NullRHI','-Unattended','-useperfthreads',
         ('-port=' + $Port),('-abslog="' + (Join-Path $run 'Server.log') + '"')))
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ((Read-AcceptanceLog 'Server') -notmatch ('IpNetDriver listening on port ' + $Port + '\b')) {

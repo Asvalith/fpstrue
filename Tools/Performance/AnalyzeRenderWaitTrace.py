@@ -271,7 +271,12 @@ def analyze_window(root, start, end, alignment_json=None, max_events=500000):
 
     issues = []
     for identifiers in per_thread.values():
-        identifiers.sort(key=lambda i: (nodes[i]["raw_start"], nodes[i]["depth"], -nodes[i]["raw_end"], nodes[i]["ordinal"]))
+        # The provider exports entry order. Equal rounded starts can include a
+        # zero-duration sibling BEFORE the actual parent of the next child.
+        # Sorting those siblings by descending end reverses them and falsely
+        # leaves the zero-duration scope on the parent stack. Preserve provider
+        # ordinal for timestamp ties; retain every event and existing tolerance.
+        identifiers.sort(key=lambda i: (nodes[i]["raw_start"], nodes[i]["ordinal"]))
         stack = []
         for identifier in identifiers:
             current = nodes[identifier]
@@ -396,7 +401,7 @@ def analyze_window(root, start, end, alignment_json=None, max_events=500000):
         "thread_coverage": {"observed_names": sorted({node["thread"] for node in nodes}),
             "missing_primary_prefixes": [prefix for prefix in ("GameThread", "RenderThread", "RHIThread") if not any(node["thread"].startswith(prefix) for node in nodes)],
             "note": "An absent thread is unobserved/not applicable, not zero-cost. Check role, RHI configuration and trace coverage."},
-        "method": "Per-thread depth/containment tree; clip boundary intersections; subtract direct-child interval unions for exclusive scope wall time. Task and explicit-blocking intervals are unioned; blocking within task scopes is removed from the task-minus-blocking field. No duration threshold is applied to analysis events.",
+        "method": "Per-thread depth/containment tree; equal-start events retain provider CSV entry order, including zero-duration siblings and parent/child scopes. Clip boundary intersections; subtract direct-child interval unions for exclusive scope wall time. Task and explicit-blocking intervals are unioned; blocking within task scopes is removed from the task-minus-blocking field. No duration threshold is applied to analysis events.",
         "wait_scope_count": len(waits), "wait_scopes": waits, "selected_wait_examples": selected,
         "engine_frames": frames, "selected_frame_examples": selected_frames,
         "per_thread_top_exclusive_scope_wall": {thread: sorted(entries.values(), key=lambda entry: -entry["exclusive_scope_wall_ms"])[:25] for thread, entries in rankings.items()},
@@ -486,6 +491,32 @@ def self_test():
         incomplete = analyze_window(root, 2, 12)
         assert not incomplete["hierarchy"]["complete"]
         assert not incomplete["wait_scopes"][0]["decomposition_complete"]
+        # Real exporter tie: zero sibling and following nonzero sibling share
+        # a start/depth; the latter, not the zero sibling, owns the next child.
+        # A zero parent with a zero child is valid and both remain in the tree.
+        save_fixture([(2,"GameThread",1,0,20,0), (2,"GameThread",5,2,2,1),
+            (2,"GameThread",2,2,8,1), (2,"GameThread",3,2.0000001,3,2),
+            (2,"GameThread",5,4,4,2), (2,"GameThread",5,4,4,3), (2,"GameThread",5,4,5,2)])
+        tied = analyze_window(root, 0, 20)
+        assert tied["hierarchy"]["complete"] and tied["hierarchy"]["event_count"] == 7
+        work_rank = next(row for row in tied["per_thread_top_exclusive_scope_wall"]["2"] if row["name"] == "Work")
+        assert work_rank["event_count"] == 4  # Three zero events are preserved.
+        tied_wait = next(row for row in tied["wait_scopes"] if row["name"] == "WaitUntilTasksComplete")
+        assert tied_wait["decomposition_complete"]
+        assert abs(tied_wait["nested_task_scope_wall_ms"] - 999.9999) < 1e-6
+        # Stable ties must not turn genuine positive-duration overruns into
+        # accepted data, including a positive child of a zero-duration parent.
+        for crossing in (
+            [(2,"GameThread",1,0,20,0), (2,"GameThread",2,2,8,1), (2,"GameThread",5,3,9,2)],
+            [(2,"GameThread",1,0,20,0), (2,"GameThread",2,2,2,1), (2,"GameThread",5,2,3,2)],
+        ):
+            save_fixture(crossing)
+            try:
+                analyze_window(root, 0, 20)
+            except ValueError as error:
+                assert "Crossing same-thread scopes" in str(error)
+            else:
+                raise AssertionError("A real crossing or positive child of a zero parent was accepted")
         save_fixture([(1196447025,"GPU1",1,2,12,0)])
         try:
             analyze_window(root, 2, 12)
@@ -493,7 +524,7 @@ def self_test():
             pass
         else:
             raise AssertionError("A GPU timeline was treated as CPU evidence")
-    print("Render-wait self-test passed: hierarchy, nested task/block union, zero double-counting, clipping, missing evidence, overwrite guard and invalid input checks. No Unreal application launched.")
+    print("Render-wait self-test passed: hierarchy, nested task/block union, zero double-counting, clipping, provider-order timestamp ties, zero-duration parent/child preservation, real-crossing rejection, missing evidence, overwrite guard and invalid input checks. No Unreal application launched.")
 
 
 if __name__ == "__main__":

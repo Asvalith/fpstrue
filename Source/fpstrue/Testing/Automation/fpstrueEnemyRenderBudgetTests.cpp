@@ -4,6 +4,7 @@
 
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
+#include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
@@ -26,6 +27,9 @@
 #include "Tests/AutomationCommon.h"
 #include "SignificanceManager.h"
 #include "AnimationSharingManager.h"
+#include "Animation/AnimInstance.h"
+#include "Engine/SkeletalMesh.h"
+#include "Math/RotationMatrix.h"
 
 #include <limits>
 
@@ -116,6 +120,65 @@ bool FFpstrueEnemySignificanceCombatSampleTest::RunTest(const FString& Parameter
 	Controller->Destroy();
 	Enemy->Destroy();
 	Target->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyPostProcessIsolationTest,
+	"fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 敌人移除后处理实例及重初始化入口，但不改共享资源或其他角色的后处理，不清主动画。
+bool FFpstrueEnemyPostProcessIsolationTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
+		FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("Postprocess isolation enemy"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	ACharacter* Other = World->SpawnActor<ACharacter>();
+	if (!TestNotNull(TEXT("Unrelated character sharing a resource"), Other)) return false;
+	USkeletalMesh* SharedResource = NewObject<USkeletalMesh>();
+	SharedResource->SetPostProcessAnimBlueprint(UAnimInstance::StaticClass());
+	Enemy->GetMesh()->SetSkeletalMeshAsset(SharedResource);
+	Other->GetMesh()->SetSkeletalMeshAsset(SharedResource);
+	Other->GetMesh()->SetDisablePostProcessBlueprint(false);
+	UAnimInstance* OtherPost = NewObject<UAnimInstance>(Other->GetMesh());
+	Other->GetMesh()->PostProcessAnimInstance = OtherPost;
+	UAnimInstance* Main = NewObject<UAnimInstance>(Enemy->GetMesh());
+	Enemy->GetMesh()->AnimScriptInstance = Main;
+	// 固定输入只模拟组件上残留的旧后处理，不加载将删除的旧敌人IK资产。
+	const auto ReintroduceOldPostProcess = [Enemy]()
+	{
+		Enemy->GetMesh()->SetOverridePostProcessAnimBP(UAnimInstance::StaticClass(), false);
+		Enemy->GetMesh()->SetDisablePostProcessBlueprint(false);
+		Enemy->GetMesh()->PostProcessAnimInstance = NewObject<UAnimInstance>(Enemy->GetMesh());
+	};
+	const auto CheckRemoved = [this, Enemy, Other, SharedResource, OtherPost, Main]()
+	{
+		TestTrue(TEXT("Enemy postprocess stays disabled"), Enemy->GetMesh()->GetDisablePostProcessBlueprint());
+		TestNull(TEXT("Enemy has no resident postprocess instance that can force synchronous evaluation"), Enemy->GetMesh()->GetPostProcessInstance());
+		TestNull(TEXT("Enemy has no component-level postprocess override"), Enemy->GetMesh()->OverridePostProcessAnimBP.Get());
+		TestTrue(TEXT("Main animation instance is not removed"), Enemy->GetMesh()->GetAnimInstance() == Main);
+		TestTrue(TEXT("Shared mesh asset is not globally edited"), SharedResource->GetPostProcessAnimBlueprint() == UAnimInstance::StaticClass());
+		TestFalse(TEXT("Other consumers keep their own enabled postprocess"), Other->GetMesh()->GetDisablePostProcessBlueprint());
+		TestTrue(TEXT("Other consumers keep their own postprocess instance"), Other->GetMesh()->GetPostProcessInstance() == OtherPost);
+	};
+	FFPEnemyRenderSignificancePolicy Policy;
+	for (const EFPEnemyRenderSignificanceTier Tier : {EFPEnemyRenderSignificanceTier::Full, EFPEnemyRenderSignificanceTier::Reduced,
+		EFPEnemyRenderSignificanceTier::Background})
+	{
+		ReintroduceOldPostProcess();
+		Enemy->ApplyRenderSignificanceTier(Tier, false, false, false, Policy);
+		CheckRemoved();
+	}
+	ReintroduceOldPostProcess();
+	Enemy->GetMesh()->OnAnimInitialized.Broadcast(); // 调用实际绑定的生命周期封口，而非直接访问私有清理。
+	CheckRemoved();
 	return true;
 }
 
@@ -268,6 +331,8 @@ bool FFpstrueEnemyRenderBudgetBoundaryTest::RunTest(const FString& Parameters)
 	UGameplayStatics::ApplyDamage(Enemy, 1000.0f, nullptr, nullptr, UDamageType::StaticClass());
 	if (!TestTrue(TEXT("Damage triggered real enemy death"), Enemy->IsDead()))
 		return false;
+	TestTrue(TEXT("Death does not re-enable enemy postprocess"), Enemy->GetMesh()->GetDisablePostProcessBlueprint());
+	TestNull(TEXT("Death keeps the enemy postprocess instance removed"), Enemy->GetMesh()->GetPostProcessInstance());
 	CheckCounts(4, 0);
 	TestFalse(TEXT("Death revokes the main skeletal mesh flags"),
 			  bool(Enemy->GetMesh()->CastShadow) || bool(Enemy->GetMesh()->bVisibleInRayTracing));
@@ -411,11 +476,15 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
 	Enemy->FinishSpawning(FTransform::Identity);
 	Enemy->SetActorEnableCollision(false);
+	Enemy->bReferenceEnemyReplication = false; // 用例固定被测策略，不改变进程A/B命令行。
+	Enemy->ApplyNetworkReplicationPolicy();
 	Coordinator->Update();
 	TestEqual(TEXT("Both valid participants contribute viewpoints"), Coordinator->GetGameplayViewpointCount(), 2);
 	TestEqual(TEXT("Typed discovery finds the live enemy"), Coordinator->GetTrackedEnemyCount(), 1);
 	TestTrue(TEXT("Near second participant wins over far first participant, rather than averaging"),
 		Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+	TestEqual(TEXT("A near second participant protects Actor replication for every connection"),
+		Enemy->GetNetUpdateFrequency(), FMath::Min(Enemy->AuthoredNetUpdateFrequency, 30.0f));
 	TestEqual(TEXT("DS never executes render application"), Coordinator->GetRenderUpdateSerial(), uint32(0));
 	TestNull(TEXT("DS never creates the World animation-sharing manager"), UAnimationSharingManager::GetManagerForWorld(World));
 	TestEqual(TEXT("DS has no sharing followers"), Sharing->GetRegisteredEnemyCount(), 0);
@@ -434,9 +503,13 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	Coordinator->Update();
 	TestEqual(TEXT("Expired retained Pawn is excluded"), Coordinator->GetGameplayViewpointCount(), 1);
 	TestTrue(TEXT("Only distant valid participant permits background gameplay"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Background);
+	TestEqual(TEXT("Only distant valid participants permit the background replication cap"),
+		Enemy->GetNetUpdateFrequency(), FMath::Min(Enemy->AuthoredNetUpdateFrequency, 5.0f));
 	Players[0]->SetActorLocation(FVector(1000.0f, 0.0f, 0.0f));
 	Coordinator->Update();
 	TestTrue(TEXT("Moving the first participant near independently restores full gameplay"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
+	TestEqual(TEXT("Either participant independently restores Full replication"),
+		Enemy->GetNetUpdateFrequency(), FMath::Min(Enemy->AuthoredNetUpdateFrequency, 30.0f));
 	const uint32 SerialBeforeEnd = Coordinator->GetUpdateSerial();
 	State->Destroy();
 	TestFalse(TEXT("GameState EndPlay stops its coordinator"), Coordinator->IsRunning());
@@ -444,6 +517,133 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	Coordinator->Update();
 	TestEqual(TEXT("Stopped coordinator cannot perform another update"), Coordinator->GetUpdateSerial(), SerialBeforeEnd);
 	TestEqual(TEXT("Cleanup leaves no sharing followers"), Sharing->GetRegisteredEnemyCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyReplicationTieringTest,
+	"fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 临时PIE角色只验证调度策略与权限，不替代真实160AI带宽/复制CPU/状态陈旧度对照。
+bool FFpstrueEnemyReplicationTieringTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Replication fixture has native AI services"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	const auto SpawnConfiguredEnemy = [World](float Frequency, float MinFrequency)
+	{
+		auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity,
+			nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Enemy == nullptr) return Enemy;
+		Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+		Enemy->SetNetUpdateFrequency(Frequency);
+		Enemy->SetMinNetUpdateFrequency(MinFrequency);
+		Enemy->FinishSpawning(FTransform::Identity);
+		Enemy->SetActorEnableCollision(false);
+		Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+		return Enemy;
+	};
+	auto* Standalone = SpawnConfiguredEnemy(80.0f, 10.0f);
+	if (!TestNotNull(TEXT("Standalone enemy"), Standalone)) return false;
+	Standalone->SignificanceTier = EFPEnemySignificanceTier::Background;
+	Standalone->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Standalone frequency is untouched"), Standalone->GetNetUpdateFrequency(), 80.0f);
+	TestFalse(TEXT("Standalone does not capture or own replication policy"), Standalone->bCapturedAuthoredReplicationFrequency);
+	TestTrue(TEXT("Reference command line is case insensitive"), AfpstrueEnemyCharacter::IsReferenceReplicationRequested(TEXT("-EnemyReplication=reference")));
+	TestFalse(TEXT("Tiered mode does not select Reference"), AfpstrueEnemyCharacter::IsReferenceReplicationRequested(TEXT("-EnemyReplication=Tiered")));
+	TestFalse(TEXT("No option keeps the shipping-compatible Tiered default"), AfpstrueEnemyCharacter::IsReferenceReplicationRequested(TEXT("")));
+	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
+	World->SetPlayInEditorInitialNetMode(NM_DedicatedServer);
+	TestTrue(TEXT("The fixture enters the real server mode guard"), World->GetNetMode() == NM_DedicatedServer);
+	auto* Enemy = SpawnConfiguredEnemy(100.0f, 20.0f);
+	auto* LowAuthored = SpawnConfiguredEnemy(12.0f, 8.0f);
+	if (!TestNotNull(TEXT("Server enemy"), Enemy) || !TestNotNull(TEXT("Low-frequency authored enemy"), LowAuthored)) return false;
+	Enemy->bReferenceEnemyReplication = LowAuthored->bReferenceEnemyReplication = false;
+	const auto CheckTier = [&](EFPEnemySignificanceTier Tier, float ExpectedFrequency, float ExpectedMin)
+	{
+		Enemy->SignificanceTier = Tier;
+		Enemy->ApplyNetworkReplicationPolicy();
+		TestEqual(TEXT("Server applies the expected Actor-level frequency cap"), Enemy->GetNetUpdateFrequency(), ExpectedFrequency);
+		TestEqual(TEXT("Adaptive minimum cannot exceed the cap or original minimum"), Enemy->GetMinNetUpdateFrequency(), ExpectedMin);
+	};
+	CheckTier(EFPEnemySignificanceTier::Full, 30.0f, 20.0f);
+	CheckTier(EFPEnemySignificanceTier::Reduced, 15.0f, 15.0f);
+	CheckTier(EFPEnemySignificanceTier::Background, 5.0f, 5.0f);
+	const float MovementInterval = Enemy->GetCharacterMovement()->GetComponentTickInterval();
+	const float MeshInterval = Enemy->GetMesh()->GetComponentTickInterval();
+	const auto RenderTier = Enemy->GetRenderSignificanceTier();
+	const bool bPostProcessDisabled = Enemy->GetMesh()->GetDisablePostProcessBlueprint();
+	Enemy->bReferenceEnemyReplication = true;
+	Enemy->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Reference restores the actual authored frequency, not Full30"), Enemy->GetNetUpdateFrequency(), 100.0f);
+	TestEqual(TEXT("Reference restores the actual authored adaptive minimum"), Enemy->GetMinNetUpdateFrequency(), 20.0f);
+	Enemy->bReferenceEnemyReplication = false;
+	Enemy->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Leaving Reference reapplies Background"), Enemy->GetNetUpdateFrequency(), 5.0f);
+	Enemy->bEnableNetworkReplicationTiering = false;
+	Enemy->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Disabling the feature restores authored frequency"), Enemy->GetNetUpdateFrequency(), 100.0f);
+	Enemy->bEnableNetworkReplicationTiering = true;
+	Enemy->ApplyNetworkReplicationPolicy();
+	LowAuthored->SignificanceTier = EFPEnemySignificanceTier::Full;
+	LowAuthored->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Full never raises an asset configured below30Hz"), LowAuthored->GetNetUpdateFrequency(), 12.0f);
+	LowAuthored->SignificanceTier = EFPEnemySignificanceTier::Reduced;
+	LowAuthored->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Reduced never raises an asset configured below15Hz"), LowAuthored->GetNetUpdateFrequency(), 12.0f);
+	LowAuthored->SignificanceTier = EFPEnemySignificanceTier::Background;
+	LowAuthored->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Background still tightens an authored low-rate actor"), LowAuthored->GetNetUpdateFrequency(), 5.0f);
+	TestEqual(TEXT("Replication policy never changes movement cadence"), Enemy->GetCharacterMovement()->GetComponentTickInterval(), MovementInterval);
+	TestEqual(TEXT("Replication policy never changes animation cadence"), Enemy->GetMesh()->GetComponentTickInterval(), MeshInterval);
+	TestTrue(TEXT("Replication policy never changes RenderTier"), Enemy->GetRenderSignificanceTier() == RenderTier);
+	TestEqual(TEXT("Replication policy never re-enables enemy postprocess"), Enemy->GetMesh()->GetDisablePostProcessBlueprint(), bPostProcessDisabled);
+	TestNull(TEXT("Replication policy leaves no enemy postprocess instance"), Enemy->GetMesh()->GetPostProcessInstance());
+	TestTrue(TEXT("Every tier keeps Actor and movement replication enabled"), Enemy->GetIsReplicated() && Enemy->IsReplicatingMovement());
+	TestTrue(TEXT("Every tier keeps the original dormancy mode"), Enemy->NetDormancy == DORM_Awake);
+
+	// 真实攻击提交后角色桥接必须立即提升，Reset后退回当前自然档；不直接伪造Combat私有阶段。
+	auto* Target = World->SpawnActor<AfpstrueCharacter>(FVector(100.0f, 0.0f, 0.0f), FRotator::ZeroRotator);
+	auto* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	if (!TestNotNull(TEXT("Combat protection target"), Target) || !TestNotNull(TEXT("Combat protection controller"), Controller)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	Controller->Possess(Enemy);
+	Controller->InitializeCombatContext(Target, nullptr);
+	Controller->GetBrainComponent()->SetComponentTickEnabled(false);
+	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	Controller->GetPerceptionComponent()->RegisterStimulus(Target, Stimulus);
+	Controller->GetPerceptionComponent()->ProcessStimuli();
+	if (!TestTrue(TEXT("Protection starts a real attack transaction"), Enemy->GetCombatComponent()->TryAttackTarget())) return false;
+	TestEqual(TEXT("Attack immediately restores the Full replication cap"), Enemy->GetNetUpdateFrequency(), 30.0f);
+	Enemy->GetCombatComponent()->ResetCombat();
+	TestEqual(TEXT("Attack cleanup returns to the unchanged natural Background tier"), Enemy->GetNetUpdateFrequency(), 5.0f);
+	UGameplayStatics::ApplyDamage(Enemy, 1.0f, nullptr, Target, UDamageType::StaticClass());
+	TestEqual(TEXT("Actual damage immediately protects replication"), Enemy->GetNetUpdateFrequency(), 30.0f);
+	Enemy->RefreshHitAnimationProtection();
+	TestEqual(TEXT("Hit protection cleanup returns to Background"), Enemy->GetNetUpdateFrequency(), 5.0f);
+
+	World->SetPlayInEditorInitialNetMode(NM_Client);
+	Enemy->SetNetUpdateFrequency(17.0f);
+	Enemy->SetMinNetUpdateFrequency(3.0f);
+	Enemy->SignificanceTier = EFPEnemySignificanceTier::Full;
+	Enemy->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Client network mode never writes authority replication settings"), Enemy->GetNetUpdateFrequency(), 17.0f);
+	World->SetPlayInEditorInitialNetMode(NM_ListenServer);
+	Enemy->SetRole(ROLE_SimulatedProxy);
+	Enemy->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("A simulated replica is rejected even in a listen-server world"), Enemy->GetNetUpdateFrequency(), 17.0f);
+	Enemy->SetRole(ROLE_Authority);
+	Enemy->ApplyNetworkReplicationPolicy();
+	TestEqual(TEXT("Authority in a listen-server world can resume policy"), Enemy->GetNetUpdateFrequency(), 30.0f);
+	UGameplayStatics::ApplyDamage(Enemy, 10000.0f, nullptr, Target, UDamageType::StaticClass());
+	TestTrue(TEXT("Actual death leaves the live-enemy replication budget"), Enemy->IsDead());
+	TestEqual(TEXT("Death restores authored replication scheduling for its final state"), Enemy->GetNetUpdateFrequency(), 100.0f);
+	TestEqual(TEXT("Death also restores the authored adaptive minimum"), Enemy->GetMinNetUpdateFrequency(), 20.0f);
+	TestTrue(TEXT("Death does not hide the final replicated Actor state"), Enemy->GetIsReplicated());
 	return true;
 }
 
@@ -520,6 +720,7 @@ bool FFpstrueMultiplayerAuthorityPoseTest::RunTest(const FString& Parameters)
 	FTestWorldWrapper Fixture;
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Authority pose fixture has native AI services"), World->CreateAISystem())) return false;
 	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
 	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
 	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
@@ -529,15 +730,90 @@ bool FFpstrueMultiplayerAuthorityPoseTest::RunTest(const FString& Parameters)
 	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
 	Enemy->GetMesh()->bEnableUpdateRateOptimizations = true;
 	Enemy->FinishSpawning(FTransform::Identity);
+	// 显式走真实配置入口固定fixture模式，既验证组件配置，也不依赖整进程A/B命令行。
+	Enemy->ConfigureHitProxies(true);
+	TestTrue(TEXT("Simple mode uses animation-independent hit proxies"), Enemy->UsesSimpleHitProxies());
+	TestFalse(TEXT("An idle Simple authority has no full-pose correctness dependency"), Enemy->RequiresFullAuthorityPose());
 	Enemy->GetMesh()->SetComponentTickInterval(0.1f);
 	FFPEnemyRenderSignificancePolicy Policy;
 	Policy.FullMinLOD = 2;
+	Enemy->SignificanceTier = EFPEnemySignificanceTier::Full;
 	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, false, false, false, Policy);
-	TestEqual(TEXT("Authority removes pre-existing mesh cooldown interval"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
-	TestFalse(TEXT("Authority disables URO independently of client visibility"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
-	TestTrue(TEXT("Authority refreshes offscreen bones for hit shapes"), Enemy->GetMesh()->VisibilityBasedAnimTickOption == EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones);
-	TestEqual(TEXT("Authority does not impose a reduced minimum LOD"), Enemy->GetAppliedMinimumLOD(), 0);
+	TestEqual(TEXT("Full gameplay removes mesh cooldown even with Background rendering"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
+	TestTrue(TEXT("Idle Simple authority may retain authored visibility ticking"),
+		Enemy->GetMesh()->VisibilityBasedAnimTickOption == EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered);
 	TestFalse(TEXT("Authority can never become an animation-sharing follower"), Enemy->CanUseAnimationSharing());
+	TestTrue(TEXT("Authority has no enemy postprocess at Full gameplay"), Enemy->GetMesh()->GetDisablePostProcessBlueprint());
+	TestNull(TEXT("Authority retains no enemy postprocess instance"), Enemy->GetMesh()->GetPostProcessInstance());
+	Enemy->SignificanceTier = EFPEnemySignificanceTier::Reduced;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Full, false, false, false, Policy);
+	TestEqual(TEXT("Reduced server pose follows gameplay, not a Full local render tier"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->MidRateAnimationTickInterval);
+	Enemy->SignificanceTier = EFPEnemySignificanceTier::Background;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Full, false, false, false, Policy);
+	TestEqual(TEXT("Background server pose follows gameplay despite Full local rendering"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->FarRateAnimationTickInterval);
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, true, true, false, Policy);
+	TestEqual(TEXT("Changing render tier and shadow/RT flags cannot change server pose cadence"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->FarRateAnimationTickInterval);
+	TestTrue(TEXT("Full rendering cannot re-enable enemy postprocess at Background gameplay"), Enemy->GetMesh()->GetDisablePostProcessBlueprint());
+	// 渲染消融只控制本地表现，不能成为服务器姿态调度开关。
+	Policy.bEnableRenderTiering = false;
+	Policy.bEnableAnimationTickTiering = false;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Full, false, false, false, Policy);
+	TestEqual(TEXT("Disabling client render tiering does not disable server gameplay cadence"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->FarRateAnimationTickInterval);
+	Policy.bEnableRenderTiering = Policy.bEnableAnimationTickTiering = true;
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, false, false, false, Policy);
+
+	// 真实感知和攻击事务即时恢复姿态；不是手工改 Combat 的攻击阶段来绕过生产路径。
+	auto* Target = World->SpawnActor<AfpstrueCharacter>(FVector(100.0f, 0.0f, 0.0f), FRotator::ZeroRotator);
+	auto* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	if (!TestNotNull(TEXT("Authority pose combat target"), Target) || !TestNotNull(TEXT("Authority pose controller"), Controller)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	Controller->Possess(Enemy);
+	Controller->InitializeCombatContext(Target, nullptr);
+	Controller->GetBrainComponent()->SetComponentTickEnabled(false);
+	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	Controller->GetPerceptionComponent()->RegisterStimulus(Target, Stimulus);
+	Controller->GetPerceptionComponent()->ProcessStimuli();
+	if (!TestTrue(TEXT("Simple authority starts a real attack transaction"), Enemy->GetCombatComponent()->TryAttackTarget())) return false;
+	TestTrue(TEXT("Attack protects authority Socket and Notify pose"), Enemy->RequiresFullAuthorityPose());
+	TestEqual(TEXT("Attack immediately removes the previous Background cooldown"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
+	TestTrue(TEXT("Attack refreshes pose even offscreen"), Enemy->GetMesh()->VisibilityBasedAnimTickOption == EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones);
+	TestFalse(TEXT("Attack disables URO for necessary authority pose"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
+	Enemy->GetCombatComponent()->ResetCombat();
+	TestFalse(TEXT("Attack cleanup releases full authority pose"), Enemy->RequiresFullAuthorityPose());
+	TestEqual(TEXT("Attack cleanup returns to the unchanged Gameplay Background cadence"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->FarRateAnimationTickInterval);
+	UGameplayStatics::ApplyDamage(Enemy, 1.0f, nullptr, Target, UDamageType::StaticClass());
+	TestTrue(TEXT("Actual damage immediately protects authority pose"), Enemy->RequiresFullAuthorityPose());
+	TestEqual(TEXT("Hit protection removes animation cooldown"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
+	Enemy->RefreshHitAnimationProtection();
+	TestFalse(TEXT("Expired hit protection releases full authority pose"), Enemy->RequiresFullAuthorityPose());
+	TestEqual(TEXT("Hit protection cleanup returns to Gameplay Background cadence"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->FarRateAnimationTickInterval);
+
+	World->SetPlayInEditorInitialNetMode(NM_DedicatedServer);
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Background, false, false, false, Policy);
+	TestEqual(TEXT("Dedicated Simple authority also obeys Gameplay Background cadence"),
+		Enemy->GetMesh()->GetComponentTickInterval(), Enemy->FarRateAnimationTickInterval);
+	TestTrue(TEXT("Idle dedicated Simple authority need not evaluate offscreen poses"),
+		Enemy->GetMesh()->VisibilityBasedAnimTickOption == EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered);
+	TestNull(TEXT("Dedicated authority never recreates enemy postprocess"), Enemy->GetMesh()->GetPostProcessInstance());
+
+	// Reference复现旧命中链，不能跟着Simple方案降频或跳过骨骼；用于性能和正确性对照。
+	Enemy->ConfigureHitProxies(false);
+	TestFalse(TEXT("Reference mode leaves simple hit proxies"), Enemy->UsesSimpleHitProxies());
+	TestTrue(TEXT("Reference authority always needs bone-driven hit shapes"), Enemy->RequiresFullAuthorityPose());
+	Enemy->ApplyRenderSignificanceTier(EFPEnemyRenderSignificanceTier::Full, false, false, false, Policy);
+	TestEqual(TEXT("Reference restores full update cadence even at Gameplay Background"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);
+	TestTrue(TEXT("Reference retains full main-pose hit-shape updates"), Enemy->GetMesh()->VisibilityBasedAnimTickOption == EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones);
+	TestFalse(TEXT("Reference disables URO independently of render visibility"), Enemy->GetMesh()->bEnableUpdateRateOptimizations);
+	TestEqual(TEXT("Reference removes local reduced MinLOD restrictions"), Enemy->GetAppliedMinimumLOD(), 0);
+	TestFalse(TEXT("Reference authority cannot become a shared-pose follower"), Enemy->CanUseAnimationSharing());
+	World->SetPlayInEditorInitialNetMode(NM_ListenServer);
 	auto* Sharing = NewObject<UfpstrueEnemyAnimationSharingCoordinator>(Enemy);
 	Enemy->AddInstanceComponent(Sharing);
 	Sharing->RegisterComponent();
@@ -662,6 +938,121 @@ bool FFpstrueEnemyRenderTopKTest::RunTest(const FString& Parameters)
 			{
 				TestEqual(FString::Printf(TEXT("Budget %d direction %d selected ID %d"), Budget, bReverseInput ? 1 : 0, Index),
 					SelectedIds[Index], ExpectedIds[Index]);
+			}
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyRenderScoringSnapshotTest,
+	"fpstrue.Performance.Significance.RenderScoringSnapshotEquivalence",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 保留优化前的纯数学公式作为测试预言机，确保公共量外提不会修改视锥、近期可见性、分数或 Top-K 排序输入。
+bool FFpstrueEnemyRenderScoringSnapshotTest::RunTest(const FString& Parameters)
+{
+	const auto ReferenceSample = [](const FFPEnemyRenderViewContext& View, const FFPEnemyRenderSignificancePolicy& Policy,
+		const FVector& Origin, float Radius, float& LastPrimaryTime)
+	{
+		FFPEnemyRenderSignificanceSample Sample;
+		const FVector Offset = Origin - View.ViewLocation;
+		Sample.Distance = Offset.Size();
+		const FRotationMatrix Rotation(View.ViewRotation);
+		const float Forward = FVector::DotProduct(Offset, Rotation.GetUnitAxis(EAxis::X));
+		const float Horizontal = FVector::DotProduct(Offset, Rotation.GetUnitAxis(EAxis::Y));
+		const float Vertical = FVector::DotProduct(Offset, Rotation.GetUnitAxis(EAxis::Z));
+		const float HalfFOV = FMath::DegreesToRadians(FMath::Clamp(View.HorizontalFOVDegrees, 5.0f, 170.0f) * 0.5f);
+		const float TanHorizontal = FMath::Max(FMath::Tan(HalfFOV), 0.01f);
+		const float TanVertical = TanHorizontal / FMath::Max(View.AspectRatio, 0.1f);
+		const float SafeForward = FMath::Max(Forward, 1.0f);
+		const float HorizontalRadius = Radius / (SafeForward * TanHorizontal);
+		const float VerticalRadius = Radius / (SafeForward * TanVertical);
+		const float HorizontalPosition = Horizontal / (SafeForward * TanHorizontal);
+		const float VerticalPosition = Vertical / (SafeForward * TanVertical);
+		const auto Intersects = [&](float Margin)
+		{
+			return Forward + Radius > 0.0f && FMath::Abs(HorizontalPosition) <= 1.0f + Margin + HorizontalRadius &&
+				FMath::Abs(VerticalPosition) <= 1.0f + Margin + VerticalRadius;
+		};
+		Sample.bInPrimaryFrustum = Intersects(0.0f);
+		Sample.bInExpandedFrustum = Intersects(FMath::Max(Policy.ExpandedFrustumMargin, 0.0f));
+		Sample.FrustumFactor = Sample.bInPrimaryFrustum ? 1.0f : (Sample.bInExpandedFrustum ? 0.5f : 0.0f);
+		const float RecentGrace = FMath::Max(Policy.RecentFrustumGraceSeconds, 0.0f);
+		if (Sample.bInPrimaryFrustum)
+		{
+			LastPrimaryTime = View.TimeSeconds;
+			Sample.RecentFrustumFactor = 1.0f;
+		}
+		else if (RecentGrace > 0.0f)
+		{
+			Sample.RecentFrustumFactor = 1.0f - FMath::Clamp((View.TimeSeconds - LastPrimaryTime) / RecentGrace, 0.0f, 1.0f);
+		}
+		const float ScreenRadius = Forward > 0.0f ? FMath::Max(HorizontalRadius, VerticalRadius) : 0.0f;
+		Sample.ScreenCoverageFactor = Sample.bInExpandedFrustum
+			? FMath::Clamp(ScreenRadius / FMath::Max(Policy.ScreenRadiusForFullScore, 0.001f), 0.0f, 1.0f) : 0.0f;
+		const float Near = FMath::Max(Policy.NearDistance, 0.0f);
+		const float Far = FMath::Max(Policy.FarDistance, Near + 1.0f);
+		Sample.DistanceFactor = 1.0f - FMath::Clamp((Sample.Distance - Near) / (Far - Near), 0.0f, 1.0f);
+		const float FrustumWeight = FMath::Max(Policy.FrustumWeight, 0.0f);
+		const float ScreenWeight = FMath::Max(Policy.ScreenCoverageWeight, 0.0f);
+		const float RecentWeight = FMath::Max(Policy.RecentFrustumWeight, 0.0f);
+		const float DistanceWeight = FMath::Max(Policy.DistanceWeight, 0.0f);
+		const float Sum = FMath::Max(FrustumWeight + ScreenWeight + RecentWeight + DistanceWeight, KINDA_SMALL_NUMBER);
+		Sample.Score = FMath::Clamp((Sample.FrustumFactor * FrustumWeight + Sample.ScreenCoverageFactor * ScreenWeight +
+			Sample.RecentFrustumFactor * RecentWeight + Sample.DistanceFactor * DistanceWeight) / Sum, 0.0f, 1.0f);
+		return Sample;
+	};
+
+	// 正面、边界、背面、近零深度及远距均覆盖；转镜、变焦、视口比例变化使用新一轮快照。
+	const TArray<FVector> Origins{
+		FVector(0.0f), FVector(1000.0f, 0.0f, 0.0f), FVector(1000.0f, 1100.0f, 0.0f),
+		FVector(-1000.0f, 0.0f, 0.0f), FVector(-1.0f, 100.0f, 500.0f), FVector(12000.0f, 2000.0f, -1000.0f)};
+	for (int32 ViewIndex = 0; ViewIndex < 4; ++ViewIndex)
+	{
+		FFPEnemyRenderViewContext View;
+		View.ViewLocation = FVector(35.0f, -40.0f, 75.0f) * ViewIndex;
+		View.ViewRotation = FRotator(12.0f * ViewIndex, 80.0f * ViewIndex, -3.0f * ViewIndex);
+		View.HorizontalFOVDegrees = ViewIndex == 0 ? 90.0f : (ViewIndex == 1 ? 20.0f : (ViewIndex == 2 ? 180.0f : 0.0f));
+		View.AspectRatio = ViewIndex == 3 ? 0.0f : 16.0f / 9.0f;
+		View.TimeSeconds = 10.0f + ViewIndex * 0.2f;
+		for (int32 PolicyIndex = 0; PolicyIndex < 3; ++PolicyIndex)
+		{
+			FFPEnemyRenderSignificancePolicy Policy;
+			if (PolicyIndex == 1)
+			{
+				Policy.FrustumWeight = 2.0f;
+				Policy.ScreenCoverageWeight = 3.0f;
+				Policy.RecentFrustumWeight = 0.0f;
+				Policy.DistanceWeight = -1.0f;
+				Policy.ExpandedFrustumMargin = 0.0f;
+				Policy.RecentFrustumGraceSeconds = 0.0f;
+			}
+			else if (PolicyIndex == 2)
+			{
+				Policy.FrustumWeight = Policy.ScreenCoverageWeight = Policy.RecentFrustumWeight = Policy.DistanceWeight = 0.0f;
+				Policy.NearDistance = -100.0f;
+				Policy.FarDistance = -200.0f;
+				Policy.ScreenRadiusForFullScore = 0.0f;
+			}
+			const FFPEnemyRenderScoringContext Context(View, Policy);
+			for (int32 BoundsIndex = 0; BoundsIndex < Origins.Num(); ++BoundsIndex)
+			{
+				const float Radius = BoundsIndex == 0 ? 1.0f : 100.0f;
+				float ReferenceTime = 9.9f;
+				float SnapshotTime = ReferenceTime;
+				const auto Expected = ReferenceSample(View, Policy, Origins[BoundsIndex], Radius, ReferenceTime);
+				const auto Actual = Context.EvaluateBounds(Origins[BoundsIndex], Radius, SnapshotTime);
+				const FString Label = FString::Printf(TEXT("View%d Policy%d Bounds%d"), ViewIndex, PolicyIndex, BoundsIndex);
+				// 排序直接比较 float 分数，使用零容差，不能让普通近似断言掩盖预算边界变化。
+				TestEqual(Label + TEXT(" Score"), Actual.Score, Expected.Score, 0.0f);
+				TestEqual(Label + TEXT(" Distance"), Actual.Distance, Expected.Distance, 0.0f);
+				TestEqual(Label + TEXT(" FrustumFactor"), Actual.FrustumFactor, Expected.FrustumFactor, 0.0f);
+				TestEqual(Label + TEXT(" ScreenCoverageFactor"), Actual.ScreenCoverageFactor, Expected.ScreenCoverageFactor, 0.0f);
+				TestEqual(Label + TEXT(" RecentFrustumFactor"), Actual.RecentFrustumFactor, Expected.RecentFrustumFactor, 0.0f);
+				TestEqual(Label + TEXT(" DistanceFactor"), Actual.DistanceFactor, Expected.DistanceFactor, 0.0f);
+				TestEqual(Label + TEXT(" Primary"), Actual.bInPrimaryFrustum, Expected.bInPrimaryFrustum);
+				TestEqual(Label + TEXT(" Expanded"), Actual.bInExpandedFrustum, Expected.bInExpandedFrustum);
+				TestEqual(Label + TEXT(" History"), SnapshotTime, ReferenceTime, 0.0f);
 			}
 		}
 	}

@@ -28,6 +28,7 @@
 #include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/ProgressBar.h"
+#include "Components/SphereComponent.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Blueprint/WidgetTree.h"
@@ -45,6 +46,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Testing/Automation/fpstrueTestObservers.h"
 #include "Engine/World.h"
+#include "TimerManager.h"
 #include "Engine/ReplicatedState.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerStart.h"
@@ -1150,6 +1152,91 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("A cancelled queued round cannot execute after a delayed cooldown callback"), BatchWeapon->ExecuteNetworkShot(CancelledBurst));
 	BatchASC->RemoveLooseGameplayTag(FpstrueGameplayTags::State_Firing);
 
+	// 真正的 Timer 回归：复用本夹具已有的1800RPM/100ms准入窗，不改变生产射速、年龄或队列上限。
+	// 尾部准入不能重建未变队头的句柄/截止时间；提前唤醒仍必须经生产回调重新安排。
+	if (!Fixture.TickTestWorld(0.2f)) { Fixture.ForwardErrorMessages(this); return false; }
+	BatchASC->AddLooseGameplayTag(FpstrueGameplayTags::State_Firing);
+	BatchWeapon->BeginAbilityFire(54);
+	const int32 TimerCaseInitialAmmo = BatchWeapon->GetCurrentAmmo();
+	const double TimerCaseReceivedTime = World->GetTimeSeconds();
+	FFPShotRequest TimerCaseRequests[3];
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		FFPShotRequest& Request = TimerCaseRequests[Index];
+		Request.Avatar = BatchPlayer;
+		Request.EquipmentGeneration = BatchWeapon->EquipmentRevision;
+		Request.FireSession = 4;
+		Request.ShotId = 6 + Index;
+		Request.ServerFireTime = TimerCaseReceivedTime - 0.09 + BatchInterval * Index;
+		Request.AimDirection = FVector::UpVector;
+	}
+	if (!TestTrue(TEXT("Timer ownership fixture commits its first legal round"),
+		BatchWeapon->AcceptShotRequest(TimerCaseRequests[0]) == EFPShotResult::Accepted)
+		|| !TestTrue(TEXT("Timer ownership fixture queues its original cooldown head"),
+		BatchWeapon->AcceptShotRequest(TimerCaseRequests[1]) == EFPShotResult::Queued)) return false;
+	// 第一个真实 Tick 激活 Pending，第二个 Tick 消耗部分等待，但不走到33.3ms截止时间。
+	if (!Fixture.TickTestWorld(0.001f) || !Fixture.TickTestWorld(0.01f)) { Fixture.ForwardErrorMessages(this); return false; }
+	FTimerManager& ShotTimers = World->GetTimerManager();
+	const FTimerHandle OriginalHeadTimer = BatchWeapon->NetworkShotTimerHandle;
+	const float HeadRemainingBeforeTail = ShotTimers.GetTimerRemaining(OriginalHeadTimer);
+	const float HeadRateBeforeTail = ShotTimers.GetTimerRate(OriginalHeadTimer);
+	const double HeadDeadlineBeforeTail = World->GetTimeSeconds() + HeadRemainingBeforeTail;
+	const double CadenceDeadlineBeforeTail = BatchWeapon->NextShotTimeSeconds;
+	if (!TestTrue(TEXT("The real original head timer is active with positive remaining time"),
+		ShotTimers.TimerExists(OriginalHeadTimer) && !ShotTimers.IsTimerPending(OriginalHeadTimer) && HeadRemainingBeforeTail > 0.0f)) return false;
+	TestTrue(TEXT("A legal tail request joins the existing cooldown head"),
+		BatchWeapon->AcceptShotRequest(TimerCaseRequests[2]) == EFPShotResult::Queued);
+	TestEqual(TEXT("Tail admission keeps exactly the original head plus one tail"), BatchWeapon->PendingNetworkShots.Num(), 2);
+	TestTrue(TEXT("Tail admission preserves the original head timer handle"), BatchWeapon->NetworkShotTimerHandle == OriginalHeadTimer);
+	TestTrue(TEXT("Tail admission preserves original head remaining time without a World tick"),
+		FMath::IsNearlyEqual(ShotTimers.GetTimerRemaining(BatchWeapon->NetworkShotTimerHandle), HeadRemainingBeforeTail, 0.000001f));
+	TestTrue(TEXT("Tail admission preserves original head timer rate"),
+		FMath::IsNearlyEqual(ShotTimers.GetTimerRate(BatchWeapon->NetworkShotTimerHandle), HeadRateBeforeTail, 0.000001f));
+	TestTrue(TEXT("Tail admission preserves original head absolute deadline"),
+		FMath::IsNearlyEqual(World->GetTimeSeconds() + ShotTimers.GetTimerRemaining(BatchWeapon->NetworkShotTimerHandle), HeadDeadlineBeforeTail, 0.000001));
+	TestEqual(TEXT("Tail admission cannot shift the server firing cadence deadline"), BatchWeapon->NextShotTimeSeconds, CadenceDeadlineBeforeTail);
+	TestEqual(TEXT("Tail admission cannot commit another round early"), BatchWeapon->GetCurrentAmmo(), TimerCaseInitialAmmo - 1);
+
+	// 定向提前唤醒注入：只换测试调度，不改射速截止时间；实际生产 Process 在 Executing 状态下必须能重新排 Timer。
+	ShotTimers.SetTimer(BatchWeapon->NetworkShotTimerHandle, BatchWeapon, &UfpstrueWeaponComponent::ProcessPendingNetworkShot, 0.001f, false);
+	const FTimerHandle EarlyWakeTimer = BatchWeapon->NetworkShotTimerHandle;
+	if (!Fixture.TickTestWorld(0.001f) || !Fixture.TickTestWorld(0.002f)) { Fixture.ForwardErrorMessages(this); return false; }
+	TestEqual(TEXT("An early real timer callback cannot consume an unexpired cooldown head"), BatchWeapon->GetCurrentAmmo(), TimerCaseInitialAmmo - 1);
+	TestEqual(TEXT("Early callback preserves both pending facts"), BatchWeapon->PendingNetworkShots.Num(), 2);
+	TestTrue(TEXT("Executing production callback can replace its early wake with a valid future timer"),
+		!ShotTimers.TimerExists(EarlyWakeTimer) && ShotTimers.TimerExists(BatchWeapon->NetworkShotTimerHandle)
+		&& BatchWeapon->NetworkShotTimerHandle != EarlyWakeTimer);
+	for (int32 Tick = 0; Tick < 8 && BatchWeapon->HasPendingNetworkShots(); ++Tick)
+	{
+		const int32 AmmoBeforeTimerTick = BatchWeapon->GetCurrentAmmo();
+		if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+		TestTrue(TEXT("Actual rescheduled timer callbacks commit at most one round per World tick"),
+			AmmoBeforeTimerTick - BatchWeapon->GetCurrentAmmo() <= 1);
+		if (BatchWeapon->HasPendingNetworkShots()) TestTrue(TEXT("A remaining head retains one valid continuation timer"),
+			ShotTimers.TimerExists(BatchWeapon->NetworkShotTimerHandle));
+	}
+	TestFalse(TEXT("The early-wake production callback still drains its original head and tail"), BatchWeapon->HasPendingNetworkShots());
+	TestFalse(TEXT("A drained timer queue has no hidden continuation timer"), ShotTimers.TimerExists(BatchWeapon->NetworkShotTimerHandle));
+	TestEqual(TEXT("The timer ownership fixture spends exactly its three actual rounds"), BatchWeapon->GetCurrentAmmo(), TimerCaseInitialAmmo - 3);
+	TestEqual(TEXT("The real continuation finalizes its own final identity"), BatchWeapon->LastProcessedShotId, uint32(8));
+	TestTrue(TEXT("The final timer-driven verdict is Accepted"), BatchWeapon->LastShotResult == EFPShotResult::Accepted);
+	FFPShotRequest TimerCancelledRequest = TimerCaseRequests[2];
+	TimerCancelledRequest.ShotId = 9;
+	TimerCancelledRequest.ServerFireTime = World->GetTimeSeconds();
+	TestTrue(TEXT("Strong-cancel timer fixture first queues one real cooldown request"),
+		BatchWeapon->AcceptShotRequest(TimerCancelledRequest) == EFPShotResult::Queued);
+	const FTimerHandle StrongCancelledTimer = BatchWeapon->NetworkShotTimerHandle;
+	const int32 AmmoBeforeTimerCancel = BatchWeapon->GetCurrentAmmo();
+	BatchWeapon->EndAbilityFire(true);
+	TestFalse(TEXT("Strong cancellation destroys the actual pending head timer"), ShotTimers.TimerExists(StrongCancelledTimer));
+	if (!Fixture.TickTestWorld(0.2f)) { Fixture.ForwardErrorMessages(this); return false; }
+	TestFalse(TEXT("Ticking past a cancelled deadline cannot revive the queue"), BatchWeapon->HasPendingNetworkShots());
+	TestFalse(TEXT("Cancelled continuation remains absent after a real later World tick"), ShotTimers.TimerExists(BatchWeapon->NetworkShotTimerHandle));
+	TestEqual(TEXT("Cancelled timer cannot consume a late round"), BatchWeapon->GetCurrentAmmo(), AmmoBeforeTimerCancel);
+	TestEqual(TEXT("A later tick cannot replace the cancelled terminal identity"), BatchWeapon->LastProcessedShotId, uint32(9));
+	TestTrue(TEXT("A later tick leaves the terminal verdict Cancelled"), BatchWeapon->LastShotResult == EFPShotResult::Cancelled);
+	BatchASC->RemoveLooseGameplayTag(FpstrueGameplayTags::State_Firing);
+
 	// 直接执行客户端裁决接收入口，验证账本收敛与版本；这不是RPC传输或客户端命中预测测试。
 	BatchWeapon->GetOwner()->SetRole(ROLE_SimulatedProxy);
 	BatchPlayer->SetRole(ROLE_SimulatedProxy);
@@ -2099,6 +2186,223 @@ bool FFpstrueMultiplayerHudRebindTest::RunTest(const FString&)
 }
 
 #if WITH_EDITOR
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemySimpleHitProxyTest,
+	"fpstrue.Multiplayer.PvPvE.SimpleHitProxyLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 真正的世界WeaponTrace验证活体几何、遮挡和部位身份；角色切换只检查权限，不冒充网络传输或画面验收。
+bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
+{
+	FTestWorldWrapper Fixture;
+	if (!BeginMultiplayerUnitWorld(Fixture, *this)) return false;
+	UWorld* World = Fixture.GetTestWorld();
+	// GetNetMode仅在PIE类型世界消费测试InitialNetMode；只设置枚举会仍落入Standalone分支。
+	// 先确认真实生产查询读到Dedicated，再检验Reference的完整姿态要求，不能让资格断言空转。
+	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
+	World->SetPlayInEditorInitialNetMode(NM_DedicatedServer);
+	if (!TestEqual(TEXT("Hit-proxy fixture actually runs the dedicated-server policy branch"),
+		static_cast<int32>(World->GetNetMode()), static_cast<int32>(NM_DedicatedServer))) return false;
+	constexpr ECollisionChannel WeaponTrace = ECC_GameTraceChannel3;
+	const auto SpawnEnemy = [&](UClass* Class, const FVector& Location, bool bClientRole = false,
+		ECollisionResponse VisibilityOverride = ECR_MAX, ECollisionResponse CameraOverride = ECR_MAX)
+	{
+		const FTransform Transform(FRotator::ZeroRotator, Location);
+		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(Class, Transform, nullptr, nullptr,
+			ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Enemy != nullptr)
+		{
+			Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+			// 写在真实BeginPlay之前，模拟旧Blueprint的Custom响应，不依赖运行后刷新缓存的测试旁路。
+			if (VisibilityOverride != ECR_MAX) Enemy->GetMesh()->SetCollisionResponseToChannel(ECC_Visibility, VisibilityOverride);
+			if (CameraOverride != ECR_MAX) Enemy->GetMesh()->SetCollisionResponseToChannel(ECC_Camera, CameraOverride);
+			if (bClientRole) Enemy->SetRole(ROLE_SimulatedProxy);
+			Enemy->FinishSpawning(Transform);
+			Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+		}
+		return Enemy;
+	};
+	AfpstrueEnemyCharacter* Enemy = SpawnEnemy(AfpstrueEnemyCharacter::StaticClass(), FVector(0.0f, 0.0f, 500.0f));
+	if (!TestNotNull(TEXT("Simple hit-proxy authority fixture"), Enemy) ||
+		!TestNotNull(TEXT("Native head query component"), Enemy->EnemyHeadHitProxy.Get()) ||
+		!TestNotNull(TEXT("Native body query component"), Enemy->EnemyBodyHitProxy.Get())) return false;
+	TestTrue(TEXT("The authored default selects simplified live enemy hit geometry"), Enemy->UsesSimpleHitProxies());
+	Enemy->ConfigureHitProxies(true);
+	TestTrue(TEXT("Simple mode is a real production configuration"), Enemy->UsesSimpleHitProxies());
+	TestFalse(TEXT("An idle dedicated authority with root-bound proxies does not require full hit-bone animation"), Enemy->RequiresFullAuthorityPose());
+	TestTrue(TEXT("Head and body attach to the movement root rather than animated bones"),
+		Enemy->EnemyHeadHitProxy->GetAttachParent() == Enemy->GetRootComponent() &&
+		Enemy->EnemyBodyHitProxy->GetAttachParent() == Enemy->GetRootComponent() &&
+		Enemy->EnemyHeadHitProxy->GetAttachSocketName().IsNone() && Enemy->EnemyBodyHitProxy->GetAttachSocketName().IsNone());
+	for (UPrimitiveComponent* Proxy : {static_cast<UPrimitiveComponent*>(Enemy->EnemyHeadHitProxy.Get()),
+		static_cast<UPrimitiveComponent*>(Enemy->EnemyBodyHitProxy.Get())})
+	{
+		TestTrue(TEXT("Each authoritative proxy is query-only"), Proxy->GetCollisionEnabled() == ECollisionEnabled::QueryOnly);
+		TestTrue(TEXT("Each proxy blocks the real weapon trace channel"), Proxy->GetCollisionResponseToChannel(WeaponTrace) == ECR_Block);
+		TestTrue(TEXT("Proxy object type preserves the original mesh query filtering"),
+			Proxy->GetCollisionObjectType() == Enemy->GetMesh()->GetCollisionObjectType());
+		TestFalse(TEXT("Hit proxies never generate gameplay overlap events"), Proxy->GetGenerateOverlapEvents());
+		TestFalse(TEXT("Hit proxies do not change navigation geometry"), Proxy->CanEverAffectNavigation());
+		for (int32 Channel = 0; Channel < ECC_OverlapAll_Deprecated; ++Channel)
+			TestTrue(TEXT("Every proxy query response preserves the original mesh contract rather than clearing non-weapon channels"),
+				Proxy->GetCollisionResponseToChannel(static_cast<ECollisionChannel>(Channel)) ==
+				Enemy->GetMesh()->GetCollisionResponseToChannel(static_cast<ECollisionChannel>(Channel)));
+	}
+	TestTrue(TEXT("Movement capsule cannot steal a weapon trace"), Enemy->GetCapsuleComponent()->GetCollisionResponseToChannel(WeaponTrace) == ECR_Ignore);
+	TestTrue(TEXT("The old live mesh no longer participates in collision"), Enemy->GetMesh()->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	TestFalse(TEXT("Simplified live mesh cannot force physics-state creation"), Enemy->GetMesh()->bAlwaysCreatePhysicsState);
+	TestEqual(TEXT("Simplified native enemy has no live skeletal body instances"), Enemy->GetMesh()->Bodies.Num(), 0);
+
+	const auto TraceProxy = [&](AfpstrueEnemyCharacter& Target, UPrimitiveComponent& Expected, float Distance, FName ExpectedBone)
+	{
+		const FVector Center = Expected.GetComponentLocation();
+		const FVector Direction = Target.GetActorForwardVector();
+		FHitResult Hit;
+		const bool bHit = World->LineTraceSingleByChannel(Hit, Center - Direction * Distance, Center + Direction * 100.0f,
+			WeaponTrace, FCollisionQueryParams(SCENE_QUERY_STAT(EnemySimpleHitProxyTest), true));
+		if (!TestTrue(TEXT("A world weapon ray reaches the actual enemy query proxy"), bHit) ||
+			!TestTrue(TEXT("World hit preserves the authoritative target and exact proxy component"),
+				Hit.GetActor() == &Target && Hit.GetComponent() == &Expected)) return false;
+		Target.ResolveHitProxyBone(Hit);
+		TestEqual(TEXT("Proxy normalization preserves head/body damage identity"), Hit.BoneName, ExpectedBone);
+		TestTrue(TEXT("Identity normalization cannot move or replace the actual physics hit"),
+			Hit.GetActor() == &Target && Hit.GetComponent() == &Expected && Hit.bBlockingHit && !Hit.ImpactPoint.ContainsNaN());
+		return true;
+	};
+	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 300.0f, TEXT("head")) ||
+		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, 300.0f, TEXT("spine_03")) ||
+		!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 6000.0f, TEXT("head")) ||
+		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, 6000.0f, TEXT("spine_03"))) return false;
+	const float NearHeadDistance = Enemy->EnemyHeadHitProxy->GetScaledSphereRadius() + 5.0f;
+	const float NearBodyDistance = Enemy->EnemyBodyHitProxy->GetScaledCapsuleRadius() + 5.0f;
+	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, NearHeadDistance, TEXT("head")) ||
+		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, NearBodyDistance, TEXT("spine_03"))) return false;
+
+	const FVector HeadLocal = Enemy->EnemyHeadHitProxy->GetRelativeLocation();
+	const FVector BodyLocal = Enemy->EnemyBodyHitProxy->GetRelativeLocation();
+	Enemy->GetMesh()->SetComponentTickEnabled(false);
+	Enemy->SetActorLocationAndRotation(FVector(1700.0f, 400.0f, 650.0f), FRotator(0.0f, 90.0f, 0.0f), false, nullptr, ETeleportType::TeleportPhysics);
+	TestTrue(TEXT("Head follows root movement and rotation without an animation tick"),
+		Enemy->EnemyHeadHitProxy->GetComponentLocation().Equals(Enemy->GetActorTransform().TransformPosition(HeadLocal), 0.001f));
+	TestTrue(TEXT("Body follows root movement and rotation without an animation tick"),
+		Enemy->EnemyBodyHitProxy->GetComponentLocation().Equals(Enemy->GetActorTransform().TransformPosition(BodyLocal), 0.001f));
+	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 300.0f, TEXT("head")) ||
+		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, 300.0f, TEXT("spine_03"))) return false;
+
+	AActor* Wall = World->SpawnActor<AActor>();
+	if (!TestNotNull(TEXT("Simple hit-proxy real occluder"), Wall)) return false;
+	UBoxComponent* WallBox = NewObject<UBoxComponent>(Wall);
+	Wall->AddInstanceComponent(WallBox);
+	Wall->SetRootComponent(WallBox);
+	WallBox->SetBoxExtent(FVector(60.0f, 20.0f, 150.0f));
+	WallBox->SetCollisionResponseToAllChannels(ECR_Ignore);
+	WallBox->SetCollisionResponseToChannel(WeaponTrace, ECR_Block);
+	WallBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	WallBox->RegisterComponent();
+	const FVector BodyCenter = Enemy->EnemyBodyHitProxy->GetComponentLocation();
+	const FVector Forward = Enemy->GetActorForwardVector();
+	Wall->SetActorLocation(BodyCenter - Forward * 150.0f);
+	FHitResult BlockedHit;
+	TestTrue(TEXT("Weapon trace still sees a real wall before the simplified enemy"),
+		World->LineTraceSingleByChannel(BlockedHit, BodyCenter - Forward * 300.0f, BodyCenter + Forward * 100.0f,
+			WeaponTrace, FCollisionQueryParams(SCENE_QUERY_STAT(EnemySimpleHitProxyOcclusion), true)) && BlockedHit.GetActor() == Wall);
+	Enemy->ResolveHitProxyBone(BlockedHit);
+	TestTrue(TEXT("Enemy normalization cannot manufacture a hit identity on an occluder"), BlockedHit.GetActor() == Wall && BlockedHit.BoneName.IsNone());
+	Wall->Destroy();
+
+	Enemy->ConfigureHitProxies(false);
+	TestFalse(TEXT("Reference selects the original live skeletal hit path"), Enemy->UsesSimpleHitProxies());
+	TestTrue(TEXT("Reference retains full dedicated authority pose for the skeletal hit path"), Enemy->RequiresFullAuthorityPose());
+	TestTrue(TEXT("Reference disables both additional hit proxies"),
+		Enemy->EnemyHeadHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision &&
+		Enemy->EnemyBodyHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	TestTrue(TEXT("Reference restores original live query collision"), Enemy->GetMesh()->GetCollisionEnabled() == ECollisionEnabled::QueryOnly);
+	Enemy->ConfigureHitProxies(true);
+	TestFalse(TEXT("Returning to simplified queries releases only the unneeded full-pose requirement"), Enemy->RequiresFullAuthorityPose());
+	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 300.0f, TEXT("head"))) return false;
+
+	AfpstrueEnemyCharacter* Client = SpawnEnemy(AfpstrueEnemyCharacter::StaticClass(), FVector(10000.0f, 10000.0f, 500.0f), true);
+	if (!TestNotNull(TEXT("Client-role proxy instance"), Client)) return false;
+	Client->ConfigureHitProxies(true);
+	TestTrue(TEXT("Client keeps component identity without authoritative query shapes"),
+		Client->EnemyHeadHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision &&
+		Client->EnemyBodyHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	const FVector ClientCenter = Client->EnemyBodyHitProxy->GetComponentLocation();
+	FHitResult ClientHit;
+	TestFalse(TEXT("A client-role enemy cannot expose a local authoritative body query"),
+		World->LineTraceSingleByChannel(ClientHit, ClientCenter - FVector(300.0f, 0.0f, 0.0f), ClientCenter + FVector(100.0f, 0.0f, 0.0f),
+			WeaponTrace, FCollisionQueryParams(SCENE_QUERY_STAT(EnemySimpleHitProxyClient), true)));
+
+	// 原生Sight使用complex Visibility线且只忽略监听者；删旧Mesh不能顺带让其他AI失去视觉遮挡。
+	// 这里只验证同通道真实物理射线，完整感知调度仍由既有Sight测试负责。
+	const auto CheckPerceptionResponse = [&](const FVector& Location, ECollisionResponse VisibilityResponse,
+		ECollisionResponse CameraResponse)
+	{
+		AfpstrueEnemyCharacter* Occluder = SpawnEnemy(AfpstrueEnemyCharacter::StaticClass(), Location, false,
+			VisibilityResponse, CameraResponse);
+		if (!TestNotNull(TEXT("Sight-channel fixture creates another real AI"), Occluder)) return false;
+		for (UPrimitiveComponent* Proxy : {static_cast<UPrimitiveComponent*>(Occluder->EnemyHeadHitProxy.Get()),
+			static_cast<UPrimitiveComponent*>(Occluder->EnemyBodyHitProxy.Get())})
+		{
+			TestTrue(TEXT("Simple proxies preserve an authored Custom Visibility response"),
+				Proxy->GetCollisionResponseToChannel(ECC_Visibility) == VisibilityResponse);
+			TestTrue(TEXT("Simple proxies preserve an authored Custom Camera response"),
+				Proxy->GetCollisionResponseToChannel(ECC_Camera) == CameraResponse);
+		}
+		const FVector Center = Occluder->EnemyBodyHitProxy->GetComponentLocation();
+		Enemy->SetActorLocation(Center - FVector(300.0f, 0.0f, 0.0f));
+		FHitResult SightHit;
+		FCollisionQueryParams SightQuery(SCENE_QUERY_STAT(EnemySimpleHitProxySight), true, Enemy);
+		const bool bSightBlocked = World->LineTraceSingleByChannel(SightHit, Enemy->GetActorLocation(),
+			Center + FVector(300.0f, 0.0f, 0.0f), ECC_Visibility, SightQuery);
+		if (VisibilityResponse == ECR_Block)
+			TestTrue(TEXT("Another AI still occludes a real complex Sight-channel ray"),
+				bSightBlocked && SightHit.GetActor() == Occluder && SightHit.GetComponent() == Occluder->EnemyBodyHitProxy);
+		else
+			TestFalse(TEXT("Authored Visibility Ignore does not become an accidental AI occluder"), bSightBlocked);
+		return true;
+	};
+	if (!CheckPerceptionResponse(FVector(1000.0f, 12000.0f, 500.0f), ECR_Block, ECR_Overlap) ||
+		!CheckPerceptionResponse(FVector(1000.0f, 16000.0f, 500.0f), ECR_Ignore, ECR_Ignore)) return false;
+
+	// 原项目资产只加载一次，检查优化不是拿无骨架夹具冒充旧物理已退出；再走真实死亡伤害入口恢复布娃娃。
+	UClass* BlueprintClass = LoadClass<AfpstrueEnemyCharacter>(nullptr,
+		TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP.enemy_BP_C"));
+	if (!TestNotNull(TEXT("Hit-proxy lifecycle loads the actual enemy Blueprint"), BlueprintClass)) return false;
+	AfpstrueEnemyCharacter* AssetEnemy = SpawnEnemy(BlueprintClass, FVector(20000.0f, 0.0f, 500.0f));
+	if (!TestNotNull(TEXT("Actual skeleton-backed enemy"), AssetEnemy)) return false;
+	USkeletalMeshComponent* AssetMesh = AssetEnemy->GetMesh();
+	UPhysicsAsset* DeathPhysics = AssetMesh->GetPhysicsAsset();
+	if (!TestNotNull(TEXT("Full source physics asset remains available for death"), DeathPhysics)) return false;
+	TestTrue(TEXT("The actual legacy enemy mesh retains its saved Custom Visibility Block response"),
+		AssetMesh->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block);
+	AssetEnemy->ConfigureHitProxies(false);
+	TestTrue(TEXT("Reference actually creates the original skeleton-backed query bodies"), AssetMesh->Bodies.Num() > 0);
+	AssetEnemy->ConfigureHitProxies(true);
+	TestEqual(TEXT("Switching the actual enemy to Simple retires all old live skeletal bodies"), AssetMesh->Bodies.Num(), 0);
+	TestFalse(TEXT("Actual live Simple mesh has no residual physics state"), AssetMesh->IsPhysicsStateCreated());
+	TestTrue(TEXT("Retiring live bodies does not mutate the source death asset"), AssetMesh->GetPhysicsAsset() == DeathPhysics);
+	TestTrue(TEXT("Simplifying the actual legacy enemy does not remove its Sight-channel occlusion"),
+		AssetEnemy->EnemyHeadHitProxy->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block &&
+		AssetEnemy->EnemyBodyHitProxy->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block);
+	if (!TraceProxy(*AssetEnemy, *AssetEnemy->EnemyHeadHitProxy, 300.0f, TEXT("head"))) return false;
+	FHitResult DeathHit;
+	const FVector HeadCenter = AssetEnemy->EnemyHeadHitProxy->GetComponentLocation();
+	if (!TestTrue(TEXT("Death fixture starts with a real proxy head hit"),
+		World->LineTraceSingleByChannel(DeathHit, HeadCenter - FVector(300.0f, 0.0f, 0.0f), HeadCenter + FVector(100.0f, 0.0f, 0.0f),
+			WeaponTrace, FCollisionQueryParams(SCENE_QUERY_STAT(EnemySimpleHitProxyDeath), true)))) return false;
+	AssetEnemy->ResolveHitProxyBone(DeathHit);
+	UGameplayStatics::ApplyPointDamage(AssetEnemy, 10000.0f, FVector::ForwardVector, DeathHit, nullptr, nullptr, nullptr);
+	TestTrue(TEXT("Actual point-damage path reaches the enemy death transaction"), AssetEnemy->IsDead());
+	TestTrue(TEXT("Death retires both live proxy shapes"),
+		AssetEnemy->EnemyHeadHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision &&
+		AssetEnemy->EnemyBodyHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	TestTrue(TEXT("Death restores the original PhysicsAsset and simulation"), AssetMesh->GetPhysicsAsset() == DeathPhysics && AssetMesh->IsSimulatingPhysics());
+	TestTrue(TEXT("Death recreates actual skeletal rigid bodies"), AssetMesh->Bodies.Num() > 0);
+	TestEqual(TEXT("Death impulse retains the normalized head bone identity"), AssetEnemy->DeathDamageContext.BoneName, FName(TEXT("head")));
+	TestTrue(TEXT("Death impulse retains the original geometric impact point"), AssetEnemy->DeathDamageContext.Location.Equals(DeathHit.ImpactPoint, 0.001f));
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerEnemyHealthBarTest,
 	"fpstrue.Multiplayer.PvPvE.EnemyHealthBarAnchorAndHealth",

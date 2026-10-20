@@ -1,6 +1,6 @@
 <#
-Run the existing normal-input rendered pair twice, with opt-in final-pose sole
-inspection: player walk/sprint/stop/turn, then a real one-enemy gameplay pass.
+Run the existing normal-input rendered pair with opt-in final-pose sole
+inspection: player idle/walk/sprint/turn, using the original Facing capture.
 This is functional measurement, not a crowd/performance benchmark. Screenshots
 still require human review. No Actor relocation, direct damage or fake AI is used.
 #>
@@ -11,7 +11,7 @@ param(
     [ValidateRange(1,65534)][int]$Port = 17861,
     [ValidateRange(180,600)][int]$TimeoutSeconds = 300,
     [ValidateRange(1,240)][int]$FacingStartServerTime = 150,
-    [ValidateSet('All','Facing','Enemy')][string]$Scenario = 'All',
+    [ValidateSet('Facing')][string]$Scenario = 'Facing',
     [ValidateRange(0,1000)][int]$PacketLagMs = 0,
     [ValidateRange(0,1000)][int]$PacketLagVarianceMs = 0,
     [ValidateRange(0,100)][int]$PacketLossPercent = 0,
@@ -23,12 +23,10 @@ $ErrorActionPreference = 'Stop'
 $TaskProject = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $TaskRunner = Join-Path $TaskProject 'Tools/Networking/RunFpsVisualAcceptance.ps1'
 $TaskModule = Join-Path $TaskProject 'Binaries/Win64/UnrealEditor-fpstrue.dll'
-$TaskProfiles = @()
-if ($Scenario -in @('All','Facing')) { $TaskProfiles += [pscustomobject]@{ Name='Facing'; Port=$Port; FacingReview=$true; FullGameplay=$false; EnemyPopulation=0 } }
-if ($Scenario -in @('All','Enemy')) { $TaskProfiles += [pscustomobject]@{ Name='Enemy'; Port=($Port+1); FacingReview=$false; FullGameplay=$true; EnemyPopulation=1 } }
+$TaskProfiles = @([pscustomobject]@{ Name=$Scenario; Port=$Port; FacingReview=$true; FullGameplay=$false; EnemyPopulation=0 })
 if ($DryRun) {
     [pscustomobject]@{ Mode='ReadOnlyPlan'; Profiles=$TaskProfiles; SampleHz=10; CpuSkin='Configured LOD0 sole subset in final postprocess pose'
-        Gates='Each rendered peer: physical player idle/walk/sprint/turn coverage; real moving enemy in Enemy profile; measured floor penetration, stance gap and fixed-vertex same-support plant drift.'
+        Gates='Each rendered peer: LocalPlayer and RemotePlayer idle/walk/sprint/turn coverage; measured floor penetration, stance gap and fixed-vertex same-support plant drift; original forty consecutive Facing captures.'
         NoGameplayMutation=$true; ScreenshotsRequireHumanReview=$true; SlopeStepEvidence='Separate unit fixture; ordinary map capture proves only surfaces actually sampled.' } | ConvertTo-Json -Depth 5
     return
 }
@@ -44,14 +42,12 @@ function Get-TaskFileIdentity([string]$Path) {
 }
 function Get-TaskFrozenInputs {
     $TaskFiles=@(Get-ChildItem -LiteralPath (Join-Path $TaskProject 'Source') -Recurse -File | Sort-Object FullName)
-    foreach($TaskAsset in @('ABP_PlayerFootIK','ABP_EnemyFootIK')) {
-        $TaskFiles+=Get-Item -LiteralPath (Join-Path $TaskProject ('Content/FirstPerson/Animations/FootIK/'+$TaskAsset+'.uasset'))
-    }
+    $TaskFiles+=Get-Item -LiteralPath (Join-Path $TaskProject 'Content/FirstPerson/Animations/FootIK/ABP_PlayerFootIK.uasset')
     $TaskFiles+=Get-Item -LiteralPath $TaskModule
     @($TaskFiles | ForEach-Object { Get-TaskFileIdentity $_.FullName })
 }
 function Read-TaskSamples([string]$Path) {
-    $TaskPattern='PVP_FOOT_IK_REVIEW SAMPLE Peer=(?<Peer>\w+) Kind=(?<Kind>\w+) Pawn=(?<Pawn>\S+) Phase=(?<Phase>\w+) Side=(?<Side>[LR]) Time=(?<Time>[-\d.]+) Speed=(?<Speed>[-\d.]+) Grounded=(?<Grounded>[01]) Enabled=(?<Enabled>[01]) Planted=(?<Planted>[01]) Cpu=(?<Cpu>[01]) Vertices=(?<Vertices>\d+) Floor=(?<Floor>[01]) Gap=(?<Gap>[-\d.]+) NormalZ=(?<NormalZ>[-\d.]+) Slip=(?<Slip>[-\d.]+) PlantAge=(?<PlantAge>[-\d.]+) Pelvis=(?<Pelvis>[-\d.]+) TraceCount=(?<Traces>\d+) SkinLOD=0 RenderLOD=(?<LOD>\d+) Visible=(?<Visible>[01])(?<Tail>[^\r\n]*)'
+    $TaskPattern='PVP_FOOT_IK_REVIEW SAMPLE Peer=(?<Peer>\w+) Kind=(?<Kind>LocalPlayer|RemotePlayer) Pawn=(?<Pawn>\S+) Phase=(?<Phase>\w+) Side=(?<Side>[LR]) Time=(?<Time>[-\d.]+) Speed=(?<Speed>[-\d.]+) Grounded=(?<Grounded>[01]) Enabled=(?<Enabled>[01]) Planted=(?<Planted>[01]) Cpu=(?<Cpu>[01]) Vertices=(?<Vertices>\d+) Floor=(?<Floor>[01]) Gap=(?<Gap>[-\d.]+) NormalZ=(?<NormalZ>[-\d.]+) Slip=(?<Slip>[-\d.]+) PlantAge=(?<PlantAge>[-\d.]+) Pelvis=(?<Pelvis>[-\d.]+) TraceCount=(?<Traces>\d+) SkinLOD=0 RenderLOD=(?<LOD>\d+) Visible=(?<Visible>[01])(?<Tail>[^\r\n]*)'
     $TaskStream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]'ReadWrite,Delete')
     $TaskReader=[IO.StreamReader]::new($TaskStream)
     try {$TaskLog=$TaskReader.ReadToEnd()} finally {$TaskReader.Dispose();$TaskStream.Dispose()}
@@ -83,7 +79,7 @@ function Get-TaskPercentile($Values,[double]$Percentile) {
     if($TaskSorted.Count -eq 0){return $null}
     $TaskSorted[[math]::Min($TaskSorted.Count-1,[math]::Floor(($TaskSorted.Count-1)*$Percentile))]
 }
-function Measure-TaskPeer([string]$Run,[string]$Peer,[string]$Profile) {
+function Measure-TaskPeer([string]$Run,[string]$Peer,[ValidateSet('Facing')][string]$Profile) {
     $TaskLog=Join-Path $Run ($Peer+'.log')
     $TaskAll=@(Read-TaskSamples $TaskLog)
     # Keep adjacent same-material-vertex motion across release/replant boundaries.
@@ -105,21 +101,13 @@ function Measure-TaskPeer([string]$Run,[string]$Peer,[string]$Profile) {
     $TaskValid=@($TaskAll | Where-Object { $_.Cpu -and $_.Floor -and $_.Enabled -and $_.Grounded -and $_.Vertices -gt 0 -and $_.Traces -gt 0 })
     if($TaskValid.Count -lt 20){throw "$Profile/$Peer has insufficient final CPU-skinned, independently floor-tested samples."}
     $TaskCoverage=@()
-    if($Profile -eq 'Facing') {
-        foreach($TaskKind in @('LocalPlayer','RemotePlayer')) {
-            foreach($TaskPhase in @('Idle','Walk','Sprint','Turn')) {
-                $TaskRows=@($TaskValid | Where-Object { $_.Kind -eq $TaskKind -and $_.Phase -eq $TaskPhase })
-                $TaskTimes=@($TaskRows | Select-Object -ExpandProperty Time -Unique)
-                if($TaskTimes.Count -lt 3){throw "$Profile/$Peer lacks actual $TaskKind $TaskPhase final-pose coverage."}
-                $TaskCoverage+=[pscustomobject]@{Kind=$TaskKind;Phase=$TaskPhase;Frames=$TaskTimes.Count;FootSamples=$TaskRows.Count}
-            }
+    foreach($TaskKind in @('LocalPlayer','RemotePlayer')) {
+        foreach($TaskPhase in @('Idle','Walk','Sprint','Turn')) {
+            $TaskRows=@($TaskValid | Where-Object { $_.Kind -eq $TaskKind -and $_.Phase -eq $TaskPhase })
+            $TaskTimes=@($TaskRows | Select-Object -ExpandProperty Time -Unique)
+            if($TaskTimes.Count -lt 3){throw "$Profile/$Peer lacks actual $TaskKind $TaskPhase final-pose coverage."}
+            $TaskCoverage+=[pscustomobject]@{Kind=$TaskKind;Phase=$TaskPhase;Frames=$TaskTimes.Count;FootSamples=$TaskRows.Count}
         }
-    } else {
-        $TaskEnemy=@($TaskValid | Where-Object { $_.Kind -eq 'Enemy' -and $_.Speed -gt 30 })
-        $TaskTimes=@($TaskEnemy | Select-Object -ExpandProperty Time -Unique | Sort-Object)
-        if($TaskTimes.Count -lt 15 -or ($TaskTimes[-1]-$TaskTimes[0]) -lt 2.0){throw "$Profile/$Peer lacks sustained real moving-enemy samples before combat resolution."}
-        if(@($TaskEnemy | Where-Object Visible).Count -lt 4){throw "$Profile/$Peer has no adequate rendered enemy visibility evidence."}
-        $TaskCoverage+=[pscustomobject]@{Kind='Enemy';Phase='Moving';Frames=$TaskTimes.Count;ObservedSpanSeconds=($TaskTimes[-1]-$TaskTimes[0]);FootSamples=$TaskEnemy.Count}
     }
     $TaskMinimum=($TaskValid | Measure-Object Gap -Minimum).Minimum
     if($TaskMinimum -lt -3.0){throw "$Profile/$Peer final sole penetrated actual support by more than 3 cm (gap=$TaskMinimum)."}
@@ -139,18 +127,10 @@ function Measure-TaskPeer([string]$Run,[string]$Peer,[string]$Profile) {
             PlantedAbsoluteGapP95=$TaskP95; SameSupportFixedVertexDriftP95=$TaskSlipP95
             SampledSlopeFootRows=@($TaskRows | Where-Object {$_.NormalZ -lt 0.99}).Count }
     })
-    if($Profile -eq 'Facing') {
-        # The original facing driver owns this continuous capture channel and
-        # its unchanged >=40-frame/turn/pitch gate. Do not take duplicate PNGs.
-        $TaskFrames=@(Get-ChildItem -LiteralPath (Join-Path $Run ('Visual/'+$Peer)) -File -Filter 'FacingRemote_*.png' -ErrorAction SilentlyContinue | Where-Object Length -gt 0)
-        if($TaskFrames.Count -lt 40){throw "$Profile/$Peer lacks the original forty consecutive facing captures."}
-    } else {
-        $TaskFrames=@(Get-ChildItem -LiteralPath (Join-Path $Run ('Visual/'+$Peer+'/FootIK')) -File -Filter 'FootIK_*_Enemy_*.png' -ErrorAction SilentlyContinue | Where-Object Length -gt 0)
-        if($TaskFrames.Count -lt 5 -or $TaskFrames.Count -gt 20){throw "$Profile/$Peer requires five to twenty budgeted, feet-in-view enemy captures."}
-        foreach($TaskMotion in @('Standing','Moving')) {
-            if(@($TaskFrames | Where-Object {$_.Name -match ('_'+$TaskMotion+'\.png$')}).Count -eq 0){throw "$Profile/$Peer lacks a feet-visible real enemy $TaskMotion capture."}
-        }
-    }
+    # The original facing driver owns this continuous capture channel and
+    # its unchanged >=40-frame/turn/pitch gate. Do not take duplicate PNGs.
+    $TaskFrames=@(Get-ChildItem -LiteralPath (Join-Path $Run ('Visual/'+$Peer)) -File -Filter 'FacingRemote_*.png' -ErrorAction SilentlyContinue | Where-Object Length -gt 0)
+    if($TaskFrames.Count -lt 40){throw "$Profile/$Peer lacks the original forty consecutive facing captures."}
     [pscustomobject]@{ Peer=$Peer; Samples=$TaskAll.Count; ValidGroundedSamples=$TaskValid.Count; InvalidCpuSamples=@($TaskAll | Where-Object {-not $_.Cpu}).Count
         MinimumNormalFloorGap=$TaskMinimum; Coverage=$TaskCoverage; Groups=$TaskGroups
         Frames=@($TaskFrames | ForEach-Object {Get-TaskFileIdentity $_.FullName}); VisualQualityReviewed=$false }
@@ -158,7 +138,7 @@ function Measure-TaskPeer([string]$Run,[string]$Peer,[string]$Profile) {
 $TaskReport=[ordered]@{Passed=$false;StartedUtc=[datetime]::UtcNow.ToString('o');Scenario=$Scenario;Failure=$null
     VisualQualityReviewed=$false;AudioReviewed=$false;PerformanceClaim=$false;SlopeStepMapClaim=$false;Profiles=@()
     SampledMotionDiagnostics=@()
-    Scope='Local Editor DS and two rendered ordinary-input clients. CPU samples use configured LOD0 sole vertices of final postprocess poses; morph/cloth excluded. Runtime foot flags alone do not establish contact. Separate unit fixtures cover synthetic slopes/steps. PrivateUsers credentials must not be shared.'}
+    Scope='Player IK only: Local Editor DS and two rendered ordinary-input clients, with AI population disabled. CPU samples use configured LOD0 sole vertices of final postprocess poses; morph/cloth excluded. Runtime foot flags alone do not establish contact. Separate unit fixtures cover synthetic slopes/steps. PrivateUsers credentials must not be shared.'}
 try {
     $TaskBefore=@(Get-TaskFrozenInputs)
     $TaskReport.FrozenInputs=$TaskBefore

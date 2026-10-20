@@ -206,7 +206,10 @@ if ($SelfTest) {
         Assert-SmokeSelfTest 'Policy rejects future/within-budget/rate/mutation/extra-consumption violations' (-not (Get-SmokeWeakPolicyEvidence $BadServer @($PolicyClient)).Passed)
     }
     Assert-SmokeSelfTest 'Policy requires actual stale exercise' (-not (Get-SmokeWeakPolicyEvidence '' @($PolicyClient)).Passed)
+    $LatencySelfTest = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -SelfTest | ConvertFrom-Json
+    Assert-SmokeSelfTest 'Shot latency parser preserves missing/phase/retry evidence' ([bool]$LatencySelfTest.Passed)
     [pscustomobject]@{ Mode = 'SelfTest'; Passed = $true; Checks = $SelfChecks.Count; Scenarios = @($SelfChecks)
+        ShotLatencyParserChecks = $LatencySelfTest.Checks
         Scope = 'Offline production-parser/options/evidence regression only; no UE, game process, network or disk output. Not gameplay/network acceptance.' } | ConvertTo-Json -Depth 4
     return
 }
@@ -388,6 +391,9 @@ $ServerArguments = $EditorArguments + @(
     ('-port=' + $Port), ('-abslog="' + $ServerLog + '"')
 ) + $SharedArguments
 if ($ExecutionMode -eq 'Editor') { $ServerArguments += '-server' }
+# UE5.5 disables performance threading on dedicated servers unless explicitly opted in.
+# Keep this on the server only; reference baselines preserve the old launch separately.
+$ServerArguments += '-useperfthreads'
 if ($IsRemote) {
     $ServerPath = $RemoteExecutable
     $RemoteRunDirectory = '/var/tmp/fpstrue-smoke-' + $RunId
@@ -395,7 +401,7 @@ if ($IsRemote) {
     $RemoteUnit = 'fpstrue-pvp-smoke-' + $RunId + '.service'
     $ServerArguments = @(
         ($Map + '?game=' + $SmokeConfig.GameMode), ('-port=' + $Port), ('-abslog=' + $RemoteLog),
-        ('-UserDir=' + $RemoteRunDirectory + '/User')
+        ('-UserDir=' + $RemoteRunDirectory + '/User'), '-useperfthreads'
     ) + $SharedArguments
 }
 $ConnectAddress = if ($IsRemote) { $ServerAddress } else { '127.0.0.1' }
@@ -1433,7 +1439,7 @@ finally {
     }
     $LatencyEvidence = $null
     if (Test-Path -LiteralPath $ServerLog -PathType Leaf) {
-        try { $LatencyEvidence = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $OutputDirectory | ConvertFrom-Json }
+        try { $LatencyEvidence = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $OutputDirectory -SameHostUtc:(!$IsRemote) | ConvertFrom-Json }
         catch { $LatencyEvidence = @{ Error=$_.Exception.Message; Scope='Latency evidence unavailable; never substitute zero latency.' } }
     }
     $Report = [pscustomobject]@{

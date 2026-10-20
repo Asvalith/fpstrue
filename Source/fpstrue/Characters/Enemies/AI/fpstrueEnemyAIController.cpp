@@ -19,7 +19,10 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "NavFilters/NavigationQueryFilter.h"
 #include "Perception/AIPerceptionComponent.h"
+#include "Perception/AIPerceptionSystem.h"
+#include "Perception/AISenseConfig_Hearing.h"
 #include "Perception/AISenseConfig_Sight.h"
+#include "Perception/AISense_Hearing.h"
 #include "Perception/AISense_Sight.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CsvProfiler.h"
@@ -65,6 +68,14 @@ AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 	Sight->DetectionByAffiliation.bDetectFriendlies = false;
 	Sight->DetectionByAffiliation.bDetectNeutrals = false;
 	Perception->ConfigureSense(*Sight);
+	UAISenseConfig_Hearing* Hearing = CreateDefaultSubobject<UAISenseConfig_Hearing>(TEXT("EnemyHearing"));
+	Hearing->HearingRange = 4500.0f;
+	Hearing->SetMaxAge(4.0f); // 原生刺激缓存有界；调查硬期限另由既有 BT 决策检查。
+	// Hearing 按 TeamId 而非 GetTeamAttitudeTowards 过滤；原生玩家没有 TeamId，回调仍严格只接纳可战斗玩家。
+	Hearing->DetectionByAffiliation.bDetectEnemies = true;
+	Hearing->DetectionByAffiliation.bDetectFriendlies = true;
+	Hearing->DetectionByAffiliation.bDetectNeutrals = true;
+	Perception->ConfigureSense(*Hearing);
 	Perception->SetDominantSense(UAISense_Sight::StaticClass());
 	Perception->OnTargetPerceptionUpdated.AddDynamic(this, &ThisClass::HandleTargetPerceptionUpdated);
 }
@@ -104,6 +115,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 	if (!HasAuthority() || GetNetMode() == NM_Client)
 	{
 		GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), false);
+		GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), false);
 		return;
 	}
 	bDisableDecisionThrottlingForBenchmark = FFPRuntimeOptions::Get().bDisableAIThrottling;
@@ -123,6 +135,9 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 	bHasMoveGoal = false;
 	OwnedMoveRequestId = FAIRequestID::InvalidRequest;
 	MoveFailures[0] = MoveFailures[1] = FMoveFailure{};
+	bInvestigatingNoise = false;
+	LastAcceptedNoiseTime = -TNumericLimits<double>::Max();
+	NextNoiseInvestigationTime = 0.0;
 	bRetreatActive = false;
 	bHasRetreatGoal = false;
 	RetreatEndTime = RetreatHoldUntil = NextRetreatAllowedTime = 0.0;
@@ -152,6 +167,7 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 	}
 
 	SurroundManager = ResolveSurroundManager();
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), true);
 	GetPerceptionComponent()->RequestStimuliListenerUpdate();
 	StartBehaviorLogic();
 }
@@ -205,6 +221,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 		bTargetVisible = false;
 		TargetForgetTime = 0.0;
 		LastKnownTargetLocation = FVector::ZeroVector;
+		bInvestigatingNoise = false;
 		// 单机撤销注入仍忘记全部刺激；多人换目标必须保留其他可见玩家，不能换一次目标就清空整份感知。
 		if (!bUsesMultiplayerTargets) GetPerceptionComponent()->ForgetAll();
 		if (ControlledEnemy != nullptr && ControlledEnemy->GetCombatComponent() != nullptr)
@@ -235,6 +252,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 		bRetreatRequested = bPendingRetreatBeforeContextChange && IsBelowRetreatThreshold() && GetWorld()->GetTimeSeconds() >= NextRetreatAllowedTime;
 	}
 	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), AcceptsCombatCommands() && (bUsesMultiplayerTargets || TargetCharacter != nullptr));
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), AcceptsCombatCommands());
 	if (TargetCharacter == nullptr)
 	{
 		SetAIState(ControlledEnemy != nullptr && ControlledEnemy->IsDead() ? EFPEnemyAIState::Dead : EFPEnemyAIState::Idle);
@@ -259,8 +277,9 @@ void AfpstrueEnemyAIController::SelectPerceivedTarget()
 		AfpstrueCharacter* Candidate = Cast<AfpstrueCharacter>(Actor);
 		if (!IsTargetUsable(Candidate)) continue;
 		// 位置取已成功的视觉数据，不从隐藏候选的真实 Transform 读取玩家信息。
-		const FVector KnownLocation = Perception->GetActorLocation(*Candidate);
-		if (KnownLocation.ContainsNaN()) continue;
+		const FActorPerceptionInfo* Info = Perception->GetActorInfo(*Candidate);
+		const FVector KnownLocation = Info != nullptr ? Info->GetStimulusLocation(UAISense::GetSenseID<UAISense_Sight>()) : FAISystem::InvalidLocation;
+		if (!FAISystem::IsValidLocation(KnownLocation) || KnownLocation.ContainsNaN()) continue;
 		const double DistanceSquared = FVector::DistSquared2D(EnemyLocation, KnownLocation);
 		if (DistanceSquared < BestDistanceSquared || (DistanceSquared == BestDistanceSquared && Selected != nullptr && Candidate->GetUniqueID() < Selected->GetUniqueID()))
 		{
@@ -276,6 +295,7 @@ void AfpstrueEnemyAIController::SelectPerceivedTarget()
 	InitializeCombatContext(Selected, SelectedManager);
 	if (!AcceptsCombatCommands() || TargetCharacter != Selected || !IsTargetUsable(Selected)) return;
 	bTargetVisible = true;
+	bInvestigatingNoise = false;
 	LastKnownTargetLocation = SelectedLocation;
 	TargetForgetTime = 0.0;
 	RequestBehaviorDecision();
@@ -336,8 +356,13 @@ void AfpstrueEnemyAIController::RequestBehaviorDecision()
 // 更新当前玩家的可见性；丢失视觉只保留最后成功发现的位置，并及时停止攻击和包围。
 void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
-	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead() ||
-		Stimulus.Type != UAISense::GetSenseID<UAISense_Sight>()) return;
+	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead()) return;
+	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>())
+	{
+		HandleHearingStimulus(Actor, Stimulus);
+		return;
+	}
+	if (Stimulus.Type != UAISense::GetSenseID<UAISense_Sight>()) return;
 	if (Actor != TargetCharacter)
 	{
 		if (bUsesMultiplayerTargets && Stimulus.WasSuccessfullySensed()) SelectPerceivedTarget();
@@ -348,6 +373,7 @@ void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAI
 	if (Stimulus.WasSuccessfullySensed())
 	{
 		bTargetVisible = true;
+		bInvestigatingNoise = false; // 真实视觉接管声音调查；旧声音失效通知不得撤销新视觉。
 		LastKnownTargetLocation = Stimulus.StimulusLocation;
 		TargetForgetTime = 0.0;
 	}
@@ -366,6 +392,77 @@ void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAI
 	}
 	if (bWasVisible != bTargetVisible) RequestBehaviorDecision();
 	if (!bTargetVisible) SelectPerceivedTarget();
+}
+
+// 服务端真实射击只产生一次语义声音，不发送额外 RPC，也不按每个敌人枚举查询。
+bool AfpstrueEnemyAIController::ReportAuthoritativeGunshot(AfpstrueCharacter* Source, const FVector& NoiseLocation,
+	float Loudness, float MaxRange)
+{
+	if (!IsInGameThread() || !IsValid(Source) || !Source->HasAuthority() || Source->IsActorBeingDestroyed() || Source->IsDead() ||
+		Source->GetWorld() == nullptr || Source->GetNetMode() == NM_Client || !FAISystem::IsValidLocation(NoiseLocation) ||
+		NoiseLocation.ContainsNaN() || !FMath::IsFinite(Loudness) || Loudness <= 0.0f || !FMath::IsFinite(MaxRange) || MaxRange < 0.0f ||
+		UAIPerceptionSystem::GetCurrent(Source->GetWorld()) == nullptr) return false;
+	UAISense_Hearing::ReportNoiseEvent(Source, NoiseLocation, Loudness, Source, MaxRange, TEXT("Weapon.Gunshot"));
+	return true;
+}
+
+// 听见不等于看见：仅以事件位置复用 Pursue 搜索，不暴露 Actor、不攻击、不消费隐藏目标的共享位置。
+void AfpstrueEnemyAIController::HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyAI_HearingStimulus);
+	AfpstrueCharacter* Source = Cast<AfpstrueCharacter>(Actor);
+	UWorld* World = GetWorld();
+	if (!Stimulus.WasSuccessfullySensed() || Stimulus.Tag != FName(TEXT("Weapon.Gunshot")) || World == nullptr ||
+		!IsTargetUsable(Source) || (!bUsesMultiplayerTargets && Source != TargetCharacter) ||
+		!FAISystem::IsValidLocation(Stimulus.StimulusLocation) || Stimulus.StimulusLocation.ContainsNaN() ||
+		!FMath::IsFinite(Stimulus.Strength) || Stimulus.Strength <= 0.0f || BrainComponent == nullptr ||
+		!BrainComponent->IsRunning() || BrainComponent->IsPaused()) return;
+	const double Now = World->GetTimeSeconds();
+	// 已看见及有效视觉记忆优先；连续枪声不能把视觉搜索位置替换成另一份隐式实时跟踪。
+	if (bTargetVisible || (!bInvestigatingNoise && Now < TargetForgetTime) || bRetreatActive || bRetreatRequested || Now < NextNoiseInvestigationTime) return;
+	if (bInvestigatingNoise && Now >= TargetForgetTime) { FinishNoiseInvestigation(); return; }
+	const float MergeInterval = FMath::IsFinite(NoiseMergeInterval) ? FMath::Max(0.1f, NoiseMergeInterval) : 0.5f;
+	const float MergeDistance = FMath::IsFinite(NoiseMergeDistance) ? FMath::Max(0.0f, NoiseMergeDistance) : 150.0f;
+	if (bInvestigatingNoise)
+	{
+		// 保留当前声源，不在多个隐藏玩家的枪声之间抖动换目标；无论是否合并都不续硬期限。
+		if (Source != TargetCharacter || Now - LastAcceptedNoiseTime < MergeInterval ||
+			FVector::DistSquared(LastKnownTargetLocation, Stimulus.StimulusLocation) <= FMath::Square(MergeDistance)) return;
+	}
+	else
+	{
+		AfpstrueSurroundManager* Manager = SurroundManager;
+		if (bUsesMultiplayerTargets)
+		{
+			auto* Mode = World->GetAuthGameMode<AfpstruePvpGameMode>();
+			Manager = Mode != nullptr ? Mode->GetOrCreateSurroundManager(Source) : nullptr;
+			if (!IsValid(Manager)) return; // 不允许声音调查绕过多人共享 MoveTo 预算。
+		}
+		InitializeCombatContext(Source, Manager);
+		if (!AcceptsCombatCommands() || TargetCharacter != Source || !IsTargetUsable(Source)) return;
+		bInvestigatingNoise = true;
+		const float Duration = FMath::IsFinite(NoiseInvestigationSeconds) ? FMath::Max(0.1f, NoiseInvestigationSeconds) : 4.0f;
+		TargetForgetTime = Now + Duration;
+	}
+	bTargetVisible = false;
+	LastKnownTargetLocation = Stimulus.StimulusLocation;
+	LastAcceptedNoiseTime = Now;
+	DecisionContext = FDecisionContext{};
+	RequestBehaviorDecision(); // 只排队，感知回调中不调用 MoveTo/寻路。
+}
+
+// 调查到位、不可达或过期都结束一次声音事务；短退避避免持续枪声立刻重开失败路径。
+void AfpstrueEnemyAIController::FinishNoiseInvestigation(bool bApplyCooldown)
+{
+	if (!bInvestigatingNoise) return;
+	bInvestigatingNoise = false;
+	TargetForgetTime = 0.0;
+	LastKnownTargetLocation = FVector::ZeroVector;
+	DecisionContext = FDecisionContext{};
+	if (bApplyCooldown && GetWorld() != nullptr)
+		NextNoiseInvestigationTime = GetWorld()->GetTimeSeconds() + (FMath::IsFinite(NoiseInvestigationCooldown) ? FMath::Max(0.1f, NoiseInvestigationCooldown) : 1.5f);
+	StopMovementIfNeeded();
+	SetAIState(EFPEnemyAIState::Idle);
 }
 
 void AfpstrueEnemyAIController::HandleEnemyHealthChanged(float NewHealth)
@@ -439,6 +536,7 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 
 	// 一次采样同时供 Blackboard 条件和下一轮间隔复用；Selector 只负责选择叶子。
 	DecisionContext = FDecisionContext{};
+	if (bInvestigatingNoise && GetWorld() != nullptr && GetWorld()->GetTimeSeconds() >= TargetForgetTime) FinishNoiseInvestigation();
 	// 统一修复或拒绝敌人、目标和 Manager 上下文，保证后续决策分支可以直接使用这些引用。
 	// 不在采样任务的 ExecuteTask 内重入 StopTree；死亡入口会停止树，本轮走安全 Idle 叶子。
 	bool bHasTarget = AcceptsCombatCommands() && IsValid(ControlledEnemy) && !ControlledEnemy->IsDead();
@@ -460,7 +558,15 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	// 先用廉价距离筛选，再检查高度和环境；楼上/墙后目标应走导航分支而不是原地重复尝试攻击。
 	if (bHasTarget)
 	{
-		if (bTargetVisible) LastKnownTargetLocation = GetPerceptionComponent()->GetActorLocation(*TargetCharacter);
+		if (bTargetVisible)
+		{
+			// 多感官接入后明确读取 Sight，不能把较新的 Hearing 位置冒充视觉采样。
+			if (const FActorPerceptionInfo* Info = GetPerceptionComponent()->GetActorInfo(*TargetCharacter))
+			{
+				const FVector SightLocation = Info->GetStimulusLocation(UAISense::GetSenseID<UAISense_Sight>());
+				if (FAISystem::IsValidLocation(SightLocation) && !SightLocation.ContainsNaN()) LastKnownTargetLocation = SightLocation;
+			}
+		}
 		const UfpstrueEnemyCombatComponent* Combat = ControlledEnemy->GetCombatComponent();
 		if (bTargetVisible && Combat != nullptr)
 		{
@@ -576,6 +682,7 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	if (!AcceptsCombatCommands()) return false;
 	if (Action == EFPEnemyBehaviorAction::Idle)
 	{
+		FinishNoiseInvestigation();
 		FinishRetreat();
 		// 没有目标或超出追击范围才停路，并立即归还槽位，避免 Idle 敌人长期占用共享资源。
 		// 远距离但仍在追击范围内的敌人仍可沿共享目标追踪，不能仅凭远距档位直接休眠。
@@ -684,7 +791,9 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 			const float ConfiguredAttackRange = Combat != nullptr ? Combat->GetConfiguredAttackRange() : 0.0f;
 			AcceptanceRadius = FMath::Max(MoveAcceptanceRadius, ConfiguredAttackRange * SafePursuitAcceptanceRangeMultiplier);
 		}
-		MoveToGoal(Goal, AcceptanceRadius, false);
+		const EMoveGoalResult MoveResult = MoveToGoal(Goal, AcceptanceRadius, false);
+		if (bInvestigatingNoise && (MoveResult == EMoveGoalResult::Arrived || MoveResult == EMoveGoalResult::Unreachable || MoveResult == EMoveGoalResult::InvalidContext))
+			FinishNoiseInvestigation();
 		return true;
 	}
 	default:
@@ -1054,6 +1163,9 @@ void AfpstrueEnemyAIController::StopAI()
 	if (CommandPhase == ECommandPhase::Stopping) return;
 	// ★【重要边界】[生命周期] 停止时先禁止新命令，再停感知、行为树、移动和攻击，最后清目标、黑板与槽位。
 	CommandPhase = ECommandPhase::Stopping;
+	bInvestigatingNoise = false;
+	LastAcceptedNoiseTime = -TNumericLimits<double>::Max();
+	NextNoiseInvestigationTime = 0.0;
 	if (TargetCharacter != nullptr)
 	{
 		TargetCharacter->OnPlayerDeathReported.RemoveDynamic(this, &ThisClass::HandleCombatTargetDied);
@@ -1069,6 +1181,7 @@ void AfpstrueEnemyAIController::StopAI()
 	TargetForgetTime = 0.0;
 	LastKnownTargetLocation = FVector::ZeroVector;
 	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), false);
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), false);
 	GetPerceptionComponent()->ForgetAll();
 	// 先停行为树，再停止导航和清理资源；否则下一次 BT 唤醒可能重新发起 MoveTo。
 	// 敌人死亡、解除占有和对局结束都走同一收口，确保路径、行为树、槽位和攻击名额不会只清理一部分。

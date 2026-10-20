@@ -2,6 +2,8 @@
 
 #include "Weapons/fpstrueWeaponComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Weapons/fpstrueCombatAbilities.h"
 #include "AbilitySystemComponent.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
@@ -449,8 +451,8 @@ bool UfpstrueWeaponComponent::PresentPredictedShot(const FFPShotRequest& Request
 	LastPredictedShotTime = GetWorld()->GetTimeSeconds();
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_PRESENT ShotId=%u Session=%u Generation=%u Count=1 WeaponNetGuid=%llu PlayerId=%d"),
-			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()));
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_PRESENT ShotId=%u Session=%u Generation=%u Count=1 WeaponNetGuid=%llu PlayerId=%d LocalSeconds=%.9f"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()), FPlatformTime::Seconds());
 #endif
 	OnWeaponFirePerformed.Broadcast();
 	if (bPredictingFire && FirePresentationKey == PresentationKey && CanExecuteShot())
@@ -472,6 +474,12 @@ bool UfpstrueWeaponComponent::BuildShotRequest(FFPShotRequest& OutRequest)
 	OutRequest.ServerFireTime = Controller->GetEstimatedServerTime();
 	OutRequest.AimDirection = Controller->GetControlRotation().Vector().GetSafeNormal();
 	OutstandingShots.Add(OutRequest.ShotId);
+#if !UE_BUILD_SHIPPING
+	// 这里只标记请求构造完成；ASC 可靠调用紧随其后，不把它称为网卡发送，也不虚构应用层重试。
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_SUBMIT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu Attempt=1 MaxAttempts=1 RetryDelayMs=0 LocalSeconds=%.9f"),
+			OutRequest.ShotId, OutRequest.FireSession, OutRequest.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), FPlatformTime::Seconds());
+#endif
 	return true;
 }
 
@@ -535,10 +543,19 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	if (Delay > FMath::Min(Interval + 0.002, 0.15)) return Reject(EFPShotResult::RateLimited);
 	const bool bMustWait = HasPendingNetworkShots() || Delay > KINDA_SMALL_NUMBER;
 	// 只记录服务器当前已授权的瞄准条件，不能让排队期间切换 ADS 改写本发散布。
-	PendingNetworkShots.Add({Request, Character->IsAiming(), FirePresentationKey});
+	PendingNetworkShots.Add({Request, Character->IsAiming(), FirePresentationKey, FPlatformTime::Seconds()});
+#if !UE_BUILD_SHIPPING
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_ADMISSION ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu ServerTime=%.6f AgeMs=%.3f AllowedAgeMs=%.3f PendingBefore=%d PendingAfter=%d QueueDelayMs=%.3f FrameDeltaMs=%.3f"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), Now,
+			(Now - Request.ServerFireTime) * 1000.0, MaxRequestAge * 1000.0, PendingNetworkShots.Num() - 1, PendingNetworkShots.Num(), Delay * 1000.0, GetWorld()->GetDeltaSeconds() * 1000.0);
+#endif
 	if (bMustWait)
 	{
-		SchedulePendingNetworkShot();
+		// 尾部入队没有改变当前队头，不清掉其原截止时间，避免每次网络到达又引入一次 Timer 帧量化。
+		// 首个队头或丢失调度才重新安排；回调内必要的提前唤醒重排仍由公共 Schedule 正常处理。
+		if (PendingNetworkShots.Num() == 1 || !GetWorld()->GetTimerManager().TimerExists(NetworkShotTimerHandle))
+			SchedulePendingNetworkShot();
 		return EFPShotResult::Queued;
 	}
 	return ExecuteNetworkShot(Request) ? EFPShotResult::Accepted : LastShotResult;
@@ -558,8 +575,18 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 	const FFPShotRequest Request = PendingNetworkShots[0].Request;
 	const bool bAimingAtAdmission = PendingNetworkShots[0].bAimingAtAdmission;
 	const int32 AdmittedPresentationKey = PendingNetworkShots[0].PresentationKey;
+#if !UE_BUILD_SHIPPING
+	const double AdmissionMonotonicSeconds = PendingNetworkShots[0].AdmissionMonotonicSeconds;
+	const int32 PendingBeforeExecution = PendingNetworkShots.Num();
+#endif
 	if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(NetworkShotTimerHandle);
 	PendingNetworkShots.RemoveAt(0, 1, EAllowShrinking::No);
+#if !UE_BUILD_SHIPPING
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_EXECUTION ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu ServerTime=%.6f QueueWaitMs=%.3f PendingBefore=%d PendingAfter=%d FrameDeltaMs=%.3f"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), GetWorld()->GetTimeSeconds(),
+			(FPlatformTime::Seconds() - AdmissionMonotonicSeconds) * 1000.0, PendingBeforeExecution, PendingNetworkShots.Num(), GetWorld()->GetDeltaSeconds() * 1000.0);
+#endif
 	EFPShotResult Result = EFPShotResult::Accepted;
 #if !UE_BUILD_SHIPPING
 	const int32 AmmoAtExecution = CurrentAmmo, ReserveAtExecution = ReserveAmmo;
@@ -676,6 +703,11 @@ void UfpstrueWeaponComponent::AcknowledgeShot(const FFPShotRequest& Request, EFP
 		LastShotResult = Result;
 	}
 	PublishNetworkState();
+#if !UE_BUILD_SHIPPING
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_ACK_SEND ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu ServerTime=%.6f Result=%d"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), GetWorld()->GetTimeSeconds(), static_cast<int32>(Result));
+#endif
 	ClientShotResult(Request.EquipmentGeneration, Request.FireSession, Request.ShotId, Result, CurrentAmmo, ReserveAmmo, NetworkState.Revision);
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
@@ -705,9 +737,9 @@ void UfpstrueWeaponComponent::ClientShotResult_Implementation(uint32 EquipmentGe
 		Presented->ConfirmedShots = FMath::Max(Presented->ConfirmedShots, static_cast<int32>(ShotId));
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_ACK ShotId=%u Session=%u Generation=%u Result=%d Ammo=%d Predicted=%d WeaponNetGuid=%llu PlayerId=%d Outstanding=%d StateRevision=%u"),
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_ACK ShotId=%u Session=%u Generation=%u Result=%d Ammo=%d Predicted=%d WeaponNetGuid=%llu PlayerId=%d Outstanding=%d StateRevision=%u LocalSeconds=%.9f"),
 			ShotId, Session, EquipmentGeneration, static_cast<int32>(Result), Ammo, Presented != nullptr && static_cast<int32>(ShotId) <= Presented->PresentedShots ? 1 : 0,
-			GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()), OutstandingShots.Num(), StateRevision);
+			GetWeaponShotNetGuid(GetOwner()), GetShotPlayerId(Character.Get()), OutstandingShots.Num(), StateRevision, FPlatformTime::Seconds());
 #endif
 	// 已播放的枪声不反向播放“撤销动画”；被拒绝的预测只释放弹药估计，不生成命中反馈。
 }
@@ -1248,6 +1280,9 @@ bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAt
 	// ★【重要边界】[状态提交] 扣弹和本发命中先成为事实，再通知表现；回调可以中断后续连射，不能撤销这一发。
 	// 先完成扣弹与命中结算，再通知 HUD/开火表现；监听者重入不能取消一发已扣弹的命中。
 	--CurrentAmmo;
+	// ★【听觉权威边界】真实扣弹提交后才产生枪声事件；预测、拒绝、视觉重播均不能刺激 AI。
+	// 取当前服务端枪声位置，不拿历史命中回溯位置或隐藏玩家的未来位置作为调查目标。
+	AfpstrueEnemyAIController::ReportAuthoritativeGunshot(OwningCharacter, Camera->GetComponentLocation());
 	// ★【表现身份】外部伤害/弹道回调可重启开火；本发广播始终携带提交时的编号，不借用新激活的计数。
 	const int32 ShotKey = Request != nullptr ? AdmittedPresentationKey : FirePresentationKey;
 	const int32 ShotIndex = Request != nullptr ? static_cast<int32>(Request->ShotId) : FirePresentationShot + 1;
@@ -1320,6 +1355,10 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	// 纯数学历史查询已经结束，世界未被移动；先固定表现身份，随后才允许伤害/蓝图同步重入。
 	const uint32 ShotGeneration = Request != nullptr ? Request->EquipmentGeneration : EquipmentRevision;
 	const uint32 ShotSession = Request != nullptr ? Request->FireSession : FireSession;
+	// 日志、部位伤害与表现使用同一命中身份；玩家历史形状已经带BoneName，不走敌人代理映射。
+	AActor* HitActor = HitResult.GetActor();
+	if (bHit && IsValid(HitActor))
+		if (const AfpstrueEnemyCharacter* Enemy = Cast<AfpstrueEnemyCharacter>(HitActor)) Enemy->ResolveHitProxyBone(HitResult);
 #if !UE_BUILD_SHIPPING
 	if (Request != nullptr && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE REWIND ShotId=%u FireTime=%.6f TargetTime=%.6f Hit=%s Bone=%s WeaponNetGuid=%llu PlayerId=%d"),
@@ -1328,7 +1367,6 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 #endif
 
 	// 只有查询真正命中后才读取目标、骨骼和物理组件；未命中只广播弹道终点供表现层使用。
-	AActor* HitActor = HitResult.GetActor();
 	if (bHit && IsValid(HitActor))
 	{
 		const bool bCriticalHit = Settings.CriticalHitBones.Contains(HitResult.BoneName);

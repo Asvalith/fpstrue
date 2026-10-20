@@ -13,9 +13,7 @@
 #include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/StaticMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameModeBase.h"
@@ -43,37 +41,19 @@ bool BeginFootWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test)
 }
 
 // 几何测试只改变独立临时地面；真实角色始终由自己的 CMC/动画组件拥有，不改项目关卡或供应商资产。
-UBoxComponent* SpawnFootFloor(UWorld& World, const FVector& Extent = FVector(2000.0f, 2000.0f, 20.0f),
-	bool bStatic = false, const FVector& Offset = FVector::ZeroVector, const FRotator& Rotation = FRotator::ZeroRotator)
+UBoxComponent* SpawnFootFloor(UWorld& World, const FVector& Extent = FVector(2000.0f, 2000.0f, 20.0f))
 {
 	AActor* Owner = World.SpawnActor<AActor>();
 	if (!Owner) return nullptr;
 	auto* Floor = NewObject<UBoxComponent>(Owner);
 	Owner->SetRootComponent(Floor); Owner->AddInstanceComponent(Floor);
-	Floor->SetBoxExtent(Extent); Floor->SetMobility(bStatic ? EComponentMobility::Static : EComponentMobility::Movable);
+	Floor->SetBoxExtent(Extent); Floor->SetMobility(EComponentMobility::Movable);
 	Floor->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Floor->SetCollisionObjectType(ECC_WorldStatic);
 	Floor->SetCollisionResponseToAllChannels(ECR_Block);
-	// 静态夹具在注册前提交位置和 Mobility；旧调用默认仍是可移动地面，不把 WorldStatic 通道等同于静态组件。
-	Floor->SetWorldLocationAndRotation(FVector(0.0f, 0.0f, -Extent.Z) + Offset, Rotation);
+	Floor->SetWorldLocation(FVector(0.0f, 0.0f, -Extent.Z));
 	Floor->RegisterComponent();
 	return Floor;
-}
-
-// 普通 StaticMeshComponent 的真实 Cube 复杂查询体，覆盖群体地图的静态网格路径；不改引擎 Cube 或项目资产。
-UStaticMeshComponent* SpawnFootStaticCube(UWorld& World, const FVector& Extent, const FVector& Center, const FRotator& Rotation)
-{
-	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	AActor* Owner = Cube ? World.SpawnActor<AActor>() : nullptr;
-	if (!Owner) return nullptr;
-	auto* Surface = NewObject<UStaticMeshComponent>(Owner);
-	Owner->SetRootComponent(Surface); Owner->AddInstanceComponent(Surface);
-	Surface->SetStaticMesh(Cube); Surface->SetMobility(EComponentMobility::Static);
-	Surface->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	Surface->SetCollisionObjectType(ECC_WorldStatic); Surface->SetCollisionResponseToAllChannels(ECR_Block);
-	Surface->SetWorldTransform(FTransform(Rotation, Center, Extent / 50.0f));
-	Surface->RegisterComponent();
-	return Surface;
 }
 
 ACharacter* SpawnFootCharacter(UWorld& World, bool bEnemy, const FVector& Location, FAutomationTestBase& Test)
@@ -185,193 +165,6 @@ FVector LegLengths(const USkeletalMeshComponent& Mesh, const TCHAR* Side)
 	return FVector(FVector::Distance(Thigh, Calf), FVector::Distance(Calf, Foot), 0.0f);
 }
 
-// 同一真实动画输入、同一类真实碰撞地面，对比候选复用与逐点世界查询；不借用上帧最终 IK 姿态作为输入或真值。
-bool CheckEnemyFootQueryReuse(FTestWorldWrapper& Fixture, FAutomationTestBase& Test, bool bMeshSurfaces)
-{
-	UWorld& World = *Fixture.GetTestWorld();
-	const FVector FloorExtent(2000.0f, 2000.0f, 20.0f);
-	const auto SpawnStaticSurface = [&](const FVector& Extent, const FVector& Center, const FRotator& Rotation) -> UPrimitiveComponent*
-	{
-		return bMeshSurfaces ? static_cast<UPrimitiveComponent*>(SpawnFootStaticCube(World, Extent, Center, Rotation))
-			: static_cast<UPrimitiveComponent*>(SpawnFootFloor(World, Extent, true, Center + FVector(0, 0, Extent.Z), Rotation));
-	};
-	UPrimitiveComponent* Floor = SpawnStaticSurface(FloorExtent, FVector(0, 0, -FloorExtent.Z), FRotator::ZeroRotator);
-	if (!Test.TestNotNull(TEXT("Candidate-query fixture creates its static floor before registration"), Floor)) return false;
-	Test.TestTrue(TEXT("Static candidate fixture is genuinely Static, not merely a WorldStatic object channel"),
-		Floor->Mobility == EComponentMobility::Static);
-	UAnimSequence* EnemyIdle = LoadObject<UAnimSequence>(nullptr,
-		TEXT("/Game/EnemyWarriorAnimPack/Animations/InPlace/Misc/EnemyWarrior_Idle_InP.EnemyWarrior_Idle_InP"));
-	UAnimSequence* PlayerIdle = LoadObject<UAnimSequence>(nullptr, TEXT("/Game/FPSMPT55/Animations/TPP/AR/A_TPP_AR_Idle.A_TPP_AR_Idle"));
-	if (!Test.TestNotNull(TEXT("Candidate comparison uses the actual enemy Idle asset"), EnemyIdle)
-		|| !Test.TestNotNull(TEXT("Player isolation uses the actual player Idle asset"), PlayerIdle)) return false;
-	ACharacter* Characters[3] = {};
-	UfpstrueFootIKAnimInstance* Solvers[3] = {};
-	FTransform OriginalActors[3];
-	FVector OriginalLegs[3][2];
-	for (int32 Index = 0; Index < 3; ++Index)
-	{
-		const bool bEnemy = Index != 2;
-		UClass* Class = bEnemy ? LoadClass<AfpstrueEnemyCharacter>(nullptr, EnemyClassPath)
-			: LoadClass<AfpstrueCharacter>(nullptr, PlayerClassPath);
-		if (!Test.TestNotNull(TEXT("Candidate comparison resolves the actual project character class"), Class)) return false;
-		const float HalfHeight = Class->GetDefaultObject<ACharacter>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-		Characters[Index] = SpawnFootCharacter(World, bEnemy, FVector(0, Index == 1 ? 1000 : Index == 2 ? -1000 : 0, HalfHeight + 2.15f), Test);
-		if (!Characters[Index]) return false;
-		USkeletalMeshComponent* Mesh = Characters[Index]->GetMesh();
-		Mesh->SetAnimationMode(EAnimationMode::AnimationSingleNode); Mesh->SetAnimation(bEnemy ? EnemyIdle : PlayerIdle);
-		auto* SingleNode = Mesh->GetSingleNodeInstance();
-		if (!Test.TestNotNull(TEXT("Query comparison freezes a real compatible main input, not the post-process result"), SingleNode)) return false;
-		SingleNode->SetPosition(0.0f, false); SingleNode->SetPlaying(false);
-		Solvers[Index] = Cast<UfpstrueFootIKAnimInstance>(Mesh->GetPostProcessInstance());
-		if (!Test.TestNotNull(TEXT("Frozen source retains its actual independent IK instance"), Solvers[Index])) return false;
-		Solvers[Index]->bReuseEnemyQueryCandidates = Index != 1;
-		Solvers[Index]->bVerifyEnemyCandidateQueries = Index == 0;
-		OriginalActors[Index] = Characters[Index]->GetActorTransform();
-		Mesh->SetDisablePostProcessBlueprint(true);
-		if (!StepFootPose(Fixture, *Characters[Index], Test)) return false;
-		OriginalLegs[Index][0] = LegLengths(*Mesh, TEXT("l")); OriginalLegs[Index][1] = LegLengths(*Mesh, TEXT("r"));
-		Mesh->SetDisablePostProcessBlueprint(false);
-		Solvers[Index]->ResetFootPlacement();
-	}
-	const auto CompareFrames = [&](const TCHAR* Label, int32 Frames, const FVector& PlanePoint, const FVector& PlaneNormal,
-		const UPrimitiveComponent* FastCurb = nullptr, const UPrimitiveComponent* ReferenceCurb = nullptr, bool bExpectReuse = true)
-	{
-		const auto Before = Solvers[0]->GetFootIKDebug();
-		double MaximumSkinGapDifference = 0, MinimumGap = TNumericLimits<double>::Max(), MaximumGap = TNumericLimits<double>::Lowest(), MaximumLegError = 0;
-		int32 CurbOverlapFrames = 0, CurbContactFrames = 0;
-		for (int32 Frame = 0; Frame < Frames; ++Frame)
-		{
-			for (int32 Index = 0; Index < 3; ++Index)
-				if (!StepFootPose(Fixture, *Characters[Index], Test)) return false;
-			FFootSoleSample Fast[2], Reference[2];
-			if (!ReadFootSoles(*Characters[0], PlanePoint, PlaneNormal, Fast[0], Fast[1], Test, FastCurb)
-				|| !ReadFootSoles(*Characters[1], PlanePoint, PlaneNormal, Reference[0], Reference[1], Test, ReferenceCurb)) return false;
-			for (int32 Side = 0; Side < 2; ++Side)
-			{
-				MaximumSkinGapDifference = FMath::Max(MaximumSkinGapDifference, FMath::Abs(Fast[Side].Gap - Reference[Side].Gap));
-				for (int32 Index = 0; Index < 3; ++Index)
-				{
-					MaximumLegError = FMath::Max(MaximumLegError, (LegLengths(*Characters[Index]->GetMesh(), Side == 0 ? TEXT("l") : TEXT("r"))
-						- OriginalLegs[Index][Side]).GetAbsMax());
-					if (!Test.TestTrue(TEXT("Query reuse never moves or rotates the actor or its collision capsule"),
-						Characters[Index]->GetActorTransform().Equals(OriginalActors[Index], 0.001f))) return false;
-				}
-				// 即时变化首先与同帧 fresh oracle 比较；接触与穿透门禁仍按原来的三十帧稳定期检查。
-				if (Frame >= 30)
-				{
-					MinimumGap = FMath::Min(MinimumGap, FMath::Min(Fast[Side].Gap, Reference[Side].Gap));
-					MaximumGap = FMath::Max(MaximumGap, FMath::Max(Fast[Side].Gap, Reference[Side].Gap));
-				}
-			}
-			if (Frame >= 30 && FastCurb)
-			{
-				CurbOverlapFrames += Fast[0].HighSupportVertices > 0;
-				CurbContactFrames += Fast[0].HighSupportContactVertices > 0;
-			}
-			if (!Test.TestEqual(TEXT("Every oracle-checked candidate ray matches its independent current World query"),
-				Solvers[0]->GetFootIKDebug().CandidateMismatches, uint32(0))) return false;
-		}
-		Test.AddInfo(FString::Printf(TEXT("Foot IK candidate equivalence meshSurface=%d stage=%s frames=%d maxSkinGapDifference=%.5fcm settledFrames=%d settledGap=[%.5f,%.5f]cm legError=%.5fcm highOverlapFrames=%d highContactFrames=%d; actual frozen main pose and final CPU skin, not performance timing."),
-			bMeshSurfaces, Label, Frames, MaximumSkinGapDifference, FMath::Max(0, Frames - 30), Frames > 30 ? MinimumGap : 0.0,
-			Frames > 30 ? MaximumGap : 0.0, MaximumLegError, CurbOverlapFrames, CurbContactFrames));
-		bool bPassed = Test.TestTrue(TEXT("Candidate reuse matches the fresh reference's real final shoe-surface gap on every sampled input"), MaximumSkinGapDifference < 0.1)
-			&& Test.TestTrue(TEXT("Candidate reuse preserves authored leg lengths"), MaximumLegError < 0.1);
-		const auto After = Solvers[0]->GetFootIKDebug();
-		bPassed &= bExpectReuse
-			? Test.TestTrue(TEXT("Each static surface stage actually executes reusable footprints and component queries"),
-				After.ReusedFootprints > Before.ReusedFootprints && After.ComponentTraceCount > Before.ComponentTraceCount)
-			: Test.TestTrue(TEXT("Each movable surface stage actually uses only the safe fallback"),
-				After.FallbackFootprints > Before.FallbackFootprints && After.ReusedFootprints == Before.ReusedFootprints);
-		if (Frames > 30) bPassed &= Test.TestTrue(TEXT("Candidate and reference retain the original settled sole gap gate"), MinimumGap >= -2.0 && MaximumGap <= 3.0);
-		if (FastCurb) bPassed &= Test.TestTrue(TEXT("Hot-query reuse retains real raised-support overlap and contact for at least ten settled frames"),
-			CurbOverlapFrames >= 10 && CurbContactFrames >= 10);
-		return bPassed;
-	};
-	const auto CompareWithoutOracle = [&](const TCHAR* Label, const FVector& PlanePoint, const FVector& PlaneNormal,
-		const UPrimitiveComponent* FastCurb = nullptr, const UPrimitiveComponent* ReferenceCurb = nullptr)
-	{
-		Solvers[0]->bVerifyEnemyCandidateQueries = false;
-		const bool bPassed = CompareFrames(Label, 45, PlanePoint, PlaneNormal, FastCurb, ReferenceCurb);
-		Solvers[0]->bVerifyEnemyCandidateQueries = true;
-		return bPassed;
-	};
-	if (!CompareFrames(TEXT("StaticFlatOracle"), 45, FVector::ZeroVector, FVector::UpVector)) return false;
-	const auto StaticDebug = Solvers[0]->GetFootIKDebug();
-	Test.TestTrue(TEXT("The static fixture actually exercises reused footprints and component ray queries"),
-		StaticDebug.ReusedFootprints > 0 && StaticDebug.ComponentTraceCount > 0);
-	Test.TestEqual(TEXT("A disabled reference never uses the candidate fast path"), Solvers[1]->GetFootIKDebug().ReusedFootprints, uint32(0));
-	Test.TestTrue(TEXT("A player on the same static floor never enters the enemy-only candidate path"),
-		Solvers[2]->GetFootIKDebug().ReusedFootprints == 0 && Solvers[2]->GetFootIKDebug().ComponentTraceCount == 0);
-	// Oracle 的额外世界查询只用于功能对照；关闭它后才比较两条执行路径的实际世界查询数。
-	Solvers[0]->bVerifyEnemyCandidateQueries = false;
-	const uint32 FastBefore = Solvers[0]->GetFootIKDebug().TraceCount, ReferenceBefore = Solvers[1]->GetFootIKDebug().TraceCount;
-	if (!CompareFrames(TEXT("StaticFlatQueryCountWithoutOracle"), 20, FVector::ZeroVector, FVector::UpVector)) return false;
-	const uint32 FastWorldQueries = Solvers[0]->GetFootIKDebug().TraceCount - FastBefore;
-	const uint32 ReferenceWorldQueries = Solvers[1]->GetFootIKDebug().TraceCount - ReferenceBefore;
-	Test.AddInfo(FString::Printf(TEXT("Foot IK query-count fixture frames=20 fastWorld=%u referenceWorld=%u oracle=0; count reduction is not a measured frame-time improvement."),
-		FastWorldQueries, ReferenceWorldQueries));
-	Test.TestTrue(TEXT("Enemy candidate reuse reduces actual World queries without disabling the solver"),
-		FastWorldQueries > 0 && FastWorldQueries < ReferenceWorldQueries && Solvers[0]->GetFootIKDebug().bEnabled);
-	Solvers[0]->bVerifyEnemyCandidateQueries = true;
-	// 静态坡面在注册前给定最终变换；不尝试移动已经注册的 Static 组件来伪造坡度覆盖。
-	Floor->DestroyComponent();
-	const FVector StaticSlopeNormal = FRotator(20, 0, 0).RotateVector(FVector::UpVector);
-	Floor = SpawnStaticSurface(FloorExtent, -StaticSlopeNormal * FloorExtent.Z, FRotator(20, 0, 0));
-	if (!Test.TestNotNull(TEXT("Static candidate fixture replaces its floor with a real twenty-degree slope"), Floor)
-		|| !CompareFrames(TEXT("StaticSlopeTwentyDegrees"), 45, FVector::ZeroVector, StaticSlopeNormal)
-		|| !CompareWithoutOracle(TEXT("StaticSlopeActualFastOutput"), FVector::ZeroVector, StaticSlopeNormal)) return false;
-	Floor->DestroyComponent(); Floor = SpawnStaticSurface(FloorExtent, FVector(0, 0, -FloorExtent.Z), FRotator::ZeroRotator);
-	if (!Test.TestNotNull(TEXT("Static candidate fixture restores its flat support"), Floor)
-		|| !CompareFrames(TEXT("StaticFlatRestored"), 45, FVector::ZeroVector, FVector::UpVector)) return false;
-	// 先覆盖整脚十五厘米台阶，再在查询已热之后仅覆盖六厘米鞋边；两者都不能删掉逐点真实接触检查。
-	UPrimitiveComponent* WholeSteps[2] = {};
-	for (int32 Index = 0; Index < 2; ++Index)
-	{
-		FFootSoleSample Left, Right;
-		if (!ReadFootSoles(*Characters[Index], FVector::ZeroVector, FVector::UpVector, Left, Right, Test)) return false;
-		FVector HalfSize = (Left.Maximum - Left.Minimum) * 0.5f + FVector(4, 4, 0); HalfSize.Z = 7.5f;
-		FVector Center = (Left.Maximum + Left.Minimum) * 0.5f; Center.Z = 7.5f;
-		WholeSteps[Index] = SpawnStaticSurface(HalfSize, Center, FRotator::ZeroRotator);
-		if (!Test.TestNotNull(TEXT("Static candidate fixture adds a real fifteen-centimeter full-foot step"), WholeSteps[Index])) return false;
-	}
-	if (!CompareFrames(TEXT("StaticWholeFootStepFifteenCm"), 45, FVector::ZeroVector, FVector::UpVector, WholeSteps[0], WholeSteps[1])
-		|| !CompareWithoutOracle(TEXT("StaticStepActualFastOutput"), FVector::ZeroVector, FVector::UpVector, WholeSteps[0], WholeSteps[1])) return false;
-	for (UPrimitiveComponent* Step : WholeSteps) Step->DestroyComponent();
-	if (!CompareFrames(TEXT("StaticWholeFootStepRemoved"), 45, FVector::ZeroVector, FVector::UpVector)) return false;
-	UPrimitiveComponent* Curbs[2] = {};
-	for (int32 Index = 0; Index < 2; ++Index)
-	{
-		FFootSoleSample Left, Right;
-		if (!ReadFootSoles(*Characters[Index], FVector::ZeroVector, FVector::UpVector, Left, Right, Test)) return false;
-		const int32 EdgeAxis = Left.Maximum.X - Left.Minimum.X >= Left.Maximum.Y - Left.Minimum.Y ? 0 : 1;
-		FVector HalfSize = (Left.Maximum - Left.Minimum) * 0.5f + FVector(4, 4, 0); HalfSize.Z = 7.5f; HalfSize[EdgeAxis] = 3.0f;
-		FVector Center = (Left.Maximum + Left.Minimum) * 0.5f; Center.Z = 7.5f; Center[EdgeAxis] = Left.Maximum[EdgeAxis] - 3.0f;
-		Test.TestTrue(TEXT("A new obstacle enters only the already-queried shoe edge, not its center"), Center[EdgeAxis] - HalfSize[EdgeAxis] > Left.Center[EdgeAxis]);
-		Curbs[Index] = SpawnStaticSurface(HalfSize, Center, FRotator::ZeroRotator);
-		if (!Test.TestNotNull(TEXT("Hot-scene fixture inserts a real new static six-centimeter curb"), Curbs[Index])) return false;
-		Curbs[Index]->CanCharacterStepUpOn = ECB_No;
-	}
-	if (!CompareFrames(TEXT("NewNarrowCurbAfterWarmQueries"), 45, FVector::ZeroVector, FVector::UpVector, Curbs[0], Curbs[1])
-		|| !CompareWithoutOracle(TEXT("NarrowCurbActualFastOutput"), FVector::ZeroVector, FVector::UpVector, Curbs[0], Curbs[1])) return false;
-	for (UPrimitiveComponent* Curb : Curbs) Curb->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	if (!CompareFrames(TEXT("CurbCollisionDisabled"), 10, FVector::ZeroVector, FVector::UpVector)) return false;
-	for (UPrimitiveComponent* Curb : Curbs) Curb->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	if (!CompareFrames(TEXT("CurbCollisionRestored"), 45, FVector::ZeroVector, FVector::UpVector, Curbs[0], Curbs[1])) return false;
-	for (UPrimitiveComponent* Curb : Curbs) Curb->DestroyComponent();
-	if (!CompareFrames(TEXT("CurbDestroyed"), 10, FVector::ZeroVector, FVector::UpVector)) return false;
-	const uint32 FallbackBefore = Solvers[0]->GetFootIKDebug().FallbackFootprints;
-	Floor->SetMobility(EComponentMobility::Movable); Floor->SetWorldLocation(FVector(0, 0, -14));
-	if (!CompareFrames(TEXT("SameWorldStaticChannelButMovingSupport"), 45, FVector(0, 0, 6), FVector::UpVector, nullptr, nullptr, false)) return false;
-	Test.TestTrue(TEXT("Movable support falls back despite still using the WorldStatic object channel"),
-		Solvers[0]->GetFootIKDebug().FallbackFootprints > FallbackBefore);
-	const FVector SlopeNormal = FRotator(10, 0, 0).RotateVector(FVector::UpVector);
-	Floor->SetWorldRotation(FRotator(10, 0, 0)); Floor->SetWorldLocation(FVector(0, 0, 6) - SlopeNormal * FloorExtent.Z);
-	if (!CompareFrames(TEXT("MovingSupportRotation"), 45, FVector(0, 0, 6), SlopeNormal, nullptr, nullptr, false)) return false;
-	Test.TestEqual(TEXT("New obstacles and support changes never leave an oracle mismatch"), Solvers[0]->GetFootIKDebug().CandidateMismatches, uint32(0));
-	Test.TestTrue(TEXT("Player isolation remains true through collision and movable-support changes"),
-		Solvers[2]->GetFootIKDebug().ReusedFootprints == 0 && Solvers[2]->GetFootIKDebug().ComponentTraceCount == 0);
-	return true;
-}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFootIKAssetBindingsTest,
@@ -380,6 +173,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFootIKAssetBindingsTest,
 
 bool FFpstrueFootIKAssetBindingsTest::RunTest(const FString&)
 {
+	// UE会先读取CanRunParallelWork，再为首帧补TickAnimation/PreUpdate。
+	// 无Owner、尚未初始化的实例也必须拒绝并行，不能等第一次贴地资格采样才切换门禁。
+	// AnimInstance的ClassWithin要求SkeletalMeshComponent；未初始化不等于允许无效Outer。
+	USkeletalMeshComponent* UninitializedMesh = NewObject<USkeletalMeshComponent>();
+	const auto* UninitializedIK = NewObject<UfpstrueFootIKAnimInstance>(UninitializedMesh);
+	if (!TestNotNull(TEXT("Foot IK thread gate is available before proxy initialization"), UninitializedIK)) return false;
+	TestFalse(TEXT("Player world-query IK rejects parallel work before its first PreUpdate"), UninitializedIK->CanRunParallelWork());
 	FTestWorldWrapper Fixture;
 	if (!BeginFootWorld(Fixture, *this)) return false;
 	for (const bool bEnemy : {false, true})
@@ -393,10 +193,31 @@ bool FFpstrueFootIKAssetBindingsTest::RunTest(const FString&)
 		const auto SourcePostProcess = Body->GetPostProcessAnimBlueprint();
 		UClass* MainAnimationClass = Mesh->GetAnimClass();
 		UfpstrueFootIKAnimInstance* IK = Cast<UfpstrueFootIKAnimInstance>(Mesh->GetPostProcessInstance());
-		if (!TestNotNull(TEXT("Normal character startup installs the independent body foot IK instance"), IK)) return false;
+		if (bEnemy)
+		{
+			TestNull(TEXT("Enemy startup never mounts a foot IK post-process instance"), Mesh->GetPostProcessInstance());
+			TestTrue(TEXT("Enemy presentation explicitly disables post-process Blueprint evaluation"), Mesh->GetDisablePostProcessBlueprint());
+			if (const auto* MainAnimation = Mesh->GetAnimInstance())
+				TestTrue(TEXT("Player-only IK thread gate does not disable enemy main-animation parallel eligibility"), MainAnimation->CanRunParallelWork());
+			UfpstrueFootIKAnimInstance::Install(Character);
+			TestTrue(TEXT("The player-only installer rejects enemies without changing their main animation or body asset"),
+				Mesh->GetPostProcessInstance() == nullptr && Mesh->GetAnimClass() == MainAnimationClass
+				&& Body->GetPostProcessAnimBlueprint() == SourcePostProcess);
+			auto* Enemy = CastChecked<AfpstrueEnemyCharacter>(Character);
+			FFPEnemyRenderSignificancePolicy Policy;
+			for (const auto Tier : {EFPEnemyRenderSignificanceTier::Full, EFPEnemyRenderSignificanceTier::Reduced, EFPEnemyRenderSignificanceTier::Background})
+			{
+				Enemy->ApplyRenderSignificanceTier(Tier, false, false, false, Policy);
+				for (int32 Frame = 0; Frame < 3; ++Frame) if (!StepFootPose(Fixture, *Character, *this)) return false;
+				TestTrue(TEXT("No enemy render-importance tier can re-enable the removed foot IK"),
+					Mesh->GetPostProcessInstance() == nullptr && Mesh->GetDisablePostProcessBlueprint());
+			}
+			continue;
+		}
+		if (!TestNotNull(TEXT("Normal player startup installs the independent body foot IK instance"), IK)) return false;
+		TestFalse(TEXT("The installed player post-process keeps a stable synchronous evaluation contract"), IK->CanRunParallelWork());
 		TestEqual(TEXT("Each character installs its explicit project-owned foot IK class"), IK->GetClass()->GetPathName(),
-			FString(bEnemy ? TEXT("/Game/FirstPerson/Animations/FootIK/ABP_EnemyFootIK.ABP_EnemyFootIK_C")
-				: TEXT("/Game/FirstPerson/Animations/FootIK/ABP_PlayerFootIK.ABP_PlayerFootIK_C")));
+			FString(TEXT("/Game/FirstPerson/Animations/FootIK/ABP_PlayerFootIK.ABP_PlayerFootIK_C")));
 		const auto* Graph = IAnimClassInterface::GetFromClass(IK->GetClass());
 		TestTrue(TEXT("Post-process IK targets the same skeleton as its actual body"), Graph && Graph->GetTargetSkeleton() == Body->GetSkeleton());
 		TestTrue(TEXT("Both calibrated foot-local sole offsets are finite and independent of world placement"),
@@ -422,9 +243,10 @@ bool FFpstrueFootIKAssetBindingsTest::RunTest(const FString&)
 		const TArray<int32> OriginalLeftSoleVertices = IK->LeftSoleVertices, OriginalRightSoleVertices = IK->RightSoleVertices;
 		FFootSoleSample Left, Right;
 		if (!StepFootPose(Fixture, *Character, *this) || !ReadFootSoles(*Character, FVector::ZeroVector, FVector::UpVector, Left, Right, *this)) return false;
-		UfpstrueFootIKAnimInstance::Install(Character, bEnemy);
+		UfpstrueFootIKAnimInstance::Install(Character);
 		TestTrue(TEXT("Repeated installation preserves the live instance and original main animation class"),
 			Mesh->GetPostProcessInstance() == IK && Mesh->GetAnimClass() == MainAnimationClass);
+		TestFalse(TEXT("Repeated player IK installation never relaxes its world-query thread gate"), IK->CanRunParallelWork());
 		TestTrue(TEXT("Footprint probes never replace or mutate the independent real CPU sole-vertex samples"),
 			IK->LeftSoleVertices == OriginalLeftSoleVertices && IK->RightSoleVertices == OriginalRightSoleVertices);
 		TestTrue(TEXT("Actor-specific IK installation never mutates the supplier skeletal mesh's post-process class"),
@@ -441,31 +263,27 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFootIKGroundPoseTest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFootIKResetTest,
-	"fpstrue.Multiplayer.Animation.FootIK.AirDeathAndSharingReset",
+	"fpstrue.Multiplayer.Animation.FootIK.AirDeathAndReset",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 {
-	for (const bool bEnemy : {false, true})
 	{
 		FTestWorldWrapper Fixture;
 		if (!BeginFootWorld(Fixture, *this)) return false;
 		UBoxComponent* Floor = SpawnFootFloor(*Fixture.GetTestWorld());
 		if (!TestNotNull(TEXT("Grounding fixture has its real query collision floor"), Floor)) return false;
-		UClass* Class = bEnemy ? LoadClass<AfpstrueEnemyCharacter>(nullptr, EnemyClassPath)
-			: LoadClass<AfpstrueCharacter>(nullptr, PlayerClassPath);
+		UClass* Class = LoadClass<AfpstrueCharacter>(nullptr, PlayerClassPath);
 		if (!TestNotNull(TEXT("Grounding fixture resolves its real character defaults"), Class)) return false;
 		const float HalfHeight = Class->GetDefaultObject<ACharacter>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-		ACharacter* Character = SpawnFootCharacter(*Fixture.GetTestWorld(), bEnemy, FVector(0, 0, HalfHeight + 2.15f), *this);
+		ACharacter* Character = SpawnFootCharacter(*Fixture.GetTestWorld(), false, FVector(0, 0, HalfHeight + 2.15f), *this);
 		if (!Character) return false;
 		USkeletalMeshComponent* Mesh = Character->GetMesh();
 		auto* IK = Cast<UfpstrueFootIKAnimInstance>(Mesh->GetPostProcessInstance());
 		if (!TestNotNull(TEXT("Grounding fixture starts its configured post-process IK"), IK)) return false;
 		UClass* MainAnimationClass = Mesh->GetAnimClass();
 		const EAnimationMode::Type MainAnimationMode = Mesh->GetAnimationMode();
-		UAnimSequence* FixedIdle = LoadObject<UAnimSequence>(nullptr, bEnemy
-			? TEXT("/Game/EnemyWarriorAnimPack/Animations/InPlace/Misc/EnemyWarrior_Idle_InP.EnemyWarrior_Idle_InP")
-			: TEXT("/Game/FPSMPT55/Animations/TPP/AR/A_TPP_AR_Idle.A_TPP_AR_Idle"));
+		UAnimSequence* FixedIdle = LoadObject<UAnimSequence>(nullptr, TEXT("/Game/FPSMPT55/Animations/TPP/AR/A_TPP_AR_Idle.A_TPP_AR_Idle"));
 		if (!TestNotNull(TEXT("Same-input stability uses the real skeleton-compatible calibrated Idle asset"), FixedIdle)) return false;
 		TestTrue(TEXT("The frozen stability input uses the character's actual body skeleton"), FixedIdle->GetSkeleton() == Mesh->GetSkeletalMeshAsset()->GetSkeleton());
 		const FTransform OriginalActor = Character->GetActorTransform();
@@ -502,8 +320,8 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 					TestTrue(TEXT("The narrow left-foot curb never raises the other foot's support surface"),
 						StripMinimum.X > Right.Maximum.X || StripMaximum.X < Right.Minimum.X
 						|| StripMinimum.Y > Right.Maximum.Y || StripMaximum.Y < Right.Minimum.Y);
-					AddInfo(FString::Printf(TEXT("Foot IK narrow-curb fixture enemy=%d axis=%s width=%.4fcm height=15cm leftSoleMin=%s leftSoleMax=%s leftSoleCenter=%s stripMin=%s stripMax=%s; per-vertex actual collision support is measured."),
-						bEnemy, EdgeAxis == 0 ? TEXT("X") : TEXT("Y"), HalfSize[EdgeAxis] * 2.0, *Left.Minimum.ToString(),
+					AddInfo(FString::Printf(TEXT("Foot IK narrow-curb fixture player axis=%s width=%.4fcm height=15cm leftSoleMin=%s leftSoleMax=%s leftSoleCenter=%s stripMin=%s stripMax=%s; per-vertex actual collision support is measured."),
+						EdgeAxis == 0 ? TEXT("X") : TEXT("Y"), HalfSize[EdgeAxis] * 2.0, *Left.Minimum.ToString(),
 						*Left.Maximum.ToString(), *Left.Center.ToString(), *StripMinimum.ToString(), *StripMaximum.ToString()));
 				}
 				Step = SpawnFootFloor(*Fixture.GetTestWorld(), HalfSize);
@@ -549,8 +367,8 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 					{
 						const FVector StepMinimum = Step->GetComponentLocation() - Step->GetScaledBoxExtent();
 						const FVector StepMaximum = Step->GetComponentLocation() + Step->GetScaledBoxExtent();
-						AddInfo(FString::Printf(TEXT("Foot IK actual-curb support enemy=%d frame=%d stripMin=%s stripMax=%s leftSoleMin=%s leftSoleMax=%s rightSoleMin=%s rightSoleMax=%s leftHighSupportVertices=%d leftHighContactVertices=%d rightHighSupportVertices=%d."),
-							bEnemy, Frame, *StepMinimum.ToString(), *StepMaximum.ToString(), *Left.Minimum.ToString(),
+						AddInfo(FString::Printf(TEXT("Foot IK actual-curb support player frame=%d stripMin=%s stripMax=%s leftSoleMin=%s leftSoleMax=%s rightSoleMin=%s rightSoleMax=%s leftHighSupportVertices=%d leftHighContactVertices=%d rightHighSupportVertices=%d."),
+							Frame, *StepMinimum.ToString(), *StepMaximum.ToString(), *Left.Minimum.ToString(),
 							*Left.Maximum.ToString(), *Right.Minimum.ToString(), *Right.Maximum.ToString(),
 							Left.HighSupportVertices, Left.HighSupportContactVertices, Right.HighSupportVertices));
 					}
@@ -584,8 +402,8 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 						Diagnostic.bWorstPlanted = Planted[Side]; Diagnostic.WorstPelvis = FrameDebug.PelvisOffset;
 					}
 					if (Frame == 30 || Frame == 45 || Frame == 59)
-						AddInfo(FString::Printf(TEXT("Foot IK settled snapshot enemy=%d surface=%d frame=%d side=%s actualSkinGap=%.4fcm solvedOffsetGap=%.4fcm soleNormalAngle=%.4fdeg rawLift=%.4fcm alpha=%.4f reachError=%.4fcm planted=%d pelvis=%.4fcm."),
-							bEnemy, Surface, Frame, Side == 0 ? TEXT("left") : TEXT("right"), Samples[Side]->Gap, SolvedGap, NormalAngle,
+						AddInfo(FString::Printf(TEXT("Foot IK settled snapshot player surface=%d frame=%d side=%s actualSkinGap=%.4fcm solvedOffsetGap=%.4fcm soleNormalAngle=%.4fdeg rawLift=%.4fcm alpha=%.4f reachError=%.4fcm planted=%d pelvis=%.4fcm."),
+							Surface, Frame, Side == 0 ? TEXT("left") : TEXT("right"), Samples[Side]->Gap, SolvedGap, NormalAngle,
 							RawLift, Alpha, FrameDebug.ReachErrors[Side], Planted[Side], FrameDebug.PelvisOffset));
 				}
 				if (Frame == 30) { FirstLeft = Left; FirstRight = Right; }
@@ -602,27 +420,27 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 					OriginalRootYaw, Mesh->GetSocketTransform(TEXT("root"), RTS_World).Rotator().Yaw))));
 			}
 			const auto Debug = IK->GetFootIKDebug();
-			AddInfo(FString::Printf(TEXT("Foot IK final-skin fixture enemy=%d surface=%d settledFrames=30 gaps=[%.4f,%.4f]cm plantTangentMotion=%.4fcm legLengthError=%.4fcm rootYawError=%.4fdeg pelvis=%.4fcm traces=%u. Not a rendered/network acceptance."),
-				bEnemy, Surface, MinGap, MaxGap, MaximumPlantMotion, MaximumLegError, MaximumRootYawError, Debug.PelvisOffset, Debug.TraceCount));
+			AddInfo(FString::Printf(TEXT("Foot IK final-skin fixture player surface=%d settledFrames=30 gaps=[%.4f,%.4f]cm plantTangentMotion=%.4fcm legLengthError=%.4fcm rootYawError=%.4fdeg pelvis=%.4fcm traces=%u. Not a rendered/network acceptance."),
+				Surface, MinGap, MaxGap, MaximumPlantMotion, MaximumLegError, MaximumRootYawError, Debug.PelvisOffset, Debug.TraceCount));
 			for (int32 Side = 0; Side < 2; ++Side)
 			{
 				const auto& Diagnostic = Diagnostics[Side];
-				AddInfo(FString::Printf(TEXT("Foot IK settled ranges enemy=%d surface=%d side=%s actualSkinGap=[%.4f,%.4f]cm rawLift=[%.4f,%.4f]cm alpha=[%.4f,%.4f] reachErrorMax=%.4fcm worstFrame=%d worstSolvedOffsetGap=%.4fcm worstSoleNormalAngle=%.4fdeg worstPlanted=%d worstPelvis=%.4fcm."),
-					bEnemy, Surface, Side == 0 ? TEXT("left") : TEXT("right"), Diagnostic.GapMin, Diagnostic.GapMax,
+				AddInfo(FString::Printf(TEXT("Foot IK settled ranges player surface=%d side=%s actualSkinGap=[%.4f,%.4f]cm rawLift=[%.4f,%.4f]cm alpha=[%.4f,%.4f] reachErrorMax=%.4fcm worstFrame=%d worstSolvedOffsetGap=%.4fcm worstSoleNormalAngle=%.4fdeg worstPlanted=%d worstPelvis=%.4fcm."),
+					Surface, Side == 0 ? TEXT("left") : TEXT("right"), Diagnostic.GapMin, Diagnostic.GapMax,
 					Diagnostic.RawLiftMin, Diagnostic.RawLiftMax, Diagnostic.AlphaMin, Diagnostic.AlphaMax, Diagnostic.ReachMax,
 					Diagnostic.WorstFrame, Diagnostic.WorstSolvedGap, Diagnostic.WorstNormalAngle, Diagnostic.bWorstPlanted, Diagnostic.WorstPelvis));
 			}
 			TestTrue(TEXT("Independent character IK is active on the actual collision surface"), Debug.bEnabled && Debug.TraceCount > 0);
 			if (Surface == 3)
 			{
-				AddInfo(FString::Printf(TEXT("Foot IK actual-curb coverage enemy=%d settledFrames=30 actualOverlapFrames=%d actualHighContactFrames=%d."),
-					bEnemy, CurbOverlapFrames, CurbContactFrames));
+				AddInfo(FString::Printf(TEXT("Foot IK actual-curb coverage player settledFrames=30 actualOverlapFrames=%d actualHighContactFrames=%d."),
+					CurbOverlapFrames, CurbContactFrames));
 				TestTrue(TEXT("The real left shoe overlaps and contacts the narrow high curb in at least ten settled frames"),
 					CurbOverlapFrames >= 10 && CurbContactFrames >= 10);
 			}
 			TestTrue(TEXT("Both real resting shoe soles stay near their own support surfaces without large penetration"), MinGap >= -2.0 && MaxGap <= 3.0);
-			AddInfo(FString::Printf(TEXT("Foot IK dynamic Idle phase change enemy=%d surface=%d firstGaps=[%.4f,%.4f]cm lastGaps=[%.4f,%.4f]cm; changing animation phases are not a same-input feedback test."),
-				bEnemy, Surface, FirstLeft.Gap, FirstRight.Gap, LastLeft.Gap, LastRight.Gap));
+			AddInfo(FString::Printf(TEXT("Foot IK dynamic Idle phase change player surface=%d firstGaps=[%.4f,%.4f]cm lastGaps=[%.4f,%.4f]cm; changing animation phases are not a same-input feedback test."),
+				Surface, FirstLeft.Gap, FirstRight.Gap, LastLeft.Gap, LastRight.Gap));
 			TestTrue(TEXT("Planted final-skin shoe patches remain stable in the support tangent plane"), MaximumPlantMotion < 2.0);
 			TestTrue(TEXT("Foot IK preserves both segment lengths instead of stretching the legs"), MaximumLegError < 0.1);
 			TestTrue(TEXT("Post-process foot placement does not override the main body's root-yaw facing"), MaximumRootYawError < 0.1);
@@ -654,8 +472,8 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 			const double LeftDrift = FMath::Abs(FixedLastLeft.Gap - FixedFirstLeft.Gap);
 			const double RightDrift = FMath::Abs(FixedLastRight.Gap - FixedFirstRight.Gap);
 			const auto FixedDebug = IK->GetFootIKDebug();
-			AddInfo(FString::Printf(TEXT("Foot IK same-input stability enemy=%d surface=%d Idle=%s frozenTime=%.4fs frames=60 settle=30 firstGaps=[%.4f,%.4f]cm lastGaps=[%.4f,%.4f]cm drift=[%.4f,%.4f]cm active=%d tracesBefore=%u tracesAfter=%u; main source paused, post-process receives real frame Delta."),
-				bEnemy, Surface, *FixedIdle->GetPathName(), SingleNode->GetCurrentTime(), FixedFirstLeft.Gap, FixedFirstRight.Gap,
+			AddInfo(FString::Printf(TEXT("Foot IK same-input stability player surface=%d Idle=%s frozenTime=%.4fs frames=60 settle=30 firstGaps=[%.4f,%.4f]cm lastGaps=[%.4f,%.4f]cm drift=[%.4f,%.4f]cm active=%d tracesBefore=%u tracesAfter=%u; main source paused, post-process receives real frame Delta."),
+				Surface, *FixedIdle->GetPathName(), SingleNode->GetCurrentTime(), FixedFirstLeft.Gap, FixedFirstRight.Gap,
 				FixedLastLeft.Gap, FixedLastRight.Gap, LeftDrift, RightDrift, FixedDebug.bEnabled, FixedBeforeTraces, FixedDebug.TraceCount));
 			TestTrue(TEXT("The same Idle input stays frozen while the independent post-process keeps updating"),
 				FMath::IsNearlyZero(SingleNode->GetCurrentTime()) && FixedDebug.bEnabled && FixedDebug.TraceCount > FixedBeforeTraces);
@@ -734,8 +552,8 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 				MinimumSoleGap = FMath::Min(MinimumSoleGap, FMath::Min(Left.Gap, Right.Gap));
 				++MotionFrames;
 			}
-			AddInfo(FString::Printf(TEXT("Foot IK authored-motion fixture enemy=%d turn=%d frames=%d rawFootTravel=%.4fcm lockedFrames=%d ankleXYError=%.4fcm footRotationError=%.4fdeg pelvisMinimum=%.4fcm soleMinimum=%.4fcm legLengthError=%.4fcm rootYawError=%.4fdeg; real main graph, same-frame pre-IK input, stationary actor collision, not rendered movement."),
-				bEnemy, bTurn, MotionFrames, MaximumRawFootTravel, LockedFrames, MaximumXYError, MaximumRotationError,
+			AddInfo(FString::Printf(TEXT("Foot IK authored-motion fixture player turn=%d frames=%d rawFootTravel=%.4fcm lockedFrames=%d ankleXYError=%.4fcm footRotationError=%.4fdeg pelvisMinimum=%.4fcm soleMinimum=%.4fcm legLengthError=%.4fcm rootYawError=%.4fdeg; real main graph, same-frame pre-IK input, stationary actor collision, not rendered movement."),
+				bTurn, MotionFrames, MaximumRawFootTravel, LockedFrames, MaximumXYError, MaximumRotationError,
 				MinimumPelvisOffset, MinimumSoleGap, MaximumLegError, MaximumRootYawError));
 			TestTrue(TEXT("Authored-motion coverage contains actual walking or turning foot motion"), MotionFrames >= 10 && MaximumRawFootTravel > 2.0);
 			TestTrue(TEXT("Walking and turning never retain Idle XY plant locks or displace authored ankle XY"), LockedFrames == 0 && MaximumXYError < 0.1);
@@ -746,29 +564,22 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 			TestTrue(TEXT("Dynamic pose checks never move the actor's CMC collision"), Character->GetActorLocation().Equals(OriginalActor.GetLocation(), 0.001));
 			return true;
 		};
-		if (!CheckDynamicPose(false) || (!bEnemy && !CheckDynamicPose(true))) return false;
-	}
-	for (const bool bMeshSurfaces : {false, true})
-	{
-		FTestWorldWrapper CandidateFixture;
-		if (!BeginFootWorld(CandidateFixture, *this) || !CheckEnemyFootQueryReuse(CandidateFixture, *this, bMeshSurfaces)) return false;
+		if (!CheckDynamicPose(false) || !CheckDynamicPose(true)) return false;
 	}
 	return true;
 }
 
 bool FFpstrueFootIKResetTest::RunTest(const FString&)
 {
-	for (const bool bEnemy : {false, true})
 	{
 		FTestWorldWrapper Fixture;
 		if (!BeginFootWorld(Fixture, *this)) return false;
 		UBoxComponent* Floor = SpawnFootFloor(*Fixture.GetTestWorld());
 		if (!TestNotNull(TEXT("IK reset fixture owns its independent collision floor"), Floor)) return false;
-		UClass* Class = bEnemy ? LoadClass<AfpstrueEnemyCharacter>(nullptr, EnemyClassPath)
-			: LoadClass<AfpstrueCharacter>(nullptr, PlayerClassPath);
+		UClass* Class = LoadClass<AfpstrueCharacter>(nullptr, PlayerClassPath);
 		if (!TestNotNull(TEXT("IK reset fixture resolves the actual character class"), Class)) return false;
 		const float HalfHeight = Class->GetDefaultObject<ACharacter>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-		ACharacter* Character = SpawnFootCharacter(*Fixture.GetTestWorld(), bEnemy, FVector(0, 0, HalfHeight + 2.15f), *this);
+		ACharacter* Character = SpawnFootCharacter(*Fixture.GetTestWorld(), false, FVector(0, 0, HalfHeight + 2.15f), *this);
 		if (!Character) return false;
 		USkeletalMeshComponent* Mesh = Character->GetMesh();
 		auto* IK = Cast<UfpstrueFootIKAnimInstance>(Mesh->GetPostProcessInstance());
@@ -776,57 +587,30 @@ bool FFpstrueFootIKResetTest::RunTest(const FString&)
 		for (int32 Frame = 0; Frame < 45; ++Frame) if (!StepFootPose(Fixture, *Character, *this)) return false;
 		const auto Grounded = IK->GetFootIKDebug();
 		TestTrue(TEXT("The reset fixture begins with an enabled independently evaluated foot solver"), Grounded.bEnabled && Grounded.TraceCount > 0);
+		TestFalse(TEXT("Grounded player post-process requires Game Thread evaluation"), IK->CanRunParallelWork());
 		Character->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+		TestFalse(TEXT("Leaving ground cannot open a parallel-evaluation eligibility window"), IK->CanRunParallelWork());
 		for (int32 Frame = 0; Frame < 12; ++Frame) if (!StepFootPose(Fixture, *Character, *this)) return false;
 		const auto Airborne = IK->GetFootIKDebug();
 		TestTrue(TEXT("Airborne motion releases both planted feet and issues no additional ground traces"),
 			!Airborne.bEnabled && !Airborne.bLeftPlanted && !Airborne.bRightPlanted && Airborne.TraceCount == Grounded.TraceCount);
+		TestFalse(TEXT("An airborne solver stays synchronous even while its world queries are inactive"), IK->CanRunParallelWork());
 		Character->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+		TestFalse(TEXT("Landing is safe before the next PreUpdate notices the restored ground eligibility"), IK->CanRunParallelWork());
 		for (int32 Frame = 0; Frame < 45; ++Frame) if (!StepFootPose(Fixture, *Character, *this)) return false;
 		const auto Landed = IK->GetFootIKDebug();
 		TestTrue(TEXT("Landing re-establishes independent grounding rather than preserving an airborne disable flag"),
 			Landed.bEnabled && Landed.TraceCount > Airborne.TraceCount);
-		if (bEnemy)
-		{
-			// 模拟插件实际使用的 LeaderPose 边界；共享期间不强行 Tick 本来不执行的 Follower 后处理。
-			AActor* LeaderOwner = Fixture.GetTestWorld()->SpawnActor<AActor>();
-			if (!TestNotNull(TEXT("Sharing reset fixture creates an independent leader owner"), LeaderOwner)) return false;
-			auto* Leader = NewObject<USkeletalMeshComponent>(LeaderOwner);
-			LeaderOwner->SetRootComponent(Leader); LeaderOwner->AddInstanceComponent(Leader);
-			Leader->SetSkeletalMesh(Mesh->GetSkeletalMeshAsset());
-			Leader->SetAnimationMode(EAnimationMode::AnimationSingleNode);
-			Leader->RegisterComponent();
-			UAnimSequence* SharedIdle = LoadObject<UAnimSequence>(nullptr,
-				TEXT("/Game/EnemyWarriorAnimPack/Animations/InPlace/Misc/EnemyWarrior_Idle_InP.EnemyWarrior_Idle_InP"));
-			if (!TestNotNull(TEXT("Sharing reset fixture uses the existing compatible shared idle"), SharedIdle)) return false;
-			Leader->SetAnimation(SharedIdle); Leader->Play(true);
-			Leader->TickAnimation(1.0f / 60.0f, false); Leader->RefreshBoneTransforms();
-			IK->ResetFootPlacement(); Mesh->SetLeaderPoseComponent(Leader, true);
-			const auto SharedBefore = IK->GetFootIKDebug();
-			for (int32 Frame = 0; Frame < 12; ++Frame)
-				if (!Fixture.TickTestWorld(1.0f / 60.0f)) { Fixture.ForwardErrorMessages(this); return false; }
-			const auto SharedAfter = IK->GetFootIKDebug();
-			TestTrue(TEXT("A real LeaderPose follower reports disabled independent IK without performing follower ground traces"),
-				!SharedAfter.bEnabled && !SharedAfter.bLeftPlanted && !SharedAfter.bRightPlanted
-				&& SharedAfter.TraceCount == SharedBefore.TraceCount);
-			Floor->SetWorldLocation(FVector(0.0f, 0.0f, -10.0f));
-			Mesh->SetLeaderPoseComponent(nullptr, true); IK->ResetFootPlacement();
-			for (int32 Frame = 0; Frame < 45; ++Frame) if (!StepFootPose(Fixture, *Character, *this)) return false;
-			const auto Independent = IK->GetFootIKDebug();
-			FFootSoleSample Left, Right;
-			if (!ReadFootSoles(*Character, FVector(0.0f, 0.0f, 10.0f), FVector::UpVector, Left, Right, *this)) return false;
-			TestTrue(TEXT("Leaving sharing reacquires the changed real floor instead of restoring stale plant anchors"),
-				Independent.bEnabled && Independent.TraceCount > SharedAfter.TraceCount
-				&& Left.Gap >= -2.0 && Left.Gap <= 3.0 && Right.Gap >= -2.0 && Right.Gap <= 3.0);
-		}
+		TestFalse(TEXT("The resumed grounded solver still rejects Worker evaluation"), IK->CanRunParallelWork());
 		const uint32 BeforeDeathTraces = IK->GetFootIKDebug().TraceCount;
 		UGameplayStatics::ApplyDamage(Character, 10000.0f, nullptr, nullptr, nullptr);
 		for (int32 Frame = 0; Frame < 12; ++Frame) if (!StepFootPose(Fixture, *Character, *this)) return false;
 		const auto Dead = IK->GetFootIKDebug();
 		TestTrue(TEXT("The normal death pipeline releases the feet and never adds dead-body grounding traces"),
 			!Dead.bEnabled && !Dead.bLeftPlanted && !Dead.bRightPlanted && Dead.TraceCount == BeforeDeathTraces);
-		AddInfo(FString::Printf(TEXT("Foot IK eligibility fixture enemy=%d traces grounded=%u air=%u landed=%u dead=%u; sharing uses actual LeaderPose, not a forced follower update. Not rendered/network acceptance."),
-			bEnemy, Grounded.TraceCount, Airborne.TraceCount, Landed.TraceCount, Dead.TraceCount));
+		TestFalse(TEXT("Dead-body query suppression does not change the player instance's thread contract"), IK->CanRunParallelWork());
+		AddInfo(FString::Printf(TEXT("Foot IK eligibility fixture player traces grounded=%u air=%u landed=%u dead=%u; actual player world-query solver; not rendered/network acceptance."),
+			Grounded.TraceCount, Airborne.TraceCount, Landed.TraceCount, Dead.TraceCount));
 	}
 	return true;
 }
