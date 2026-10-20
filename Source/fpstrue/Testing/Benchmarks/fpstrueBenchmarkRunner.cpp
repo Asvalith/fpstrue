@@ -17,12 +17,10 @@
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/BoxComponent.h"
 #include "Components/InputComponent.h"
-#include "Components/ShapeComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
-#include "Engine/StaticMesh.h"
-#include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/GameEngine.h"
 #include "Engine/GameInstance.h"
@@ -60,6 +58,7 @@
 #include "ProfilingDebugging/MiscTrace.h"
 #include "ProfilingDebugging/TraceAuxiliary.h"
 #include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #include "UnrealClient.h"
@@ -958,8 +957,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		int32 PostInstances = 0, PostCanParallel = 0, PostDisabled = 0, SimpleEnemies = 0, FullAuthorityPose = 0;
 		int32 MeshCollisionEnabled = 0, MeshPhysicsStates = 0, ValidMeshBodyInstances = 0, ConstraintEntries = 0;
 		int32 HitProxyComponents = 0, QueryEnabledHitProxies = 0, HitProxyPhysicsStates = 0;
-		int32 ConvexHitElements = 0, OtherHitElements = 0, AlwaysCheckFloorEnemies = 0;
-		TSet<const UStaticMesh*> HitHullAssets;
+		int32 HitProxyBodySetups = 0, InvalidHitProxyBodySetups = 0, BoxHitElements = 0, ConvexHitElements = 0, OtherHitElements = 0;
+		int32 UnexpectedHitProxyComponents = 0, MinHitBoxesPerEnemy = MAX_int32, MaxHitBoxesPerEnemy = 0, AlwaysCheckFloorEnemies = 0;
 		int32 GameplayTiers[3] = {}, RenderTiers[3] = {}, VisibilityOptions[5] = {};
 		int32 GameplayReasonSampled = 0, GameplayDistanceValid = 0;
 		int32 FullByDistance = 0, FullByAttack = 0, FullByMeleeRange = 0, FullReasonUnknown = 0;
@@ -1022,26 +1021,36 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				*Leader, Boolean(Enemy->IsAttacking()), Boolean(Enemy->RequiresFullAuthorityPose()),
 				Boolean(DetailMesh != nullptr && DetailMesh->IsComponentTickEnabled()), DetailMesh != nullptr ? DetailMesh->GetNumLODs() : 0,
 				Enemy->GetAppliedMinimumLOD(), DetailMesh != nullptr ? DetailMesh->GetPredictedLODLevel() : INDEX_NONE);
-			// 查询代理与 Mesh 的资产 Body 数是不同口径；组件可不创建 Chaos 物理状态。
-			TInlineComponentArray<UStaticMeshComponent*> Shapes;
+			// 只统计带标签的原生盒体；残留的网格/其他代理单独报错，不能冒充六个盒体。
+			// 只读已存在的 BodySetup，不为客户端观测创建原本不需要的查询几何。
+			int32 EnemyHitBoxes = 0;
+			TInlineComponentArray<UPrimitiveComponent*> Shapes;
 			Enemy->GetComponents(Shapes);
-			for (const UStaticMeshComponent* Shape : Shapes)
+			for (const UPrimitiveComponent* Component : Shapes)
 			{
-				if (!Shape->ComponentHasTag(TEXT("EnemyHitProxy"))) continue;
+				if (!Component->ComponentHasTag(TEXT("EnemyHitProxy"))) continue;
+				const UBoxComponent* Shape = Cast<UBoxComponent>(Component);
+				if (Shape == nullptr)
+				{
+					++UnexpectedHitProxyComponents;
+					continue;
+				}
+				++EnemyHitBoxes;
 				++HitProxyComponents;
 				const ECollisionEnabled::Type Collision = Shape->GetCollisionEnabled();
 				QueryEnabledHitProxies += Collision == ECollisionEnabled::QueryOnly || Collision == ECollisionEnabled::QueryAndPhysics ? 1 : 0;
 				HitProxyPhysicsStates += Shape->IsPhysicsStateCreated() ? 1 : 0;
-				if (const UStaticMesh* Hull = Shape->GetStaticMesh())
+				if (const UBodySetup* Body = Shape->ShapeBodySetup)
 				{
-					HitHullAssets.Add(Hull);
-					if (const UBodySetup* Body = Hull->GetBodySetup())
-					{
-						ConvexHitElements += Body->AggGeom.ConvexElems.Num();
-						OtherHitElements += Body->AggGeom.GetElementCount() - Body->AggGeom.ConvexElems.Num();
-					}
+					++HitProxyBodySetups;
+					BoxHitElements += Body->AggGeom.BoxElems.Num();
+					ConvexHitElements += Body->AggGeom.ConvexElems.Num();
+					OtherHitElements += Body->AggGeom.GetElementCount() - Body->AggGeom.BoxElems.Num() - Body->AggGeom.ConvexElems.Num();
+					InvalidHitProxyBodySetups += Body->AggGeom.BoxElems.Num() != 1 || Body->AggGeom.GetElementCount() != 1 ? 1 : 0;
 				}
 			}
+			MinHitBoxesPerEnemy = FMath::Min(MinHitBoxesPerEnemy, EnemyHitBoxes);
+			MaxHitBoxesPerEnemy = FMath::Max(MaxHitBoxesPerEnemy, EnemyHitBoxes);
 			const USkeletalMeshComponent* Mesh = Enemy->GetMesh();
 			if (Mesh == nullptr) continue;
 			++Meshes;
@@ -1084,9 +1093,10 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		Json += FString::Printf(TEXT("},\"mesh\":{\"count\":%d,\"tickEnabled\":%d,\"everyFrameTick\":%d,\"uroEnabled\":%d,\"leaderPoseFollowers\":%d,\"postProcessDisabled\":%d,\"collisionEnabled\":%d,\"physicsStatesCreated\":%d,\"validBodyInstances\":%d,\"constraintInstanceEntries\":%d,\"gameplayTiers\":[%d,%d,%d],\"renderTiers\":[%d,%d,%d],\"visibilityOptionsByEnum\":[%d,%d,%d,%d,%d]},"),
 			Meshes, MeshTickEnabled, EveryFrameMeshTicks, URO, LeaderFollowers, PostDisabled, MeshCollisionEnabled, MeshPhysicsStates, ValidMeshBodyInstances, ConstraintEntries,
 			GameplayTiers[0], GameplayTiers[1], GameplayTiers[2], RenderTiers[0], RenderTiers[1], RenderTiers[2], VisibilityOptions[0], VisibilityOptions[1], VisibilityOptions[2], VisibilityOptions[3], VisibilityOptions[4]);
-		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"movement\":{\"alwaysCheckFloorEnemies\":%d},\"hitProxyComponents\":{\"count\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d,\"convexElements\":%d,\"otherElements\":%d,\"uniqueHullAssets\":%d},\"physicsAssetConfiguration\":["),
+		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"movement\":{\"alwaysCheckFloorEnemies\":%d},\"hitProxyComponents\":{\"schemaVersion\":2,\"geometry\":\"NativeBox\",\"count\":%d,\"minPerEnemy\":%d,\"maxPerEnemy\":%d,\"unexpectedTaggedComponents\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d,\"bodySetupsPresent\":%d,\"invalidBodySetups\":%d,\"boxElements\":%d,\"convexElements\":%d,\"otherElements\":%d},\"physicsAssetConfiguration\":["),
 			MainInstances, MainMultithreaded, MainCanParallel, MainRootMotionEverything, PostInstances, PostCanParallel, AlwaysCheckFloorEnemies,
-			HitProxyComponents, QueryEnabledHitProxies, HitProxyPhysicsStates, ConvexHitElements, OtherHitElements, HitHullAssets.Num());
+			HitProxyComponents, Alive > 0 ? MinHitBoxesPerEnemy : 0, MaxHitBoxesPerEnemy, UnexpectedHitProxyComponents,
+			QueryEnabledHitProxies, HitProxyPhysicsStates, HitProxyBodySetups, InvalidHitProxyBodySetups, BoxHitElements, ConvexHitElements, OtherHitElements);
 		TArray<const UPhysicsAsset*> Assets;
 		AssetReferences.GetKeys(Assets);
 		Assets.Sort([](const UPhysicsAsset& Left, const UPhysicsAsset& Right) { return Left.GetPathName() < Right.GetPathName(); });

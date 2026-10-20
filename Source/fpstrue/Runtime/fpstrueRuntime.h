@@ -12,8 +12,6 @@
 // [生命周期/资源所有权/资源归还]：退出时停止生产新工作，并按所有权释放登记、许可和采集资源。
 // [线程交接/预算保护/配置契约/验收边界]：说明在哪个线程执行、哪些行为不能降级，以及配置和测试能证明什么。
 
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 /**
  * 项目级碰撞通道约定。
  *
@@ -25,8 +23,6 @@ namespace FpstrueCollisionChannels
 	// 玩家 Hitscan 专用查询通道：场景和敌人骨骼阻挡，角色胶囊、Trigger、UI 和尸体忽略。
 	inline constexpr ECollisionChannel WeaponTrace = ECC_GameTraceChannel3;
 }
-
-// Copyright Epic Games, Inc. All Rights Reserved.
 
 class UAnimInstance;
 class UAnimMontage;
@@ -56,8 +52,6 @@ struct FPSTRUE_API FFPActionPlayback
 	// 检查是否保存了完整且仍有效的身份；不代表该实例此刻还在播放。
 	bool IsSet() const;
 };
-
-// Copyright Epic Games, Inc. All Rights Reserved.
 
 // 运行时埋点声明：AI、生成和攻击模块写入，stat fpstruePerformance 与 Insights/测试器读取。
 DECLARE_STATS_GROUP(TEXT("fpstrue Performance"), STATGROUP_fpstruePerformance, STATCAT_Advanced);

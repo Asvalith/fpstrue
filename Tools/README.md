@@ -77,6 +77,7 @@ powershell -ExecutionPolicy Bypass -File .\Tools\Performance\RunRenderCostMatrix
 - `-EnemyHitProxies Reference` 显式保留旧骨骼命中策略；`Simple` 测试简化活体命中代理。比较代理时固定线程模式、复制策略、场景及其他条件，用不同运行名保存证据；该选择在三端显式传入，旧 Shipping 包不能冒充新版本。
 - `-OutputRoot` 可将日志、UserDir和帧数据移到空间充足的目录，默认仍为项目 `Saved/Profiling`。输出不覆盖既有目录，固定160 AI、两玩家、原画质与活动校验不变。
 - 每个角色的摘要补充 START／STOP 边界快照：实际 `FApp` 门禁、动画 CVar、实例并行资格、姿态策略及物理计数。共享 PhysicsAsset 的 Body／Shape／Constraint 数仅在边界按资产去重读取，是配置数量；Mesh 有效 BodyInstance、创建的物理状态与命中代理另列，不能互相冒充。这些门禁也不证明任务实际在Worker执行，仍需独立Trace确认。
+- `Simple` 命中门禁使用 `hitProxyComponents.schemaVersion=2 / geometry=NativeBox`：逐敌人必须恰好六个带标签的原生盒体，服务器 960 个查询体／已创建物理状态／BoxElem，代理 Convex 与其他形状均为 0；客户端查询及物理状态为 0。观测只读已存在的 `ShapeBodySetup`，不为客户端创建几何；旧凸包报告不会通过新门禁。专用凸包资源与 `BuildEnemyHitHull` 入口已移除，原 PhysicsAsset 的死亡几何不在此计数口径内。
 - Editor／Shipping仅指客户端构建，服务器仍是相同的Editor DS；不将此结果写成Shipping独立服务器性能。逐帧CSV列与既有schema-2口径保持不变，动画／物理边界快照位于计时窗口之外；显式 Trace／线程 CPU／节拍逐帧诊断的额外开销另行记录。
 
 节拍与遮挡对照复用上述入口，**默认不改变旧启动条件**：
@@ -86,11 +87,11 @@ powershell -ExecutionPolicy Bypass -File .\Tools\Performance\RunRenderCostMatrix
 - `-ClientOcclusion Inherited` 为默认，不追加渲染参数。`Buffer3` 只给唯一渲染客户端加本轮 `r.NumBufferedOcclusionQueries=3` ini 覆盖；`HZB` 只加 `r.HZBOcclusion=1`，二者不能作为同一轮选项叠加。Case、experiment、result、summary 记录模式与独立名称，不改生产 `Config/`，服务器和 NullRHI peer 不受该选项影响。
 - 渲染端必须读回 `r.NumBufferedOcclusionQueries`、`r.HZBOcclusion`、`r.OneFrameThreadLag`、`r.RHICmdBypass`；覆盖值未实际生效即失败，尤其不能认为 Shipping 收到命令行就一定应用。先用 Editor 同场景各三轮做单因素对照，Shipping 后续只确认选中的候选；不同模式／构建不能合并成一个性能均值。
 - Buffer3 增加遮挡历史延迟，要复验快速转头、出掩体和显隐跳变；HZB 结果更保守，可能多画物体，且其 readback lock／RHI 提交仍可能等待。不能预告它“消除 GPU 等待”，也不能靠增加流水线延迟隐藏瓶颈。需要同时看平均帧、RT／RHI scope、实际画面与固定活动人口。
-- `-ContinuousFloorChecks` 是地面缓存的反向消融对照，默认关闭，不改资产配置。显式开启时只给本轮 DS 传 `-PvpBaselineAlwaysCheckFloor`，等全部 160 个敌人和两玩家就绪后、预热前一次性设置敌人 CMC 的 `bAlwaysCheckFloor=true`，不在生成阶段或采集循环每帧写入。Case 增加 `_FloorReference`，清单和结果记录该选项，并严格核对服务器 START／STOP 的 `movement.alwaysCheckFloorEnemies` 为 160；默认固定场景应为 0。必须与同一六凸包构建、相同节拍及渲染参数的默认组比较，不拿旧两代理 B3 当地面缓存对照，不改变正常游戏入口。
+- `-ContinuousFloorChecks` 是地面缓存的反向消融对照，默认关闭，不改资产配置。显式开启时只给本轮 DS 传 `-PvpBaselineAlwaysCheckFloor`，等全部 160 个敌人和两玩家就绪后、预热前一次性设置敌人 CMC 的 `bAlwaysCheckFloor=true`，不在生成阶段或采集循环每帧写入。Case 增加 `_FloorReference`，清单和结果记录该选项，并严格核对服务器 START／STOP 的 `movement.alwaysCheckFloorEnemies` 为 160；默认固定场景应为 0。必须与同一六盒体构建、相同节拍及渲染参数的默认组比较，不拿旧凸包或两代理 B3 当地面缓存对照，不改变正常游戏入口。
 - `-CpuDiagnostic -BuildKinds Editor` 是**不依赖 Trace 的独立 CPU 诊断**，允许 `-Repeat 3`；不与 Trace／Scheduler／PresentMon 混用。只有 DS 与渲染端增加已有原生 `-PvpBaselineCpuAccounting`，读取 Windows `GetThreadTimes` 并写相同 schema-2 `frames.csv` 和独立 `pacing.csv`，无 `.utrace`、命名事件、引擎 CSV profiler 或 ETL，不触发专属于 Trace 的 C 盘 5 GiB 守卫。直接采样和 pacing 的开销仍在，Case 增加 `_CpuDiagnostic`，`cpu-diagnostic-manifest.json`、清单及汇总明确 `DiagnosticOnly=true`／`FormalBaseline=false`，不能混进正式 B1。
 - `-ServerTraceOnly` 必须与 `-DiagnosticTrace -DiagnosticTraceOnly` 同用，仅为 DS 写新 Trace；渲染端仍采 CPU／pacing，但没有客户端 Trace，不用于证明其 Worker／GPU 调用链。默认仍采双端，Case、清单和逐角色记录注明实际 `TraceRoles`，5 GiB 磁盘守卫不降低。
 - 160 AI 验收同时要求所有敌人的行为树持续运行。服务器 START／STOP 另记录各目标管理器的内外环容量、可用／占用席位、等候人数、攻击许可及累计授予／回收／超时；客户端应无权威管理器。外环持有者仍排内环队列，不能将外环与队列相加当总人数。边界观测不申请席位、不触发补位，也不能替代逐次补位与死亡／超时的功能回归。
-- 地面缓存与连续查询对照应在**同一六凸包构建**各做三轮、交错调用并使用独立运行名；`-Repeat 3` 只重复当前组，不自动切换地面模式。两组都加 `-CpuDiagnostic`，只有参考组再加 `-ContinuousFloorChecks`。先比较 native GT／World 的有效 CPU 累计量、每帧均值和实际移动／攻击人口；汇总 `MeanServerGTFrameCpuMs`／`MeanServerWorldCpuMs` 仅在启用 CPU 采样时有值，否则为 null。服务器 FrameEnd 与 FApp idle 只作节拍上下文，不用帧长变化冒充执行成本收益；无 OS 调度数据，仍不输出 Ready／Blocked 分类或 GPU／Worker 时间。
+- 地面缓存与连续查询对照应在**同一六盒体构建**各做三轮、交错调用并使用独立运行名；`-Repeat 3` 只重复当前组，不自动切换地面模式。两组都加 `-CpuDiagnostic`，只有参考组再加 `-ContinuousFloorChecks`。先比较 native GT／World 的有效 CPU 累计量、每帧均值和实际移动／攻击人口；汇总 `MeanServerGTFrameCpuMs`／`MeanServerWorldCpuMs` 仅在启用 CPU 采样时有值，否则为 null。服务器 FrameEnd 与 FApp idle 只作节拍上下文，不用帧长变化冒充执行成本收益；无 OS 调度数据，仍不输出 Ready／Blocked 分类或 GPU／Worker 时间。
 
 同场景的线程诊断使用独立单轮，不重建或覆盖上述三轮基线：
 

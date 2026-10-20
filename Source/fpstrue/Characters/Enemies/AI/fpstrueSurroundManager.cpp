@@ -209,7 +209,7 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 	Request.SetFloatParam(TEXT("Cover"), 0.0f).SetFloatParam(TEXT("InnerCount"), FMath::Clamp(InnerSlotCount, 4, 24));
 	Request.SetFloatParam(TEXT("OuterCount"), FMath::Clamp(OuterSlotCount, 4, 32));
 	Request.SetFloatParam(TEXT("InnerRadius"), InnerRadius).SetFloatParam(TEXT("OuterRadius"), OuterRadius);
-	Request.SetFloatParam(TEXT("InnerApproach"), AttackApproachRadius).SetFloatParam(TEXT("OuterApproach"), OuterRadius);
+	Request.SetFloatParam(TEXT("InnerApproach"), AttackApproachRadius);
 	Request.SetFloatParam(TEXT("ProjectionX"), NavigationProjectionExtent.X).SetFloatParam(TEXT("ProjectionY"), NavigationProjectionExtent.Y).SetFloatParam(TEXT("ProjectionZ"), NavigationProjectionExtent.Z);
 	ApproachQueryStartedTime = NavigationCacheTime = Now;
 	bNeedsNavigationRetry = false;
@@ -263,7 +263,7 @@ void AfpstrueSurroundManager::HandleApproachQueryFinished(TSharedPtr<FEnvQueryRe
 			Slot.ProjectedSlotLocation = Point.Nav.Location;
 			Slot.bHasProjectedSlotLocation = true;
 		}
-		else if (Point.Kind == 1 && !Slot.bHasProjectedApproachLocation)
+		else if (Point.Kind == 1 && Slot.RingIndex == 0 && !Slot.bHasProjectedApproachLocation)
 		{
 			bool bOverlaps = false;
 			for (const FfpstrueSurroundSlot& Other : SurroundSlots)
@@ -283,9 +283,12 @@ void AfpstrueSurroundManager::HandleApproachQueryFinished(TSharedPtr<FEnvQueryRe
 		}
 	}
 	int32 Available = 0;
-	for (const FfpstrueSurroundSlot& Slot : SurroundSlots) Available += Slot.bHasProjectedApproachLocation ? 1 : 0;
+	// 重试只跟真正消费的目标一致：内圈靠攻击接近点，外圈靠布局站位；不为废弃的外圈 LOS 结果重查。
+	for (const FfpstrueSurroundSlot& Slot : SurroundSlots)
+		Available += (Slot.RingIndex == 0 ? Slot.bHasProjectedApproachLocation : Slot.bHasProjectedSlotLocation) ? 1 : 0;
 	bNeedsNavigationRetry = Available != SurroundSlots.Num();
 	PublishedTargetLocation = QueryTarget;
+	// 保留既有 CSV 列名，数值表示当前真正可用的战术席位，而非已废弃的外圈接近点。
 	CSV_CUSTOM_STAT(fpstrueEQS, ApproachAvailableSlots, Available, ECsvCustomStatOp::Set);
 	PumpTacticalQueue();
 }

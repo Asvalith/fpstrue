@@ -43,7 +43,7 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 	FVector PreviousLocation = FVector::ZeroVector;
 	bool bEligible = false;
 	bool bSettledIdle = false;
-	TWeakObjectPtr<ACharacter> QueryOwner;
+	TWeakObjectPtr<AfpstrueCharacter> QueryOwner;
 	FFpstrueFootIKDebug Debug;
 	void CoverFootprint(ACharacter* Character, int32 Side, const FBox& Bounds,
 		const FCollisionObjectQueryParams& Objects, const FCollisionQueryParams& Query)
@@ -104,12 +104,9 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		Debug.bEnabled = bEligible; Debug.bLeftPlanted = Debug.bRightPlanted = false; Debug.PelvisOffset = 0.0f;
 		if (!bEligible) return;
 		MeshWorld = Mesh->GetComponentTransform(); Velocity = Character->GetVelocity();
-		bSettledIdle = Velocity.Size2D() < 3.0f;
-		if (const auto* Player = Cast<AfpstrueCharacter>(Character))
-		{
-			const auto* Animation = Cast<UfpstruePlayerAnimInstance>(Mesh->GetAnimInstance());
-			bSettledIdle &= Player->GetBodyFacingState().TurnDirection == 0 && (!Animation || Animation->TurnAlpha < 0.05f);
-		}
+		const auto* Animation = Cast<UfpstruePlayerAnimInstance>(Mesh->GetAnimInstance());
+		bSettledIdle = Velocity.Size2D() < 3.0f && Character->GetBodyFacingState().TurnDirection == 0
+			&& (!Animation || Animation->TurnAlpha < 0.05f);
 		Bottom = Location - FVector(0, 0, Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
 		SoleOffsets[0] = IK->LeftSoleOffset; SoleOffsets[1] = IK->RightSoleOffset;
 		SoleNormals[0] = IK->LeftSoleNormal; SoleNormals[1] = IK->RightSoleNormal;
@@ -134,11 +131,10 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		if (!Pelvis.IsValid() || !FootIndices[0].IsValid() || !FootIndices[1].IsValid()) { Debug.bEnabled = false; return true; }
 		FCSPose<FCompactPose> Pose; Pose.InitPose(Output.Pose);
 		check(IsInGameThread());
-		ACharacter* Character = QueryOwner.Get();
+		AfpstrueCharacter* Character = QueryOwner.Get();
 		if (!Character) return true;
 		FCollisionQueryParams Query(SCENE_QUERY_STAT(FpstrueFootIKRecovery), true, Character);
-		if (auto* Player = Cast<AfpstrueCharacter>(Character); Player && Player->GetEquippedWeaponComponent())
-			Query.AddIgnoredActor(Player->GetEquippedWeaponComponent()->GetOwner());
+		if (const auto* Weapon = Character->GetEquippedWeaponComponent()) Query.AddIgnoredActor(Weapon->GetOwner());
 		FCollisionObjectQueryParams Objects;
 		Objects.AddObjectTypesToQuery(ECC_WorldStatic); Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
 		{
@@ -157,18 +153,16 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 				for (const FVector& Probe : Probes)
 					ProbeBounds += Center + RawRotation.RotateVector((Probe - SoleOffsets[Side]) * MeshWorld.GetScale3D() * Foot.GetScale3D());
 				CoverFootprint(Character, Side, ProbeBounds, Objects, Query);
-				TArray<FHitResult> Hits; ++Debug.TraceCount;
-				Character->GetWorld()->LineTraceMultiByObjectType(Hits, FVector(Center.X, Center.Y, Bottom.Z + 45),
-					FVector(Center.X, Center.Y, Bottom.Z - 45), Objects, Query);
-				for (const FHitResult& Hit : Hits)
+				TArray<FHitResult> Hits;
+				FHitResult Hit;
+				if (FindWorldSupport(Character, FVector(Center.X, Center.Y, Bottom.Z + 45),
+					FVector(Center.X, Center.Y, Bottom.Z - 45), Objects, Query, Hit, Hits))
 				{
-					if (Cast<APawn>(Hit.GetActor()) || !Hit.GetComponent() || !Character->GetCharacterMovement()->IsWalkable(Hit)) continue;
 					if (!Ground[Side].bValid || Hit.ImpactPoint.Z > Ground[Side].Position.Z)
 					{
 						Ground[Side].bValid = true; Ground[Side].Position = Hit.ImpactPoint; Ground[Side].Normal = Hit.ImpactNormal;
 						Ground[Side].Surface = Hit.GetComponent()->GetComponentTransform(); Ground[Side].Identity = FObjectKey(Hit.GetComponent());
 					}
-					break;
 				}
 			}
 		}

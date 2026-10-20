@@ -10,8 +10,6 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 // 绑定调用者指定的有效播放；重复绑定只能命中原身份，不能覆盖另一轮动作。
 FAnimMontageInstance* FFPActionPlayback::TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage)
 {

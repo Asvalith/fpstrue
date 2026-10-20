@@ -105,7 +105,7 @@ void UfpstrueHealthAttributeSet::PostRepNotifies()
 	Super::PostRepNotifies();
 	if (!bReceivedHealthAttributes) return;
 	bReceivedHealthAttributes = false;
-	if (UfpstrueHealthComponent* HealthComponent = GetOwningActor()->FindComponentByClass<UfpstrueHealthComponent>())
+	if (UfpstrueHealthComponent* HealthComponent = Cast<UfpstrueHealthComponent>(GetOwningAbilitySystemComponent()))
 	{
 		HealthComponent->HealthAttributes = this;
 		HealthComponent->OnRep_HealthSnapshot();
@@ -141,33 +141,20 @@ UfpstrueHealthResetEffect::UfpstrueHealthResetEffect()
 }
 
 /*
- * 玩家和敌人共用的生命值组件。
- * Owner 仍通过 UE 的 ApplyDamage/OnTakeAnyDamage 进入系统，本组件只保存权威血量并广播只发生一次的死亡事件，
- * 具体的布娃娃、停止 AI、HUD 等表现由各自订阅者处理。
+ * 玩家和敌人共用的 ASC 生命适配。
+ * UE 伤害或外部生命 GE -> 同线程事务队列 -> Instant GE/AttributeSet 提交 -> 兼容镜像与通知。
+ * AttributeSet 原生复制是客户端数值来源；客户端不重放伤害来源或服务器事务队列。
  *
- * 数据流：GameplayStatics::ApplyDamage/ApplyPointDamage -> Owner::OnTakeAnyDamage -> 本组件 Clamp 血量
- *       -> OnDamageReceived / OnHealthChanged -> 血量归零时 OnDeath。
- * 组件不认识玩家、敌人、HUD 或 GameMode，因此同一套伤害和死亡语义可以被不同 Actor 复用。
+ * 本组件只补充固定通知顺序、同步重入排队和死亡边沿；布娃娃、停止 AI、HUD 由订阅者处理。
  */
-
-// GAS 接入说明：上面的旧链路与注释保留；其中 Clamp/生命写入已交给 AttributeSet 和 Instant GE。
-// 本组件现在同时是 ASC，旧数值和快照仅作兼容镜像，伤害通知、同线程重入及一次死亡语义保持不变。
 
 // ==================== 生命周期与伤害入口 ====================
 
-// 生命组件不需要 Tick，血量只在伤害、重置和生命周期事件发生时变化。
+// 生命事务没有逐帧查询；能力任务和效果保留 ASC 自身的原生调度。
 UfpstrueHealthComponent::UfpstrueHealthComponent()
 {
-	// 不禁用 ASC 的任务/效果 Tick；生命事务本身仍没有逐帧查询。
 	SetIsReplicatedByDefault(true);
 	SetReplicationMode(EGameplayEffectReplicationMode::Minimal);
-}
-
-// GAS 同批属性 RepNotify 结束后刷新兼容镜像和通知；这里不建立第二套生命值复制。
-void UfpstrueHealthComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
-{
-	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	// 原单结构快照不再单独复制；AttributeSet 的原生属性复制是唯一网络数值来源。
 }
 
 // AddSet 内部以 Owner Actor 为 Outer 创建属性集，符合 UAttributeSet::GetOwningActor 的约束。

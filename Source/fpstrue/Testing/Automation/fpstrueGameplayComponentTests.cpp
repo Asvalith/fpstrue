@@ -84,6 +84,9 @@ bool FFpstrueHealthMutationTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Health test component"), Health)) return false;
 	Owner->AddInstanceComponent(Health);
 	Health->RegisterComponent();
+	const UfpstrueHealthAttributeSet* Attributes = Health->GetHealthAttributeSet();
+	if (!TestNotNull(TEXT("Registered health creates its native attribute set"), Attributes)) return false;
+	TestEqual(TEXT("Native ASC lookup supports owners without IAbilitySystemInterface"), Attributes->GetOwningAbilitySystemComponent(), static_cast<UAbilitySystemComponent*>(Health));
 	TStrongObjectPtr<UfpstrueHealthMutationTestObserver> Observer(NewObject<UfpstrueHealthMutationTestObserver>());
 	Observer->Health = Health;
 	Health->OnDamageReceived.AddDynamic(Observer.Get(), &UfpstrueHealthMutationTestObserver::OnDamage);
@@ -165,6 +168,9 @@ bool FFpstrueEnemyQueuedDamageContextTest::RunTest(const FString& Parameters)
 	Enemy->FinishSpawning(FTransform::Identity);
 	UfpstrueHealthComponent* Health = Enemy->FindComponentByClass<UfpstrueHealthComponent>();
 	if (!TestNotNull(TEXT("Enemy health"), Health)) return false;
+	const UfpstrueHealthAttributeSet* Attributes = Health->GetHealthAttributeSet();
+	if (!TestNotNull(TEXT("Enemy owns its native attribute set"), Attributes)) return false;
+	TestEqual(TEXT("Native ASC lookup uses the enemy's IAbilitySystemInterface"), Attributes->GetOwningAbilitySystemComponent(), Enemy->GetAbilitySystemComponent());
 	// 先让低频网格进入真实冷却，再施加伤害；不等待全局协调器也必须及时恢复动画更新。
 	FFPEnemyRenderSignificancePolicy Policy;
 	Policy.CombatPriorityGraceSeconds = 0.05f;

@@ -21,7 +21,7 @@ public class fpstrue : ModuleRules
 			"AnimationSharing"
 		});
 		// 重连票据使用平台安全随机源；失败时拒绝创建票据，不退回可预测标识。
-		PrivateDependencyModuleNames.AddRange(new string[] { "SignificanceManager", "PlatformCrypto", "PlatformCryptoOpenSSL", "AnimationCore", "PhysicsCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "SignificanceManager", "PlatformCrypto", "PlatformCryptoOpenSSL", "AnimationCore", "PhysicsCore", "EngineSettings" });
 		if (Target.bBuildEditor)
 		{
 			// 可编辑行为树资产生成和编辑器自动化测试需要这些模块；Game 目标不依赖它们。

@@ -1,5 +1,53 @@
 # 代码职责与动作生命周期
 
+## 2026-10-20：敌人命中改用原生盒体
+
+六个命中部位直接使用 `UBoxComponent`，保留组件名、`EnemyHitProxy` 标签、根节点相对位置／尺寸、通道继承和部位伤害映射；删除专用 StaticMesh 硬引用、缩放换算、缺网格校验和 `BuildEnemyHitHull` 生成分支。不新增自己的几何求交或物理系统。
+
+盒体只在服务器启用 QueryOnly，客户端不创建权威查询。活体旧骨骼物理退出；攻击／受击／Root Motion 的必要姿态规则不变；死亡先关闭六盒，再恢复原 PhysicsAsset 布娃娃。原死亡资产和 PvP 玩家的历史命中几何不在删除范围内。
+
+`SM_EnemyHitConvex.uasset` 已移出 `Content`，可从 `Saved/Backups/NativeBoxHits_20261020/` 恢复，原文件 SHA256 为 `3BA5AFE3D9C3433AD3C4117870EBF8404696A793D3DD9647058C7F47BB632D90`。不删除历史 Cook／Stage 和冻结报告；下面旧六凸包报告不代表当前六盒体性能。
+
+验收同时检查真实 `enemy_BP` 直接加载／实例化和显式蓝图编译，不只测原生类；AssetRegistry 扫描活动项目包的硬／软依赖。新基线观察只读已有 BodySetup，逐敌人六盒、代理 Convex 为零，不能靠聚合总数掩盖错误组件。
+
+本轮证据目录为 `C:/UEBuild/FPSBoxHits_20261020/`。首轮回归 `Automation_R1` 在显式蓝图编译时触发 UE 重实例化断言：前序 `FTestWorldWrapper` 只销毁世界而不立即 GC，重实例化试图在已退出的旧世界生成 Actor。保留原失败日志；测试在创建本轮世界之前完成 GC 隔离，继续验证真实编译，不关闭重实例化、不屏蔽失败，也不修改生产代码绕过此断言。
+
+Editor／Shipping 编译通过，补全编译前实例覆盖和测试 GC 隔离后，`Automation_R2/index.json` **101／101（87 clean、14 warned、0 failed／notRun）**。六盒生命周期用例零警告／错误；30 条测试期警告及完整日志 100 条警告均与上一版原生复用回归归一临时对象编号后逐条一致，没有新增缺包或蓝图类型警告。批准清单仍为 101，工具自测 62 项通过；离线验证的 `FreshnessChecked=false` 不冒充运行时新鲜度证明。
+
+验证源码差异为 `ValidatedSource.patch`，SHA256 `64EF11FB1B5C973C110734273C309B63F5EE4722914E22A1CD9903846E29BBA7`；Editor DLL／Shipping EXE SHA256 分别为 `8FA0886380D31C693825023CE669741E76983953AF24A3949EF3946B2AB06ABF`／`AFA9EB6EB05605F53015B57D34533ACE83A6498F7C00ABF33CF9B7376C0FE235`。未重做 Cook／Stage，旧打包文件不包含当前替换。
+
+`NativeBox160_20261020_R1` 实际集成通过：服务器 START／STOP 各 960 Box／0 Convex，客户端零权威查询／物理状态，160 棵行为树持续就绪；两个目标管理器仍各 8 内环／12 外环占位，三个进程自然退出。正常移动靶烟测通过；标准弱网（不含移动靶）亦通过，36 发完整执行确认，含 PvE／硬断恢复。附加“弱网＋移动靶”首发 PvP 未命中、后续未进入，失败保留且未修改网络判定刷绿。逐轮结果见[实验日志](Performance/EXPERIMENT_LOG.md)，不把单轮诊断当作新性能基线。
+
+## 2026-10-20：优先复用 UE 原生能力
+
+本轮基于 `842b472` 检查生产模块，目标是删掉重复工作，而不是为减行数改变协议、生命周期或战斗规则。没有新增生产源文件、管理框架、Protobuf 或替代网络层。
+
+| 原重复实现 | 当前处理 | 保留的业务边界 |
+| --- | --- | --- |
+| HUD 在每次 DrawHUD 查询 Pawn 并判断是否重绑 | 原生 `OnPossessedPawnChanged`；初始化补读，EndPlay 解绑 | 晚建 HUD、换 Pawn、旧武器通知隔离 |
+| AttributeSet 回调自行扫描生命组件 | 原生 `GetOwningAbilitySystemComponent()`；删除生命组件空复制覆写 | AttributeSet 仍是唯一复制数值来源，兼容通知顺序不变 |
+| 射击 Timer 先 Clear 再 Set；低帧后坐力同帧补调 | 同句柄直接使用原生 SetTimer 替换；后坐力开启 `bMaxOncePerFrame` | 空队列／取消仍清理，恢复按实际游戏时间积分，射击节拍不变 |
+| 手读 GameDefaultMap 配置键 | 原生 `UGameMapsSettings`，明确请求 Client 地图 | PvP 覆盖优先、包路径校验，不接纳 URL 附加选项 |
+| 离线保留与断线状态两个同值字段 | 合并为既有 `bDisconnected` | 保留原 Pawn／PlayerState、认领后清标志、到期释放 |
+| 外圈已不用攻击接近点，却仍查询和据此重试 | Outer 只生成／消费站位；Inner 保留三个接近候选 | 默认攻击 EQS 候选 80→44；重试看真实消费者，FIFO／版本／软边界不变 |
+| 玩家脚部查询重复过滤、重复类型转换 | 复用现有支撑查询入口，收窄已知玩家类型 | 仍用原生世界查询和 `AnimationCore::SolveTwoBoneIK`；探针、计数、支撑选择不变 |
+
+以下不是应删除的“轮子”：GAS 自定义 TargetData 的薄 `NetSerialize`、SavedMove 两个移动模式位、逐发身份与最终 ACK、命中历史、动作播放实例身份、重连安全票据、围攻 FIFO／预算／请求版本。这些补充项目独有语义，底层传输、预测、Timer、BT、感知、导航、EQS、Significance 和 AnimationSharing 已使用 UE 原生能力。
+
+不直接把自适应 DecisionWait 换成普通 Wait：当前还需要初始错峰、动态间隔和事件提前唤醒；也不把多 Mesh 换弹桥替换成只管单 AnimInstance 的任务。没有语义等价证据就不删除，避免用更隐蔽的状态错误换取少几行代码。
+
+本轮构建／回归证据目录为 `C:/UEBuild/FPSNativeReuse_20261020/`。Editor／Shipping 首轮编译通过；`Automation_R1/index.json` 首轮 **101／101（87 clean、14 warned、0 failed／notRun）**，注册名单未增减，测试警告 30 条及完整日志警告与上一轮归一临时对象编号后完全相同。批准清单工具自测 62 项通过。新增断言覆盖真实占有事件、晚建 HUD、解绑、原生 ASC 获取、地图选择、离线保留、低帧恢复及内外圈真实目标，不以手动调用掩盖事件接线。
+
+- 正常本地双 NullRHI：`Saved/Networking/PvpSmoke_20261020_190323_df956f2f/Report.json` 严格通过，活跃端 34 发完整执行确认，移动命中、PvE、死亡重生及硬断恢复通过。
+- 模拟弱网：`PvpSmoke_20261020_190451_55f43c0a` 严格通过，活跃端 36 发完整执行确认；每发送方向额外 100 ms、波动参数 20 ms、丢包 2%。两轮均无异常拒绝、漏最终 ACK 或重复表现，不代表公网、160 AI 弱网、原进程自动重连或画面验收。
+- 160 AI 集成诊断：`C:/UEBuild/FPSBaselines/NativeReuse160_20261020_R1/results.json` 有效，固定两玩家、160 AI，1851 个完整服务器采样帧，283 次人口检查中行为树始终 160 棵就绪。START／STOP 的两个 Manager 均有 8 个可用且占用的内圈、12 个可用且占用的外圈，STOP 攻击许可分别 4／3，未超配额；外圈不依赖废弃接近点。客户端 Full Render 12、共享姿态 143，三个进程均自然 exit0。本次明确 `DiagnosticOnly=true`、`FormalBaseline=false`，是单轮 CPU 采样的集成验证，不是新的三轮性能收益或 160 个同时攻击者验收。
+
+验证源码差异保存在 `ValidatedSource.patch`，SHA256 `0BCC06C0E36DF66B2674D8831D0D6AAF13BFB0D1E7B4D6DFBF61ED69B8CE2135`；Editor DLL／Shipping EXE 的 SHA256 分别为 `18A0861B05D3C191B3F8EF086E417433AA27FB819D1422A9684D96D97D191DEF`／`21E0578FA1DA0154476BFCBCDA6C8E7E5A07B22561E942439EF889DE4468CA45`。本轮未重做素材 Cook／Stage；旧包不代表这些新代码。
+
+此前 `Tactical160_20261020_B1` 的三轮性能数据属于冻结的 `842b472`，不能直接移称本轮精简后的性能收益；新增断言也不是新增玩法功能。
+
+以下保留 2026-09-29 的历史整理和验收记录。
+
 本轮整理针对 2026-09-29 的两次审查摘要，重点是统一状态写入口、明确播放身份和清理责任。第二次摘要提到 51 项审查事项，包含条件风险与设计建议，不是 51 个已复现 Bug；附件中的完整报告链接未提供本地正文，因此不宣称逐项全部修复。保留现有类型、资产路径和有效复习注释，不通过新增一批 Manager 整理架构。
 
 ## 1. 从哪里开始读，谁负责修改状态

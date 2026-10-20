@@ -7,17 +7,16 @@
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
+#include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/MeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
 #include "Components/ProgressBar.h"
 #include "Blueprint/WidgetTree.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
-#include "Engine/StaticMesh.h"
 #include "EngineGlobals.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
@@ -31,7 +30,6 @@
 #include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
-#include "UObject/ConstructorHelpers.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
@@ -418,22 +416,19 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter(const FObjectInitializer& ObjectI
 
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
 	CombatComponent = CreateDefaultSubobject<UfpstrueEnemyCombatComponent>(TEXT("CombatComponent"));
-	// 同一份已烘焙凸包资源由六部位和所有敌人共享；不在出生/LOD切换时运行凸包Cooking。
-	static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> HitHull(TEXT("/Game/PerformanceCandidates/EnemyCollision/SM_EnemyHitConvex.SM_EnemyHitConvex"));
-	const bool bGeneratingHitHull = FParse::Param(FCommandLine::Get(), TEXT("BuildEnemyHitHull"));
-	EnemyHeadHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyHeadHitProxy"));
-	EnemyBodyHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyBodyHitProxy"));
-	EnemyLeftArmHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyLeftArmHitProxy"));
-	EnemyRightArmHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyRightArmHitProxy"));
-	EnemyLeftLegHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyLeftLegHitProxy"));
-	EnemyRightLegHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyRightLegHitProxy"));
-	for (UStaticMeshComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
+	// 六部位直接使用原生盒体，无命中网格资源、缩放换算或运行时凸包Cooking。
+	// 保留组件名称和命中代理Tag，既有蓝图与命中身份仍沿用原入口。
+	EnemyHeadHitProxy = CreateDefaultSubobject<UBoxComponent>(TEXT("EnemyHeadHitProxy"));
+	EnemyBodyHitProxy = CreateDefaultSubobject<UBoxComponent>(TEXT("EnemyBodyHitProxy"));
+	EnemyLeftArmHitProxy = CreateDefaultSubobject<UBoxComponent>(TEXT("EnemyLeftArmHitProxy"));
+	EnemyRightArmHitProxy = CreateDefaultSubobject<UBoxComponent>(TEXT("EnemyRightArmHitProxy"));
+	EnemyLeftLegHitProxy = CreateDefaultSubobject<UBoxComponent>(TEXT("EnemyLeftLegHitProxy"));
+	EnemyRightLegHitProxy = CreateDefaultSubobject<UBoxComponent>(TEXT("EnemyRightLegHitProxy"));
+	for (UBoxComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
 		EnemyRightArmHitProxy.Get(), EnemyLeftLegHitProxy.Get(), EnemyRightLegHitProxy.Get()})
 	{
 		Proxy->SetupAttachment(GetCapsuleComponent());
 		Proxy->SetMobility(EComponentMobility::Movable);
-		// 仅首次资产生成命令允许资源尚不存在；正常游戏仍按硬引用加载并校验交付内容。
-		if (!bGeneratingHitHull) Proxy->SetStaticMesh(HitHull.Get());
 		Proxy->ComponentTags.Add(TEXT("EnemyHitProxy"));
 		Proxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Proxy->SetCollisionObjectType(ECC_Pawn);
@@ -590,7 +585,7 @@ void AfpstrueEnemyCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME(AfpstrueEnemyCharacter, NetworkPresentation);
 }
 
-// 六个真凸包采用统一近远规则；本地偏移从角色胶囊尺寸生成，不采样任何骨骼或客户端相机。
+// 六个原生盒体采用统一近远规则；本地偏移从角色胶囊尺寸生成，不采样任何骨骼或客户端相机。
 void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 {
 	bUseSimpleHitProxies = bSimpleMode;
@@ -619,11 +614,11 @@ void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 	if (CharacterMesh->IsPhysicsStateCreated()) CharacterMesh->DestroyPhysicsState();
 	const float HalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 	const float Radius = GetCapsuleComponent()->GetUnscaledCapsuleRadius();
-	const auto ConfigurePart = [](UStaticMeshComponent* Part, const FVector& Offset, const FVector& HalfExtents)
+	const auto ConfigurePart = [](UBoxComponent* Part, const FVector& Offset, const FVector& HalfExtents)
 	{
-		// 共享资源的局部半尺寸为50cm；缩放Body而不是复制/修改共享BodySetup。
 		Part->SetRelativeLocation(Offset);
-		Part->SetRelativeScale3D(HalfExtents.ComponentMax(FVector(1.0f)) / 50.0f);
+		Part->SetRelativeScale3D(FVector::OneVector);
+		Part->SetBoxExtent(HalfExtents.ComponentMax(FVector(1.0f)), false);
 	};
 	ConfigurePart(EnemyHeadHitProxy, FVector(0, 0, HalfHeight * 0.82f), FVector(Radius * 0.43f, Radius * 0.43f, HalfHeight * 0.17f));
 	ConfigurePart(EnemyBodyHitProxy, FVector(0, 0, HalfHeight * 0.24f), FVector(Radius * 0.55f, Radius * 0.58f, HalfHeight * 0.42f));
@@ -631,7 +626,7 @@ void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 	ConfigurePart(EnemyRightArmHitProxy, FVector(0, Radius * 0.82f, HalfHeight * 0.12f), FVector(Radius * 0.32f, Radius * 0.22f, HalfHeight * 0.40f));
 	ConfigurePart(EnemyLeftLegHitProxy, FVector(0, -Radius * 0.30f, -HalfHeight * 0.59f), FVector(Radius * 0.40f, Radius * 0.24f, HalfHeight * 0.41f));
 	ConfigurePart(EnemyRightLegHitProxy, FVector(0, Radius * 0.30f, -HalfHeight * 0.59f), FVector(Radius * 0.40f, Radius * 0.24f, HalfHeight * 0.41f));
-	for (UStaticMeshComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
+	for (UBoxComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
 		EnemyRightArmHitProxy.Get(), EnemyLeftLegHitProxy.Get(), EnemyRightLegHitProxy.Get()})
 	{
 		Proxy->SetCollisionObjectType(QueryObjectType);
@@ -640,17 +635,13 @@ void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 		Proxy->SetCanEverAffectNavigation(false);
 		Proxy->SetSimulatePhysics(false);
 		// 非拥有端只消费服务器命中事实；不再为远端敌人创建权威查询或模拟对象。
-		if (HasAuthority())
-		{
-			ensureMsgf(Proxy->GetStaticMesh() != nullptr, TEXT("Missing pre-cooked enemy convex hit mesh; generate and cook SM_EnemyHitConvex before delivery"));
-			Proxy->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-		}
+		if (HasAuthority()) Proxy->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	}
 }
 
 void AfpstrueEnemyCharacter::DisableHitProxies()
 {
-	for (UStaticMeshComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
+	for (UBoxComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
 		EnemyRightArmHitProxy.Get(), EnemyLeftLegHitProxy.Get(), EnemyRightLegHitProxy.Get()})
 		Proxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 }
@@ -1466,7 +1457,7 @@ void AfpstrueEnemyCharacter::RefreshRenderBudgetMeshes()
 	// 普通 Attach 不转移所有权，否则两名敌人交换挂件时会互相覆盖缓存的原始资格。
 	// ★【重要边界】[资源所有权] 只管理本 Actor/ChildActor 拥有的 Mesh，保存原始许可；外部 Actor 仅 Attach 不自动进入该敌人的预算。
 	GetComponents(CurrentMeshes, true);
-	// UI与不可见的命中凸包不进入表现预算；不能让新增碰撞组件变成额外渲染消费者。
+	// UI不进入表现预算；命中盒体不是Mesh，不会成为额外渲染消费者。
 	CurrentMeshes.RemoveAll([this](const UMeshComponent* CandidateMesh)
 	{
 		return CandidateMesh == HealthBar.Get() || CandidateMesh->ComponentHasTag(TEXT("EnemyHitProxy"));

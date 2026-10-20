@@ -28,7 +28,7 @@ class APlayerController;
 class APlayerCameraManager;
 class USphereComponent;
 class UCapsuleComponent;
-class UStaticMeshComponent;
+class UBoxComponent;
 
 // UE5.5 静态地面组件退出场景后，原生缓存可能尚未失效；只补生命周期检查，其余移动和查询仍由 CMC 执行。
 UCLASS()
@@ -201,7 +201,7 @@ public:
 	// 敌人与玩家共享 GE 生命结算；现有 AI/攻击事务不因此改为另一套决策系统。
 	virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override { return HealthComponent.Get(); }
 
-	// 活体使用六个根组件凸包并继承原Mesh查询通道；不是逐骨骼轮廓，不改玩家历史回溯或伤害权限。
+	// 活体使用六个根组件原生盒体并继承原Mesh查询通道；不是逐骨骼轮廓，不改玩家历史回溯或伤害权限。
 	bool UsesSimpleHitProxies() const { return bUseSimpleHitProxies; }
 	// 基线读取实际保护条件；普通服务器姿态不再受本地相机/阴影名额控制。
 	bool RequiresFullAuthorityPose() const;
@@ -311,17 +311,17 @@ protected:
 
 	// 无 Socket 绑定、无重叠事件、无导航影响；客户端只保留组件身份，不创建权威命中查询。
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UStaticMeshComponent> EnemyHeadHitProxy;
+	TObjectPtr<UBoxComponent> EnemyHeadHitProxy;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UStaticMeshComponent> EnemyBodyHitProxy;
+	TObjectPtr<UBoxComponent> EnemyBodyHitProxy;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UStaticMeshComponent> EnemyLeftArmHitProxy;
+	TObjectPtr<UBoxComponent> EnemyLeftArmHitProxy;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UStaticMeshComponent> EnemyRightArmHitProxy;
+	TObjectPtr<UBoxComponent> EnemyRightArmHitProxy;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UStaticMeshComponent> EnemyLeftLegHitProxy;
+	TObjectPtr<UBoxComponent> EnemyLeftLegHitProxy;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UStaticMeshComponent> EnemyRightLegHitProxy;
+	TObjectPtr<UBoxComponent> EnemyRightLegHitProxy;
 
 	// 近远距离使用相同几何规则。命令行Reference只用于同一二进制的完整骨骼对照。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combat|Hit Proxies")

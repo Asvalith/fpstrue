@@ -51,6 +51,7 @@ struct FfpstrueSurroundSlot
 	float Radius = 250.0f;
 	TWeakObjectPtr<AfpstrueEnemyCharacter> Occupant;
 	FVector ProjectedSlotLocation = FVector::ZeroVector;
+	// 仅内圈消费攻击接近点；外圈资格和导航重试只看 ProjectedSlotLocation。
 	FVector ProjectedApproachLocation = FVector::ZeroVector;
 	bool bHasProjectedSlotLocation = false;
 	bool bHasProjectedApproachLocation = false;

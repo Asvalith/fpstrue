@@ -6,9 +6,9 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
+#include "GameMapsSettings.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
-#include "Misc/ConfigCacheIni.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
 #include "Net/UnrealNetwork.h"
@@ -202,6 +202,22 @@ AfpstruePvpHUD::AfpstruePvpHUD()
 	IngameWidgetClass = FSoftObjectPath(TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C"));
 }
 
+// 原生 Controller 在权威占有和客户端 OnRep_Pawn 时均广播；HUD 晚创建时补读一次当前 Pawn。
+void AfpstruePvpHUD::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	if (PlayerOwner != nullptr)
+	{
+		PlayerOwner->OnPossessedPawnChanged.AddUniqueDynamic(this, &ThisClass::HandlePossessedPawnChanged);
+		BindPawn(Cast<AfpstrueCharacter>(PlayerOwner->GetPawn()));
+	}
+}
+
+void AfpstruePvpHUD::HandlePossessedPawnChanged(APawn*, APawn* NewPawn)
+{
+	BindPawn(Cast<AfpstrueCharacter>(NewPawn));
+}
+
 // 本地视口才创建原 UMG；父类/布局合同不符时明确回退 Canvas，不把两套 HUD 同时叠在画面上。
 bool AfpstruePvpHUD::EnsureIngameWidget()
 {
@@ -232,8 +248,7 @@ void AfpstruePvpHUD::RefreshIngameSnapshot()
 void AfpstruePvpHUD::DrawHUD()
 {
 	Super::DrawHUD();
-	auto* Pawn = PlayerOwner != nullptr ? Cast<AfpstrueCharacter>(PlayerOwner->GetPawn()) : nullptr;
-	if (ObservedPawn.Get() != Pawn) BindPawn(Pawn);
+	auto* Pawn = ObservedPawn.Get();
 	if (Pawn == nullptr || !bShowHUD)
 	{
 		if (IngameWidget != nullptr) IngameWidget->SetVisibility(ESlateVisibility::Collapsed);
@@ -324,6 +339,8 @@ bool AfpstruePvpHUD::HasDrawnCurrentState(const AfpstrueCharacter* Pawn) const
 // HUD 比 Pawn 晚退出也可安全解除绑定；弱引用不延长旧角色与武器寿命。
 void AfpstruePvpHUD::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (PlayerOwner != nullptr)
+		PlayerOwner->OnPossessedPawnChanged.RemoveDynamic(this, &ThisClass::HandlePossessedPawnChanged);
 	BindPawn(nullptr);
 	if (IngameWidget != nullptr) IngameWidget->RemoveFromParent();
 	IngameWidget = nullptr;
@@ -636,14 +653,13 @@ void AfpstruePvpPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 void AfpstruePvpPlayerState::SetRetainedForReconnect(bool bRetained)
 {
 	if (!HasAuthority()) return;
-	bRetainedForReconnect = bRetained;
 	bDisconnected = bRetained;
 	ForceNetUpdate();
 }
 
 void AfpstruePvpPlayerState::OnDeactivated()
 {
-	if (bRetainedForReconnect) { SetOwner(nullptr); return; }
+	if (bDisconnected) { SetOwner(nullptr); return; }
 	Super::OnDeactivated();
 }
 
@@ -1726,12 +1742,17 @@ void AfpstruePvpGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+FString UfpstrueMultiplayerGameInstance::ResolvePvpMapPackage() const
+{
+	const FString Map = PvpMap.TrimStartAndEnd();
+	return FPackageName::ObjectPathToPackageName(Map.IsEmpty()
+		? UGameMapsSettings::GetGameDefaultMap(EDefaultMapRequestType::Client) : Map);
+}
+
 // 只接纳包路径作为地图，URL中的PvP模式和监听选项由本入口固定生成。
 void UfpstrueMultiplayerGameInstance::HostPvp()
 {
-	FString Map = PvpMap.TrimStartAndEnd();
-	if (Map.IsEmpty() && GConfig != nullptr) GConfig->GetString(TEXT("/Script/EngineSettings.GameMapsSettings"), TEXT("GameDefaultMap"), Map, GEngineIni);
-	Map = FPackageName::ObjectPathToPackageName(Map);
+	const FString Map = ResolvePvpMapPackage();
 	if (GetWorld() == nullptr || !FPackageName::IsValidLongPackageName(Map))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("HostPvp requires a valid game map package, got %s."), *Map);
@@ -2036,9 +2057,7 @@ void UfpstrueMultiplayerGameInstance::ReturnToLocalWorld()
 	if (World == nullptr) { if (ConnectionState == EFPConnectionState::Leaving) SetConnectionState(EFPConnectionState::Idle); return; }
 	if (bReturningToLocalWorld) return;
 	if (GEngine != nullptr) GEngine->CancelPending(World);
-	FString Map = PvpMap;
-	if (Map.IsEmpty() && GConfig != nullptr) GConfig->GetString(TEXT("/Script/EngineSettings.GameMapsSettings"), TEXT("GameDefaultMap"), Map, GEngineIni);
-	Map = FPackageName::ObjectPathToPackageName(Map);
+	const FString Map = ResolvePvpMapPackage();
 	if (!FPackageName::IsValidLongPackageName(Map)) { SetConnectionState(EFPConnectionState::Failed); return; }
 	bReturningToLocalWorld = true;
 	UGameplayStatics::OpenLevel(this, FName(*Map), true, TEXT("game=/Script/Engine.GameModeBase"));

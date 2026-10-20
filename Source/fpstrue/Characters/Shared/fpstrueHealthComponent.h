@@ -117,22 +117,19 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHealthChanged, float, NewHealth);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
 
 /**
- * 通用生命值模块：统一接收 UE 伤害、维护血量并广播受伤、血量变化和死亡事件。
+ * 共用 ASC：将 UE 伤害转换为 Instant GE，并按事务顺序广播受伤、血量变化和死亡事件。
  *
- * 它是 CurrentHealth 的唯一写入者，不依赖玩家或敌人类型；Owner 订阅事件后自行处理 HUD、停止 AI、
- * Ragdoll 等差异化副作用，因此生命数值与角色表现可以分别复用和测试。
+ * AttributeSet 是生命数值和网络复制的唯一来源；CurrentHealth/MaxHealth 仅兼容既有蓝图读接口。
+ * Owner 订阅事件后处理 HUD、停止 AI、Ragdoll 等副作用，组件不依赖具体角色类型。
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
-// 上述原有说明中的 CurrentHealth 现在是兼容只读镜像；真实权威值由 AttributeSet + GE 维护。
 class FPSTRUE_API UfpstrueHealthComponent : public UAbilitySystemComponent
 {
 	GENERATED_BODY()
 
 public:
-	// 创建无 Tick 的生命值组件。
+	// 保留 ASC 原生任务/效果调度，生命事务本身不进行逐帧查询。
 	UfpstrueHealthComponent();
-	// 只复制完整生命快照；伤害来源和本地事务队列不作为客户端事件重放。
-	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	// 调试与测试读取真正的 GAS 属性集；不能把旧显示镜像误认为第二套生命状态。
 	const UfpstrueHealthAttributeSet* GetHealthAttributeSet() const { return HealthAttributes != nullptr ? HealthAttributes.Get() : GetSet<UfpstrueHealthAttributeSet>(); }
 	// 外部瞬时生命 GE 也按事务执行；不能绕过旧 BP 通知、死亡结算及同线程重入顺序。

@@ -28,7 +28,7 @@ struct FPSTRUE_API FFPEnemyQueryPoint
 {
 	FNavLocation Nav;
 	int32 SlotIndex = INDEX_NONE;
-	// 0：包围布局站位；1：对应槽位的攻击接近点；2：撤退掩体。
+	// 0：包围布局站位；1：仅内圈槽位的攻击接近点；2：撤退掩体。
 	int32 Kind = 0;
 	// 攻击接近点保存相对扇区的角度偏移；测试按绝对值惩罚偏离原槽位的候选。
 	float Preference = 0.0f;
@@ -54,7 +54,8 @@ public:
 /**
  * 有界双环候选生成器，不遍历宽网格，也不在生成阶段同步找路径。
  * 请求使用 float NamedParams：OriginX/Y/Z、ThreatX/Y/Z、Cover(1/0)、
- * InnerCount、OuterCount、InnerRadius、OuterRadius、InnerApproach、OuterApproach。
+ * InnerCount、OuterCount、InnerRadius、OuterRadius、InnerApproach。
+ * 内圈生成布局点和三个攻击接近候选；外圈只生成实际消费的布局站位，不做废弃的接近点查询。
  * 攻击 Origin 是玩家位置快照，掩体 Origin 是敌人位置快照；Threat 始终是已知威胁快照。
  */
 UCLASS()

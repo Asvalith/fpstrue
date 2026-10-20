@@ -72,6 +72,7 @@ public:
 	virtual void DrawHUD() override;
 	bool HasDrawnCurrentState(const AfpstrueCharacter* Pawn) const;
 protected:
+	virtual void PostInitializeComponents() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	// 只在本地有画面时加载；专服不为 HUD 保活整套 UMG/动画资源。
 	UPROPERTY(EditDefaultsOnly, Category = "Multiplayer|UI") TSoftClassPtr<UfpstruePvpIngameWidget> IngameWidgetClass;
@@ -80,6 +81,7 @@ private:
 	void BindPawn(AfpstrueCharacter* Pawn);
 	bool EnsureIngameWidget();
 	void RefreshIngameSnapshot();
+	UFUNCTION() void HandlePossessedPawnChanged(APawn* OldPawn, APawn* NewPawn);
 	UFUNCTION() void HandleHealthChanged(float Health);
 	UFUNCTION() void HandleWeaponChanged(UfpstrueWeaponComponent* Weapon);
 	UFUNCTION() void HandleAmmoChanged(int32 Ammo, int32 Magazine, int32 Reserve);
@@ -206,7 +208,6 @@ private:
 	UPROPERTY(Replicated)
 	int32 Deaths = 0;
 	UPROPERTY(Replicated) bool bDisconnected = false;
-	bool bRetainedForReconnect = false;
 };
 
 // 客户端通过GameState和引擎PlayerArray读取比赛状态及所有参与玩家的计分。
@@ -432,6 +433,8 @@ private:
 	friend class FFpstrueMultiplayerSpawnReadinessTest;
 	// 空手是合法就绪状态；有装备时才要求其持有者关系已经解析，能力与生命仍必须就绪。
 	static bool IsPawnStateReady(const AfpstrueCharacter* Pawn, const AfpstruePvpPlayerState* State);
+	// 地图配置读取沿用引擎设置；业务入口仍只接纳合法包路径，不传额外 URL 选项。
+	FString ResolvePvpMapPackage() const;
 	bool TickConnection(float DeltaSeconds);
 	void StartClientTravel(uint32 Revision);
 	void SetConnectionState(EFPConnectionState State);

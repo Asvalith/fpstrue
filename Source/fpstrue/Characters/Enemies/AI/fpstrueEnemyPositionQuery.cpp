@@ -116,11 +116,10 @@ void UfpstrueEnvQueryGenerator_Positions::GenerateItems(FEnvQueryInstance& Query
 	const float InnerRadius = ReadRadius(QueryInstance, TEXT("InnerRadius"), bCover ? 450.0f : 250.0f);
 	const float OuterRadius = ReadRadius(QueryInstance, TEXT("OuterRadius"), bCover ? 800.0f : 430.0f);
 	const float InnerApproach = ReadRadius(QueryInstance, TEXT("InnerApproach"), 120.0f);
-	const float OuterApproach = ReadRadius(QueryInstance, TEXT("OuterApproach"), 220.0f);
-	QueryInstance.ReserveItemData((InnerCount + OuterCount) * (bCover ? 1 : 4));
+	QueryInstance.ReserveItemData(bCover ? InnerCount + OuterCount : InnerCount * 4 + OuterCount);
 
 	// 所有请求复用无状态节点；SlotIndex 固定采用先内环、后外环的布局顺序。
-	const auto AddRing = [&QueryInstance, &Origin, bCover](int32 Count, int32 SlotBase, float Radius, float ApproachRadius)
+	const auto AddRing = [&QueryInstance, &Origin, bCover, InnerApproach](int32 Count, int32 SlotBase, float Radius)
 	{
 		const float Sector = 2.0f * PI / static_cast<float>(Count);
 		for (int32 Index = 0; Index < Count; ++Index)
@@ -138,18 +137,18 @@ void UfpstrueEnvQueryGenerator_Positions::GenerateItems(FEnvQueryInstance& Query
 			};
 
 			AddPoint(BaseAngle, Radius, bCover ? 2 : 0, 0.0f);
-			if (!bCover)
+			if (!bCover && SlotBase == 0)
 			{
 				// 每槽一个原角接近点和左右两个小偏移，避免障碍恰好挡住唯一候选。
 				for (const float Offset : { 0.0f, -0.2f, 0.2f })
 				{
-					AddPoint(BaseAngle + Offset * Sector, ApproachRadius, 1, Offset);
+					AddPoint(BaseAngle + Offset * Sector, InnerApproach, 1, Offset);
 				}
 			}
 		}
 	};
-	AddRing(InnerCount, 0, InnerRadius, InnerApproach);
-	AddRing(OuterCount, InnerCount, OuterRadius, OuterApproach);
+	AddRing(InnerCount, 0, InnerRadius);
+	AddRing(OuterCount, InnerCount, OuterRadius);
 }
 
 UfpstrueEnvQueryTest_Position::UfpstrueEnvQueryTest_Position(const FObjectInitializer& ObjectInitializer)

@@ -5,6 +5,7 @@
 #include "Misc/AutomationTest.h"
 #include "Game/fpstrueMultiplayer.h"
 #include "Game/fpstrueGameMode.h"
+#include "GameMapsSettings.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Weapons/fpstrueWeaponComponent.h"
@@ -63,13 +64,19 @@
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopeExit.h"
 #include "Tests/AutomationCommon.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UnrealType.h"
 #include "UObject/CoreNet.h"
 #if WITH_EDITOR
+#include "UObject/GarbageCollection.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Animation/AnimBlueprint.h"
+#include "Engine/Blueprint.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "AnimGraphNode_ApplyMeshSpaceAdditive.h"
 #include "AnimGraphNode_LayeredBoneBlend.h"
 #include "AnimGraphNode_BlendListByBool.h"
@@ -1973,6 +1980,13 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 		&& Mode->RejoinSlots.FindChecked(InitialToken).ExpiresAt <= World->GetTimeSeconds() + 120.01);
 	TestNull(TEXT("Disconnected Pawn is no longer controlled by its old connection"), Pawn->GetController());
 	TestTrue(TEXT("The original server Pawn remains a combat participant during the grace period"), Mode->IsCombatParticipant(Pawn));
+	TestTrue(TEXT("The single disconnected field also records server retention"), State->IsDisconnected());
+	State->OnDeactivated();
+	TestTrue(TEXT("Deactivation preserves the retained PlayerState rather than duplicating or destroying it"),
+		IsValid(State) && !State->IsActorBeingDestroyed());
+	TestNull(TEXT("Retained deactivation drops the obsolete connection owner"), State->GetOwner());
+	TestTrue(TEXT("The retained PlayerState remains in the native GameState PlayerArray"),
+		World->GetGameState()->PlayerArray.Contains(State));
 	Original->Destroy();
 	UGameplayStatics::ApplyDamage(Pawn, 25.0f, nullptr, nullptr, nullptr);
 	TestEqual(TEXT("A retained disconnected Pawn is not invulnerable"), Pawn->GetCurrentHealth(), 175.0f);
@@ -1993,6 +2007,7 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A claimed supply is not destroyed by its original spawn record"), IsValid(Weapon->GetOwner()) && !Weapon->GetOwner()->IsActorBeingDestroyed());
 	TestTrue(TEXT("Alive reconnect reuses the exact server Pawn"), Restored->GetPawn() == Pawn);
 	TestTrue(TEXT("Reconnect reuses the exact server PlayerState"), Restored->GetPlayerState<AfpstruePvpPlayerState>() == State);
+	TestFalse(TEXT("Successful reclaim clears the same disconnected/retention field"), State->IsDisconnected());
 	TestEqual(TEXT("Reconnect does not roll back offline damage"), Pawn->GetCurrentHealth(), 175.0f);
 	TestEqual(TEXT("Reconnect preserves authoritative ammunition"), Pawn->GetEquippedWeaponComponent()->GetCurrentAmmo(), AmmoBefore);
 	TestEqual(TEXT("Reconnect preserves authoritative kills"), State->GetKills(), 2);
@@ -2028,6 +2043,7 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 	Mode->SweepRejoinSlots();
 	TestFalse(TEXT("Expiry clears the retained token record"), Mode->RejoinSlots.Contains(RotatedToken));
 	TestFalse(TEXT("Expiry releases the retained server Pawn"), IsValid(Pawn) && !Pawn->IsActorBeingDestroyed());
+	TestFalse(TEXT("Expiry releases the retained PlayerState"), IsValid(State) && !State->IsActorBeingDestroyed());
 	TestFalse(TEXT("Expiry releases the retained server weapon"), IsValid(Weapon->GetOwner()) && !Weapon->GetOwner()->IsActorBeingDestroyed());
 	AfpstruePvpPlayerController* TimedOut = NewClaim();
 	if (!TestNotNull(TEXT("An incomplete owner handshake"), TimedOut)) return false;
@@ -2190,6 +2206,12 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 	Mode->SweepRejoinSlots();
 	TestTrue(TEXT("Expiring an obsolete slot cannot destroy another live Pawn's actual rifle"),
 		IsValid(LiveRifle) && !LiveRifle->IsActorBeingDestroyed() && RebornPawn->GetEquippedWeaponComponent() == LiveWeapon);
+	AfpstruePvpPlayerState* ReleasedState = World->SpawnActor<AfpstruePvpPlayerState>();
+	if (!TestNotNull(TEXT("Retention-reset lifecycle fixture PlayerState"), ReleasedState)) return false;
+	ReleasedState->SetRetainedForReconnect(true);
+	ReleasedState->SetRetainedForReconnect(false);
+	ReleasedState->OnDeactivated();
+	TestTrue(TEXT("Clearing retention restores native deactivation destruction"), ReleasedState->IsActorBeingDestroyed());
 	return true;
 }
 
@@ -2202,6 +2224,29 @@ bool FFpstrueMultiplayerConnectionRevisionTest::RunTest(const FString& Parameter
 {
 	TStrongObjectPtr<UfpstrueMultiplayerGameInstance> Instance(NewObject<UfpstrueMultiplayerGameInstance>());
 	if (!TestNotNull(TEXT("Connection lifecycle fixture GameInstance"), Instance.Get())) return false;
+	// 只暂改原生设置 CDO 的反射值，作用域退出即恢复；不写配置、不触发地图旅行。
+	UGameMapsSettings* Maps = GetMutableDefault<UGameMapsSettings>();
+	const FStructProperty* ClientMapProperty = FindFProperty<FStructProperty>(Maps->GetClass(), TEXT("GameDefaultMap"));
+	const FStructProperty* ServerMapProperty = FindFProperty<FStructProperty>(Maps->GetClass(), TEXT("ServerDefaultMap"));
+	if (!TestNotNull(TEXT("The native client map setting"), ClientMapProperty) ||
+		!TestNotNull(TEXT("The distinct native server map setting"), ServerMapProperty)) return false;
+	TGuardValue<FSoftObjectPath> ClientMapGuard(*ClientMapProperty->ContainerPtrToValuePtr<FSoftObjectPath>(Maps),
+		FSoftObjectPath(TEXT("/Game/Tests/ClientFallback.ClientFallback")));
+	TGuardValue<FSoftObjectPath> ServerMapGuard(*ServerMapProperty->ContainerPtrToValuePtr<FSoftObjectPath>(Maps),
+		FSoftObjectPath(TEXT("/Game/Tests/ServerFallback.ServerFallback")));
+	Instance->PvpMap.Reset();
+	TestEqual(TEXT("An empty PvP override uses the native client map, not the dedicated-server default"),
+		Instance->ResolvePvpMapPackage(), FString(TEXT("/Game/Tests/ClientFallback")));
+	Instance->PvpMap = TEXT("   ");
+	TestEqual(TEXT("Whitespace-only overrides use the same native client map"),
+		Instance->ResolvePvpMapPackage(), UGameMapsSettings::GetGameDefaultMap(EDefaultMapRequestType::Client));
+	Instance->PvpMap = TEXT(" /Game/Tests/PvpOverride.PvpOverride ");
+	TestEqual(TEXT("An explicit PvP object path remains the normalized priority override"),
+		Instance->ResolvePvpMapPackage(), FString(TEXT("/Game/Tests/PvpOverride")));
+	Instance->PvpMap = TEXT("/Game/Tests/PvpOverride?listen");
+	TestFalse(TEXT("The shared resolver does not make URL options into an accepted map package"),
+		FPackageName::IsValidLongPackageName(Instance->ResolvePvpMapPackage()));
+	Instance->PvpMap.Reset();
 	Instance->OperationRevision = 41;
 	Instance->ScheduledRetryRevision = 40;
 	Instance->ConnectionState = EFPConnectionState::RetryWait;
@@ -2376,6 +2421,50 @@ bool FFpstrueMultiplayerHudRebindTest::RunTest(const FString&)
 	SecondWeapon->OnAmmoChanged.Broadcast(3, 30, 20);
 	TestEqual(TEXT("Unbound HUD has no remaining weapon subscription"), HUD->CurrentAmmo, 0);
 	TestFalse(TEXT("Unbound HUD never reports visual restoration"), HUD->HasDrawnCurrentState(Second));
+
+	// 原生占有通知专项不手调 BindPawn：先占有再创建 HUD，之后只用真实 Possess/UnPossess 推进。
+	for (AfpstrueCharacter* Pawn : {First, Second})
+	{
+		for (const TCHAR* Name : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+			TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+		{
+			FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(Pawn->GetClass(), Name);
+			if (!TestNotNull(TEXT("Native HUD possession fixture action property"), Property)) return false;
+			Property->SetObjectPropertyValue_InContainer(Pawn, NewObject<UInputAction>(Pawn));
+		}
+	}
+	APlayerController* NativeController = World->SpawnActor<APlayerController>();
+	if (!TestNotNull(TEXT("Native HUD lifecycle player controller"), NativeController)) return false;
+	NativeController->Possess(First);
+	if (!TestTrue(TEXT("The native owner actually possesses the first Pawn before HUD creation"), NativeController->GetPawn() == First)) return false;
+	FActorSpawnParameters HudSpawn;
+	HudSpawn.Owner = NativeController;
+	AfpstruePvpHUD* NativeHUD = World->SpawnActor<AfpstruePvpHUD>(AfpstruePvpHUD::StaticClass(), FTransform::Identity, HudSpawn);
+	if (!TestNotNull(TEXT("Late native-owned HUD"), NativeHUD)) return false;
+	TestTrue(TEXT("Native HUD initialization discovers its already-possessed Pawn without a DrawHUD poll"), NativeHUD->ObservedPawn.Get() == First);
+	TestEqual(TEXT("Late HUD initialization immediately reads the current health"), NativeHUD->CurrentHealth, First->GetCurrentHealth());
+	TestEqual(TEXT("Late HUD initialization immediately reads the current weapon ammo"), NativeHUD->CurrentAmmo, FirstWeapon->GetCurrentAmmo());
+	TestTrue(TEXT("HUD subscribes to the native authority/client Pawn-change delegate"),
+		NativeController->OnPossessedPawnChanged.IsAlreadyBound(NativeHUD, &AfpstruePvpHUD::HandlePossessedPawnChanged));
+	NativeController->UnPossess();
+	TestNull(TEXT("Native UnPossess immediately unbinds the HUD without a rendered frame"), NativeHUD->ObservedPawn.Get());
+	TestEqual(TEXT("Native UnPossess clears the previous magazine"), NativeHUD->CurrentAmmo, 0);
+	NativeController->Possess(Second);
+	TestTrue(TEXT("Native Possess switches the HUD to its new Pawn without manual rebinding"), NativeHUD->ObservedPawn.Get() == Second);
+	TestEqual(TEXT("Native Possess reads the new Pawn's health snapshot"), NativeHUD->CurrentHealth, Second->GetCurrentHealth());
+	TestEqual(TEXT("The unarmed replacement Pawn does not inherit the old magazine"), NativeHUD->CurrentAmmo, 0);
+	const float NativeCurrentHealth = NativeHUD->CurrentHealth;
+	UGameplayStatics::ApplyDamage(First, 1.0f, nullptr, Second, nullptr);
+	FirstWeapon->OnAmmoChanged.Broadcast(1, 30, 1);
+	TestEqual(TEXT("Old Pawn events cannot overwrite the natively rebound HUD"), NativeHUD->CurrentHealth, NativeCurrentHealth);
+	TestEqual(TEXT("Old weapon events cannot populate the natively rebound unarmed HUD"), NativeHUD->CurrentAmmo, 0);
+	NativeHUD->Destroy();
+	TestFalse(TEXT("HUD EndPlay explicitly removes its native Pawn-change binding"),
+		NativeController->OnPossessedPawnChanged.IsAlreadyBound(NativeHUD, &AfpstruePvpHUD::HandlePossessedPawnChanged));
+	TestNull(TEXT("HUD EndPlay clears the last observed Pawn"), NativeHUD->ObservedPawn.Get());
+	NativeController->UnPossess();
+	NativeController->Possess(First);
+	TestNull(TEXT("Later owner transitions cannot rebind the ended HUD"), NativeHUD->ObservedPawn.Get());
 	return true;
 }
 
@@ -2388,6 +2477,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemySimpleHitProxyTest,
 // 真正的世界WeaponTrace验证活体几何、遮挡和部位身份；角色切换只检查权限，不冒充网络传输或画面验收。
 bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 {
+	// 前序FTestWorldWrapper析构只销毁World、不强制GC；先清理它们，防止蓝图重实例化尝试在已teardown的World生成替身。
+	// 必须放在当前fixture创建之前，避免让本测试的原始对象指针跨越全局回收边界。
+	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 	FTestWorldWrapper Fixture;
 	if (!BeginMultiplayerUnitWorld(Fixture, *this)) return false;
 	UWorld* World = Fixture.GetTestWorld();
@@ -2426,28 +2518,44 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	TestFalse(TEXT("An idle dedicated authority with root-bound proxies does not require full hit-bone animation"), Enemy->RequiresFullAuthorityPose());
 	const auto GetProxies = [](AfpstrueEnemyCharacter& Target)
 	{
-		return TArray<UStaticMeshComponent*, TInlineAllocator<6>>{Target.EnemyHeadHitProxy.Get(), Target.EnemyBodyHitProxy.Get(),
+		return TArray<UBoxComponent*, TInlineAllocator<6>>{Target.EnemyHeadHitProxy.Get(), Target.EnemyBodyHitProxy.Get(),
 			Target.EnemyLeftArmHitProxy.Get(), Target.EnemyRightArmHitProxy.Get(), Target.EnemyLeftLegHitProxy.Get(), Target.EnemyRightLegHitProxy.Get()};
 	};
 	const FName ExpectedBones[] = {TEXT("head"), TEXT("spine_03"), TEXT("upperarm_l"), TEXT("upperarm_r"), TEXT("thigh_l"), TEXT("thigh_r")};
-	const TArray<UStaticMeshComponent*, TInlineAllocator<6>> Proxies = GetProxies(*Enemy);
+	const TArray<UBoxComponent*, TInlineAllocator<6>> Proxies = GetProxies(*Enemy);
 	TestEqual(TEXT("Six independently identified root-bound query components exist"), Proxies.Num(), 6);
-	UStaticMesh* SharedHull = Enemy->EnemyHeadHitProxy->GetStaticMesh();
-	if (!TestNotNull(TEXT("Hit proxies reference the prebaked shared convex mesh"), SharedHull) ||
-		!TestNotNull(TEXT("Shared convex mesh owns its cooked body setup"), SharedHull->GetBodySetup())) return false;
-	const UBodySetup* HullBody = SharedHull->GetBodySetup();
-	TestEqual(TEXT("Shared mesh contains one real convex and no sphere, capsule, box or extra geometry"), HullBody->AggGeom.GetElementCount(), 1);
-	if (!TestEqual(TEXT("Shared mesh has one FKConvexElem"), HullBody->AggGeom.ConvexElems.Num(), 1)) return false;
-	TestEqual(TEXT("Shared convex is the authored sixteen-vertex chamfered hull"), HullBody->AggGeom.ConvexElems[0].VertexData.Num(), 16);
-	TestTrue(TEXT("The unit convex keeps the fifty-centimeter half extents used by all part scales"),
-		HullBody->AggGeom.ConvexElems[0].ElemBox.Min.Equals(FVector(-50.0), 0.001) &&
-		HullBody->AggGeom.ConvexElems[0].ElemBox.Max.Equals(FVector(50.0), 0.001));
-	TestTrue(TEXT("The convex has real cooked Chaos geometry"), HullBody->AggGeom.ConvexElems[0].GetChaosConvexMesh() != nullptr);
-	TestTrue(TEXT("Complex weapon and sight queries resolve the same simple convex geometry"), HullBody->CollisionTraceFlag == CTF_UseSimpleAsComplex);
-	for (UStaticMeshComponent* Proxy : Proxies)
+	const auto CheckBoxGeometry = [&](AfpstrueEnemyCharacter& Target)
+	{
+		int32 BoxCount = 0;
+		for (UActorComponent* Component : Target.GetComponents())
+		{
+			if (!Component->ComponentHasTag(TEXT("EnemyHitProxy"))) continue;
+			++BoxCount;
+			if (!TestTrue(TEXT("Every tagged live hit proxy is a native box, not a mesh adapter"), Component->GetClass() == UBoxComponent::StaticClass())) return false;
+		}
+		if (!TestEqual(TEXT("The real actor contains exactly six tagged native boxes"), BoxCount, 6)) return false;
+		for (UBoxComponent* Proxy : GetProxies(Target))
+		{
+			if (!TestNotNull(TEXT("Each part uses a real native box component"), Proxy)) return false;
+			const UBodySetup* Body = Proxy->GetBodySetup();
+			if (!TestNotNull(TEXT("Each native box owns its actual query geometry"), Body) ||
+				!TestEqual(TEXT("Each hit part has exactly one native BoxElem"), Body->AggGeom.BoxElems.Num(), 1)) return false;
+			TestEqual(TEXT("Native hit boxes have no convex geometry"), Body->AggGeom.ConvexElems.Num(), 0);
+			TestEqual(TEXT("No spheres, capsules or other geometry remain alongside the box"), Body->AggGeom.GetElementCount(), 1);
+			const FVector Extent = Proxy->GetUnscaledBoxExtent();
+			TestTrue(TEXT("Native boxes use real positive extents rather than mesh scale conversion"),
+				!Extent.ContainsNaN() && Extent.GetMin() >= 1.0 && Proxy->GetRelativeScale3D().Equals(FVector::OneVector));
+			const FKBoxElem& Box = Body->AggGeom.BoxElems[0];
+			TestTrue(TEXT("The native BoxElem dimensions match the configured component half extents"),
+				FVector(Box.X, Box.Y, Box.Z).Equals(Extent * 2.0, 0.001) && Box.GetTransform().Equals(FTransform::Identity));
+			TestTrue(TEXT("Complex weapon and sight rays use the same native box geometry"), Body->CollisionTraceFlag == CTF_UseSimpleAsComplex);
+		}
+		return true;
+	};
+	if (!CheckBoxGeometry(*Enemy)) return false;
+	for (UBoxComponent* Proxy : Proxies)
 	{
 		if (!TestNotNull(TEXT("Each of the six proxy components exists"), Proxy)) return false;
-		TestTrue(TEXT("Every part reuses the same prebaked mesh rather than cooking a private shape"), Proxy->GetStaticMesh() == SharedHull);
 		TestTrue(TEXT("Every part attaches to the movement root without a bone socket"),
 			Proxy->GetAttachParent() == Enemy->GetRootComponent() && Proxy->GetAttachSocketName().IsNone());
 		TestTrue(TEXT("Each authoritative proxy is query-only"), Proxy->GetCollisionEnabled() == ECollisionEnabled::QueryOnly);
@@ -2456,9 +2564,9 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 			Proxy->GetCollisionObjectType() == Enemy->GetMesh()->GetCollisionObjectType());
 		TestFalse(TEXT("Hit proxies never generate gameplay overlap events"), Proxy->GetGenerateOverlapEvents());
 		TestFalse(TEXT("Hit proxies do not change navigation geometry"), Proxy->CanEverAffectNavigation());
-		TestFalse(TEXT("Query-only hulls never become visible render geometry"), Proxy->IsVisible());
-		TestFalse(TEXT("Query-only hulls cannot consume a shadow slot"), Proxy->CastShadow);
-		TestFalse(TEXT("Query-only hulls cannot consume a ray-tracing slot"), Proxy->bVisibleInRayTracing);
+		TestFalse(TEXT("Query-only boxes never become visible render geometry"), Proxy->IsVisible());
+		TestFalse(TEXT("Query-only boxes cannot consume a shadow slot"), Proxy->CastShadow);
+		TestFalse(TEXT("Query-only boxes cannot consume a ray-tracing slot"), Proxy->bVisibleInRayTracing);
 		for (int32 Channel = 0; Channel < ECC_OverlapAll_Deprecated; ++Channel)
 			TestTrue(TEXT("Every proxy query response preserves the original mesh contract rather than clearing non-weapon channels"),
 				Proxy->GetCollisionResponseToChannel(static_cast<ECollisionChannel>(Channel)) ==
@@ -2493,12 +2601,29 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 			!TraceProxy(*Enemy, *Proxies[Index], 300.0f, ExpectedBones[Index]) ||
 			!TraceProxy(*Enemy, *Proxies[Index], 6000.0f, ExpectedBones[Index])) return false;
 		LocalCenters.Add(Proxies[Index]->GetRelativeLocation());
+		// 单组件真实物理射线隔离相邻部位，验证新盒体的完整角区与边界外不命中，不拿Bounds冒充碰撞。
+		const FVector Extent = Proxies[Index]->GetUnscaledBoxExtent();
+		const FTransform Transform = Proxies[Index]->GetComponentTransform();
+		const FVector CornerOffset(0.0, Extent.Y * 0.95, Extent.Z * 0.95);
+		FHitResult CornerHit;
+		TestTrue(TEXT("A real native box ray includes its full corner rather than the old chamfered hull"),
+			Proxies[Index]->LineTraceComponent(CornerHit,
+				Transform.TransformPosition(CornerOffset - FVector(Extent.X + 5.0, 0.0, 0.0)),
+				Transform.TransformPosition(CornerOffset + FVector(Extent.X + 5.0, 0.0, 0.0)),
+				FCollisionQueryParams(SCENE_QUERY_STAT(EnemyNativeBoxCorner), true)));
+		FHitResult OutsideHit;
+		const FVector OutsideOffset(0.0, Extent.Y + 1.0, 0.0);
+		TestFalse(TEXT("A real native box ray just outside the configured face cannot hit the part"),
+			Proxies[Index]->LineTraceComponent(OutsideHit,
+				Transform.TransformPosition(OutsideOffset - FVector(Extent.X + 5.0, 0.0, 0.0)),
+				Transform.TransformPosition(OutsideOffset + FVector(Extent.X + 5.0, 0.0, 0.0)),
+				FCollisionQueryParams(SCENE_QUERY_STAT(EnemyNativeBoxOutside), true)));
 	}
 	Enemy->GetMesh()->SetComponentTickEnabled(false);
 	Enemy->SetActorLocationAndRotation(FVector(1700.0f, 400.0f, 650.0f), FRotator(0.0f, 90.0f, 0.0f), false, nullptr, ETeleportType::TeleportPhysics);
 	for (int32 Index = 0; Index < Proxies.Num(); ++Index)
 	{
-		TestTrue(TEXT("Every convex follows root movement and rotation without an animation tick"),
+		TestTrue(TEXT("Every native box follows root movement and rotation without an animation tick"),
 			Proxies[Index]->GetComponentLocation().Equals(Enemy->GetActorTransform().TransformPosition(LocalCenters[Index]), 0.001f));
 		if (!TraceProxy(*Enemy, *Proxies[Index], 300.0f, ExpectedBones[Index])) return false;
 	}
@@ -2528,7 +2653,7 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	TestFalse(TEXT("Reference selects the original live skeletal hit path"), Enemy->UsesSimpleHitProxies());
 	TestTrue(TEXT("Reference retains full dedicated authority pose for the skeletal hit path"), Enemy->RequiresFullAuthorityPose());
 	for (UPrimitiveComponent* Proxy : Proxies)
-		TestTrue(TEXT("Reference disables every additional convex proxy"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+		TestTrue(TEXT("Reference disables every additional native box"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	TestTrue(TEXT("Reference restores original live query collision"), Enemy->GetMesh()->GetCollisionEnabled() == ECollisionEnabled::QueryOnly);
 	Enemy->ConfigureHitProxies(true);
 	TestFalse(TEXT("Returning to simplified queries releases only the unneeded full-pose requirement"), Enemy->RequiresFullAuthorityPose());
@@ -2538,7 +2663,7 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	if (!TestNotNull(TEXT("Client-role proxy instance"), Client)) return false;
 	Client->ConfigureHitProxies(true);
 	for (UPrimitiveComponent* Proxy : GetProxies(*Client))
-		TestTrue(TEXT("Client keeps every convex component without authoritative queries"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+		TestTrue(TEXT("Client keeps every native box without authoritative queries"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	const FVector ClientCenter = Client->EnemyBodyHitProxy->GetComponentLocation();
 	FHitResult ClientHit;
 	TestFalse(TEXT("A client-role enemy cannot expose a local authoritative body query"),
@@ -2576,12 +2701,68 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	if (!CheckPerceptionResponse(FVector(1000.0f, 12000.0f, 500.0f), ECR_Block, ECR_Overlap) ||
 		!CheckPerceptionResponse(FVector(1000.0f, 16000.0f, 500.0f), ECR_Ignore, ECR_Ignore)) return false;
 
-	// 原项目资产只加载一次，检查优化不是拿无骨架夹具冒充旧物理已退出；再走真实死亡伤害入口恢复布娃娃。
+	// 扫描磁盘包引用而非只看已加载对象，硬/软包引用都不能保留专用命中网格依赖；不修改或保存资产。
+	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	Registry.ScanPathsSynchronous({TEXT("/Game")}, true);
+	const FName RetiredHullPackage(TEXT("/Game/PerformanceCandidates/EnemyCollision/SM_EnemyHitConvex"));
+	TArray<FName> HullReferencers;
+	Registry.GetReferencers(RetiredHullPackage, HullReferencers, UE::AssetRegistry::EDependencyCategory::Package);
+	for (const FName Referencer : HullReferencers)
+		AddError(FString::Printf(TEXT("Project package retains a hard or soft reference to the removed hit hull: %s"), *Referencer.ToString()));
+	TestEqual(TEXT("No on-disk package retains a hard or soft reference to the retired hull"), HullReferencers.Num(), 0);
+	TestFalse(TEXT("The retired special-purpose convex asset is no longer an active project package"),
+		FPackageName::DoesPackageExist(RetiredHullPackage.ToString()));
+	const auto CheckBlueprintDefaults = [&](UClass* Class, const TCHAR* Phase)
+	{
+		AddInfo(FString::Printf(TEXT("Checking actual enemy Blueprint native-box defaults: %s"), Phase));
+		AfpstrueEnemyCharacter* Defaults = Class->GetDefaultObject<AfpstrueEnemyCharacter>();
+		for (const FName Name : {FName(TEXT("EnemyHeadHitProxy")), FName(TEXT("EnemyBodyHitProxy")),
+			FName(TEXT("EnemyLeftArmHitProxy")), FName(TEXT("EnemyRightArmHitProxy")),
+			FName(TEXT("EnemyLeftLegHitProxy")), FName(TEXT("EnemyRightLegHitProxy"))})
+		{
+			const FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(Class, Name);
+			if (!TestNotNull(TEXT("The actual Blueprint exposes each inherited hit-proxy property"), Property) ||
+				!TestTrue(TEXT("Reflected hit-proxy properties use UBoxComponent, not the retired static-mesh type"),
+					Property->PropertyClass == UBoxComponent::StaticClass())) return false;
+			UObject* DefaultPart = Property->GetObjectPropertyValue_InContainer(Defaults);
+			if (!TestNotNull(TEXT("Each Blueprint CDO hit-proxy property has a real default subobject"), DefaultPart) ||
+				!TestTrue(TEXT("The Blueprint CDO retains exactly the named native box default subobject"),
+					DefaultPart->GetClass() == UBoxComponent::StaticClass() &&
+					DefaultPart == Defaults->GetDefaultSubobjectByName(Name))) return false;
+		}
+		return true;
+	};
+	// 先验证磁盘蓝图直接加载和正常BeginPlay，不能靠编译重建CDO或手动Configure掩盖失效模板。
 	UClass* BlueprintClass = LoadClass<AfpstrueEnemyCharacter>(nullptr,
 		TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP.enemy_BP_C"));
 	if (!TestNotNull(TEXT("Hit-proxy lifecycle loads the actual enemy Blueprint"), BlueprintClass)) return false;
+	if (!CheckBlueprintDefaults(BlueprintClass, TEXT("direct load before compile"))) return false;
+	AfpstrueEnemyCharacter* DirectLoadEnemy = SpawnEnemy(BlueprintClass, FVector(18000.0f, 0.0f, 500.0f));
+	if (!TestNotNull(TEXT("Directly loaded enemy Blueprint spawns before explicit compilation"), DirectLoadEnemy) ||
+		!TestTrue(TEXT("Normal Blueprint BeginPlay selects native boxes without manual reconfiguration"), DirectLoadEnemy->UsesSimpleHitProxies()) ||
+		!CheckBoxGeometry(*DirectLoadEnemy) ||
+		!TraceProxy(*DirectLoadEnemy, *DirectLoadEnemy->EnemyHeadHitProxy, 300.0f, TEXT("head"))) return false;
+	TestEqual(TEXT("Normal Blueprint BeginPlay retires live skeletal bodies before any test reconfiguration"), DirectLoadEnemy->GetMesh()->Bodies.Num(), 0);
+	DirectLoadEnemy->Destroy();
+	// 再重新编译验证旧StaticMesh组件类型/节点未藏在保存图表里；不Save。
+	UBlueprint* Blueprint = UBlueprint::GetBlueprintFromClass(BlueprintClass);
+	if (!TestNotNull(TEXT("The actual enemy generated class retains its editable source Blueprint"), Blueprint)) return false;
+	FCompilerResultsLog Compilation;
+	FKismetEditorUtilities::CompileBlueprint(Blueprint,
+		EBlueprintCompileOptions::SkipGarbageCollection | EBlueprintCompileOptions::SkipSave, &Compilation);
+	for (const TSharedRef<FTokenizedMessage>& Message : Compilation.Messages)
+		AddInfo(FString::Printf(TEXT("Enemy Blueprint compile: %s"), *Message->ToText().ToString()));
+	if (!TestEqual(TEXT("The real enemy Blueprint compiles without stale mesh-typed proxy errors"), Compilation.NumErrors, 0) ||
+		!TestTrue(TEXT("The recompiled enemy Blueprint is valid"), Blueprint->Status != BS_Error)) return false;
+	BlueprintClass = Blueprint->GeneratedClass;
+	if (!TestNotNull(TEXT("Successful native-box compilation retains a generated enemy class"), BlueprintClass)) return false;
+	if (!CheckBlueprintDefaults(BlueprintClass, TEXT("after compile"))) return false;
+	TArray<FName> BlueprintDependencies;
+	Registry.GetDependencies(BlueprintClass->GetOutermost()->GetFName(), BlueprintDependencies, UE::AssetRegistry::EDependencyCategory::Package);
+	TestFalse(TEXT("The actual enemy Blueprint has no direct on-disk retired-hull dependency"), BlueprintDependencies.Contains(RetiredHullPackage));
 	AfpstrueEnemyCharacter* AssetEnemy = SpawnEnemy(BlueprintClass, FVector(20000.0f, 0.0f, 500.0f));
 	if (!TestNotNull(TEXT("Actual skeleton-backed enemy"), AssetEnemy)) return false;
+	if (!CheckBoxGeometry(*AssetEnemy)) return false;
 	USkeletalMeshComponent* AssetMesh = AssetEnemy->GetMesh();
 	UPhysicsAsset* DeathPhysics = AssetMesh->GetPhysicsAsset();
 	if (!TestNotNull(TEXT("Full source physics asset remains available for death"), DeathPhysics)) return false;
@@ -2606,7 +2787,7 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	UGameplayStatics::ApplyPointDamage(AssetEnemy, 10000.0f, FVector::ForwardVector, DeathHit, nullptr, nullptr, nullptr);
 	TestTrue(TEXT("Actual point-damage path reaches the enemy death transaction"), AssetEnemy->IsDead());
 	for (UPrimitiveComponent* Proxy : GetProxies(*AssetEnemy))
-		TestTrue(TEXT("Death retires every live convex proxy"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+		TestTrue(TEXT("Death retires every live native box"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	TestTrue(TEXT("Death restores the original PhysicsAsset and simulation"), AssetMesh->GetPhysicsAsset() == DeathPhysics && AssetMesh->IsSimulatingPhysics());
 	TestTrue(TEXT("Death recreates actual skeletal rigid bodies"), AssetMesh->Bodies.Num() > 0);
 	TestEqual(TEXT("Death impulse retains the normalized head bone identity"), AssetEnemy->DeathDamageContext.BoneName, FName(TEXT("head")));

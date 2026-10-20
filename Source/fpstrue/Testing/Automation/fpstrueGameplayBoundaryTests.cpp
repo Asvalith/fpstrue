@@ -1362,10 +1362,18 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Arming the pending timer does not consume recoil or advance game time"), Controller->RotationInput.Pitch, Kick);
 	const double RecoveryStartTime = World.GetWorld()->GetTimeSeconds();
 	// A 140ms hitch includes 120ms without recovery and 20ms of actual recovery.
-	// At 10 degrees/s a 1-degree kick must retain 80%, regardless of timer catch-up callback count.
+	// At 10 degrees/s a 1-degree kick must retain 80%; the native timer skips same-frame catch-up calls.
 	if (!World.AdvanceSingleFrame(0.14f)) return false;
 	TestEqual(TEXT("The hitch advances exactly 140ms of game time"), World.GetWorld()->GetTimeSeconds() - RecoveryStartTime, 0.14, 0.0001);
 	TestEqual(TEXT("Recovery integrates elapsed time, excluding the configured delay"), Controller->RotationInput.Pitch / Kick, 0.8, 0.025);
+	// 连续低帧继续按经过时间积分，而不是按一次回调固定恢复 1/60 秒。
+	if (!World.AdvanceSingleFrame(0.04f)) return false;
+	TestEqual(TEXT("A subsequent 40ms frame integrates its full recovery interval"), Controller->RotationInput.Pitch / Kick, 0.4, 0.025);
+	if (!World.AdvanceSingleFrame(0.04f)) return false;
+	TestTrue(TEXT("Recovery reaches zero without overshooting during low frame rate"), FMath::IsNearlyZero(Controller->RotationInput.Pitch, FMath::Abs(Kick) * 0.025));
+	const FRotator RecoveredInput = Controller->RotationInput;
+	if (!World.AdvanceSingleFrame(0.1f)) return false;
+	TestTrue(TEXT("Completed recovery leaves no later input correction"), Controller->RotationInput.Equals(RecoveredInput, 0.001));
 	Weapon->StartFire();
 	Weapon->StopFire();
 	ActiveShakes.Reset(); // UE 的查询接口向输出数组追加，不能把上次快照算成仍在播放的实例。

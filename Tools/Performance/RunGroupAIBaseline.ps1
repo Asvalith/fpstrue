@@ -117,7 +117,7 @@ if ($DryRun) {
         Resolution='1600x900';Quality='High / scalability level 2; engine feature defaults retained';WarmupSeconds=20;CaptureSeconds=60;
         Population=160;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;PresentMon=[bool]$PresentMon;ServerAnimationThreads=$ServerAnimationThreads;
         ServerPacing=$PacingPolicy;
-        ContinuousFloorChecks=[bool]$ContinuousFloorChecks;FloorCheckBoundary='Reverse ablation only: Server applies bAlwaysCheckFloor=true once after the full 160 population is ready, before warmup. Default does not write the authored setting. Compare the same six-convex build and renderer/pacing settings; never use old two-proxy results as the floor-cache control.';
+        ContinuousFloorChecks=[bool]$ContinuousFloorChecks;FloorCheckBoundary='Reverse ablation only: Server applies bAlwaysCheckFloor=true once after the full 160 population is ready, before warmup. Default does not write the authored setting. Compare the same six-box build and renderer/pacing settings; never use old convex or two-proxy results as the floor-cache control.';
         ClientOcclusion=$ClientOcclusion;ClientOcclusionBoundary='Rendered client only: Inherited changes nothing; Buffer3 overrides only r.NumBufferedOcclusionQueries=3; HZB overrides only r.HZBOcclusion=1. Native CVar readback must confirm the requested value. These are independent renderer experiments, not AI/network changes.';
         AnimationThreading='Reference adds no engine threading option; Parallel adds -useperfthreads to the Editor dedicated server only. Runtime gates are snapshots, not proof of Worker dispatch.';
         NetworkCounters='Per-role START/STOP parent-connection In/OutTotalBytes/Packets, including engine connection/PacketOverhead accounting; stable identities, no wrap/reset/reconnect concatenation; not NIC/per-Actor traffic.';
@@ -630,12 +630,18 @@ foreach ($Case in $Cases) {
                 if($Snapshot.simpleHitProxyEnemies -ne $ExpectedSimple){throw ('Actual enemy hit-proxy mode mismatch: '+$Entry.Role)}
                 if($EnemyHitProxies -eq 'Simple'){
                     $ExpectedQueries=if($Entry.Role -eq 'Server'){960}else{0}
-                    if($Snapshot.hitProxyComponents.count -ne 960 -or $Snapshot.hitProxyComponents.queryEnabled -ne $ExpectedQueries -or
-                        $Snapshot.hitProxyComponents.physicsStatesCreated -ne $ExpectedQueries -or
-                        $Snapshot.hitProxyComponents.convexElements -ne 960 -or $Snapshot.hitProxyComponents.otherElements -ne 0 -or
-                        $Snapshot.hitProxyComponents.uniqueHullAssets -ne 1 -or
+                    $HitProxies=$Snapshot.hitProxyComponents
+                    # Schema 2 counts native boxes and observes only already allocated BodySetups.
+                    # A non-query client may have none; every existing setup must contain one box.
+                    if($HitProxies.schemaVersion -ne 2 -or $HitProxies.geometry -cne 'NativeBox' -or
+                        $HitProxies.count -ne 960 -or $HitProxies.minPerEnemy -ne 6 -or $HitProxies.maxPerEnemy -ne 6 -or
+                        $HitProxies.unexpectedTaggedComponents -ne 0 -or $HitProxies.queryEnabled -ne $ExpectedQueries -or
+                        $HitProxies.physicsStatesCreated -ne $ExpectedQueries -or
+                        $HitProxies.bodySetupsPresent -lt $ExpectedQueries -or $HitProxies.bodySetupsPresent -gt 960 -or
+                        $HitProxies.invalidBodySetups -ne 0 -or $HitProxies.boxElements -ne $HitProxies.bodySetupsPresent -or
+                        $HitProxies.convexElements -ne 0 -or $HitProxies.otherElements -ne 0 -or
                         $Snapshot.mesh.collisionEnabled -ne 0 -or $Snapshot.mesh.validBodyInstances -ne 0){
-                        throw ('Simplified hit proxies did not replace live skeletal collision: '+$Entry.Role)
+                        throw ('Six native hit boxes did not replace live skeletal collision: '+$Entry.Role)
                     }
                 }
             }

@@ -318,12 +318,9 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 	bEquipmentEnabled = NetworkState.Action != EFPWeaponActionState::Disabled;
 	if (EquipmentRevision != NetworkState.EquipmentGeneration) OutstandingShots.Reset();
 	EquipmentRevision = NetworkState.EquipmentGeneration;
-	if (NetworkState.Revision >= LastAmmoStateRevision)
-	{
-		CurrentAmmo = NetworkState.Ammo;
-		ReserveAmmo = NetworkState.Reserve;
-		LastAmmoStateRevision = NetworkState.Revision;
-	}
+	CurrentAmmo = NetworkState.Ammo;
+	ReserveAmmo = NetworkState.Reserve;
+	LastAmmoStateRevision = NetworkState.Revision;
 	if (FPredictedFirePresentation* Presented = PredictedPresentations.FindByPredicate(
 		[this](const FPredictedFirePresentation& P) { return P.Generation == EquipmentRevision && P.Session == NetworkState.FireSession; }))
 		Presented->ConfirmedShots = FMath::Max(Presented->ConfirmedShots, NetworkState.FirePresentationShot);
@@ -666,8 +663,12 @@ void UfpstrueWeaponComponent::SchedulePendingNetworkShot()
 {
 	UWorld* World = GetWorld();
 	if (World == nullptr || GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
-	World->GetTimerManager().ClearTimer(NetworkShotTimerHandle);
-	if (!HasPendingNetworkShots()) return;
+	if (!HasPendingNetworkShots())
+	{
+		World->GetTimerManager().ClearTimer(NetworkShotTimerHandle);
+		return;
+	}
+	// SetTimer 原生替换同一句柄，保留空队列清理即可。
 	World->GetTimerManager().SetTimer(NetworkShotTimerHandle, this, &ThisClass::ProcessPendingNetworkShot,
 		FMath::Max(GetNextShotDelay(true), 0.001f), false);
 }
@@ -1750,10 +1751,11 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 
 	if (UWorld* World = GetWorld())
 	{
-		// 延迟是“不恢复”的时间，不计入恢复步长；卡顿后的步长使用真实经过的游戏时间。
+		// 按真实经过时间恢复；原生单帧限次避免卡顿后补调多次零步长回调。
 		LastRecoilRecoveryTimeSeconds = World->GetTimeSeconds() + Settings.RecoilRecoveryDelay;
 		World->GetTimerManager().SetTimer(RecoilRecoveryTimerHandle, this, &UfpstrueWeaponComponent::UpdateRecoilRecovery,
-										  RecoilRecoveryTickInterval, true, Settings.RecoilRecoveryDelay);
+			RecoilRecoveryTickInterval, FTimerManagerTimerParameters{
+				.bLoop = true, .bMaxOncePerFrame = true, .FirstDelay = Settings.RecoilRecoveryDelay});
 	}
 }
 

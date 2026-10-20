@@ -1612,6 +1612,43 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	Manager->SurroundSlots[2].bHasProjectedApproachLocation = false;
 	TestEqual(TEXT("An unreachable approach is never reserved based only on a valid standing point"),
 		Manager->FindBestFreeSlot(FVector::ZeroVector, 0), INDEX_NONE);
+	// 内圈只需要攻击接近点、外圈只需要布局点；废弃的外圈接近/LOS 不能再触发导航重试。
+	TArray<FFPEnemyQueryPoint> CompletePoints;
+	for (int32 SlotIndex = 0; SlotIndex < Manager->SurroundSlots.Num(); ++SlotIndex)
+	{
+		const FfpstrueSurroundSlot& Slot = Manager->SurroundSlots[SlotIndex];
+		FFPEnemyQueryPoint& Point = CompletePoints.AddDefaulted_GetRef();
+		const float Radius = Slot.RingIndex == 0 ? Manager->AttackApproachRadius : Slot.Radius;
+		Point.Nav = FNavLocation(Manager->CachedTargetLocation +
+			FVector(FMath::Cos(Slot.AngleRadians) * Radius, FMath::Sin(Slot.AngleRadians) * Radius, 0.0f));
+		Point.SlotIndex = SlotIndex;
+		Point.Kind = Slot.RingIndex == 0 ? 1 : 0;
+	}
+	int32 CompleteQueryId = PublishedQueryId + 10;
+	const auto PublishComplete = [&](const TArray<FFPEnemyQueryPoint>& QueryPoints)
+	{
+		Manager->ApproachQueryId = ++CompleteQueryId;
+		const uint32 Revision = ++Manager->PositionQueryRevision;
+		Manager->HandleApproachQueryFinished(MakeResult(CompleteQueryId, QueryPoints, true), Revision, Manager->CachedTargetLocation);
+	};
+	PublishComplete(CompletePoints);
+	TestFalse(TEXT("All consumed inner approach and outer standing goals satisfy the navigation cache"), Manager->bNeedsNavigationRetry);
+	TestFalse(TEXT("Outer seats do not require a projected attack approach"), Manager->SurroundSlots[Manager->InnerSlotCount].bHasProjectedApproachLocation);
+	TArray<FFPEnemyQueryPoint> MissingOuter = CompletePoints;
+	MissingOuter.RemoveAt(Manager->InnerSlotCount);
+	PublishComplete(MissingOuter);
+	TestTrue(TEXT("A missing consumed outer standing point still schedules navigation retry"), Manager->bNeedsNavigationRetry);
+	TArray<FFPEnemyQueryPoint> MissingInner = CompletePoints;
+	MissingInner.RemoveAt(0);
+	PublishComplete(MissingInner);
+	TestTrue(TEXT("A missing consumed inner approach still schedules navigation retry"), Manager->bNeedsNavigationRetry);
+	// 即使旧请求携带外圈 Kind1，也不能恢复无消费者的缓存或影响可用性判断。
+	FFPEnemyQueryPoint LegacyOuter = CompletePoints[Manager->InnerSlotCount];
+	LegacyOuter.Kind = 1;
+	CompletePoints.Add(LegacyOuter);
+	PublishComplete(CompletePoints);
+	TestFalse(TEXT("An unused outer approach cannot force retry once all consumed goals are available"), Manager->bNeedsNavigationRetry);
+	TestFalse(TEXT("A legacy outer approach result is not published"), Manager->SurroundSlots[Manager->InnerSlotCount].bHasProjectedApproachLocation);
 	// 目标撤销后清空快照和所有站位，不允许下一轮复用旧玩家的分配。
 	Manager->ApproachQueryId = PublishedQueryId + 2;
 	const uint32 ClearedRevision = ++Manager->PositionQueryRevision;
@@ -1769,7 +1806,7 @@ bool FFpstrueSurroundTacticalBoundaryTest::RunTest(const FString& Parameters)
 	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
 	Manager->SurroundSlots[0].ProjectedApproachLocation = FVector(120.0f, 0.0f, 0.0f);
 	const int32 OuterIndex = Manager->InnerSlotCount;
-	Manager->SurroundSlots[OuterIndex].bHasProjectedSlotLocation = Manager->SurroundSlots[OuterIndex].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[OuterIndex].bHasProjectedSlotLocation = true;
 	Manager->SurroundSlots[OuterIndex].ProjectedSlotLocation = FVector(430.0f, 0.0f, 0.0f);
 	Manager->SurroundSlots[OuterIndex].ProjectedApproachLocation = FVector(220.0f, 0.0f, 0.0f);
 	const auto SpawnEnemy = [World]()
@@ -1785,6 +1822,7 @@ bool FFpstrueSurroundTacticalBoundaryTest::RunTest(const FString& Parameters)
 	FFPEnemyTacticalAssignment InnerAssignment, OuterAssignment;
 	Manager->GetOrRequestTacticalAssignment(Inner, InnerAssignment);
 	Manager->GetOrRequestTacticalAssignment(Outer, OuterAssignment);
+	TestTrue(TEXT("A projected standing point alone grants the outer seat"), OuterAssignment.Role == EFPEnemyTacticalRole::Outer);
 	TestTrue(TEXT("Outer uses its standing point rather than the inward attack approach"), OuterAssignment.Goal.Equals(FVector(430.0f, 0.0f, 0.0f)));
 	Outer->SetActorLocation(FVector(-430.0f, 0.0f, 0.0f));
 	FNavigationPath Crossing(TArray<FVector>{Outer->GetActorLocation(), OuterAssignment.Goal});
@@ -1942,6 +1980,8 @@ bool FFpstrueEnemyPositionQueryRuntimeTest::RunTest(const FString& Parameters)
 			Request.SetFloatParam(TEXT("InnerCount"), 4.0f).SetFloatParam(TEXT("OuterCount"), 5.0f);
 		}
 		if (Index == 1) Request.SetFloatParam(TEXT("OriginX"), std::numeric_limits<float>::quiet_NaN());
+		// 历史配置多带的参数允许被忽略，不能重新生成已删除的外圈接近点。
+		if (Index == 2) Request.SetFloatParam(TEXT("OuterApproach"), 50.0f);
 		if (Index == 4) Request.SetFloatParam(TEXT("Cover"), 1.0f);
 		const int32 QueryId = Request.Execute(EEnvQueryRunMode::AllMatching,
 			FQueryFinishedSignature::CreateLambda([&, Index](TSharedPtr<FEnvQueryResult> Result) { Results[Index] = Result; }));
@@ -1959,7 +1999,20 @@ bool FFpstrueEnemyPositionQueryRuntimeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Missing position snapshots generate no candidates"), Results[0]->Items.Num(), 0);
 	TestEqual(TEXT("Non-finite position snapshots generate no candidates"), Results[1]->Items.Num(), 0);
 	TestTrue(TEXT("Valid float count parameters complete generation"), Results[2]->IsSuccessful());
-	TestEqual(TEXT("Four inner and five outer slots generate four candidates each"), Results[2]->Items.Num(), 36);
+	TestEqual(TEXT("Four inner slots generate four candidates each; five outer slots generate standing points only"), Results[2]->Items.Num(), 21);
+	int32 InnerApproaches = 0, StandingPoints = 0;
+	for (int32 Index = 0; Index < Results[2]->Items.Num(); ++Index)
+	{
+		const FFPEnemyQueryPoint& Candidate = Results[2]->GetItemAsTypeChecked<UfpstrueEnvQueryItemType_Position>(Index);
+		if (Candidate.Kind == 0) ++StandingPoints;
+		if (Candidate.Kind == 1)
+		{
+			++InnerApproaches;
+			TestTrue(TEXT("Only inner slots generate LOS-tested approach candidates"), Candidate.SlotIndex < 4);
+		}
+	}
+	TestEqual(TEXT("Every inner and outer slot retains its layout point"), StandingPoints, 9);
+	TestEqual(TEXT("Only four inner slots generate three approach alternatives"), InnerApproaches, 12);
 	TestFalse(TEXT("Production attack query cannot succeed without navigation"), Results[3]->IsSuccessful());
 	TestFalse(TEXT("Production cover query cannot succeed without navigation"), Results[4]->IsSuccessful());
 	TestEqual(TEXT("Missing navigation never publishes raw attack positions"), Results[3]->Items.Num(), 0);
