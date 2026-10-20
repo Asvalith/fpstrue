@@ -123,6 +123,71 @@ bool FFpstrueEnemySignificanceCombatSampleTest::RunTest(const FString& Parameter
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyGameplayTierReasonSnapshotTest,
+	"fpstrue.Performance.Significance.GameplayTierReasonSnapshot",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 走真实 ApplySignificance 和攻击事务；诊断不得把锁定目标、受击姿态保护或未知距离冒充 Full 的原因。
+bool FFpstrueEnemyGameplayTierReasonSnapshotTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	if (!TestNotNull(TEXT("Reason fixture has native AI services"), World->CreateAISystem())) return false;
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity);
+	if (!TestNotNull(TEXT("Reason fixture enemy"), Enemy)) return false;
+	TestFalse(TEXT("A not-yet-sampled enemy starts explicitly unknown"), Enemy->GetGameplayTierReasonSnapshot().bHasPolicySample);
+	TestFalse(TEXT("An unknown enemy has no invented zero-distance measurement"), Enemy->GetGameplayTierReasonSnapshot().bDistanceSampleValid);
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
+	auto* Target = World->SpawnActor<AfpstrueCharacter>(FVector(100.0f, 0.0f, 0.0f), FRotator::ZeroRotator);
+	auto* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	if (!TestNotNull(TEXT("Reason fixture target"), Target) || !TestNotNull(TEXT("Reason fixture controller"), Controller)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
+	Controller->Possess(Enemy);
+	Controller->InitializeCombatContext(Target, nullptr);
+	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	Controller->GetPerceptionComponent()->RegisterStimulus(Target, Stimulus);
+	Controller->GetPerceptionComponent()->ProcessStimuli();
+	Controller->GetBrainComponent()->StopLogic(TEXT("Gameplay reason snapshot fixture"));
+	const bool bNotInRange = false;
+	TGuardValue<const bool*> NoRangeSample(Enemy->SignificanceCombatProtectionSample, &bNotInRange);
+	Enemy->ApplySignificance(1.0f / 501.0f);
+	TestTrue(TEXT("Near max-player distance score alone selects Full"), Enemy->GetGameplayTierReasonSnapshot().bFullByDistance);
+	TestTrue(TEXT("Distance is recovered from the actual policy score"),
+		Enemy->GetGameplayTierReasonSnapshot().bDistanceSampleValid && FMath::IsNearlyEqual(Enemy->GetGameplayTierReasonSnapshot().NearestPlayerDistance2D, 500.0, 0.01));
+	TestFalse(TEXT("A sampled-out melee reason is not invented from the live target"), Enemy->GetGameplayTierReasonSnapshot().bFullByMeleeRange);
+	Enemy->ApplySignificance(1.0f / 9001.0f);
+	TestTrue(TEXT("A locked target alone does not make far gameplay Full"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Background);
+	const bool bInRange = true;
+	{
+		TGuardValue<const bool*> RangeSample(Enemy->SignificanceCombatProtectionSample, &bInRange);
+		Enemy->ApplySignificance(1.0f / 9001.0f);
+		TestTrue(TEXT("Non-attacking close-combat sample explains Full"), Enemy->GetGameplayTierReasonSnapshot().bFullByMeleeRange);
+		TestFalse(TEXT("Far score remains a non-distance Full reason"), Enemy->GetGameplayTierReasonSnapshot().bFullByDistance);
+		TestTrue(TEXT("Reason records actual scoped sample use"), Enemy->GetGameplayTierReasonSnapshot().bUsedScopedCombatSample);
+	}
+	if (!TestTrue(TEXT("Reason fixture begins a real attack transaction"), Enemy->GetCombatComponent()->TryAttackTarget())) return false;
+	Enemy->ApplySignificance(1.0f / 9001.0f);
+	TestTrue(TEXT("An actual attack explains Full even with a sampled-out melee range"), Enemy->GetGameplayTierReasonSnapshot().bFullByAttack);
+	TestFalse(TEXT("Attack short-circuit does not also count a melee-range reason"), Enemy->GetGameplayTierReasonSnapshot().bFullByMeleeRange);
+	TestFalse(TEXT("Attack short-circuit does not claim it consumed the close-combat sample"), Enemy->GetGameplayTierReasonSnapshot().bUsedScopedCombatSample);
+	Enemy->GetCombatComponent()->ResetCombat();
+	UGameplayStatics::ApplyDamage(Enemy, 1.0f, nullptr, Target, UDamageType::StaticClass());
+	Enemy->ApplySignificance(0.0f);
+	const auto& Final = Enemy->GetGameplayTierReasonSnapshot();
+	TestTrue(TEXT("Zero-score application is recorded, not confused with never sampled"), Final.bHasPolicySample);
+	TestFalse(TEXT("Zero score has no measured nearest-player distance"), Final.bDistanceSampleValid);
+	TestTrue(TEXT("Hit animation protection does not change the real gameplay tier"), Final.AppliedTier == EFPEnemySignificanceTier::Background);
+	TestFalse(TEXT("Hit animation protection is not falsely reported as a Full reason"), Final.bFullByDistance || Final.bFullByAttack || Final.bFullByMeleeRange);
+	TestEqual(TEXT("The reason timestamp is the actual last policy application time"), Final.SampleWorldTimeSeconds, static_cast<double>(World->GetTimeSeconds()));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyPostProcessIsolationTest,
 	"fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -711,6 +776,150 @@ bool FFpstrueMultiplayerClientPerformanceTest::RunTest(const FString& Parameters
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyRenderBudgetStabilityTest,
+	"fpstrue.Rendering.EnemyBudget.IndependentBudgetRetention",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 直接调用生产预算分配阶段，不把自然档迟滞、Actor 注册顺序或真实渲染耗时混入名额稳定性断言。
+bool FFpstrueEnemyRenderBudgetStabilityTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	AfpstrueEnemyCharacter* Enemies[3] = {};
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const FTransform Transform(FVector(Index * 500.0f, 0.0f, 0.0f));
+		Enemies[Index] = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), Transform,
+			nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (!TestNotNull(TEXT("Budget candidate enemy"), Enemies[Index])) return false;
+		Enemies[Index]->AutoPossessAI = EAutoPossessAI::Disabled;
+		Enemies[Index]->FinishSpawning(Transform);
+		Enemies[Index]->GetCharacterMovement()->SetComponentTickEnabled(false);
+	}
+	auto* Coordinator = NewObject<UfpstrueEnemySignificanceCoordinator>();
+	auto& Policy = Coordinator->ActiveRenderPolicy;
+	Policy.MaxFullRenderEnemies = Policy.MaxShadowCastingEnemies = Policy.MaxRayTracingEnemies = 1;
+	Policy.BudgetRetentionMargin = 0.05f;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		auto& Candidate = Coordinator->CandidateBuffer.AddDefaulted_GetRef();
+		Candidate.Enemy = Enemies[Index];
+		Candidate.PriorityKey = {0.8f - Index * 0.01f, static_cast<uint32>(Index + 1), true, true};
+		Candidate.Sample.Score = Candidate.PriorityKey.Score;
+		Candidate.Sample.Distance = 100.0f;
+		Candidate.Sample.bInExpandedFrustum = true;
+		Candidate.NaturalTier = EFPEnemyRenderSignificanceTier::Full;
+		Candidate.bShadowEligible = Candidate.bRayTracingEligible = true;
+	}
+	int32 FullRejected = 0, ShadowRejected = 0, RayTracingRejected = 0;
+	const auto Allocate = [&]() { Coordinator->AllocatePresentationBudgets(FullRejected, ShadowRejected, RayTracingRejected); };
+	const auto Holds = [](const TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>>& Holders, AfpstrueEnemyCharacter* Enemy)
+	{
+		return Holders.Contains(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
+	};
+	Allocate();
+	TestTrue(TEXT("Initial Full selection uses raw priority"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	Coordinator->CandidateBuffer[1].PriorityKey.Score = 0.81f;
+	Allocate();
+	TestTrue(TEXT("A small score crossing does not replace an existing Full holder"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	TestEqual(TEXT("Budget scoring leaves the raw key untouched"), Coordinator->CandidateBuffer[1].PriorityKey.Score, 0.81f);
+	TestEqual(TEXT("Budget scoring leaves the sampled score untouched"), Coordinator->CandidateBuffer[0].Sample.Score, 0.8f);
+	TestTrue(TEXT("A budget-reduced candidate retains its natural Full tier"),
+		Coordinator->CandidateBuffer[1].NaturalTier == EFPEnemyRenderSignificanceTier::Full);
+	Coordinator->CandidateBuffer[1].PriorityKey.Score = 0.86f;
+	Allocate();
+	TestTrue(TEXT("A clearly better candidate replaces the incumbent"), Holds(Coordinator->FullBudgetHolders, Enemies[1]));
+	TestEqual(TEXT("Full rejection accounting still reflects the strict budget"), FullRejected, 2);
+
+	Coordinator->Stop();
+	Coordinator->CandidateBuffer[0].PriorityKey.Score = 0.99f;
+	Coordinator->CandidateBuffer[1].PriorityKey.Score = 0.98f;
+	Allocate();
+	Coordinator->CandidateBuffer[1].PriorityKey.Score = 1.0f;
+	Allocate();
+	TestTrue(TEXT("Near-one scores retain the margin instead of saturating away the bonus"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	Policy.BudgetRetentionMargin = 0.0f;
+	Allocate();
+	TestTrue(TEXT("Zero retention restores raw-score selection"), Holds(Coordinator->FullBudgetHolders, Enemies[1]));
+	Policy.BudgetRetentionMargin = 0.05f;
+	Coordinator->CandidateBuffer[1].PriorityKey.bInPrimaryFrustum = false;
+	Allocate();
+	TestTrue(TEXT("A higher frustum class wins immediately despite the previous holder"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	Coordinator->CandidateBuffer[0].NaturalTier = EFPEnemyRenderSignificanceTier::Reduced;
+	Allocate();
+	TestFalse(TEXT("A holder that loses Full eligibility is released"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	TestEqual(TEXT("Losing eligibility never leaves an unused Full slot"), Coordinator->FullBudgetHolders.Num(), 1);
+
+	// 三个池先各自形成历史；Full 资格不能把阴影/RT 名额一并赠送给同一敌人。
+	Coordinator->Stop();
+	Policy.MaxFullRenderEnemies = 3;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		auto& Candidate = Coordinator->CandidateBuffer[Index];
+		Candidate.PriorityKey = {0.8f, static_cast<uint32>(Index + 1), true, true};
+		Candidate.NaturalTier = EFPEnemyRenderSignificanceTier::Full;
+		Candidate.bShadowEligible = Index == 1;
+		Candidate.bRayTracingEligible = Index == 2;
+	}
+	Allocate();
+	TestTrue(TEXT("Shadow history belongs only to its selected pool"), Holds(Coordinator->ShadowBudgetHolders, Enemies[1]));
+	TestTrue(TEXT("Ray tracing history belongs only to its selected pool"), Holds(Coordinator->RayTracingBudgetHolders, Enemies[2]));
+	Coordinator->CandidateBuffer[0].PriorityKey.Score = 0.81f;
+	for (auto& Candidate : Coordinator->CandidateBuffer) Candidate.bShadowEligible = Candidate.bRayTracingEligible = true;
+	Allocate();
+	TestTrue(TEXT("Shadow keeps its own holder, not the raw-score/Full winner"), Holds(Coordinator->ShadowBudgetHolders, Enemies[1]));
+	TestTrue(TEXT("Ray tracing keeps its different holder independently"), Holds(Coordinator->RayTracingBudgetHolders, Enemies[2]));
+	TestEqual(TEXT("Full allocations do not increase the shadow cap"), Coordinator->ShadowBudgetHolders.Num(), 1);
+	TestEqual(TEXT("Full allocations do not increase the ray tracing cap"), Coordinator->RayTracingBudgetHolders.Num(), 1);
+	Coordinator->CandidateBuffer[1].Sample.Distance = Policy.ShadowMaxDistance + 1.0f;
+	Coordinator->CandidateBuffer[2].bRayTracingEligible = false;
+	Allocate();
+	TestFalse(TEXT("Shadow holder loses its slot outside the distance limit"), Holds(Coordinator->ShadowBudgetHolders, Enemies[1]));
+	TestFalse(TEXT("Ray tracing holder loses its slot when asset eligibility is removed"), Holds(Coordinator->RayTracingBudgetHolders, Enemies[2]));
+	Coordinator->CandidateBuffer[1].Sample.Distance = 100.0f;
+	Coordinator->CandidateBuffer[2].bRayTracingEligible = true;
+	Policy.MaxFullRenderEnemies = 1;
+	Allocate();
+	TestEqual(TEXT("Shrinking Full capacity immediately respects the new budget"), Coordinator->FullBudgetHolders.Num(), 1);
+	TestTrue(TEXT("Ray tracing still requires assigned Full, not only old ray tracing membership"),
+		Holds(Coordinator->RayTracingBudgetHolders, Enemies[0]));
+
+	Policy.bEnableRenderTiering = Policy.bEnableShadowBudget = Policy.bEnableRayTracingBudget = false;
+	Allocate();
+	TestEqual(TEXT("Disabled Full budgeting clears its membership history"), Coordinator->FullBudgetHolders.Num(), 0);
+	TestEqual(TEXT("Disabled shadow budgeting clears its membership history"), Coordinator->ShadowBudgetHolders.Num(), 0);
+	TestEqual(TEXT("Disabled ray tracing budgeting clears its membership history"), Coordinator->RayTracingBudgetHolders.Num(), 0);
+	Policy.bEnableRenderTiering = Policy.bEnableShadowBudget = Policy.bEnableRayTracingBudget = true;
+	Policy.MaxFullRenderEnemies = 3;
+	Allocate();
+	TestTrue(TEXT("Re-enabled shadow budgeting starts with raw priority"), Holds(Coordinator->ShadowBudgetHolders, Enemies[0]));
+	TestTrue(TEXT("Re-enabled ray tracing budgeting starts without stale holders"), Holds(Coordinator->RayTracingBudgetHolders, Enemies[0]));
+	Policy.MaxFullRenderEnemies = Policy.MaxShadowCastingEnemies = Policy.MaxRayTracingEnemies = 0;
+	Allocate();
+	TestEqual(TEXT("Zero Full budget has no retained members"), Coordinator->FullBudgetHolders.Num(), 0);
+	TestEqual(TEXT("Zero shadow budget has no retained members"), Coordinator->ShadowBudgetHolders.Num(), 0);
+	TestEqual(TEXT("Zero ray tracing budget has no retained members"), Coordinator->RayTracingBudgetHolders.Num(), 0);
+
+	Policy.MaxFullRenderEnemies = Policy.MaxShadowCastingEnemies = Policy.MaxRayTracingEnemies = 1;
+	Allocate();
+	TestTrue(TEXT("Destroyed-candidate scenario begins with A holding Full"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	Enemies[0]->Destroy();
+	Coordinator->CandidateBuffer.RemoveAt(0);
+	Allocate();
+	TestFalse(TEXT("An enemy removed from the live snapshot cannot keep a Full slot"), Holds(Coordinator->FullBudgetHolders, Enemies[0]));
+	TestFalse(TEXT("A removed enemy cannot keep its shadow slot"), Holds(Coordinator->ShadowBudgetHolders, Enemies[0]));
+	TestFalse(TEXT("A removed enemy cannot keep its ray tracing slot"), Holds(Coordinator->RayTracingBudgetHolders, Enemies[0]));
+	TestEqual(TEXT("The remaining live candidate receives the released Full slot"), Coordinator->FullBudgetHolders.Num(), 1);
+	Coordinator->Stop();
+	TestEqual(TEXT("Stop clears Full history"), Coordinator->FullBudgetHolders.Num(), 0);
+	TestEqual(TEXT("Stop clears shadow history"), Coordinator->ShadowBudgetHolders.Num(), 0);
+	TestEqual(TEXT("Stop clears ray tracing history"), Coordinator->RayTracingBudgetHolders.Num(), 0);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerAuthorityPoseTest,
 	"fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -941,6 +1150,76 @@ bool FFpstrueEnemyRenderTopKTest::RunTest(const FString& Parameters)
 			}
 		}
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemyRenderBudgetRetentionKeyTest,
+	"fpstrue.Performance.Significance.RenderBudgetRetentionOrder",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 持有加成只在入堆前产生新键，不能把非传递的“差不多相等”带回比较器。
+bool FFpstrueEnemyRenderBudgetRetentionKeyTest::RunTest(const FString& Parameters)
+{
+	const TArray<FFPEnemyRenderPriorityKey> RawKeys{
+		{0.050000000f, 1, false, false},
+		{0.050000007f, 2, false, false},
+		{0.050000014f, 3, false, false},
+		{0.99f, 4, true, true},
+		{1.0f, 5, true, true},
+		{0.0f, 6, false, true},
+		{std::numeric_limits<float>::quiet_NaN(), 7, true, true},
+		{std::numeric_limits<float>::infinity(), 8, true, true},
+	};
+	const FFPEnemyRenderPriorityLess Before;
+	for (const float Margin : {0.0f, 0.05f, 1.0f})
+	{
+		TArray<FFPEnemyRenderPriorityKey> BudgetKeys;
+		for (int32 Index = 0; Index < RawKeys.Num(); ++Index)
+		{
+			BudgetKeys.Add(FPEnemyRenderBudgetPriorityKey(RawKeys[Index], Index % 2 == 0, Margin));
+			TestFalse(TEXT("A retention key never sorts before itself"), Before(BudgetKeys.Last(), BudgetKeys.Last()));
+		}
+		for (int32 A = 0; A < BudgetKeys.Num(); ++A)
+		{
+			for (int32 B = 0; B < BudgetKeys.Num(); ++B)
+			{
+				if (Margin == 0.0f)
+					TestEqual(TEXT("Zero margin exactly preserves every raw ordering decision"),
+						Before(BudgetKeys[A], BudgetKeys[B]), Before(RawKeys[A], RawKeys[B]));
+				for (int32 C = 0; C < BudgetKeys.Num(); ++C)
+					if (Before(BudgetKeys[A], BudgetKeys[B]) && Before(BudgetKeys[B], BudgetKeys[C]))
+						TestTrue(TEXT("Budget retention ordering remains transitive"), Before(BudgetKeys[A], BudgetKeys[C]));
+			}
+		}
+		TArray<FFPEnemyRenderPriorityKey> Sorted = BudgetKeys;
+		Sorted.Sort(Before);
+		for (const bool bReverse : {false, true})
+		{
+			TArray<FFPEnemyRenderTopKEntry, TInlineAllocator<8>> Heap;
+			for (int32 Step = 0; Step < BudgetKeys.Num(); ++Step)
+			{
+				const int32 Index = bReverse ? BudgetKeys.Num() - 1 - Step : Step;
+				FPEnemyRenderTopKInsert(Heap, 3, Index, BudgetKeys[Index]);
+			}
+			for (int32 Index = 0; Index < 3; ++Index)
+				TestTrue(TEXT("Retention Top-K equals full sorting for either input order"),
+					Heap.ContainsByPredicate([&Sorted, Index](const FFPEnemyRenderTopKEntry& Entry)
+						{ return Entry.PriorityKey.TieBreakId == Sorted[Index].TieBreakId; }));
+		}
+	}
+	const FFPEnemyRenderPriorityKey NaNHolder = FPEnemyRenderBudgetPriorityKey(RawKeys[6], true, 1.0f);
+	TestFalse(TEXT("A retained NaN score does not become a valid score"), FMath::IsFinite(NaNHolder.Score));
+	const FFPEnemyRenderPriorityKey ValidZero{0.0f, 9, true, true};
+	TestTrue(TEXT("A finite score still outranks a retained nonfinite score within the same frustum"), Before(ValidZero, NaNHolder));
+	TestEqual(TEXT("Nonfinite retention configuration disables the score adjustment"),
+		FPEnemyRenderBudgetPriorityKey(RawKeys[0], true, std::numeric_limits<float>::quiet_NaN()).Score, RawKeys[0].Score);
+	const FFPEnemyRenderPriorityKey Outside{1.0f, 10, false, false};
+	const FFPEnemyRenderPriorityKey Expanded{0.0f, 11, false, true};
+	const FFPEnemyRenderPriorityKey Primary{0.0f, 12, true, true};
+	TestTrue(TEXT("New expanded-frustum priority is never blocked by an outside holder"),
+		Before(FPEnemyRenderBudgetPriorityKey(Expanded, false, 1.0f), FPEnemyRenderBudgetPriorityKey(Outside, true, 1.0f)));
+	TestTrue(TEXT("New primary-frustum priority is never blocked by an expanded holder"),
+		Before(FPEnemyRenderBudgetPriorityKey(Primary, false, 1.0f), FPEnemyRenderBudgetPriorityKey(Expanded, true, 1.0f)));
 	return true;
 }
 

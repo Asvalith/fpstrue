@@ -1,6 +1,78 @@
 # 多敌人场景性能优化：完整实验报告
 
-本报告只回答三个问题：敌人数增加时成本从哪里来；已实施策略实际减少了什么；敌人成本下降后，整帧为何仍受渲染链限制。结论按实验推进顺序组织，逐轮数据、异常样本、Trace 事件和文件对应关系集中放在[实验附录](../../PERFORMANCE_EVIDENCE.md)。
+本报告只回答三个问题：敌人数增加时成本从哪里来；已实施策略实际减少了什么；敌人成本下降后，整帧为何仍受渲染链限制。最新验收先列，其余历史实验按推进顺序保留；逐轮数据、异常样本、Trace 事件和文件对应关系集中放在[实验附录](../../PERFORMANCE_EVIDENCE.md)。
+
+## 2026-10-20 最新：战术准入闭环、启动修复与代码清理
+
+### 实现边界与删减
+
+沿用现有 Controller／BT／SurroundManager／Combat，没有新增生产源文件、Mass 或网络队列协议：真实感知 → 按目标请求 → FIFO／外环／外围候场 → 正式授予内圈 → 原生 MoveTo → 到位、朝向、范围和冷却检查 → 单次攻击许可 → 权威伤害。内圈席位跨挥砍保留，单次许可随攻击收尾；死亡、退出、失效对象、不可达和接近超时才回收席位。FIFO 保证空位出现时的先后，不保证仍持位者每挥一刀就轮换。
+
+请求账本是唯一去重和版本来源，旧移动反馈不能回收新授予；伤害窗口另捕获原 Manager 和分配版本，撤销后立即禁止结算，重新授予同一 Actor 也不能复活旧窗口。外围路径初次提交及后续决策复用时检查剩余路径，不检查已走过的前缀；这是软准入边界，允许 RVO／击退造成被动入圈后向外恢复，不是逐帧物理空气墙。黑板仅镜像，旧七键树继续兼容，新增战术调试键仅在新建／安全升级默认资产后出现，不覆盖策划自定义树。
+
+删除无槽追玩家中心的回退、旧最近外环晋升路径、Controller 重复归还攻击许可、空闲 ResetCombat 的重复清理、管理器第二轮失效表扫描、只写不读的本地 MoveBudget 镜像及分配 SlotIndex 输出。保留服务器端权限、生命周期、请求版本和异步身份检查；不为缩行删除提交时的实时校验。
+
+敌人行为树必须实际启动并对应本次 Pawn，才允许登记；上下文注入不能复活失败启动，重复 Stop 同代短路。玩家出生保持真实碰撞，最多初次加三次恢复；耗尽后明确拒绝，握手栈不能再发 Accepted。固定压测先等两位已握手、存活且有 Pawn 的玩家，再生成 160 AI；没有换出生锚点或放宽人数刷过门禁。
+
+### 构建与功能验收
+
+Editor／Shipping 编译通过。DLL SHA256 `3C9329796E50C2757C67B7CBD9D43C0DE0CD10971C2644C553B40D0000C1697F`，Shipping EXE `9C8BEE174D3CC57E724DC68004F805A836EA7BF2FA7766EE1659B3F70CD2EFED`。新 Stage 在 `D:/UEBuild/FPSTactical_20261020/Stage/Windows/`，实际 EXE 与编译产物哈希相同；本轮原生代码变化复用已有、同引擎的 VersionCookedContent 缓存重新 IoStore／Stage，并非再次完整 Cook 素材。旧包和失败证据未删除。日志在 `C:/UEBuild/FPSTactical_20261020/`。
+
+完整自动化严格限三轮：R1 **93／101**，R2 **99／101**，R3 **101／101（87 clean、14 warned，0 failed／notRun）**。修正夹具的脚底高度、真实到位、暂停语义及已销毁弱引用，保留原断言；另验证有席位但未到位必须拒绝。新 4 条警告均为出生碰撞／耗尽故障注入，旧 26 条归一临时对象编号后逐条一致，没有隐藏新增警告。工具自测 62、网络解析 65、延迟解析 22 通过；批准清单和注册均为 101，清单 SHA256 `42f87daff38ea613ff220422f0e74125f18e530bbbef271892e82a6f77c19196`。离线读取报告的 `FreshnessChecked=false` 保留原义，本轮来源由独立新目录、实际进程日志和构建身份共同记录，不伪称离线读取完成了调用时新鲜度门禁。
+
+- 正常网络 `PvpSmoke_20261020_174422_310d4c98`：34 发预测／执行／最终 ACK，0 异常拒绝／漏 ACK／重复表现；移动命中、PvE、死亡重生及硬停进程后的状态恢复通过。
+- 弱网 `PvpSmoke_20261020_174551_62424689`：每发送方向额外延迟 100 ms、波动参数 20 ms、丢包 2%，严格门槛通过；36 发完整执行确认，0 异常拒绝／漏 ACK／重复表现，PvE 与重连通过。这些是注入参数，不是测得 RTT，也不是 160 AI 弱网容量。
+
+两轮均为本机 Editor 专服＋双 NullRHI 客户端，不替代公网、双画面、连续动画观感或原进程自动重连验收。
+
+### 新的 160 AI 正式基线
+
+`C:/UEBuild/FPSBaselines/Tactical160_20261020_B1/` 六个 case 全有效，18 个进程自然 exit0。与此前平地六凸包 B1 保持地图、160 活 AI、2 玩家、seed1337、Player 相机、1600×900、High、20 秒预热／60 秒采集、Parallel／Simple／Tiered、Inherited pacing／occlusion；仅一个客户端真实 DX12 渲染，另一客户端 NullRHI，共用同类 Editor DS。正式采集未开 Trace／线程 CPU 计时。
+
+| 指标 | Editor 客户端三轮 | Shipping 客户端三轮 |
+| --- | ---: | ---: |
+| 各轮平均帧末间隔 / ms | 20.754、20.945、19.872 | 11.619、12.030、11.718 |
+| 三轮均值 / ms | 20.524 | 11.789 |
+| 各轮 P95 均值 / ms | 26.940 | 17.011 |
+| 超过 16.667 ms 比例均值 | 89.807% | 5.880% |
+| Editor DS World 墙钟均值 / ms | 14.028 | 14.456 |
+| DS 两连接合计发出 / KiB/s | 52.581 | 51.841 |
+
+帧末间隔不是 Present，World 墙钟包含依赖等待；带宽是稳定连接累计计数，含引擎协议记账。新队列改变实际站位和活动分布，不能将与旧 B1 的差值归为单一缓存或评分优化收益；网络字节没有显著下降，不宣称完成新的压缩／AOI／每连接调度。Shipping 约 5.9% 帧超过 16.67 ms，仍非稳定 60 FPS，更不是 Shipping DS／公网／双渲染容量。
+
+160 棵树在每次人口校验中均运行。六轮 STOP：服务器 Gameplay Full **157～160**，均有距离原因、Unknown=0；客户端 Full Render **12**，共享姿态 **142～147**、独立 Mesh Tick **13～18**。两个管理器各持有 8 内环、12 外环，实际缓存点均可用；总队列 **33～41**（包含 24 个外环持有者），单管理器短攻击许可为 0～7，未越过内圈资格和容量。不把 160 个存活／运行的 AI 说成 160 个同时攻击者，也不把候场说成停止感知／伤害。
+
+### 当前构建的执行／等待归因
+
+`Tactical160_20261020_Trace_R1` 是独立服务器 Trace，客户端只保留 CPU／pacing 采样，没有新客户端 RHI／GPU Trace。`Tactical160_20261020_Analysis/CaptureWindow.json` 用完整帧序列唯一校准 **1339 帧**、58.0045088～119.764358 s；原生聚合、完整事件和 Exclusive 分区闭合。结果在 `CurrentAnalysis.json`，导出器正常 exit0。
+
+| 同一诊断窗口的 scope | 平均 / ms | 解释 |
+| --- | ---: | --- |
+| FEngineLoop::Tick | 46.123 | 整帧墙钟，不是执行 CPU |
+| Game thread idle time | 29.686 | 引擎节拍补足等待，位于 UpdateTimeAndHandleMaxTickRate，不是网络判定 |
+| Char Tick | 5.487 | 角色移动父项 |
+| Phys SetBodyTransform | 1.934 | 已包含在移动链内，不另加到 5.487 |
+| ServerReplicateActors | 3.899 | Actor 复制工作，不等于网卡等待 |
+| 整体 Significance 协调入口 | 0.050 | 插件评分子项约 0.015，不是主要成本 |
+| 玩家 FootIK Solve | 0.474 | 不作为敌人 IK 或当前主要瓶颈 |
+
+物理变换共 928,011 次：同一移动收尾中，根体及六个 Enemy HitProxy 各 132,573 次；六代理子链合计约 **1.508 ms**。说明骨骼物理退出不等于查询体零维护，实际位置／朝向变化仍需更新，不能盲关碰撞来刷成绩。`WaitUntilTasksComplete` Inclusive 10.341 ms 中大量是内嵌实际工作，Exclusive 仅约 0.680 ms，不能把整段叫空闲。
+
+四条真实 Worker 共记录 5,526 个 `SkeletalComponentAnimEvaluate_WorkerThread` 和 5,526 个 `ProxyUpdateAnimation_WorkerThread`；两类嵌套，不相加为独立姿态次数，也不宣称所有动画都并行。原生 GetThreadTimes 的 GT 帧／World CPU 均值为 **15.357／13.945 ms**，不是墙钟减 idle。实际 NetDriver／安全重读目标为 30 Hz，边界 FApp overshoot 约 12.1 ms；无 OS 调度 ETL，不能精确拆成 Ready／Blocked／抢占。结论是先看 Full 档移动（含根代理维护）与复制，不再优先重写 0.05 ms 的评分系统。
+
+### 原生地面缓存 CPU 对照：未确认稳定收益
+
+同一构建再做三对独立 Editor 诊断，固定 160 AI／2 玩家和原正式场景，仅 `ContinuousFloorChecks` 在原生缓存与持续检查之间切换；只启用原生线程 CPU／pacing 采样，无 Trace，不混入正式帧率基线。运行顺序为 Cache1、Continuous1、Continuous2、Cache2、Cache3、Continuous3。目录前缀 `C:/UEBuild/FPSBaselines/TacticalFloorCpu_20261020_`，六 case 全有效，CPU API 失败数为 0、有效区间等于完整采样帧数，160 棵树持续运行，18 个进程自然 exit0。
+
+| 对照轮次 | 缓存 World CPU / ms | 持续检查 World CPU / ms | 持续检查减缓存 / ms | 缓存／持续检查 DS 帧末间隔 / ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 13.110 | 13.513 | +0.403 | 46.028／46.657 |
+| 2 | 12.747 | 13.056 | +0.308 | 45.568／45.879 |
+| 3 | 10.357 | 8.156 | -2.201 | 39.057／35.250 |
+
+前两对为小幅局部差值，第三对反向，不能平均后宣称稳定缓存收益或因果回退。六轮目标读回均为 30 Hz，但实际服务器节拍明显变化；第三轮持续检查结束点 overshoot 为 0，之前五轮结束点为 11.6～13.6 ms。活动分布也不相同（各轮移动数量范围 8～73、短时攻击数量范围 1～9），固定 seed／人数不代表整段轨迹逐帧相同。保留全部样本、停止扩大本轮采集；原生缓存失效修复有功能回归支持，但本轮没有独立证明它带来稳定整帧／CPU 降幅。
+
+以下为各冻结版本的历史实验，数值不升级为当前版本结论。
 
 ## 2026-09-29：小装饰物距离剔除与补充 LOD（无整帧收益，已撤回）
 
@@ -514,3 +586,79 @@ Frame 平均节省 0.676 ms、P95 节省 0.719 ms。Draw Calls 未得到实质�
 修后 Editor DLL SHA256 为 `9A3A4A260ADC35D840F06209597960DA02C244FF20BF227488ECDA0216BAA0E6`，实际 `Stage_QueryResponse/Windows/fpstrue/Binaries/Win64/fpstrue-Win64-Shipping.exe` 为 `6EC48133960A46ED4321F84EA86D69C7A78FA0F817FB67D1C0BBF22456B86D2B`。两目标编译通过；仅原生逻辑改变、UHT 无生成变更，重新 Stage 使用同一既有 Cook 数据，旧包与旧日志均保留。不是新 Linux Server／公网配对验收。
 
 最终离线工具复验为交付 62 项、网络解析 65 项、逐发计时解析 22 项及 Render-wait 层级／边界自测通过。功能冗余检查保留生命周期、重入、射击准入与执行期二次校验，不为减少行数删除必要保护。提交包含已授权的敌人 IK／复杂地形专项撤除及对应平地场地、实现、测试、工具和文档；用户原有 `Content/StarterContent/Architecture/Floor_400x400.uasset` 改动明确排除并保留在工作树。
+
+### 2026-10-20 六凸包最终链路：实现与 B1 验收
+
+本轮不再把旧 Chaos 数据当作当前热点，也不因服务器 Gameplay Full 就推断本地 Render／共享全部失效。没有新增源码碎片文件；主要改动保留在既有 EnemyCharacter、Performance 协调器、BenchmarkRunner 与原测试文件。
+
+- **六凸包**：头、躯干、双臂、双腿使用六个根变换驱动的查询组件，共用 `SM_EnemyHitConvex` 预烘焙资源；资源只有一个真实 16 顶点凸包，不是用球／胶囊改名。160 敌人服务器实际 960 query／physics states、960 convex、0 other shapes、1 unique hull asset；客户端同名组件的 query／physics states 均为 0。不可见代理排除 Render 预算；死亡先关闭代理，再恢复原 PhysicsAsset 布娃娃。**不逐骨骼贴合挥动四肢，也不新增 AI 历史回溯；玩家 PvP 回溯不变。六个代理不是比原来两个更便宜的几何。**
+- **Full 档内部减重复工作**：默认关闭 CMC `Always Check Floor`，复用原生静止静态地面查询缓存，移动／动态基座／瞬移／强制检查仍走原生查询。只在原 EnemyCharacter 文件增加薄 CMC 子类，撤销已销毁、未注册或已移除物理状态基座的缓存资格，其余交回 `Super::FindFloor`。保留蓝图显式启用连续检查的特殊场景，不强制覆盖设计配置。
+- **策略消费者清晰化**：唯一姿态提交入口更名 `ApplyAnimationAndRenderPolicy`；权威分支读 Gameplay 档位，本地分支读 Render 档位。增加最近一次真实 Gameplay 采样的距离／攻击／非攻击近战保护原因、时间与实际组件设置；不再用客户端默认 Full 冒充服务器统计，也不增加玩家查找或 LOS。
+- **本地预算稳定性**：Full、阴影、光追分别保留上轮持有者，小幅保留余量只用于排序；不修改原始分数，不越过视锥资格，不突破名额。关闭、缩容、死亡和退出会释放对应持有者。它是画面稳定性改进，不冒充协调器 0.05 ms 的大幅提速。
+
+Editor 与 Shipping 编译通过，新资源完成 Cook／IoStore／Stage。Editor DLL SHA256 `5900912B057E312D20C711DA2689E05AC9DAD92AE01458006A6FC2D2897788E7`；本轮实际 Stage EXE `F5F896495B9D48EA676AB0B52EC86519A08FA4B3F6F94D7ADB27D52D87B77ECD`。构建、资源生成与打包日志位于 `C:/UEBuild/FPSFinalChain_20261020/`。最终 `Automation_Final/index.json` 为 **96 passed（83 clean、13 warned），0 failed／notRun**。`Automation_R1` 和 `Automation_FloorGuard` 各有一次 95／96，分别保留真实地面组件生命周期漏洞及编辑器首秒 Falling 测试夹具问题；没有删断言刷绿。
+
+`FinalChain160_20261020_B1` 固定 seed1337、160 活 AI、两连接、平地 ArenaOverview55x192；Editor DS NullRHI，两种客户端各三轮交错运行，仅 Client1 真实 DX12 渲染，Client2 NullRHI。固定 Player 相机、1600×900、High／内部比例 87%、预热 20 s、采样约 61 s，Parallel／Simple 六凸包／Tiered、Inherited pacing／occlusion；未开 Trace／线程 CPU 诊断。六个 case 全有效，18 个进程自然 exit0。
+
+| 本轮固定条件 | Editor 客户端三轮 | Shipping 客户端三轮 |
+| --- | ---: | ---: |
+| 各轮平均帧末间隔 / ms | 23.760、23.061、24.481 | 12.579、13.960、12.556 |
+| 三轮均值 / ms | 23.767 | 13.031 |
+| 各轮 P95 的均值 / ms | 31.342 | 19.226 |
+| 同类 Editor DS World 墙钟均值 / ms | 13.553 | 14.401 |
+| DS 两连接合计发出 / KiB/s | 49.187 | 51.396 |
+
+帧末间隔含等待，不是 Present 间隔／stat-unit GT。World 墙钟含依赖等待，不是 on-core CPU。发包来自连接计数器，含协议记账，不是 Actor payload 或网卡抓包。Editor／Shipping 客户端共用同类 Editor DS，不能宣称 Shipping DS、公网容量或双渲染客户端容量。B1 几何、组件、预算保持与前批不同，**不拿旧 B3 两代理数值相减计算纯收益**。
+
+六轮 STOP 的服务器 Gameplay 为 157～160 Full、0～3 Reduced、0 Background；Full 距离原因同为 157～160、Unknown=0，最近玩家距离约 0.80～15.41 m。攻击原因 8～16、非攻击近战原因 2～9，可重叠；不是锁定／寻路／Top-K 把全场锁 Full。完整权威姿态保护只有 8～16。客户端 Full Render 恒为 12，实际共享姿态 134～141、独立 Mesh Tick 19～26；Editor R1 STOP 模型预测 LOD0／1／2=17／52／91。**这证明 Render 分级和共享在消费，而非全部失效；共享动画不消除每个角色的蒙皮和绘制成本。**
+
+B1 实际 NetDriver 和安全重读引擎目标均为 **30 Hz**，`t.MaxFPS=0` 不解锁专服。Editor R1 边界 FApp delta 46.122／46.228 ms、idle 31.700／32.458 ms、overshoot 12.788／12.894 ms；这些是采集边界，不当作全窗平均。源代码的专服默认 `SleepNoStats(WaitTime)` 路径与 `ActualWait-WantedWait` 定义已核对。未采 ETL，不能确定超时内 Ready／唤醒／抢占的精确占比；降低 World 工作也可能只是增加目标补足等待，不能单看服务器 FPS 证明优化。
+
+**另一个约束是间隔与真实 Tick 预算不匹配，而非入口没跑。** Movement／动画 Reduced 默认 33.3 ms、Background 50 ms；当前约 46.7 ms 服务器帧中，Reduced 几乎仍每帧，Background 也不能描述为“每四帧”。UE Tick 会抵扣 overrun，不能直接向上取整推断调用周期。本轮无 Background 人口，不能用它证明远档节流收益。行为树则是间隔决策：普通追击 Full／Reduced／Background 为 250／375／500 ms，远距为 500／750／1000 ms，Idle 为 1000／1500／2000 ms；攻击响应维持 100 ms，并有即时唤醒，不等于整个 Controller／感知／PathFollowing 停 Tick。复制上限为 30／15／5 Hz，Full 还受当前服务器实际约 21.4 帧／秒约束；这些是策略上限，不是每个 Actor 实发频率保证。
+
+同构建本地 NullRHI 功能回归 `Saved/Networking/PvpSmoke_20261020_140056_00e11aa4/Report.json` **Passed**：PvP、换弹／自动换弹、移动靶历史命中、AI 双向伤害、死亡重生及断线恢复。34 发有完整预测／权威执行／ACK，0 非预期拒绝、漏 ACK、重复表现；34 次执行不等于 34 次几何命中。不是弱网、画面恢复或公网新验收。
+
+原始证据：[B1 汇总](/C:/UEBuild/FPSBaselines/FinalChain160_20261020_B1/summary.json)、[B1 原始结果](/C:/UEBuild/FPSBaselines/FinalChain160_20261020_B1/results.json)、[96 项回归](/C:/UEBuild/FPSFinalChain_20261020/Automation_Final/index.json)、[本地联网回归](/E:/ueprojrct/fpstrue_safe2/Saved/Networking/PvpSmoke_20261020_140056_00e11aa4/Report.json)。
+
+### 六凸包地面缓存 CPU 对照：两对有效，第三对被人口门禁拒绝
+
+为避免把限帧空闲算作收益，本轮增加脚本独立 `CpuDiagnostic`：仅服务器与渲染端启用已有原生 `GetThreadTimes` 计量和逐帧 pacing，不采 Trace／引擎 CSV；明确标记 `DiagnosticOnly=true / FormalBaseline=false`，默认正式基线行为不变。脚本 AST／角色启动／缺失 CPU 反例与汇总 null 边界共 25 项离线检查通过，不冒充游戏用例。
+
+计划同六凸包、Parallel／Tiered、Editor、160 AI、两连接、相同相机画质、继承 30 Hz，交错执行缓存／连续地面查询三对。连续组只在完整人口就绪后一次设置 `bAlwaysCheckFloor=true`，原生读回 160；缓存组读回 0。`FinalFloorCpu_20261020_Cache_R1` 在采样前因缺少有效玩家失败，保留原始反例。只允许一个新批次 `FinalFloorCpuB2_20261020_*`，完成前两对，第三对首个 Cache case 再次同类失败，即停止；未运行 Continuous R3，未再刷重试。
+
+| 有效诊断 / ms 每完整帧 | 缓存 R1 | 连续查询 R1 | 连续查询 R2 | 缓存 R2 |
+| --- | ---: | ---: | ---: | ---: |
+| GT 实际累计 CPU / 帧 | 7.005 | 11.514 | 11.232 | 10.040 |
+| World 内 GT 实际 CPU / 帧 | 6.032 | 10.470 | 10.271 | 9.027 |
+
+这是两对实际观察，不是计划中的三对验收。相同数量／seed 不保证群体决策和移动活动逐帧一致，且缓存两轮本身有明显波动，**不据此宣称固定百分比收益或“性能优化已全部验收”**。这批实际周期约 33.3 ms，首次缓存组边界 idle overshoot 为 0／0.426 ms；与先前 B1 的约 12.8 ms 不同，说明超时并非固定 AI 成本。没有更改网络 TickRate、全局定时器或电源设置，也不能据这次帧间隔恢复就宣布 Windows 调度问题已修复。
+
+第二次失败证据为 `FinalFloorCpuB2_20261020_Cache_R3/Editor_Parallel_R1_CpuDiagnostic/Server.log:1268–1273`：渲染客户端较晚加入，固定 `GroupBaselineClient1` 出生点 `(-350,-900,100)` 碰撞导致 Pawn 生成失败；连接确认仍记录 `Pawn=None / PawnNetGuid=0`。Client2 随后是 `Enemies=160 / Players=1 / frames=0`，Client1 留在 STARTING。当前握手确认与出生成功没有形成闭环，也没有有界角色恢复。固定 Tag 入口绕过通常空位筛选；日志**没有记录阻挡者**，不能归因于六凸包（代理对 Pawn 为 Ignore）。生产出生失败恢复与基线入场排程需要独立修复，不能靠强制重叠生成、降低人数门禁或无限重试掩盖。
+
+已停止本次所有测试进程。未启动新的六凸包 Trace，不将旧 B3 的真实 Worker 动画派发冒充本轮新 Trace。并行资格／开关已读回，当前构建的逐线程执行验收仍需在出生闭环修复后补齐。
+
+证据：[缓存 R1](/C:/UEBuild/FPSBaselines/FinalFloorCpuB2_20261020_Cache_R1/summary.json)、[连续 R1](/C:/UEBuild/FPSBaselines/FinalFloorCpuB2_20261020_Continuous_R1/summary.json)、[连续 R2](/C:/UEBuild/FPSBaselines/FinalFloorCpuB2_20261020_Continuous_R2/summary.json)、[缓存 R2](/C:/UEBuild/FPSBaselines/FinalFloorCpuB2_20261020_Cache_R2/summary.json)、[第三对拒绝原因](/C:/UEBuild/FPSBaselines/FinalFloorCpuB2_20261020_Cache_R3/Editor_Parallel_R1_CpuDiagnostic/result.json)。
+
+### 最终链路审计：旧 B3 Client Trace 等待归因
+
+本节只离线分析此前 `Simple160Trace_20261020_B3/Editor_Parallel_R1/Client1.utrace`，属于**旧头部球体＋身体胶囊两代理版本**，不是六凸包的新基线或新验收。未重新启动游戏／采集。Client1 原始帧表与连续 `FEngineLoop::Tick` 全序列匹配，唯一有效完整窗口为 **49.5956109～111.732822 秒，共 3207 帧**；客户端、服务器各用自己的已验证窗口，不能将两端 Trace 秒数直接当作同一时钟。
+
+| 客户端窗口内范围 | 每完整 GT 帧归一化 / ms | 含义与边界 |
+| --- | ---: | --- |
+| 帧末间隔／GT 被调度 CPU | 19.375／6.217 | 后者来自 Windows `GetThreadTimes`，两者之差不是纯阻塞 |
+| GT `Frame Sync Time` | 11.957 | 下含 `GameThreadWaitForTask` 11.947 和 `Game thread idle time` 11.946，不能相加 |
+| RT `OcclusionSubmittedFence Wait` | 4.181 | 等待既往遮挡提交命令的 RHI thread fence，不是 GPU 遮挡 pass 耗时 |
+| RT `WaitForGatherDynamicMeshElements` | 2.542 | 等待可见性／遮挡／动态网格命令管线；其中显式 `WaitForTasks` scope 约 2.532 |
+| RHI `RHI_Translate` | 13.611 | CPU 线程处理 RHI 命令的 scope，不是 GPU 执行时间 |
+| RHI `GPUSkinCache` | 5.757 | 嵌在上一行，包含 `GPUSkinCache_UpdateSkinningBatches` 4.705；不能再加 |
+| RHI `Submission_Wait` | 1.190 | 等待 CPU 提交队列的提交完成事件，不等同于 GPU 完成 |
+
+GT 的主要等待链为 `FFrameEndSync::Sync → FRenderCommandFence::Wait → GameThreadWaitForTask`，属于渲染／RHI 流水线依赖，不是等待服务器网络包，也不是前一节专服的 31.737 ms 节拍等待。同名 `Game thread idle time` 在不同父调用下含义不同，必须连父调用一起看。引擎帧同步还受 `r.OneFrameThreadLag`、`r.GTSyncType` 等配置影响；本次旧采集没有这些值的完整运行时读回，不唯一指定某个 fence ID。
+
+两种 RT 等待也不能混称“GPU 查询”：`WaitOcclusionTests` 在本机 UE5.5 `SceneOcclusion.cpp:1561` 调用 `WaitOnRHIThreadFence`，等 RHI 命令到达此前的提交栅栏；`SceneVisibility.cpp:4718` 的 Gather 等待则等待 `DynamicMeshElementsPipe`，该接口允许帮助执行 RT 任务，但本次全窗口及选出的完整帧中，主要嵌套的是显式等待调用。中位完整帧 **18.6858 ms** 内，前者 5.0530 ms 中有 `WaitForTasks` 5.0396 ms，后者 2.3889 ms 中有 2.3804 ms；P95 完整帧 **25.2962 ms** 内分别为 7.4833／7.4685 ms、3.7870／3.7623 ms。它们不是 OS Blocked 时长。
+
+Worker 上确实另有 `ExecuteForegroundTask → ExecuteTask → OcclusionCullPipe → SyncPoint_Wait`：中位帧 `Background Worker #10` 为 2.4055 ms，P95 帧 `Foreground Worker #0` 为 3.6530 ms。源级路径是硬件遮挡查询 `RHIGetRenderQueryResult(..., true)` 等 GPU sync point，并通过 D3D12 interrupt 处理完成。它与 RT Gather 等待在同一客户端时钟重叠，但**没有 TaskID／fence 唯一 ID 的连接证据，不能宣称它就是每次 RT 等待的唯一生产者**。同理，未采 OS 调度 ETL，仍不能把 Ready／被抢占与 OS Blocked 完全分开；RHI CPU 皮肤任务也不能标成 GPU 皮肤执行耗时。以上全部 Inclusive／嵌套／并行范围都不相加为整帧成本。
+
+原生渲染参数优先做独立对照：当前项目及旧 Client1 日志确认 `r.NumBufferedOcclusionQueries=2`；`Buffer3` 只测试 3，接受多一帧历史的视觉风险。`HZB` 只测试 `r.HZBOcclusion=1`，不与 Buffer3 叠加；本机 UE5.5 源码初值实际为 0，帮助文案的“default 1”不能作为读回。HZB 的 `MapResults` 仍可能在 readback lock 等待，RHI 提交栅栏也不因 HZB 自动消失，因此不能预先宣称消除所有等待。新轮次必须读回实际 CVar，保持 160 AI、相机、画质、服务器和线程模式不变，旧 Trace 不升级为新策略的性能成绩。
+
+证据：[离线审计小结](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/WaitAuditSummary.json)、[3207 帧窗口校准](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/ClientCaptureWindow.json)、[客户端 GT 调用树](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/ClientGTCalltree.csv)、[RT 绘制调用树](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/ClientRTDrawCalltree.csv)、[RHI CPU 命令调用树](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/ClientRHIExecuteCalltree.csv)、[中位完整帧层级分析](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/ClientMedianWaitAnalysis.json)、[P95 完整帧层级分析](/C:/UEBuild/FPSDiagnostics/FinalWaitAudit_20261020/ClientP95WaitAnalysis.json)。短窗各有 25,870／27,835 个有效 CPU 事件，层级检查通过；导出器对没有 CPU timeline 的线程可能错误复用 GPU timeline 0，分析前仅剔除每窗 64 个被元数据明确标成 GPU 的别名事件，原始短窗及剔除清单均保留，不静默把 GPU 计入 CPU。无新的游戏通过记录。

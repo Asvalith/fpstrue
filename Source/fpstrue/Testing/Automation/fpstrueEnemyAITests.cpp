@@ -32,6 +32,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Tests/AutomationCommon.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavigationData.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AIPerceptionSystem.h"
 #include "Perception/AISenseConfig_Hearing.h"
@@ -65,6 +66,13 @@
 // 行为决策、感知与寻路：先验证默认结构，再验证实际运行与资产接线。
 namespace
 {
+// 保持真实树已启动且未暂停，只隔离后台采样。单独关 Enabled 会被 UE ScheduleNextTick 重新打开。
+void DisableAutomaticBehaviorTick(UBrainComponent& Brain)
+{
+	Brain.SetComponentTickEnabled(false);
+	Brain.PrimaryComponentTick.bCanEverTick = false;
+}
+
 // 经真实感知组件派发成功/失败刺激，保留回调链；只固定输入，不替代 Controller 的处理逻辑。
 bool ReportBehaviorSightStimulus(AfpstrueEnemyAIController* Controller, AActor* Target, bool bSensed,
 	const FVector& StimulusLocation, FAutomationTestBase& Test)
@@ -260,7 +268,7 @@ bool FFPEnemyBehaviorTreeStructureTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Engine default SelfActor key is preserved"), Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey,
 			  bHadEngineSelfKey);
 	TestTrue(TEXT("Required blackboard keys have correct types"), FPHasEnemyBlackboardSchema(Blackboard));
-	TestEqual(TEXT("Default schema includes independent retreat state"), Blackboard->Keys.Num(), 7);
+	TestEqual(TEXT("Default schema includes independent retreat and tactical state"), Blackboard->Keys.Num(), 10);
 	UBTComposite_Sequence* Root = Cast<UBTComposite_Sequence>(Tree->RootNode);
 	if (!TestNotNull(TEXT("Decision cycle is a real Sequence"), Root))
 		return false;
@@ -338,7 +346,7 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Upgrading a current default tree is idempotent"),
 		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
 	TestTrue(TEXT("Current default upgrade preserves the root instance"), Tree->RootNode == OriginalRoot);
-	Blackboard->Keys.RemoveAt(Blackboard->Keys.Num() - 1);
+	Blackboard->Keys.RemoveAt(Blackboard->GetKeyID(FPEnemyBlackboard::Retreating));
 	TestFalse(TEXT("Missing required key is rejected"), FPHasEnemyBlackboardSchema(Blackboard));
 	UBehaviorTree* LegacyTree = NewObject<UBehaviorTree>();
 	UBlackboardData* LegacyBlackboard = NewObject<UBlackboardData>(LegacyTree);
@@ -349,13 +357,15 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 	UBTTaskNode* OriginalSustain = LegacyChoice->Children[2].ChildTask;
 	LegacyChoice->Children.RemoveAt(1);
 	LegacyBlackboard->Keys.RemoveAt(LegacyBlackboard->GetKeyID(FPEnemyBlackboard::Retreating));
+	for (const FName Key : {FPEnemyBlackboard::TacticalRole, FPEnemyBlackboard::TacticalGoal, FPEnemyBlackboard::HasInnerSlot})
+		LegacyBlackboard->Keys.RemoveAt(LegacyBlackboard->GetKeyID(Key));
 	TestEqual(TEXT("Legacy fixture retains the original six-key schema"), LegacyBlackboard->Keys.Num(), 6);
 	TestFalse(TEXT("Legacy schema cannot run the new retreat contract before upgrade"), FPHasEnemyBlackboardSchema(LegacyBlackboard));
 	TestTrue(TEXT("A verified legacy native default tree upgrades in place"),
 		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(LegacyTree, LegacyBlackboard));
 	TestTrue(TEXT("Legacy upgrade preserves the original root"), LegacyTree->RootNode == LegacyRoot);
 	TestTrue(TEXT("Legacy upgrade preserves the original attack task instance"), LegacyChoice->Children[2].ChildTask == OriginalSustain);
-	TestEqual(TEXT("Legacy upgrade adds one independent retreat key"), LegacyBlackboard->Keys.Num(), 7);
+	TestEqual(TEXT("Legacy upgrade adds independent retreat and tactical keys"), LegacyBlackboard->Keys.Num(), 10);
 	TestTrue(TEXT("The upgraded legacy schema satisfies the full contract"), FPHasEnemyBlackboardSchema(LegacyBlackboard));
 	const UfpstrueBTTask_EnemyAction* LegacyRetreat = Cast<UfpstrueBTTask_EnemyAction>(LegacyChoice->Children[1].ChildTask);
 	TestTrue(TEXT("Legacy upgrade inserts retreat before the existing attack branch"),
@@ -372,7 +382,7 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(CustomizedTree, CustomizedBlackboard));
 	TestTrue(TEXT("Rejected upgrade preserves the designer root"), CustomizedTree->RootNode == CustomizedRoot);
 	TestTrue(TEXT("Rejected upgrade preserves the designer action"), CustomizedAction->Action == EFPEnemyBehaviorAction::Idle);
-	TestEqual(TEXT("Rejected upgrade preserves all Blackboard entries"), CustomizedBlackboard->Keys.Num(), 7);
+	TestEqual(TEXT("Rejected upgrade preserves all Blackboard entries"), CustomizedBlackboard->Keys.Num(), 10);
 
 	// 已有自定义键的资产不得被默认模板覆盖，拒绝后也不能留下半成品树。
 	UBehaviorTree* UnconfiguredTree = NewObject<UBehaviorTree>();
@@ -545,6 +555,8 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Rediscovery restores the real target and its newly seen position"),
 		First->GetTargetCharacter() == Target && First->LastKnownTargetLocation.Equals(Target->GetActorLocation()));
 	TestEqual(TEXT("Rediscovery cancels the old memory deadline"), First->TargetForgetTime, 0.0);
+	// 隐藏目标/共享缓存场景已经结束；独立近战场景不能从场景兜底查找重新拿到旧 Manager。
+	SharedManager->Destroy();
 	First->InitializeCombatContext(Target, nullptr);
 	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
 
@@ -886,7 +898,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
 	if (!TestNotNull(TEXT("Controller"), Controller)) return false;
 	Controller->Possess(Enemy);
-	Controller->GetBrainComponent()->StopLogic(TEXT("Move request fixture"));
+	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 	UPathFollowingComponent* Following = Controller->GetPathFollowingComponent();
 	if (!TestNotNull(TEXT("Engine path-following component"), Following)) return false;
 	int32 SubmittedCompletions = 0;
@@ -916,7 +928,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	AfpstrueEnemyAIController* OtherController = World->SpawnActor<AfpstrueEnemyAIController>();
 	if (!TestNotNull(TEXT("Another controller owns its own navigation"), OtherController)) return false;
 	OtherController->Possess(OtherEnemy);
-	OtherController->GetBrainComponent()->StopLogic(TEXT("Independent path ownership fixture"));
+	DisableAutomaticBehaviorTick(*OtherController->GetBrainComponent());
 	UPathFollowingComponent* OtherFollowing = OtherController->GetPathFollowingComponent();
 	if (!TestNotNull(TEXT("Another enemy retains its own path-following component"), OtherFollowing)) return false;
 	TestTrue(TEXT("Shared candidate locations do not share path-following state"), Following != OtherFollowing);
@@ -1229,9 +1241,29 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	Controller->Possess(Enemy);
 	Controller->InitializeCombatContext(Target, Surround);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
+	// 仅固定共享导航输出，资格仍经过生产队列、席位版本和 Controller 决策入口。
+	const auto SeedCombatSlots = [&](AfpstrueCharacter* Player)
+	{
+		Surround->SetTargetCharacter(Player);
+		Surround->PublishedTargetLocation = Surround->CachedTargetLocation;
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			FfpstrueSurroundSlot& Slot = Surround->SurroundSlots[Index];
+			Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = true;
+			Slot.ProjectedSlotLocation = Player->GetActorLocation() + FVector(250.0f, Index * 250.0f, 0.0f);
+			Slot.ProjectedApproachLocation = Enemy->GetNavAgentLocation() + FVector(0.0f, Index * 200.0f, 0.0f);
+		}
+		FFPEnemyTacticalAssignment Assignment;
+		const bool bGranted = Surround->GetOrRequestTacticalAssignment(Enemy, Assignment)
+			&& Assignment.Role == EFPEnemyTacticalRole::Inner
+			&& Surround->GetOrRequestTacticalAssignment(Probe, Assignment) && Assignment.Role == EFPEnemyTacticalRole::Inner;
+		Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+		return bGranted;
+	};
+	if (!TestTrue(TEXT("Both permit probes first acquire genuine inner leases"), SeedCombatSlots(Target))) return false;
 	// 直接驱动攻击入口，避免 BT 下一轮重新申请名额掩盖清理测试。
 	if (!TestNotNull(TEXT("Behavior brain"), Controller->GetBrainComponent())) return false;
-	Controller->GetBrainComponent()->StopLogic(TEXT("Combat lifecycle fixture"));
+	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 	FIntProperty* BudgetProperty = FindFProperty<FIntProperty>(Surround->GetClass(), TEXT("MaxActiveAttackers"));
 	if (!TestNotNull(TEXT("Editable attack budget"), BudgetProperty)) return false;
 	BudgetProperty->SetPropertyValue_InContainer(Surround, 1);
@@ -1310,6 +1342,25 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	// 本测试关注窗口/伤害规则；真实播放身份与停止重入由 ExplicitPlaybackAndStopReentry 覆盖。
 	Combat->BeginAttackWindow();
 	TestTrue(TEXT("A valid window enters Active"), Combat->AttackPhase == EFPEnemyAttackPhase::Active);
+	// 席位撤销必须立即封住最终结算，不等待下一轮 BT；同一个敌人重新获授也不能复活旧窗口。
+	UfpstrueHealthComponent* TargetHealth = Target->FindComponentByClass<UfpstrueHealthComponent>();
+	if (!TestNotNull(TEXT("Damage revocation probe uses the real player health"), TargetHealth)) return false;
+	const float BeforeRevokedHit = TargetHealth->GetHealth();
+	const uint64 OriginalLeaseRevision = Controller->TacticalAssignment.Revision;
+	Surround->ReleaseSurroundSlot(Enemy);
+	TestTrue(TEXT("Revocation probe still has an old Active window before BT cancellation"), Combat->AttackPhase == EFPEnemyAttackPhase::Active);
+	TestFalse(TEXT("Revoking an inner lease immediately rejects old-window damage"), Combat->TryApplyAttackDamage(Target));
+	TestEqual(TEXT("Revoked window cannot change player health"), TargetHealth->GetHealth(), BeforeRevokedHit);
+	FFPEnemyTacticalAssignment Regranted;
+	if (!TestTrue(TEXT("The same enemy can legitimately acquire a new inner lease"), Surround->GetOrRequestTacticalAssignment(Enemy, Regranted))) return false;
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	TestTrue(TEXT("Regrant has a different lease identity"), Regranted.Revision != OriginalLeaseRevision);
+	TestTrue(TEXT("The new inner lease is valid"), Surround->HasInnerSlot(Enemy, Regranted.Revision));
+	TestFalse(TEXT("Regranting the same actor cannot ABA-revive its old attack window"), Combat->TryApplyAttackDamage(Target));
+	TestEqual(TEXT("Regranted old window still cannot change player health"), TargetHealth->GetHealth(), BeforeRevokedHit);
+	Combat->ResetCombat();
+	if (!TestTrue(TEXT("A fresh transaction can capture the new lease"), Combat->TryAttackTarget())) return false;
+	Combat->BeginAttackWindow();
 	const FVector HistoricalSample(11.0f, 22.0f, 33.0f);
 	Combat->PreviousWeaponBase = HistoricalSample;
 	Combat->BeginAttackWindow();
@@ -1380,6 +1431,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	Surround->ReleaseAttackPermission(Probe);
 	Controller->InitializeCombatContext(Target, Surround);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
+	if (!TestTrue(TEXT("A restarted context obtains a new inner lease and revision"), SeedCombatSlots(Target))) return false;
 	TestTrue(TEXT("The stopped enemy can acquire a fresh permit"), Surround->TryAcquireAttackPermission(Enemy));
 	TestTrue(TEXT("A new context begins a fresh attack"), Combat->TryAttackTarget());
 	// 换目标不能让旧攻击改打新玩家；应取消旧事务，再由新事务捕获目标。
@@ -1389,6 +1441,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	ReplacementTarget->SetActorLocation(FVector(200.0f, 0.0f, 0.0f));
 	Controller->InitializeCombatContext(ReplacementTarget, Surround);
 	if (!ReportVisibleCombatTarget(Controller, ReplacementTarget, *this)) return false;
+	if (!TestTrue(TEXT("Replacement context reacquires target-owned leases"), SeedCombatSlots(ReplacementTarget))) return false;
 	TestFalse(TEXT("Replacing combat target cancels the old attack instead of retargeting its damage"), Combat->IsAttacking());
 	TestFalse(TEXT("Old target context is cleared"), Combat->AttackTarget.IsValid());
 	TestTrue(TEXT("Replacement target permits a new attack"), Combat->TryAttackTarget());
@@ -1535,12 +1588,12 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Old occupant"), OldEnemy) || !TestNotNull(TEXT("New occupant"), NewEnemy)) return false;
 	OldEnemy->SetActorLocation(Manager->SurroundSlots[0].ProjectedApproachLocation);
 	NewEnemy->SetActorLocation(Manager->SurroundSlots[2].ProjectedApproachLocation);
-	FVector FirstApproach;
-	FVector SecondApproach;
+	FFPEnemyTacticalAssignment FirstAssignment;
+	FFPEnemyTacticalAssignment SecondAssignment;
 	const uint32 SharedRevision = Manager->PositionQueryRevision;
-	TestTrue(TEXT("First enemy consumes the published shared result"), Manager->GetOrAssignAttackApproachLocation(OldEnemy, FirstApproach));
-	TestTrue(TEXT("Second enemy consumes the same published shared result"), Manager->GetOrAssignAttackApproachLocation(NewEnemy, SecondApproach));
-	TestFalse(TEXT("Shared candidates retain distinct occupied approach goals"), FirstApproach.Equals(SecondApproach));
+	TestTrue(TEXT("First enemy consumes the published shared result"), Manager->GetOrRequestTacticalAssignment(OldEnemy, FirstAssignment));
+	TestTrue(TEXT("Second enemy consumes the same published shared result"), Manager->GetOrRequestTacticalAssignment(NewEnemy, SecondAssignment));
+	TestFalse(TEXT("Shared candidates retain distinct occupied approach goals"), FirstAssignment.Goal.Equals(SecondAssignment.Goal));
 	TestEqual(TEXT("Consuming candidates does not run one query per enemy"), Manager->PositionQueryRevision, SharedRevision);
 	Manager->ReleaseSurroundSlot(OldEnemy);
 	Manager->ReleaseSurroundSlot(NewEnemy);
@@ -1548,6 +1601,7 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	Manager->SurroundSlots[0].Occupant = NewEnemy;
 	Manager->ReleaseSurroundSlot(OldEnemy);
 	TestTrue(TEXT("Stale slot mapping does not release the new occupant"), Manager->SurroundSlots[0].Occupant.Get() == NewEnemy);
+	Manager->GetOrRequestTacticalAssignment(OldEnemy, FirstAssignment);
 	Manager->EnemyToSlot.Add(TWeakObjectPtr<AfpstrueEnemyCharacter>(OldEnemy), 0);
 	OldEnemy->Destroy();
 	Manager->CleanupInvalidEntries();
@@ -1557,7 +1611,7 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	Manager->SurroundSlots[0].bHasProjectedApproachLocation = false;
 	Manager->SurroundSlots[2].bHasProjectedApproachLocation = false;
 	TestEqual(TEXT("An unreachable approach is never reserved based only on a valid standing point"),
-		Manager->FindBestFreeSlot(FVector::ZeroVector), INDEX_NONE);
+		Manager->FindBestFreeSlot(FVector::ZeroVector, 0), INDEX_NONE);
 	// 目标撤销后清空快照和所有站位，不允许下一轮复用旧玩家的分配。
 	Manager->ApproachQueryId = PublishedQueryId + 2;
 	const uint32 ClearedRevision = ++Manager->PositionQueryRevision;
@@ -1576,6 +1630,238 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Late success after EndPlay cannot revive a shared snapshot"), Manager->GetSharedTargetSnapshot(Snapshot));
 	TestEqual(TEXT("EndPlay releases every attack permit"), Manager->ActiveAttackers.Num(), 0);
 	TestFalse(TEXT("EndPlay stops the shared target timer"), World->GetTimerManager().IsTimerActive(Manager->SharedTargetTimerHandle));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueSurroundTacticalQueueTest,
+	"fpstrue.AI.Surround.TacticalQueueAndRecovery",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 固定已投影位置以隔离导航质量；请求、版本、FIFO、许可和回收均调用生产入口。
+bool FFpstrueSurroundTacticalQueueTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
+	UWorld* World = Fixture.GetTestWorld();
+	AfpstrueSurroundManager* Manager = World->SpawnActor<AfpstrueSurroundManager>();
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	if (!TestNotNull(TEXT("Queue manager"), Manager) || !TestNotNull(TEXT("Queue target"), Target)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->SetActorLocation(FVector::ZeroVector);
+	Manager->SetTargetCharacter(Target);
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	const int32 OuterIndex = Manager->InnerSlotCount;
+	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[0].ProjectedApproachLocation = FVector(120.0f, 0.0f, 0.0f);
+	Manager->SurroundSlots[OuterIndex].bHasProjectedSlotLocation = true;
+	Manager->SurroundSlots[OuterIndex].ProjectedSlotLocation = FVector(430.0f, 0.0f, 0.0f);
+	const auto SpawnEnemy = [World](float X)
+	{
+		const FTransform Transform(FVector(X, 0.0f, 0.0f));
+		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
+			AfpstrueEnemyCharacter::StaticClass(), Transform, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Enemy != nullptr)
+		{
+			Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+			Enemy->FinishSpawning(Transform);
+			Enemy->SetActorEnableCollision(false);
+		}
+		return Enemy;
+	};
+	AfpstrueEnemyCharacter* First = SpawnEnemy(1000.0f);
+	AfpstrueEnemyCharacter* Second = SpawnEnemy(1200.0f);
+	AfpstrueEnemyCharacter* Third = SpawnEnemy(1400.0f);
+	AfpstrueEnemyCharacter* Fourth = SpawnEnemy(1600.0f);
+	if (!TestNotNull(TEXT("First"), First) || !TestNotNull(TEXT("Second"), Second)
+		|| !TestNotNull(TEXT("Third"), Third) || !TestNotNull(TEXT("Fourth"), Fourth)) return false;
+	FFPEnemyTacticalAssignment A, B, C, D;
+	if (!Manager->GetOrRequestTacticalAssignment(First, A) || !Manager->GetOrRequestTacticalAssignment(Second, B)
+		|| !Manager->GetOrRequestTacticalAssignment(Third, C) || !Manager->GetOrRequestTacticalAssignment(Fourth, D)) return false;
+	TestTrue(TEXT("First valid request obtains the only inner position"), A.Role == EFPEnemyTacticalRole::Inner);
+	TestTrue(TEXT("Second request holds outer while still queuing for inner"), B.Role == EFPEnemyTacticalRole::Outer);
+	TestTrue(TEXT("Overflow receives a real peripheral waiting goal"), C.Role == EFPEnemyTacticalRole::Waiting && C.Goal.Size2D() > Manager->OuterRadius);
+	TestEqual(TEXT("Only requests without inner eligibility remain queued"), Manager->WaitingQueue.Num(), 3);
+	const uint64 SecondSequence = Manager->Participants.FindChecked(Second).RequestSequence;
+	FFPEnemyTacticalAssignment Repeated;
+	Manager->GetOrRequestTacticalAssignment(Second, Repeated);
+	TestEqual(TEXT("Repeated decisions do not requeue"), Manager->WaitingQueue.Num(), 3);
+	TestEqual(TEXT("Repeated decisions preserve FIFO identity"), Manager->Participants.FindChecked(Second).RequestSequence, SecondSequence);
+	TestEqual(TEXT("Repeated decisions preserve assignment revision"), Repeated.Revision, B.Revision);
+	TestTrue(TEXT("Inner lease permits one attack transaction"), Manager->TryAcquireAttackPermission(First));
+	TestFalse(TEXT("Outer occupancy is not permission to attack"), Manager->TryAcquireAttackPermission(Second));
+	Manager->bEnableActiveAttackerBudget = false;
+	TestFalse(TEXT("Disabling concurrency throttling cannot bypass inner eligibility"), Manager->TryAcquireAttackPermission(Third));
+	Manager->bEnableActiveAttackerBudget = true;
+	Manager->ReleaseAttackPermission(First);
+	TestTrue(TEXT("Ending one swing retains the long-lived inner lease"), Manager->HasInnerSlot(First, A.Revision));
+	Manager->ReleaseSurroundSlot(First);
+	Manager->GetOrRequestTacticalAssignment(Second, Repeated);
+	TestTrue(TEXT("FIFO outer holder advances to the freed inner position"), Repeated.Role == EFPEnemyTacticalRole::Inner);
+	TestFalse(TEXT("Promotion invalidates the previous outer revision"), Manager->HasInnerSlot(Second, B.Revision));
+	FVector Goal;
+	TestFalse(TEXT("An old movement assignment cannot resolve after promotion"), Manager->ResolveTacticalMoveGoal(Second, B, Goal));
+	Manager->ReportTacticalMoveFailure(Second, B.Revision);
+	TestTrue(TEXT("Old failure callback cannot release a newer lease"), Manager->HasInnerSlot(Second, Repeated.Revision));
+	Manager->GetOrRequestTacticalAssignment(Third, C);
+	TestTrue(TEXT("Vacated outer position is filled from the same FIFO"), C.Role == EFPEnemyTacticalRole::Outer);
+	const uint64 Released = Manager->TacticalReleaseCount;
+	const uint64 Granted = Manager->TacticalGrantCount;
+	Manager->ReleaseSurroundSlot(First);
+	TestEqual(TEXT("Repeated release does not release resources twice"), Manager->TacticalReleaseCount, Released);
+	TestEqual(TEXT("Repeated release does not grant duplicate positions"), Manager->TacticalGrantCount, Granted);
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> DeadKey(Second);
+	Second->Destroy();
+	Manager->CleanupInvalidEntries();
+	Manager->PumpTacticalQueue();
+	TestFalse(TEXT("Destroyed participant is erased by its original weak identity"), Manager->Participants.Contains(DeadKey));
+	Manager->GetOrRequestTacticalAssignment(Third, C);
+	Manager->GetOrRequestTacticalAssignment(Fourth, D);
+	TestTrue(TEXT("Weak-key cleanup also triggers the next inner promotion"), C.Role == EFPEnemyTacticalRole::Inner);
+	TestTrue(TEXT("Promotion cascades a waiting participant into outer"), D.Role == EFPEnemyTacticalRole::Outer);
+	Manager->Participants.FindChecked(Third).LastProgressTime -= Manager->SlotApproachTimeout + 1.0;
+	Manager->CleanupInvalidEntries();
+	Manager->PumpTacticalQueue();
+	Manager->GetOrRequestTacticalAssignment(Third, Repeated);
+	TestTrue(TEXT("No-progress holder returns to stable peripheral waiting during retry delay"), Repeated.Role == EFPEnemyTacticalRole::Waiting);
+	TestTrue(TEXT("Timeout preserves the participant's original peripheral location"), Repeated.Goal.Equals(Manager->CachedTargetLocation + Manager->Participants.FindChecked(Third).WaitingOffset));
+	TestEqual(TEXT("No-progress timeout is observable"), Manager->TacticalTimeoutCount, static_cast<uint64>(1));
+	TestTrue(TEXT("Next FIFO request receives the freed inner lease"), Manager->HasInnerSlot(Fourth));
+	const uint64 TimedOutRevision = Repeated.Revision;
+	Manager->Participants.FindChecked(Third).RetryAfter = World->GetTimeSeconds() - 1.0;
+	Manager->PumpTacticalQueue();
+	Manager->GetOrRequestTacticalAssignment(Third, Repeated);
+	TestTrue(TEXT("Retry expiry permits outer admission without stealing the current inner"), Repeated.Role == EFPEnemyTacticalRole::Outer);
+	TestTrue(TEXT("Readmission has a new assignment version"), Repeated.Revision != TimedOutRevision);
+	Manager->GetOrRequestTacticalAssignment(Fourth, D);
+	Fourth->SetActorLocation(D.Goal);
+	Manager->Participants.FindChecked(Fourth).LastProgressTime -= 100.0;
+	Manager->CleanupInvalidEntries();
+	TestTrue(TEXT("Arrived holder retains its lease across individual attacks"), Manager->HasInnerSlot(Fourth, D.Revision));
+	Manager->ReportTacticalMoveFailure(Fourth, D.Revision);
+	TestFalse(TEXT("Current unreachable report revokes its old inner identity"), Manager->HasInnerSlot(Fourth, D.Revision));
+	TestTrue(TEXT("Unreachable recovery gives the next request a chance"), Manager->HasInnerSlot(Third));
+	Manager->SetTargetCharacter(nullptr);
+	const FFPEnemyTacticalDebugSnapshot Empty = Manager->GetTacticalDebugSnapshot();
+	TestEqual(TEXT("Target reset removes every queue request"), Empty.QueuedEnemies, 0);
+	TestEqual(TEXT("Target reset removes every occupied slot"), Empty.OccupiedInnerSlots + Empty.OccupiedOuterSlots, 0);
+	TestEqual(TEXT("Target reset removes every attack permit"), Empty.ActiveAttackers, 0);
+	TestFalse(TEXT("Old assignment cannot resolve after target reset"), Manager->ResolveTacticalMoveGoal(Third, C, Goal));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueSurroundTacticalBoundaryTest,
+	"fpstrue.AI.Surround.TacticalBoundaryAndAssignments",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 验证资格/终点/路径段，明确不把 RVO、击退或玩家靠近造成的被动越界说成物理空气墙。
+bool FFpstrueSurroundTacticalBoundaryTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
+	UWorld* World = Fixture.GetTestWorld();
+	AfpstrueSurroundManager* Manager = World->SpawnActor<AfpstrueSurroundManager>();
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	if (!TestNotNull(TEXT("Boundary manager"), Manager) || !TestNotNull(TEXT("Boundary target"), Target)) return false;
+	Target->SetActorEnableCollision(false);
+	Target->SetActorLocation(FVector::ZeroVector);
+	Manager->SetTargetCharacter(Target);
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[0].ProjectedApproachLocation = FVector(120.0f, 0.0f, 0.0f);
+	const int32 OuterIndex = Manager->InnerSlotCount;
+	Manager->SurroundSlots[OuterIndex].bHasProjectedSlotLocation = Manager->SurroundSlots[OuterIndex].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[OuterIndex].ProjectedSlotLocation = FVector(430.0f, 0.0f, 0.0f);
+	Manager->SurroundSlots[OuterIndex].ProjectedApproachLocation = FVector(220.0f, 0.0f, 0.0f);
+	const auto SpawnEnemy = [World]()
+	{
+		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
+			FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Enemy != nullptr) { Enemy->AutoPossessAI = EAutoPossessAI::Disabled; Enemy->FinishSpawning(FTransform::Identity); Enemy->SetActorEnableCollision(false); }
+		return Enemy;
+	};
+	AfpstrueEnemyCharacter* Inner = SpawnEnemy();
+	AfpstrueEnemyCharacter* Outer = SpawnEnemy();
+	if (!TestNotNull(TEXT("Inner"), Inner) || !TestNotNull(TEXT("Outer"), Outer)) return false;
+	FFPEnemyTacticalAssignment InnerAssignment, OuterAssignment;
+	Manager->GetOrRequestTacticalAssignment(Inner, InnerAssignment);
+	Manager->GetOrRequestTacticalAssignment(Outer, OuterAssignment);
+	TestTrue(TEXT("Outer uses its standing point rather than the inward attack approach"), OuterAssignment.Goal.Equals(FVector(430.0f, 0.0f, 0.0f)));
+	Outer->SetActorLocation(FVector(-430.0f, 0.0f, 0.0f));
+	FNavigationPath Crossing(TArray<FVector>{Outer->GetActorLocation(), OuterAssignment.Goal});
+	TestFalse(TEXT("An outside endpoint does not authorize a chord through the inner circle"), Manager->IsTacticalPathAllowed(Outer, Crossing));
+	FVector Resolved;
+	if (!TestTrue(TEXT("Outer resolver offers an arc waypoint"), Manager->ResolveTacticalMoveGoal(Outer, OuterAssignment, Resolved))) return false;
+	FNavigationPath Arc(TArray<FVector>{Outer->GetActorLocation(), Resolved});
+	TestTrue(TEXT("Arc's first segment remains outside the protected circle"), Manager->IsTacticalPathAllowed(Outer, Arc));
+	FNavigationPath Around(TArray<FVector>{Outer->GetActorLocation(), FVector(-430.0f, 500.0f, 0.0f), FVector(430.0f, 500.0f, 0.0f), OuterAssignment.Goal});
+	TestTrue(TEXT("A multi-segment route outside the boundary is accepted"), Manager->IsTacticalPathAllowed(Outer, Around));
+	Outer->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("Passive entry can resolve an outward recovery goal"), Manager->ResolveTacticalMoveGoal(Outer, OuterAssignment, Resolved));
+	FNavigationPath Outward(TArray<FVector>{Outer->GetActorLocation(), Resolved});
+	TestTrue(TEXT("Passive entry permits monotonic outward movement"), Manager->IsTacticalPathAllowed(Outer, Outward));
+	FNavigationPath Inward(TArray<FVector>{Outer->GetActorLocation(), FVector(50.0f, 0.0f, 0.0f), Resolved});
+	TestFalse(TEXT("Passive entry does not permit moving deeper before leaving"), Manager->IsTacticalPathAllowed(Outer, Inward));
+	Inner->SetActorLocation(FVector(-430.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("A genuine inner holder is allowed to approach through the circle"), Manager->IsTacticalPathAllowed(Inner, Crossing));
+	Manager->ReleaseSurroundSlot(Inner);
+	TestFalse(TEXT("Outer assignment becomes stale when promoted"), Manager->ResolveTacticalMoveGoal(Outer, OuterAssignment, Resolved));
+	Manager->GetOrRequestTacticalAssignment(Outer, OuterAssignment);
+	TestTrue(TEXT("New inner assignment uses the actual attack point"), OuterAssignment.Role == EFPEnemyTacticalRole::Inner && OuterAssignment.Goal.Equals(FVector(120.0f, 0.0f, 0.0f)));
+	const uint64 LeaseRevision = OuterAssignment.Revision;
+	Target->SetActorLocation(FVector(50.0f, 0.0f, 0.0f));
+	Manager->SharedTargetSnapshotTime -= Manager->SharedTargetMaxAge + 0.1;
+	Manager->UpdateSharedTargetSnapshot(false);
+	TestTrue(TEXT("Player movement updates geometry without reassigning slot identity"), Manager->HasInnerSlot(Outer, LeaseRevision));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorStartupTest,
+	"fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFPEnemyBehaviorStartupTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
+	UWorld* World = Fixture.GetTestWorld();
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
+		FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	if (!TestNotNull(TEXT("Startup enemy"), Enemy) || !TestNotNull(TEXT("Startup controller"), Controller) || !TestNotNull(TEXT("Startup target"), Target)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	Enemy->FinishSpawning(FTransform::Identity);
+	Enemy->SetActorEnableCollision(false);
+	Target->SetActorEnableCollision(false);
+	UBehaviorTree* InvalidTree = NewObject<UBehaviorTree>(Controller);
+	InvalidTree->BlackboardAsset = NewObject<UBlackboardData>(InvalidTree);
+	Controller->BehaviorTreeAsset = InvalidTree;
+	AddExpectedError(TEXT("has an incompatible Blackboard; activation rejected"), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedError(TEXT("No valid enemy BehaviorTree is available"), EAutomationExpectedErrorFlags::Contains, 1);
+	Controller->Possess(Enemy);
+	TestFalse(TEXT("An incompatible tree never becomes activation-ready"), Controller->IsBehaviorReady());
+	TestFalse(TEXT("Failed startup closes combat commands"), Controller->AcceptsCombatCommands());
+	Controller->InitializeCombatContext(Target, nullptr);
+	TestFalse(TEXT("Context injection cannot resurrect failed behavior startup"), Controller->AcceptsCombatCommands());
+	TestNull(TEXT("Failed startup cannot publish a target through context injection"), Controller->TargetCharacter.Get());
+	const uint32 FailedStopRevision = Controller->MoveRequestRevision;
+	Controller->StopAI();
+	Controller->StopAI();
+	TestEqual(TEXT("Repeated completed stops do not repeat movement cleanup"), Controller->MoveRequestRevision, FailedStopRevision);
+	Controller->UnPossess();
+	Controller->BehaviorTreeAsset = nullptr;
+	Controller->Possess(Enemy);
+	TestTrue(TEXT("A new Possess can start the valid native tree"), Controller->IsBehaviorReady());
+	Controller->InitializeCombatContext(Target, nullptr);
+	Controller->StopAI();
+	const uint32 CompletedStopRevision = Controller->MoveRequestRevision;
+	Controller->StopAI();
+	TestEqual(TEXT("Successful lifecycle also stops idempotently"), Controller->MoveRequestRevision, CompletedStopRevision);
+	TestFalse(TEXT("Completed stop really stops the brain"), Controller->GetBrainComponent()->IsRunning());
+	Controller->InitializeCombatContext(Target, nullptr);
+	TestTrue(TEXT("Explicit restart of a previously successful lifecycle reruns the tree"), Controller->IsBehaviorReady());
+	TestTrue(TEXT("Explicit restart publishes only its new target"), Controller->TargetCharacter.Get() == Target);
+	Controller->StopAI();
 	return true;
 }
 
@@ -1833,7 +2119,7 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 	Controller->Possess(Enemy);
 	Controller->InitializeCombatContext(Target, Surround);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
-	Controller->GetBrainComponent()->StopLogic(TEXT("Deterministic retreat lifecycle fixture"));
+	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 	Controller->RetreatTimeLimit = 0.3f;
 	Controller->RetreatCooldown = 0.4f;
 	Controller->RetreatDecisionInterval = 10.0f;
@@ -1842,11 +2128,24 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 	UfpstrueEnemyCombatComponent* Combat = Enemy->GetCombatComponent();
 	if (!TestNotNull(TEXT("Real health component"), Health) || !TestNotNull(TEXT("Real combat transaction"), Combat)) return false;
 	Surround->PublishedTargetLocation = Surround->CachedTargetLocation;
-	Surround->SurroundSlots[0].bHasProjectedSlotLocation = true;
-	Surround->SurroundSlots[0].bHasProjectedApproachLocation = true;
-	Surround->SurroundSlots[0].ProjectedApproachLocation = Surround->CachedTargetLocation + FVector(Surround->AttackApproachRadius, 0.0f, 0.0f);
-	FVector OccupiedApproach;
-	if (!TestTrue(TEXT("Enemy occupies a surround slot before retreat"), Surround->GetOrAssignAttackApproachLocation(Enemy, OccupiedApproach))) return false;
+	// 掩体异步身份照常运行；本夹具只固定接近点缓存，避免无 NavMesh 的位置查询覆盖测试输入。
+	const int32 OldApproachQuery = Surround->ApproachQueryId;
+	Surround->ApproachQueryId = INDEX_NONE;
+	++Surround->PositionQueryRevision;
+	if (UEnvQueryManager* Queries = UEnvQueryManager::GetCurrent(World)) Queries->AbortQuery(OldApproachQuery);
+	Surround->bNeedsNavigationRetry = false;
+	Surround->NavigationCacheMaxAge = 100.0f;
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		FfpstrueSurroundSlot& Slot = Surround->SurroundSlots[Index];
+		Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = true;
+		Slot.ProjectedSlotLocation = Surround->CachedTargetLocation + FVector(250.0f, Index * 250.0f, 0.0f);
+		Slot.ProjectedApproachLocation = Enemy->GetNavAgentLocation() + FVector(0.0f, Index * 200.0f, 0.0f);
+	}
+	FFPEnemyTacticalAssignment Assignment;
+	if (!TestTrue(TEXT("Enemy occupies a genuine inner lease before retreat"), Surround->GetOrRequestTacticalAssignment(Enemy, Assignment))
+		|| !TestTrue(TEXT("Permit probe also owns an inner lease"), Surround->GetOrRequestTacticalAssignment(Probe, Assignment))) return false;
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	if (!TestTrue(TEXT("Healthy attacker owns its permit"), Surround->TryAcquireAttackPermission(Enemy)) ||
 		!TestTrue(TEXT("Healthy attack begins through the real combat component"), Combat->TryAttackTarget())) return false;
 	TestFalse(TEXT("Another living enemy cannot take the active attack permit"), Surround->TryAcquireAttackPermission(Probe));
@@ -1970,7 +2269,9 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 	Health->ResetHealth();
 	Controller->UnPossess();
 	Controller->IdleDecisionInterval = 10.0f;
+	Controller->GetBrainComponent()->PrimaryComponentTick.bCanEverTick = true;
 	Controller->Possess(Enemy);
+	Controller->GetBrainComponent()->SetComponentTickEnabled(true);
 	Target->SetActorLocation(FVector(100000.0f, 0.0f, 0.0f));
 	Controller->InitializeCombatContext(Target, Surround);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
@@ -2068,7 +2369,7 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	Controller->Possess(Enemy);
 	Controller->InitializeCombatContext(Target, nullptr);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
-	Controller->GetBrainComponent()->StopLogic(TEXT("Explicit playback fixture"));
+	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 	UfpstrueEnemyCombatComponent* Combat = Enemy->GetCombatComponent();
 	USkeletalMeshComponent* Mesh = Enemy->GetMesh();
 	USkeletalMesh* BladeMesh = NewObject<USkeletalMesh>(Enemy);
@@ -2273,7 +2574,7 @@ bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 		Controller->Possess(Enemy);
 		Controller->InitializeCombatContext(Target, nullptr);
 		if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
-		Controller->GetBrainComponent()->StopLogic(TEXT("Project attack Blueprint integration"));
+		DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 		UfpstrueEnemyCombatComponent* Combat = Enemy->GetCombatComponent();
 		USkeletalMeshComponent* Mesh = Enemy->GetMesh();
 		UAnimInstance* ProjectAnim = Mesh->GetAnimInstance();
@@ -2312,6 +2613,145 @@ bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 	return true;
 }
 #endif // WITH_EDITOR
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyNativeFloorCacheTest,
+	"fpstrue.AI.Movement.NativeStationaryFloorCache",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 运行真实 CMC 查询和 Walking，不自建缓存或用降频代替正确性；标记仅证明是否复用了原查询结果。
+bool FFPEnemyNativeFloorCacheTest::RunTest(const FString& Parameters)
+{
+	TestFalse(TEXT("Native enemy defaults permit the engine stationary floor cache"),
+		GetDefault<AfpstrueEnemyCharacter>()->GetCharacterMovement()->bAlwaysCheckFloor);
+	FTestWorldWrapper Fixture;
+	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
+	UWorld* World = Fixture.GetTestWorld();
+	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	// UE5.5 StartFalling在Editor中保护世界最初1秒，避免PIE首帧场景未加载时跌落。
+	// 真实推进World越过保护期，不修改TimeSeconds/GIsEditor或伪造MOVE_Falling。
+	for (int32 Frame = 0; Frame < 12; ++Frame)
+		if (!Fixture.TickTestWorld(0.1f)) { Fixture.ForwardErrorMessages(this); return false; }
+	if (!TestTrue(TEXT("Real world ticking passes the native editor startup falling guard"),
+		World->HasBegunPlay() && World->GetTimeSeconds() >= 1.0f)) return false;
+	AActor* FloorActor = World->SpawnActor<AActor>();
+	if (!TestNotNull(TEXT("Native floor cache has a real floor actor"), FloorActor)) return false;
+	UBoxComponent* Floor = NewObject<UBoxComponent>(FloorActor);
+	FloorActor->AddInstanceComponent(Floor);
+	FloorActor->SetRootComponent(Floor);
+	Floor->SetMobility(EComponentMobility::Static);
+	Floor->SetBoxExtent(FVector(1000.0f, 1000.0f, 20.0f));
+	Floor->SetCollisionObjectType(ECC_WorldStatic);
+	Floor->SetCollisionResponseToAllChannels(ECR_Block);
+	Floor->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Floor->SetWorldLocation(FVector(0.0f, 0.0f, -20.0f));
+	Floor->RegisterComponent();
+	const FTransform SpawnTransform(FVector(0.0f, 0.0f, 98.0f));
+	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
+		AfpstrueEnemyCharacter::StaticClass(), SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("Floor cache fixture has a real enemy"), Enemy)) return false;
+	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement();
+	// 原生配置是可覆盖的默认值，不在 BeginPlay 强压资产；保留特殊关卡的连续地面检测资格。
+	Movement->bAlwaysCheckFloor = true;
+	Enemy->FinishSpawning(SpawnTransform);
+	TestTrue(TEXT("An explicitly authored Always Check Floor option survives BeginPlay"), Movement->bAlwaysCheckFloor);
+	Movement->bAlwaysCheckFloor = false;
+	Movement->bRunPhysicsWithNoController = true;
+	Movement->bUseRVOAvoidance = false;
+	Movement->SetMovementMode(MOVE_Walking);
+	Movement->SetComponentTickEnabled(false); // 下方显式调用公开 TickComponent，避免测试世界额外推进一帧。
+	const FVector CacheMarker(123456.0f, 654321.0f, 777777.0f);
+	const auto SeedStaticFloor = [&]()
+	{
+		FFindFloorResult FoundFloor;
+		Movement->FindFloor(Enemy->GetActorLocation(), FoundFloor, false);
+		if (!TestTrue(TEXT("The physical box is a walkable floor"), FoundFloor.IsWalkableFloor())) return false;
+		Movement->CurrentFloor = FoundFloor;
+		Enemy->SetBase(Floor);
+		Movement->CurrentFloor.HitResult.TraceStart = CacheMarker;
+		Movement->bForceNextFloorCheck = false;
+		Movement->bJustTeleported = false;
+		return true;
+	};
+	FFindFloorResult Result;
+	if (!SeedStaticFloor()) return false;
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestTrue(TEXT("Stationary valid static floor reuses the native query result"),
+		Result.IsWalkableFloor() && Result.HitResult.TraceStart == CacheMarker);
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, false);
+	TestTrue(TEXT("A changed location request bypasses the cached query"),
+		Result.IsWalkableFloor() && Result.HitResult.TraceStart != CacheMarker);
+	if (!SeedStaticFloor()) return false;
+	Movement->bForceNextFloorCheck = true;
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestTrue(TEXT("Explicit floor invalidation forces a real query"),
+		Result.IsWalkableFloor() && Result.HitResult.TraceStart != CacheMarker);
+	if (!SeedStaticFloor()) return false;
+	Movement->bJustTeleported = true;
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestTrue(TEXT("Teleport invalidation forces a real query"),
+		Result.IsWalkableFloor() && Result.HitResult.TraceStart != CacheMarker);
+	if (!SeedStaticFloor()) return false;
+	Movement->bAlwaysCheckFloor = true;
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestTrue(TEXT("The native designer opt-out restores continuous queries"),
+		Result.IsWalkableFloor() && Result.HitResult.TraceStart != CacheMarker);
+	Movement->bAlwaysCheckFloor = false;
+	if (!SeedStaticFloor()) return false;
+	Floor->SetMobility(EComponentMobility::Movable);
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestTrue(TEXT("A movable base is never treated as a reusable static floor"),
+		Result.IsWalkableFloor() && Result.HitResult.TraceStart != CacheMarker);
+	Floor->SetMobility(EComponentMobility::Static);
+	if (!SeedStaticFloor()) return false;
+	const double BeforeMoveX = Enemy->GetActorLocation().X;
+	Movement->Velocity = FVector(200.0f, 0.0f, 0.0f);
+	Movement->TickComponent(0.02f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("Actual native Walking still advances the actor"), Enemy->GetActorLocation().X > BeforeMoveX);
+	TestTrue(TEXT("Actual movement refreshes the floor rather than carrying the stationary result"),
+		Movement->CurrentFloor.IsWalkableFloor() && Movement->CurrentFloor.HitResult.TraceStart != CacheMarker);
+	Movement->StopMovementImmediately();
+	if (!SeedStaticFloor()) return false;
+	Floor->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestFalse(TEXT("Disabling the current floor collision invalidates the cache"), Result.IsWalkableFloor());
+	Floor->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	if (!SeedStaticFloor()) return false;
+	Floor->UnregisterComponent();
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestFalse(TEXT("Unregistering a static floor invalidates the cache while its actor stays alive"), Result.IsWalkableFloor());
+	Floor->RegisterComponent();
+	if (!SeedStaticFloor()) return false;
+	Floor->DestroyPhysicsState();
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestFalse(TEXT("Retiring only the static floor physics state invalidates the cache"), Result.IsWalkableFloor());
+	Floor->RecreatePhysicsState();
+	if (!SeedStaticFloor()) return false;
+	Floor->DestroyComponent();
+	Movement->FindFloor(Enemy->GetActorLocation(), Result, true);
+	TestFalse(TEXT("Removing the floor component invalidates the cache"), Result.IsWalkableFloor());
+	Movement->TickComponent(0.02f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("Walking without its removed support transitions to Falling"), Movement->IsFalling());
+	// 生产资产必须实际继承新默认值；若保存了旧 true，只报告配置差异，不在运行时覆盖作者选择。
+	UClass* EnemyBlueprintClass = LoadClass<AfpstrueEnemyCharacter>(nullptr,
+		TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP.enemy_BP_C"));
+	if (!TestNotNull(TEXT("The production enemy Blueprint loads for the floor policy check"), EnemyBlueprintClass)) return false;
+	TestFalse(TEXT("The production enemy Blueprint default permits stationary floor reuse"),
+		EnemyBlueprintClass->GetDefaultObject<AfpstrueEnemyCharacter>()->GetCharacterMovement()->bAlwaysCheckFloor);
+	const FTransform BlueprintSpawn(FVector(4000.0f, 0.0f, 98.0f));
+	AfpstrueEnemyCharacter* BlueprintEnemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
+		EnemyBlueprintClass, BlueprintSpawn, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!TestNotNull(TEXT("The production enemy Blueprint spawns with its authored movement policy"), BlueprintEnemy)) return false;
+	BlueprintEnemy->AutoPossessAI = EAutoPossessAI::Disabled;
+	BlueprintEnemy->FinishSpawning(BlueprintSpawn);
+	TestFalse(TEXT("The production enemy runtime keeps the stationary floor cache enabled"),
+		BlueprintEnemy->GetCharacterMovement()->bAlwaysCheckFloor);
+	TestTrue(TEXT("The production enemy runtime uses the lifecycle-safe native floor query"),
+		BlueprintEnemy->GetCharacterMovement()->IsA<UfpstrueEnemyMovementComponent>());
+	return true;
+}
 
 #endif // WITH_DEV_AUTOMATION_TESTS
 

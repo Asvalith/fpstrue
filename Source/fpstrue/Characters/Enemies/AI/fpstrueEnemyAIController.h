@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "AIController.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "fpstrueEnemyAIController.generated.h"
 
 class AfpstrueCharacter;
@@ -55,6 +56,13 @@ public:
 
 	// 单机由 GameMode 注入目标；多人从感知缓存选目标，再取得该玩家专属的包围管理器。
 	void InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager);
+	// 同步启动结果，供生成入口验收；无需等待首轮行为树采样。
+	bool IsBehaviorReady() const;
+	// 资格改变只撤销旧移动归属并唤醒采样，不在管理器回调中同步启动攻击。
+	void OnTacticalAssignmentChanged(AfpstrueSurroundManager* Source);
+	// 攻击提交的实时准入检查；黑板仅是镜像，真实归属仍向 Manager 校验。
+	bool IsTacticalAttackPositionReady(bool bRequireFacing = true) const;
+	uint64 GetTacticalAssignmentRevision() const { return TacticalAssignment.Revision; }
 	// 主动离开/恢复期限结束可立即撤销目标；死亡和 EndPlay 也会通过绑定进入同一清理。
 	void NotifyCombatTargetUnavailable(AfpstrueCharacter* UnavailableTarget);
 	// 仅从服务器已接受的真实开火事务调用；一次事件交给原生 Hearing 分发，不逐敌人同步查询/寻路。
@@ -94,10 +102,9 @@ public:
 
 	// PathFollowing 失败时安排退避；成功到位后的朝向由下一次决策结合到达检测更新。
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
+	virtual FAIRequestID RequestMove(const FAIMoveRequest& MoveRequest, FNavPathSharedPtr Path) override;
 	// 外部统一停止 AI；敌人死亡和 GameMode 结束都会调用。
 	void StopAI();
-	// 攻击结束或 AI 停止时归还 SurroundManager 的攻击名额。
-	void ReleaseAttackPermission();
 
 protected:
 	// 可替换为策划配置的行为树；未配置时使用原生默认树。自定义树需要同名 Blackboard 键。
@@ -133,10 +140,6 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
 	float MoveAcceptanceRadius = 75.0f;
-
-	// 共享目标追击的接受距离 = Max(MoveAcceptanceRadius, 基础攻击范围 * 此倍率)。
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float PursuitAcceptanceRangeMultiplier = 0.8f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
 	float CombatMoveAcceptanceRadius = 15.0f;
@@ -188,7 +191,10 @@ private:
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	friend class FFPEnemyIdleSearchSightTest;
 	friend class FFPEnemyHearingInvestigationTest;
-	enum class ECommandPhase : uint8 { Stopped, Accepting, ChangingContext, Stopping };
+	friend class FFpstrueEnemyCombatLifecycleTest;
+	friend class FFPEnemyTacticalExecutionTest;
+	friend class FFPEnemyBehaviorStartupTest;
+	enum class ECommandPhase : uint8 { Uninitialized, Stopped, Accepting, ChangingContext, Stopping };
 	enum class EMoveGoalResult : uint8
 	{
 		Moving,
@@ -221,7 +227,7 @@ private:
 	};
 
 	// 启动唯一决策驱动；默认树和外部树不能与旧 Timer/FSM 并行运行。
-	void StartBehaviorLogic();
+	bool StartBehaviorLogic();
 	// 消息只排队唤醒当前等待节点，不从感知回调中重入行为树。
 	void RequestBehaviorDecision();
 	// 单机只处理注入玩家；多人也接收其他玩家的视觉刺激，但稳定保留当前可见目标。
@@ -312,9 +318,10 @@ private:
 	// 持有原生默认树，防止世界内共享模板被 GC；每个 Controller 的运行状态仍相互独立。
 	UPROPERTY(Transient)
 	TObjectPtr<UBehaviorTree> ActiveBehaviorTree;
+	FFPEnemyTacticalAssignment TacticalAssignment;
 
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
-	ECommandPhase CommandPhase = ECommandPhase::Stopped;
+	ECommandPhase CommandPhase = ECommandPhase::Uninitialized;
 	// 原始业务目标只用于请求去重；实际导航目标用于到达检查，避免导航投影偏移造成反复重寻路。
 	FMoveGoalKey LastMoveGoal;
 	FVector LastResolvedMoveGoal = FVector::ZeroVector;

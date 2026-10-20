@@ -24,6 +24,7 @@ DEFINE_STAT(STAT_fpstrueAttackSweepCount);
 DEFINE_STAT(STAT_fpstrueSweepReturnedHitCount);
 DEFINE_STAT(STAT_fpstrueAttackWindowUpdateCount);
 CSV_DEFINE_CATEGORY(fpstrueCombat, true);
+CSV_DECLARE_CATEGORY_EXTERN(fpstrueAI);
 
 /*
  * 单个敌人的近战事务组件。
@@ -143,7 +144,9 @@ bool UfpstrueEnemyCombatComponent::IsTargetInAttackRange() const
 bool UfpstrueEnemyCombatComponent::CanStartAttack() const
 {
 	// 提交入口重新采样真实距离和环境，不依赖 AI 较早生成的决策快照。
-	return IsAttackReady() && IsTargetInAttackRange();
+	const AfpstrueEnemyCharacter* Enemy = GetEnemy();
+	const AfpstrueEnemyAIController* Controller = Enemy != nullptr ? Cast<AfpstrueEnemyAIController>(Enemy->GetController()) : nullptr;
+	return IsAttackReady() && Controller->IsTacticalAttackPositionReady() && IsTargetInAttackRange();
 }
 
 // 检查存活目标、命令入口、空闲事务和冷却；不执行射线或重复距离采样。
@@ -176,6 +179,15 @@ bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 	// 上面的资格检查已确认 Owner/World；提交前没有外部回调，直接使用本次有效上下文。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	UWorld* World = GetWorld();
+	const AfpstrueEnemyAIController* Controller = CastChecked<AfpstrueEnemyAIController>(Enemy->GetController());
+	AfpstrueSurroundManager* PermissionSource = Controller->GetSurroundManager();
+	// 最终提交点统一取得本次出手许可；Controller 不再先抢名额、转向失败又立即归还。
+	if (PermissionSource != nullptr && !PermissionSource->TryAcquireAttackPermission(Enemy))
+	{
+		INC_DWORD_STAT(STAT_fpstrueAIAttackBudgetRejectedCount);
+		CSV_CUSTOM_STAT(fpstrueAI, AttackBudgetRejectedCount, 1, ECsvCustomStatOp::Accumulate);
+		return false;
+	}
 
 	// 建立事务本身即确保伤害窗口尚未开启，不再先关闭一次窗口。
 	// ★【重要边界】[状态提交] 广播播放请求前先提交攻击阶段、编号、目标和许可来源，观察者看到完整事务。
@@ -184,8 +196,8 @@ bool UfpstrueEnemyCombatComponent::TryAttackTarget()
 	const uint32 StartingSequence = AttackSequence;
 	bHitTargetThisAttack = false;
 	AttackTarget = Enemy->GetCombatTarget();
-	const AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(Enemy->GetController());
-	AttackPermissionSource = Controller != nullptr ? Controller->GetSurroundManager() : nullptr;
+	AttackPermissionSource = PermissionSource;
+	AttackTacticalRevision = PermissionSource != nullptr ? Controller->GetTacticalAssignmentRevision() : 0;
 
 	//停止移动，避免攻击过程中角色漂移或被物理推开，保证动画和轨迹检测的准确性。
 	if (UCharacterMovementComponent* Movement = Enemy->GetCharacterMovement())
@@ -509,6 +521,9 @@ bool UfpstrueEnemyCombatComponent::TryApplyAttackDamage(AActor* HitActor)
 	// Sweep 可命中多个 Pawn，但当前事务只接受指定玩家且每次攻击最多成功扣血一次。
 	AfpstrueEnemyCharacter* Enemy = GetEnemy();
 	AfpstrueCharacter* TargetCharacter = AttackTarget.Get();
+	// 准入撤销立即封住旧窗口，不等下一轮行为树；版本同时防止释放后重新授予的 ABA。
+	if (AttackTacticalRevision != 0 && (!AttackPermissionSource.IsValid() ||
+		!AttackPermissionSource->HasInnerSlot(Enemy, AttackTacticalRevision))) return false;
 	if (Enemy == nullptr || !Enemy->HasAuthority() || HitActor == nullptr || TargetCharacter == nullptr || HitActor != TargetCharacter || TargetCharacter->IsDead() ||
 		AttackPhase != EFPEnemyAttackPhase::Active || bHitTargetThisAttack ||
 		!HasClearAttackPath(*Enemy, *TargetCharacter, Enemy->GetActorLocation(), TargetCharacter->GetActorLocation()))
@@ -577,8 +592,8 @@ void UfpstrueEnemyCombatComponent::FinishAttack()
 // 中断与生命周期退出的统一出口：先撤销事务身份、清 Timer 并归还原许可，最后停止旧动画。
 void UfpstrueEnemyCombatComponent::ResetCombat()
 {
+	if (!IsAttacking()) return; // 空闲阶段没有攻击事务，不重复推进编号或清理 Timer。
 	// 先清状态再执行动画停止回调；许可固定归还给开始时的 Manager，不读取可变化的 Controller。
-	const bool bWasAttacking = IsAttacking();
 	const FFPActionPlayback PlaybackToStop = AttackPlayback;
 	AfpstrueSurroundManager* PermissionSource = AttackPermissionSource.Get();
 	// 先发布空闲状态并使旧编号失效，动画停止或优先级恢复回调不能沿旧调用栈继续伤害。
@@ -588,6 +603,7 @@ void UfpstrueEnemyCombatComponent::ResetCombat()
 	bHitTargetThisAttack = false;
 	AttackTarget.Reset();
 	AttackPermissionSource.Reset();
+	AttackTacticalRevision = 0;
 	AttackPlayback.Reset();
 	if (UWorld* World = GetWorld())
 	{
@@ -595,13 +611,13 @@ void UfpstrueEnemyCombatComponent::ResetCombat()
 	}
 	if (AfpstrueEnemyCharacter* Enemy = GetEnemy())
 	{
-		if (bWasAttacking) Enemy->PublishAttackPresentation(AttackSequence, nullptr, 1.0f, false);
+		Enemy->PublishAttackPresentation(AttackSequence, nullptr, 1.0f, false);
 		if (PermissionSource != nullptr)
 		{
 			// ★【重要边界】[资源归还] 许可只归还给攻击开始时捕获的管理器，不从已改变的 Controller 反查新来源。
 			PermissionSource->ReleaseAttackPermission(Enemy);
 		}
-		if (bWasAttacking && !Enemy->IsDead())
+		if (!Enemy->IsDead())
 		{
 			Enemy->SetAttackAnimationPriority(false);
 		}

@@ -199,6 +199,7 @@ private:
 	friend class FFpstrueGameModeStartupTest;
 	friend class FFpstrueWaveConfigurationTest;
 	friend class FFpstrueGameModeParticipantBoundaryTest;
+	friend class FFpstrueMultiplayerEnemyActivationTest;
 
 	// ==================== 波次与生成 ====================
 

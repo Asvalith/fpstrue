@@ -135,6 +135,7 @@ private:
 	friend class AfpstruePvpGameMode;
 	friend class UfpstrueMultiplayerGameInstance;
 	friend class FFpstrueMultiplayerResumeSessionTest;
+	friend class FFpstrueMultiplayerSpawnReadinessTest;
 	UFUNCTION(Client, Reliable) void ClientBeginConnectionHandshake();
 	UFUNCTION(Client, Reliable) void ClientConnectionAccepted(const FString& Token, int32 ResumeId, bool bRestored);
 	UFUNCTION(Client, Reliable) void ClientConnectionRejected(const FString& Reason);
@@ -279,6 +280,9 @@ protected:
 	virtual void BeginPlay() override;
 	// 初始生成和重生都从空手开始；只有显式开发烟测在完成占有后自动装备默认武器。
 	virtual void FinishRestartPlayer(AController* NewPlayer, const FRotator& StartRotation) override;
+	virtual void RestartPlayer(AController* NewPlayer) override;
+	virtual void FailedToRestartPlayer(AController* NewPlayer) override;
+	virtual APawn* SpawnDefaultPawnAtTransform_Implementation(AController* NewPlayer, const FTransform& SpawnTransform) override;
 	virtual void HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer) override;
 	// 世界退出先拒绝新事务，再停止全部重生Timer和清理武器。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -309,6 +313,8 @@ private:
 	friend class AfpstruePvpPlayerController;
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
+	friend class FFpstrueMultiplayerSpawnReadinessTest;
+	friend class FFpstrueMultiplayerEnemyActivationTest;
 	void UpdatePvePopulation();
 	AfpstrueEnemyCharacter* SpawnPveEnemy(AfpstrueCharacter* NearPlayer = nullptr);
 	void RegisterPveEnemy(AfpstrueEnemyCharacter* Enemy);
@@ -324,6 +330,8 @@ private:
 	FTimerHandle PvePopulationTimer;
 	double NextEnemySpawnTime = 0.0;
 	int32 NextPveSpawnIndex = 0;
+	// 只改变显式基线的入场顺序：两个真实玩家先出生，随后仍按原规则生成并验证160个敌人。
+	bool bBaselinePopulationStarted = false;
 #if !UE_BUILD_SHIPPING
 	void SendNormalVisualRoutes();
 	bool bNormalVisualRoutesSent = false;
@@ -364,6 +372,13 @@ private:
 	void ReleasePlayerWeapon(APlayerController* Player);
 
 	TMap<TWeakObjectPtr<APlayerController>, FTimerHandle> PendingRespawns;
+	struct FSpawnRecovery
+	{
+		FTimerHandle Timer;
+		int32 Attempts = 0;
+	};
+	// 同一次出生最多初次加三次重试；成功、离场和世界退出统一撤销，不开每帧轮询。
+	TMap<TWeakObjectPtr<APlayerController>, FSpawnRecovery> SpawnRecoveries;
 	TMap<TWeakObjectPtr<APlayerController>, TWeakObjectPtr<AActor>> PlayerWeapons;
 	TMap<TWeakObjectPtr<APlayerController>, TWeakObjectPtr<AActor>> SpawnPickups;
 	bool bEndingPvp = false;
@@ -414,6 +429,7 @@ private:
 	friend class AfpstruePvpPlayerController;
 	friend class FFpstrueMultiplayerConnectionRevisionTest;
 	friend class FFpstrueMultiplayerResumeSessionTest;
+	friend class FFpstrueMultiplayerSpawnReadinessTest;
 	// 空手是合法就绪状态；有装备时才要求其持有者关系已经解析，能力与生命仍必须就绪。
 	static bool IsPawnStateReady(const AfpstrueCharacter* Pawn, const AfpstruePvpPlayerState* State);
 	bool TickConnection(float DeltaSeconds);

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Blueprint/UserWidget.h"
 #include "AbilitySystemInterface.h"
 #include "Components/SkinnedMeshComponent.h"
@@ -27,6 +28,17 @@ class APlayerController;
 class APlayerCameraManager;
 class USphereComponent;
 class UCapsuleComponent;
+class UStaticMeshComponent;
+
+// UE5.5 静态地面组件退出场景后，原生缓存可能尚未失效；只补生命周期检查，其余移动和查询仍由 CMC 执行。
+UCLASS()
+class FPSTRUE_API UfpstrueEnemyMovementComponent : public UCharacterMovementComponent
+{
+	GENERATED_BODY()
+public:
+	virtual void FindFloor(const FVector& CapsuleLocation, FFindFloorResult& OutFloorResult, bool bCanUseCachedLocation,
+		const FHitResult* DownwardSweepResult = nullptr) const override;
+};
 
 // 四种模式只改变本地血条表现；非 Shipping 的对照参数不改变生命、AI 或网络规则。
 enum class EFPEnemyHealthBarMode : uint8
@@ -154,6 +166,22 @@ enum class EFPEnemySignificanceTier : uint8
 	Background
 };
 
+// 只记录最近一次实际 ApplySignificance 输入；不是第二份玩法状态，不复制、不用于决策。
+struct FFPEnemyGameplayTierReasonSnapshot
+{
+	bool bHasPolicySample = false;
+	bool bDistanceSampleValid = false;
+	bool bUsedScopedCombatSample = false;
+	double SampleWorldTimeSeconds = -1.0;
+	float SignificanceScore = 0.0f;
+	// 当前距离评分为 1/(1+二维距离)，多玩家取最大分；此值从该分反解，不额外查找玩家。
+	double NearestPlayerDistance2D = 0.0;
+	EFPEnemySignificanceTier AppliedTier = EFPEnemySignificanceTier::Full;
+	bool bFullByDistance = false;
+	bool bFullByAttack = false;
+	bool bFullByMeleeRange = false;
+};
+
 /**
  * 敌人实体模块：组合 Health、Combat、移动和渲染分级，并桥接 AI、动画共享与蓝图表现。
  *
@@ -167,16 +195,17 @@ class FPSTRUE_API AfpstrueEnemyCharacter : public ACharacter, public IAbilitySys
 
 public:
 	// 创建健康/战斗组件并设置基础骨骼动画优化。
-	AfpstrueEnemyCharacter();
+	AfpstrueEnemyCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 	// CharacterMovement/生命属性负责规则同步，本类补充攻击播放及死亡表现的当前快照。
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	// 敌人与玩家共享 GE 生命结算；现有 AI/攻击事务不因此改为另一套决策系统。
 	virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override { return HealthComponent.Get(); }
 
-	// 活体使用两个根组件查询代理并继承原Mesh查询通道；简化几何不冒充原PA轮廓，不改玩家历史回溯或伤害权限。
+	// 活体使用六个根组件凸包并继承原Mesh查询通道；不是逐骨骼轮廓，不改玩家历史回溯或伤害权限。
 	bool UsesSimpleHitProxies() const { return bUseSimpleHitProxies; }
 	// 基线读取实际保护条件；普通服务器姿态不再受本地相机/阴影名额控制。
 	bool RequiresFullAuthorityPose() const;
+	const FFPEnemyGameplayTierReasonSnapshot& GetGameplayTierReasonSnapshot() const { return GameplayTierReasonSnapshot; }
 	// 原生射线命中代理后补齐部位身份，沿用现有爆头与死亡冲量入口；不伪造历史姿态。
 	void ResolveHitProxyBone(FHitResult& Hit) const;
 
@@ -282,9 +311,17 @@ protected:
 
 	// 无 Socket 绑定、无重叠事件、无导航影响；客户端只保留组件身份，不创建权威命中查询。
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<USphereComponent> EnemyHeadHitProxy;
+	TObjectPtr<UStaticMeshComponent> EnemyHeadHitProxy;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
-	TObjectPtr<UCapsuleComponent> EnemyBodyHitProxy;
+	TObjectPtr<UStaticMeshComponent> EnemyBodyHitProxy;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	TObjectPtr<UStaticMeshComponent> EnemyLeftArmHitProxy;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	TObjectPtr<UStaticMeshComponent> EnemyRightArmHitProxy;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	TObjectPtr<UStaticMeshComponent> EnemyLeftLegHitProxy;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Hit Proxies")
+	TObjectPtr<UStaticMeshComponent> EnemyRightLegHitProxy;
 
 	// 近远距离使用相同几何规则。命令行Reference只用于同一二进制的完整骨骼对照。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combat|Hit Proxies")
@@ -389,6 +426,7 @@ private:
 	friend class UfpstrueEnemyCombatComponent;
 	friend class FFpstrueEnemyQueuedDamageContextTest;
 	friend class FFpstrueEnemySignificanceCombatSampleTest;
+	friend class FFpstrueEnemyGameplayTierReasonSnapshotTest;
 	friend class AfpstruePvpGameMode;
 	friend class FFpstrueNetworkEnemyPresentationTest;
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
@@ -437,7 +475,8 @@ private:
 	// ==================== Render 分级与动画共享 ====================
 
 	// 把当前 Render Tier 和预算结果写入 SkeletalMeshComponent。
-	void ApplyRenderSignificanceSettings();
+	// 唯一提交出口：先按端侧合成姿态策略，再提交本地渲染资格；名字不暗示专服依赖镜头。
+	void ApplyAnimationAndRenderPolicy();
 	// 敌人不再使用脚部后处理；初始化/共享/死亡路径统一清理实例，主AnimInstance与命中骨骼仍保留。
 	UFUNCTION() void DisableEnemyPostProcessAnimation();
 	// 存活时消费预算，死亡后关闭主 Mesh 与附件的阴影/光追；普通可见性和布娃娃不受影响。
@@ -471,6 +510,7 @@ private:
 	// 主线程集中采样后交给插件评分；Update 同步等待评分完成，期间这些值不再修改。
 	FVector SignificancePositionSnapshot = FVector::ZeroVector;
 	bool bHasSignificancePositionSnapshot = false;
+	FFPEnemyGameplayTierReasonSnapshot GameplayTierReasonSnapshot;
 	// 只借用 Coordinator 本轮候选中的近战保护值；Update 退出即撤销，真实攻击与命中从不读取它。
 	const bool* SignificanceCombatProtectionSample = nullptr;
 	// Gameplay 档位控制 AI/移动节奏；自然 Render 档位经过滞回，再由全局预算决定最终档位。

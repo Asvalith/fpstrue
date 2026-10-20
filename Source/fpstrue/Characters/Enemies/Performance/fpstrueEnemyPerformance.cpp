@@ -193,6 +193,9 @@ void UfpstrueEnemySignificanceCoordinator::StartMultiplayer(UfpstrueEnemyAnimati
 void UfpstrueEnemySignificanceCoordinator::Stop()
 {
 	bRunning = false;
+	FullBudgetHolders.Reset();
+	ShadowBudgetHolders.Reset();
+	RayTracingBudgetHolders.Reset();
 	// 对局结束时停止下一轮集中采样；敌人自己的死亡/组件清理由各自生命周期负责。
 	if (UWorld* World = GetWorld())
 	{
@@ -216,7 +219,7 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 	 * 2. Gameplay：权威端用有效玩家 Transform 更新评分；专服到此结束，客户端不执行此阶段；
 	 * 3. 从 PlayerCameraManager 创建唯一 Render ViewContext，填充样本并用纯数值 Top-K 分配名额；
 	 * 4. 统一写回组件，并记录“消费者数量 + 局部耗时”所需的 CSV 指标。
-	 * 阶段之间不边采样边抢预算，保证结果只由本轮快照和稳定优先级决定。
+	 * 阶段之间不边采样边抢预算；本轮快照与本端各预算自己的名额历史共同决定结果。
 	 */
 
 void UfpstrueEnemySignificanceCoordinator::Update()
@@ -358,84 +361,8 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		Candidate.bGameplayAnimationProtection =
 			Enemy->RequiresGameplayAnimationProtection(ViewContext.TimeSeconds, Policy.CombatPriorityGraceSeconds);
 		Candidate.NaturalTier = Enemy->ResolveNaturalRenderSignificanceTier(Candidate.Sample, Policy);
-		// 先把所有自然 Full 候选降为 Reduced，再只恢复优先级最高的 K 个
-		Candidate.AssignedTier = Policy.bEnableRenderTiering && Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full
-									 ? EFPEnemyRenderSignificanceTier::Reduced
-									 : Candidate.NaturalTier;
-		// 关闭某项预算时默认放行，开启时仅由对应 Top-K 授予资格，不再另扫一遍候选。
-		Candidate.bShouldCastShadow = !Policy.bEnableShadowBudget;
-		Candidate.bShouldBeVisibleInRayTracing = !Policy.bEnableRayTracingBudget;
 	}
-
-	// 三类预算复用同一个小型堆。默认名额不超过内联容量，避免为 Top-K 额外申请堆内存；
-	// 配置超过内联容量时 TArray 仍可正常扩展。比较阶段只读取预计算的纯数值 PriorityKey。
-	// ★【重要边界】[预算保护] 先收齐候选再用纯数值 Top-K 分配名额，不在 Actor 采样过程中按注册先后抢预算。
-	TArray<FFPEnemyRenderTopKEntry, TInlineAllocator<32>> TopKHeap;
-	// 每种预算单独过滤资格并复用同一堆；返回候选总数，便于统计因名额不足被拒绝的数量。
-	const auto SelectTopK = [&Candidates, &TopKHeap](int32 RequestedCount, const auto& IsEligible)
-	{
-		TopKHeap.Reset();
-		const int32 SafeCount = FMath::Clamp(RequestedCount, 0, Candidates.Num());
-		int32 EligibleCount = 0;
-		for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
-		{
-			const FEnemyRenderCandidate& Candidate = Candidates[CandidateIndex];
-			if (!IsEligible(Candidate))
-			{
-				continue;
-			}
-
-			++EligibleCount;
-			FPEnemyRenderTopKInsert(TopKHeap, SafeCount, CandidateIndex, Candidate.PriorityKey);
-		}
-		return EligibleCount;
-	};
-
-	// Render Tier 预算：先尊重自然档位，再限制 Full 档总量。
-	// 禁用分档时 ResolveNaturalRenderSignificanceTier 已返回 Full，无须再次覆盖全体。
-	if (Policy.bEnableRenderTiering)
-	{
-		const int32 EligibleFullCount = SelectTopK(Policy.MaxFullRenderEnemies, [](const FEnemyRenderCandidate& Candidate)
-												   { return Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full; });
-		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
-		{
-			Candidates[Entry.CandidateIndex].AssignedTier = EFPEnemyRenderSignificanceTier::Full;
-		}
-		FullBudgetDowngradeCount = EligibleFullCount - TopKHeap.Num();
-	}
-
-	// 光追预算：只让 Full 且在距离内的高排序敌人参与动态 BLAS。
-	if (Policy.bEnableRayTracingBudget)
-	{
-		const int32 EligibleRayTracingCount = SelectTopK(Policy.MaxRayTracingEnemies,
-														 [&Policy](const FEnemyRenderCandidate& Candidate)
-														 {
-															 return Candidate.bRayTracingEligible && Candidate.AssignedTier == EFPEnemyRenderSignificanceTier::Full &&
-																	Candidate.Sample.Distance <= Policy.RayTracingMaxDistance;
-														 });
-		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
-		{
-			Candidates[Entry.CandidateIndex].bShouldBeVisibleInRayTracing = true;
-		}
-		RayTracingBudgetRejectedCount = EligibleRayTracingCount - TopKHeap.Num();
-	}
-
-	// 阴影预算：扩展视锥、距离和 Render Tier 共同决定候选资格。
-	if (Policy.bEnableShadowBudget)
-	{
-		const int32 EligibleShadowCount = SelectTopK(Policy.MaxShadowCastingEnemies,
-													 [&Policy](const FEnemyRenderCandidate& Candidate)
-													 {
-														 return Candidate.bShadowEligible && Candidate.Sample.bInExpandedFrustum &&
-																Candidate.Sample.Distance <= Policy.ShadowMaxDistance &&
-																Candidate.AssignedTier != EFPEnemyRenderSignificanceTier::Background;
-													 });
-		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
-		{
-			Candidates[Entry.CandidateIndex].bShouldCastShadow = true;
-		}
-		ShadowBudgetRejectedCount = EligibleShadowCount - TopKHeap.Num();
-	}
+	AllocatePresentationBudgets(FullBudgetDowngradeCount, ShadowBudgetRejectedCount, RayTracingBudgetRejectedCount);
 	}
 
 	// ★【重要边界】[线程交接] 预算选择完成后在当前游戏线程统一写回组件；候选裸指针只用于本轮同步处理，不作为 Worker 或跨轮数据。
@@ -454,6 +381,104 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		UE_LOG(LogTemp, Display, TEXT("PVP_PERFORMANCE SHARING_ACTIVE NetMode=%d Followers=%d"),
 			static_cast<int32>(GetNetMode()), AnimationSharingCoordinator->GetRegisteredEnemyCount());
 	}
+}
+
+void UfpstrueEnemySignificanceCoordinator::AllocatePresentationBudgets(int32& FullBudgetDowngradeCount,
+	int32& ShadowBudgetRejectedCount, int32& RayTracingBudgetRejectedCount)
+{
+	TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
+	const FFPEnemyRenderSignificancePolicy& Policy = ActiveRenderPolicy;
+	FullBudgetDowngradeCount = ShadowBudgetRejectedCount = RayTracingBudgetRejectedCount = 0;
+	for (FEnemyRenderCandidate& Candidate : Candidates)
+	{
+		// 先把所有自然 Full 候选降为 Reduced，再只恢复优先级最高的 K 个。
+		Candidate.AssignedTier = Policy.bEnableRenderTiering && Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full
+			? EFPEnemyRenderSignificanceTier::Reduced : Candidate.NaturalTier;
+		// 关闭某项预算时默认放行；名额历史仍清除，重启时不得继承停用前的优势。
+		Candidate.bShouldCastShadow = !Policy.bEnableShadowBudget;
+		Candidate.bShouldBeVisibleInRayTracing = !Policy.bEnableRayTracingBudget;
+	}
+
+	// 三类预算复用同一个小型堆。默认名额不超过内联容量，避免为 Top-K 额外申请堆内存；
+	// 配置超过内联容量时 TArray 仍可正常扩展。比较阶段只读取预计算的纯数值 PriorityKey。
+	// ★【重要边界】[预算保护] 先收齐候选再用纯数值 Top-K 分配名额，不在 Actor 采样过程中按注册先后抢预算。
+	TArray<FFPEnemyRenderTopKEntry, TInlineAllocator<32>> TopKHeap;
+	// 每种预算单独过滤资格并复用同一堆；返回候选总数，便于统计因名额不足被拒绝的数量。
+	const auto SelectTopK = [&Candidates, &TopKHeap, &Policy](int32 RequestedCount,
+		TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>>& PreviousHolders, const auto& IsEligible)
+	{
+		TopKHeap.Reset();
+		const int32 SafeCount = FMath::Clamp(RequestedCount, 0, Candidates.Num());
+		int32 EligibleCount = 0;
+		for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
+		{
+			const FEnemyRenderCandidate& Candidate = Candidates[CandidateIndex];
+			if (!IsEligible(Candidate))
+			{
+				continue;
+			}
+
+			++EligibleCount;
+			const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Candidate.Enemy);
+			const FFPEnemyRenderPriorityKey BudgetKey = FPEnemyRenderBudgetPriorityKey(Candidate.PriorityKey,
+				PreviousHolders.Contains(EnemyKey), Policy.BudgetRetentionMargin);
+			FPEnemyRenderTopKInsert(TopKHeap, SafeCount, CandidateIndex, BudgetKey);
+		}
+		// 当轮不再有资格、已死亡/销毁或不再被发现的对象自然失去名额，不额外保留计时锁。
+		PreviousHolders.Reset();
+		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
+			PreviousHolders.Add(TWeakObjectPtr<AfpstrueEnemyCharacter>(Candidates[Entry.CandidateIndex].Enemy));
+		return EligibleCount;
+	};
+
+	// Render Tier 预算：先尊重自然档位，再限制 Full 档总量。
+	// 禁用分档时 ResolveNaturalRenderSignificanceTier 已返回 Full，无须再次覆盖全体。
+	if (Policy.bEnableRenderTiering)
+	{
+		const int32 EligibleFullCount = SelectTopK(Policy.MaxFullRenderEnemies, FullBudgetHolders, [](const FEnemyRenderCandidate& Candidate)
+												   { return Candidate.NaturalTier == EFPEnemyRenderSignificanceTier::Full; });
+		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
+		{
+			Candidates[Entry.CandidateIndex].AssignedTier = EFPEnemyRenderSignificanceTier::Full;
+		}
+		FullBudgetDowngradeCount = EligibleFullCount - TopKHeap.Num();
+	}
+	else FullBudgetHolders.Reset();
+
+	// 光追预算：只让 Full 且在距离内的高排序敌人参与动态 BLAS。
+	if (Policy.bEnableRayTracingBudget)
+	{
+		const int32 EligibleRayTracingCount = SelectTopK(Policy.MaxRayTracingEnemies, RayTracingBudgetHolders,
+														 [&Policy](const FEnemyRenderCandidate& Candidate)
+														 {
+															 return Candidate.bRayTracingEligible && Candidate.AssignedTier == EFPEnemyRenderSignificanceTier::Full &&
+																	Candidate.Sample.Distance <= Policy.RayTracingMaxDistance;
+														 });
+		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
+		{
+			Candidates[Entry.CandidateIndex].bShouldBeVisibleInRayTracing = true;
+		}
+		RayTracingBudgetRejectedCount = EligibleRayTracingCount - TopKHeap.Num();
+	}
+	else RayTracingBudgetHolders.Reset();
+
+	// 阴影预算：扩展视锥、距离和 Render Tier 共同决定候选资格。
+	if (Policy.bEnableShadowBudget)
+	{
+		const int32 EligibleShadowCount = SelectTopK(Policy.MaxShadowCastingEnemies, ShadowBudgetHolders,
+													 [&Policy](const FEnemyRenderCandidate& Candidate)
+													 {
+														 return Candidate.bShadowEligible && Candidate.Sample.bInExpandedFrustum &&
+																Candidate.Sample.Distance <= Policy.ShadowMaxDistance &&
+																Candidate.AssignedTier != EFPEnemyRenderSignificanceTier::Background;
+													 });
+		for (const FFPEnemyRenderTopKEntry& Entry : TopKHeap)
+		{
+			Candidates[Entry.CandidateIndex].bShouldCastShadow = true;
+		}
+		ShadowBudgetRejectedCount = EligibleShadowCount - TopKHeap.Num();
+	}
+	else ShadowBudgetHolders.Reset();
 }
 
 // 应用本轮已确定的三类预算，并读回组件标志和档位写入 CSV；统计结果不参与本轮决策。
@@ -602,6 +627,8 @@ void UfpstrueEnemySignificanceCoordinator::SanitizePolicy(FFPEnemyRenderSignific
 	Policy.MinimumTierHoldSeconds = FMath::Max(Policy.MinimumTierHoldSeconds, 0.0f);
 
 	// 名额允许为零；低档位的最低 LOD 不得反而比高档位更精细。
+	Policy.BudgetRetentionMargin = FMath::IsFinite(Policy.BudgetRetentionMargin)
+		? FMath::Clamp(Policy.BudgetRetentionMargin, 0.0f, 1.0f) : 0.0f;
 	Policy.MaxFullRenderEnemies = FMath::Max(Policy.MaxFullRenderEnemies, 0);
 	Policy.MaxShadowCastingEnemies = FMath::Max(Policy.MaxShadowCastingEnemies, 0);
 	Policy.ShadowMaxDistance = FMath::Max(Policy.ShadowMaxDistance, 0.0f);

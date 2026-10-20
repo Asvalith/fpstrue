@@ -18,6 +18,15 @@ param(
     # Reference preserves the historical launch. Parallel changes only the DS
     # threading gate; it does not force CVars, animation flags or gameplay LOD.
     [ValidateSet('Reference','Parallel')][string[]]$ServerAnimationThreads = @('Reference'),
+    # Omission preserves the historical NetDriver configuration. Zero is not
+    # uncapped: UE5.5 clamps NetServerMaxTickRate into [1,1000] for a DS.
+    [ValidateRange(1,1000)][Nullable[int]]$ServerTickRate = $null,
+    # Independent native-renderer experiments, applied only to the rendered
+    # client process. No production Config write and no combined overrides.
+    [ValidateSet('Inherited','Buffer3','HZB')][string]$ClientOcclusion = 'Inherited',
+    # Reverse ablation: restore continuous floor queries once, on the test DS
+    # after all 160 enemies are ready. Default preserves authored CMC settings.
+    [switch]$ContinuousFloorChecks,
     [ValidateRange(1,5)][int]$Repeat = 3,
     [ValidateRange(1024,65000)][int]$Port = 17871,
     [ValidateRange(180,900)][int]$TimeoutSeconds = 600,
@@ -25,8 +34,13 @@ param(
     [string]$OutputRoot = '',
     [switch]$PresentMon,
     [switch]$CaptureScreenshots,
+    # Direct native GetThreadTimes + pacing CSV only; no Trace, named events,
+    # engine CSV profiler or scheduler recorder. Separate diagnostic evidence.
+    [switch]$CpuDiagnostic,
     [switch]$DiagnosticTrace,
     [switch]$DiagnosticTraceOnly,
+    # Bounded server call-chain capture; client still records CPU/pacing, not a client Trace.
+    [switch]$ServerTraceOnly,
     [switch]$DiagnosticScheduler,
     [string]$DiagnosticRoot = 'C:/UEBuild/FPSDiagnostics',
     [ValidateRange(100,50000)][int]$DiagnosticServerCsvFrames = 2500,
@@ -38,7 +52,25 @@ $ErrorActionPreference = 'Stop'
 $EnemyReplication=if($EnemyReplication -ieq 'Reference'){'Reference'}else{'Tiered'}
 $EnemyHitProxies=if($EnemyHitProxies -ieq 'Simple'){'Simple'}else{'Reference'}
 $ServerAnimationThreads=@($ServerAnimationThreads | ForEach-Object {if($_ -ieq 'Parallel'){'Parallel'}else{'Reference'}})
+$ClientOcclusion=switch($ClientOcclusion.ToLowerInvariant()){'buffer3'{'Buffer3'}'hzb'{'HZB'}default{'Inherited'}}
+$CpuAccounting=[bool]($DiagnosticTrace -or $CpuDiagnostic)
+$HasDiagnostics=[bool]($DiagnosticTrace -or $CpuDiagnostic)
+$TraceRoles=@('Server')
+if(-not $ServerTraceOnly){$TraceRoles+=$RenderRole}
+if($ServerTraceOnly -and (-not $DiagnosticTrace -or -not $DiagnosticTraceOnly)){
+    throw 'ServerTraceOnly requires DiagnosticTrace and DiagnosticTraceOnly.'
+}
+if($CpuDiagnostic -and ($DiagnosticTrace -or $DiagnosticTraceOnly -or $DiagnosticScheduler -or $PresentMon)){
+    throw 'CpuDiagnostic is CPU/pacing only; do not combine it with Trace, Scheduler or PresentMon.'
+}
+if($CpuDiagnostic -and ($BuildKinds.Count -ne 1 -or $BuildKinds[0] -ne 'Editor')){
+    throw 'CpuDiagnostic currently requires Editor clients; repeated independent Editor CPU comparisons are supported.'
+}
 if($ServerAnimationThreads.Count -eq 0 -or @($ServerAnimationThreads | Select-Object -Unique).Count -ne $ServerAnimationThreads.Count){throw 'Provide one or two distinct server animation-thread modes.'}
+$PacingPolicy=[ordered]@{Mode=if($null -eq $ServerTickRate){'Inherited'}else{'ExplicitNetDriverTarget'};
+    RequestedServerTickRateHz=$ServerTickRate;
+    Boundary='Default launch does not change pacing. Explicit targets override only this disposable DS IpNetDriver ini; t.MaxFPS=0 does not uncap the DS. Targets with different pacing are independent experiments, never pooled with the historical baseline.';
+    Readback='Live NetDriver target plus safe UGameEngine max-rate re-evaluation and FApp idle/overshoot. Getter result is not the captured internal pacing decision; independent diagnostic pacing.csv is paired by global frame.'}
 if ($RunName -notmatch '^[A-Za-z0-9_-]+$' -or $Map -notmatch '^/Game/[A-Za-z0-9_/]+$') { throw 'Invalid run or map package name.' }
 $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
 $EngineRoot = [IO.Path]::GetFullPath($EngineRoot)
@@ -72,21 +104,29 @@ for ($Round=1; $Round -le $Repeat; ++$Round) {
     if($Round % 2 -eq 0){[array]::Reverse($ThreadOrder)}
     foreach ($Kind in $Order) { foreach($Threads in $ThreadOrder){
         $Name=if($ServerAnimationThreads.Count -eq 1 -and $Threads -eq 'Reference'){('{0}_R{1}' -f $Kind,$Round)}else{('{0}_{1}_R{2}' -f $Kind,$Threads,$Round)}
-        $Cases += [pscustomobject]@{Kind=$Kind;ServerAnimationThreads=$Threads;Round=$Round;Name=$Name}
+        if($null -ne $ServerTickRate){$Name+=('_ServerTick'+$ServerTickRate)}
+        if($ClientOcclusion -ne 'Inherited'){$Name+=('_Client'+$ClientOcclusion)}
+        if($ContinuousFloorChecks){$Name+='_FloorReference'}
+        if($CpuDiagnostic){$Name+='_CpuDiagnostic'}
+        if($ServerTraceOnly){$Name+='_ServerTraceOnly'}
+        $Cases += [pscustomobject]@{Kind=$Kind;ServerAnimationThreads=$Threads;ClientOcclusion=$ClientOcclusion;ContinuousFloorChecks=[bool]$ContinuousFloorChecks;CpuDiagnostic=[bool]$CpuDiagnostic;Round=$Round;Name=$Name}
     } }
 }
 if ($DryRun) {
     [pscustomobject]@{Run=$Run;Map=$Map;Cases=$Cases;Server='Frozen Editor -server';Clients=2;RenderedClients=1;
         Resolution='1600x900';Quality='High / scalability level 2; engine feature defaults retained';WarmupSeconds=20;CaptureSeconds=60;
         Population=160;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;PresentMon=[bool]$PresentMon;ServerAnimationThreads=$ServerAnimationThreads;
+        ServerPacing=$PacingPolicy;
+        ContinuousFloorChecks=[bool]$ContinuousFloorChecks;FloorCheckBoundary='Reverse ablation only: Server applies bAlwaysCheckFloor=true once after the full 160 population is ready, before warmup. Default does not write the authored setting. Compare the same six-convex build and renderer/pacing settings; never use old two-proxy results as the floor-cache control.';
+        ClientOcclusion=$ClientOcclusion;ClientOcclusionBoundary='Rendered client only: Inherited changes nothing; Buffer3 overrides only r.NumBufferedOcclusionQueries=3; HZB overrides only r.HZBOcclusion=1. Native CVar readback must confirm the requested value. These are independent renderer experiments, not AI/network changes.';
         AnimationThreading='Reference adds no engine threading option; Parallel adds -useperfthreads to the Editor dedicated server only. Runtime gates are snapshots, not proof of Worker dispatch.';
         NetworkCounters='Per-role START/STOP parent-connection In/OutTotalBytes/Packets, including engine connection/PacketOverhead accounting; stable identities, no wrap/reset/reconnect concatenation; not NIC/per-Actor traffic.';
-        Diagnostic=[ordered]@{Enabled=[bool]$DiagnosticTrace;TraceOnly=[bool]$DiagnosticTraceOnly;Output=$DiagnosticRun;ServerCsvFrames=$DiagnosticServerCsvFrames;
-            CpuAccounting=[bool]$DiagnosticTrace;Scheduler=[ordered]@{Requested=[bool]$DiagnosticScheduler;Recorder='One named WPR CPU.Verbose.File instance; UE contextswitch/stacksampling remain disabled';RequiresAdministrator=$true;
+        Diagnostic=[ordered]@{Enabled=$HasDiagnostics;DiagnosticOnly=$HasDiagnostics;FormalBaseline=(-not $HasDiagnostics);TraceEnabled=[bool]$DiagnosticTrace;TraceRoles=@($TraceRoles | Where-Object {$DiagnosticTrace});ServerTraceOnly=[bool]$ServerTraceOnly;CpuOnly=[bool]$CpuDiagnostic;TraceOnly=[bool]$DiagnosticTraceOnly;Output=if($CpuDiagnostic){$Run}else{$DiagnosticRun};ServerCsvFrames=if($CpuDiagnostic){$null}else{$DiagnosticServerCsvFrames};
+            CpuAccounting=$CpuAccounting;Scheduler=[ordered]@{Requested=[bool]$DiagnosticScheduler;Recorder='One named WPR CPU.Verbose.File instance; UE contextswitch/stacksampling remain disabled';RequiresAdministrator=$true;
                 Analysis='ETL existence is not proof of complete Running/Ready/Wait data; verify coverage, PID/TID mappings, lost events and QPC alignment offline.'};
-            RenderedClientCsvFrames=$DiagnosticClientCsvFrames;FlushTimeoutSeconds=$DiagnosticFlushTimeoutSeconds;
-            Budget='Trace/named events (and optional native CSV) add CPU/memory/disk overhead. Reserve at least 5 GiB on C; traces may consume several GiB. Never merge diagnostic timings into the formal baseline.';
-            Window=if($DiagnosticTraceOnly){'Native CSV intentionally disabled. Trace window alignment requires offline validation; no native thread/GPU timing claimed.'}else{'Native CSV must finalize; exact baseline/native/Trace frame alignment is an offline validation, not an assumed FrameIndex.'}};
+            RenderedClientCsvFrames=if($CpuDiagnostic){$null}else{$DiagnosticClientCsvFrames};FlushTimeoutSeconds=$DiagnosticFlushTimeoutSeconds;
+            Budget=if($CpuDiagnostic){'Direct native GameThread CPU queries and a separate bounded pacing.csv add measurement overhead. No Trace, named events, engine CSV profiler, ETL or 5-GiB Trace reserve. Never merge this diagnostic into the formal baseline.'}else{'Trace/named events (and optional native CSV) add CPU/memory/disk overhead. Reserve at least 5 GiB on C; traces may consume several GiB. Never merge diagnostic timings into the formal baseline.'};
+            Window=if($CpuDiagnostic){'Consecutive native OnEndFrame CPU deltas and selected-World begin/end CPU samples; exact pacing pairing uses global Frame. No Trace alignment, worker attribution, GPU time or OS Ready/Blocked classification claimed.'}elseif($DiagnosticTraceOnly){'Native CSV intentionally disabled. Trace window alignment requires offline validation; no native thread/GPU timing claimed.'}else{'Native CSV must finalize; exact baseline/native/Trace frame alignment is an offline validation, not an assumed FrameIndex.'}};
         ExitPolicy='Independent per-role controls; release clients and verify COMPLETE + natural exit 0 before releasing the server.';
         Boundary='Separate builds; no pooled timings; FrameEndInterval is not presentation latency.'} | ConvertTo-Json -Depth 5
     return
@@ -337,10 +377,14 @@ $FingerprintText=$Fingerprint | ConvertTo-Json -Depth 4 -Compress
 $Experiment=[ordered]@{Created=(Get-Date).ToString('o');Map=$Map;Cases=$Cases;Fingerprint=$Fingerprint;WarmupSeconds=20;CaptureSeconds=60;
     Resolution='1600x900';Quality=2;Population=160;Clients=2;RenderedRole=$RenderRole;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;ServerAnimationThreads=$ServerAnimationThreads;
     AnimationThreading='Reference preserves historical engine defaults; Parallel adds only DS -useperfthreads. No per-instance/CVar forcing; compare actual runtime gate snapshots and independent traces.';
+    ServerPacing=$PacingPolicy;
+    ContinuousFloorChecks=[bool]$ContinuousFloorChecks;
+    ClientOcclusion=$ClientOcclusion;
     NetworkCounters='Stable parent connections, START/STOP cumulative deltas; engine connection accounting incl. PacketOverhead, not NIC or per-Actor bytes. Server retains all 160 AI relevance. Replication, hit-proxy and threading modes are recorded separately; change one factor per comparison.';
     Backend='Same Editor dedicated server for Editor and Shipping client cases';
     ExitPolicy='Independent per-role controls; clients COMPLETE + natural exit 0, then server EXIT';
-    Diagnostic=[bool]$DiagnosticTrace;
+    Diagnostic=$HasDiagnostics;DiagnosticOnly=$HasDiagnostics;FormalBaseline=(-not $HasDiagnostics);CpuDiagnostic=[bool]$CpuDiagnostic;TraceDiagnostic=[bool]$DiagnosticTrace;
+    TraceRoles=@($TraceRoles | Where-Object {$DiagnosticTrace});ServerTraceOnly=[bool]$ServerTraceOnly;
     Boundary='Warmed fixed-view baseline. Whole-process local competition retained. No WAN, all-AI-attacking, Shipping DS capacity or input/visual-quality claim.';
     Hardware=@{CPU=@(Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors);
         GPU=@(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion);RAM=@(Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory)}}
@@ -358,12 +402,22 @@ foreach ($Case in $Cases) {
     # normal disconnect/default-map loading after its samples were already flushed.
     $Controls=@{}
     foreach($Role in @('Server','Client1','Client2')){$Controls[$Role]=Join-Path $CaseRoot ($Role+'.control.txt')}
-    $Result=[ordered]@{Name=$Case.Name;Kind=$Case.Kind;Round=$Case.Round;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;ServerAnimationThreads=$Case.ServerAnimationThreads;Valid=$false;Error=$null;Processes=@();Roles=@{};PresentMon=$null}
-    $DiagnosticInfo=$null;$DiagnosticCase=$null;$ObservedRolePhases=@{};$Scheduler=$null
+    $Result=[ordered]@{Name=$Case.Name;Kind=$Case.Kind;Round=$Case.Round;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;ServerAnimationThreads=$Case.ServerAnimationThreads;ServerPacing=$PacingPolicy;ClientOcclusion=$ClientOcclusion;ContinuousFloorChecks=[bool]$ContinuousFloorChecks;CpuDiagnostic=[bool]$CpuDiagnostic;DiagnosticOnly=$HasDiagnostics;FormalBaseline=(-not $HasDiagnostics);Valid=$false;Error=$null;Processes=@();Roles=@{};PresentMon=$null}
+    $DiagnosticInfo=$null;$DiagnosticCase=$null;$DiagnosticManifestPath=$null;$ObservedRolePhases=@{};$Scheduler=$null
+    if($CpuDiagnostic){
+        $DiagnosticCase=$CaseRoot
+        $DiagnosticManifestPath=Join-Path $CaseRoot 'cpu-diagnostic-manifest.json'
+        $DiagnosticInfo=[ordered]@{SchemaVersion=1;Case=$Case.Name;DiagnosticOnly=$true;FormalBaseline=$false;CpuOnly=$true;TraceEnabled=$false;
+            NativeCsvPolicy='No engine CSV profiler or Trace requested. Native frames.csv CPU accounting and pacing.csv only.';
+            StartedUtc=[datetime]::UtcNow.ToString('o');Roles=@{};
+            Boundary='Direct Windows GetThreadTimes measurement overhead is included. Server and rendered client only; peer remains uninstrumented. Compare the same build/settings and activity. No Worker/GPU/OS scheduling attribution.'}
+        $Result.Diagnostic=$DiagnosticInfo
+    }
     if($DiagnosticTrace){
         $DiagnosticCase=Join-Path $DiagnosticRun $Case.Name
+        $DiagnosticManifestPath=Join-Path $DiagnosticCase 'diagnostic-manifest.json'
         $null=New-Item -ItemType Directory -Path $DiagnosticCase
-        $DiagnosticInfo=[ordered]@{SchemaVersion=1;Case=$Case.Name;DiagnosticOnly=$true;FormalBaseline=$false;TraceOnly=[bool]$DiagnosticTraceOnly;
+        $DiagnosticInfo=[ordered]@{SchemaVersion=1;Case=$Case.Name;DiagnosticOnly=$true;FormalBaseline=$false;TraceOnly=[bool]$DiagnosticTraceOnly;TraceRoles=$TraceRoles;ServerTraceOnly=[bool]$ServerTraceOnly;
             NativeCsvPolicy=if($DiagnosticTraceOnly){'Intentionally disabled for startup-failure A/B isolation; no native CSV or stat-unit thread/GPU timings claimed.'}else{'Finite native capture; require complete finalization; exact window coverage remains an offline gate.'};
             TraceDirectory=$DiagnosticCase;StartedUtc=[datetime]::UtcNow.ToString('o');StopwatchFrequency=[Diagnostics.Stopwatch]::Frequency;
             ServerCsvFrameBudget=$DiagnosticServerCsvFrames;RenderedClientCsvFrameBudget=$DiagnosticClientCsvFrames;
@@ -408,6 +462,8 @@ foreach ($Case in $Cases) {
                 $Arguments+=@('-server','-NullRHI',('-port='+$Port),'-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyPopulation=160',
                     '-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemySpawnInterval=0.05','-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyRespawnDelay=600')
                 if($Case.ServerAnimationThreads -eq 'Parallel'){$Arguments+='-useperfthreads'}
+                if($null -ne $ServerTickRate){$Arguments+=('-ini:Engine:[/Script/OnlineSubsystemUtils.IpNetDriver]:NetServerMaxTickRate='+$ServerTickRate)}
+                if($ContinuousFloorChecks){$Arguments+='-PvpBaselineAlwaysCheckFloor'}
             } else {
                 # Shipping intentionally ignores a positional travel URL. Both
                 # client builds use the same bounded loopback benchmark entry;
@@ -417,18 +473,26 @@ foreach ($Case in $Cases) {
                 if($Role -eq $RenderRole){$Arguments+=@('-dx12','-Windowed','-ForceRes','-ResX=1600','-ResY=900','-NoVSync','-PvpBaselineRendered')}
                 else{$Arguments+='-NullRHI'}
             }
+            if($Role -eq $RenderRole){
+                if($ClientOcclusion -eq 'Buffer3'){$Arguments+='-ini:Engine:[ConsoleVariables]:r.NumBufferedOcclusionQueries=3'}
+                elseif($ClientOcclusion -eq 'HZB'){$Arguments+='-ini:Engine:[ConsoleVariables]:r.HZBOcclusion=1'}
+            }
             if($CaptureScreenshots -and $Role -eq $RenderRole){$Arguments+='-PvpBaselineScreenshot'}
-            if($DiagnosticTrace -and ($Role -eq 'Server' -or $Role -eq $RenderRole)){
+            if($CpuAccounting -and ($Role -eq 'Server' -or $Role -eq $RenderRole)){
+                $Arguments+='-PvpBaselineCpuAccounting'
+                $DiagnosticInfo.Roles[$Role]=[ordered]@{UserDirectory=$User;CpuAccountingRequested=$true;TraceEnabled=[bool]($DiagnosticTrace -and $Role -in $TraceRoles)}
+            }
+            if($DiagnosticTrace -and $Role -in $TraceRoles){
                 $Channels=if($Role -eq 'Server'){'cpu,frame,bookmark,task,log,counters'}else{'cpu,gpu,frame,bookmark,task,log,counters'}
                 $TracePath=Join-Path $DiagnosticCase ($Role+'.utrace')
                 $CsvFrames=if($Role -eq 'Server'){$DiagnosticServerCsvFrames}else{$DiagnosticClientCsvFrames}
-                $Arguments+=@(('-trace='+$Channels),('-tracefile="'+$TracePath+'"'),'-statnamedevents','-PvpBaselineCpuAccounting')
+                $Arguments+=@(('-trace='+$Channels),('-tracefile="'+$TracePath+'"'),'-statnamedevents')
                 if(-not $DiagnosticTraceOnly){
                     $Arguments+=@(('-csvCaptureFrames='+$CsvFrames),
                         '-csvCategories=Animation,AnimationParallelEvaluation,CharacterMovement,CharacterMovementDetailed,ChaosPhysics,ChaosPhysicsSolver,Networking,NavigationSystem,fpstrueAI,fpstrueSignificance,fpstrueEnemyUI',
                         '-csvGpuStats','-csvCompression=0')
                 }
-                $DiagnosticInfo.Roles[$Role]=[ordered]@{Trace=$TracePath;Channels=$Channels;NativeCsvFrames=if($DiagnosticTraceOnly){$null}else{$CsvFrames};UserDirectory=$User}
+                $DiagnosticInfo.Roles[$Role]=[ordered]@{Trace=$TracePath;TraceEnabled=$true;CpuAccountingRequested=$true;Channels=$Channels;NativeCsvFrames=if($DiagnosticTraceOnly){$null}else{$CsvFrames};UserDirectory=$User}
             }
             $Process=Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
             $Owned+=[pscustomobject]@{Role=$Role;Id=$Process.Id;Process=$Process;StartedUtc=$Process.StartTime.ToUniversalTime();Executable=$Executable;ControlPath=$RoleControl;Forced=$false}
@@ -436,7 +500,7 @@ foreach ($Case in $Cases) {
             if($Role -eq 'Server'){Start-Sleep -Seconds 3}
         }
         Write-BaselineJson $Launches (Join-Path $CaseRoot 'launch.json')
-        if($DiagnosticTrace){Write-BaselineJson $DiagnosticInfo (Join-Path $DiagnosticCase 'diagnostic-manifest.json')}
+        if($HasDiagnostics){Write-BaselineJson $DiagnosticInfo $DiagnosticManifestPath}
         Write-Output ('Baseline '+$Case.Name+' (160 AI, '+$Case.Kind+' rendered client, fixed Editor DS).')
         while($true) {
             if(((Get-Date)-$Started).TotalSeconds -gt $TimeoutSeconds){throw ('Timeout in '+$Phase)}
@@ -533,25 +597,57 @@ foreach ($Case in $Cases) {
                 $Animation.start.enemies -ne 160 -or $Animation.stop.enemies -ne 160){throw ('Missing boundary animation diagnostics: '+$Entry.Role)}
             $ExpectedPerfThreads=$Entry.Role -eq 'Server' -and $Case.ServerAnimationThreads -eq 'Parallel'
             foreach($Snapshot in @($Animation.start,$Animation.stop)){
+                if($null -eq $Snapshot.tacticalManagers){throw ('Missing tactical boundary snapshot: '+$Entry.Role)}
+                $Managers=@($Snapshot.tacticalManagers)
+                if($Entry.Role -eq 'Server' -and $Managers.Count -eq 0){throw 'Missing server tactical managers.'}
+                $Participants=0
+                foreach($Manager in $Managers){
+                    # An inert map-placed Actor is allowed on clients; an initialized
+                    # tactical ledger is not. Existence alone does not mean simulation.
+                    if($Entry.Role -ne 'Server' -and ($Manager.innerCapacity -ne 0 -or $Manager.outerCapacity -ne 0 -or
+                        $Manager.queuedEnemies -ne 0 -or $Manager.activeAttackers -ne 0)){
+                        throw ('Client initialized an authority tactical ledger: '+$Entry.Role)
+                    }
+                    if($Manager.occupiedInnerSlots -lt 0 -or $Manager.occupiedInnerSlots -gt $Manager.innerCapacity -or
+                        $Manager.occupiedOuterSlots -lt 0 -or $Manager.occupiedOuterSlots -gt $Manager.outerCapacity -or
+                        $Manager.activeAttackers -lt 0 -or $Manager.activeAttackers -gt $Manager.occupiedInnerSlots -or
+                        $Manager.queuedEnemies -lt 0){throw ('Tactical capacity or admission invariant failed: '+$Entry.Role)}
+                    # Outer occupants are also queued for Inner; do not count them twice.
+                    $Participants+=$Manager.occupiedInnerSlots+$Manager.queuedEnemies
+                }
+                if($Participants -gt 160){throw 'Tactical participants exceed the fixed live population.'}
                 if([bool]$Snapshot.forceUsePerfThreads -ne $ExpectedPerfThreads){throw ('Animation threading launch mismatch: '+$Entry.Role)}
                 if($Entry.Role -eq 'Server' -and ($Snapshot.netMode -ne 1 -or -not $Snapshot.dedicatedServer -or
                     [bool]$Snapshot.shouldUseThreadingForPerformance -ne $ExpectedPerfThreads)){throw 'Dedicated-server threading gate mismatch.'}
+                if($Entry.Role -eq 'Server'){
+                    $ExpectedContinuousFloorEnemies=if($ContinuousFloorChecks){160}else{0}
+                    if($null -eq $Snapshot.movement -or $null -eq $Snapshot.movement.alwaysCheckFloorEnemies -or
+                        [int]$Snapshot.movement.alwaysCheckFloorEnemies -ne $ExpectedContinuousFloorEnemies){
+                        throw 'Actual server continuous-floor-check population does not match this control.'
+                    }
+                }
                 $ExpectedSimple=if($EnemyHitProxies -eq 'Simple'){160}else{0}
                 if($Snapshot.simpleHitProxyEnemies -ne $ExpectedSimple){throw ('Actual enemy hit-proxy mode mismatch: '+$Entry.Role)}
                 if($EnemyHitProxies -eq 'Simple'){
-                    $ExpectedQueries=if($Entry.Role -eq 'Server'){320}else{0}
-                    if($Snapshot.hitProxyComponents.count -ne 320 -or $Snapshot.hitProxyComponents.queryEnabled -ne $ExpectedQueries -or
+                    $ExpectedQueries=if($Entry.Role -eq 'Server'){960}else{0}
+                    if($Snapshot.hitProxyComponents.count -ne 960 -or $Snapshot.hitProxyComponents.queryEnabled -ne $ExpectedQueries -or
+                        $Snapshot.hitProxyComponents.physicsStatesCreated -ne $ExpectedQueries -or
+                        $Snapshot.hitProxyComponents.convexElements -ne 960 -or $Snapshot.hitProxyComponents.otherElements -ne 0 -or
+                        $Snapshot.hitProxyComponents.uniqueHullAssets -ne 1 -or
                         $Snapshot.mesh.collisionEnabled -ne 0 -or $Snapshot.mesh.validBodyInstances -ne 0){
                         throw ('Simplified hit proxies did not replace live skeletal collision: '+$Entry.Role)
                     }
                 }
             }
             $NetworkCounters=Assert-BaselineNetworkCounters $Summary $Entry.Role
-            if($DiagnosticTrace -and $Entry.Role -in @('Server',$RenderRole)){
+            if($CpuAccounting -and $Entry.Role -in @('Server',$RenderRole)){
                 $Cpu=$Summary.cpuAccounting
                 if($null -eq $Cpu -or -not $Cpu.enabled -or -not $Cpu.platformSupported -or -not $Cpu.valid -or
                     $Cpu.validFrameCpuIntervals -ne $Summary.frames -or $Cpu.validWorldCpuIntervals -ne $Summary.frames -or
-                    $Cpu.osQueryFailures -ne 0 -or $Cpu.negativeFrameCpuDeltas -ne 0 -or $Cpu.negativeWorldCpuDeltas -ne 0){
+                    $Cpu.osQueryFailures -ne 0 -or $Cpu.negativeFrameCpuDeltas -ne 0 -or $Cpu.negativeWorldCpuDeltas -ne 0 -or
+                    $null -eq $Cpu.meanFrameCpuMs -or $null -eq $Cpu.meanWorldCpuMs -or
+                    [double]::IsNaN([double]$Cpu.meanFrameCpuMs) -or [double]::IsInfinity([double]$Cpu.meanFrameCpuMs) -or
+                    [double]::IsNaN([double]$Cpu.meanWorldCpuMs) -or [double]::IsInfinity([double]$Cpu.meanWorldCpuMs)){
                     throw ('Missing or incomplete native GameThread CPU accounting: '+$Entry.Role)
                 }
                 $DiagnosticInfo.Roles[$Entry.Role].CpuAccounting=$Cpu
@@ -562,15 +658,45 @@ foreach ($Case in $Cases) {
             if($Entry.Role -eq 'Server') {
                 $Activity=$Summary.aiActivity
                 if($null -eq $Activity -or $Activity.minControllers -ne 160 -or $Activity.maxControllers -ne 160 -or
+                    $Activity.minBehaviorReady -ne 160 -or $Activity.maxBehaviorReady -ne 160 -or
                     $Activity.validationSamples -ne $Summary.validationSamples -or
                     ($Activity.maxMoving -le 0 -and $Activity.maxAttacking -le 0)) {
-                    throw 'Server AI activity invalid: require 160 controllers throughout and observed movement or attacks.'
+                    throw 'Server AI activity invalid: require 160 running behavior controllers throughout and observed movement or attacks.'
+                }
+            }
+            $Pacing=$Summary.pacingDiagnostics
+            $ExpectedPacingFrames=$CpuAccounting -and ($Entry.Role -eq 'Server' -or $Entry.Role -eq $RenderRole)
+            if($null -eq $Pacing -or $Pacing.perFrameDiagnostic -isnot [bool] -or [bool]$Pacing.perFrameDiagnostic -ne $ExpectedPacingFrames){throw ('Missing or unexpected pacing diagnostics: '+$Entry.Role)}
+            foreach($Boundary in @('start','stop')){
+                $Snapshot=$Pacing.$Boundary
+                if($null -eq $Snapshot -or $Snapshot.netDriverValid -isnot [bool] -or -not $Snapshot.netDriverValid -or
+                    $Snapshot.engineQueryValid -isnot [bool]){throw ('Missing live NetDriver pacing readback: '+$Entry.Role+'/'+$Boundary)}
+                foreach($Field in @('queryInputDeltaSeconds','appDeltaSeconds','appIdleSeconds','appIdleOvershootSeconds')){
+                    if($null -eq $Snapshot.$Field -or [double]::IsNaN([double]$Snapshot.$Field) -or [double]::IsInfinity([double]$Snapshot.$Field) -or [double]$Snapshot.$Field -lt 0){throw ('Invalid raw pacing field: '+$Entry.Role+'/'+$Boundary+'/'+$Field)}
+                }
+                if($Snapshot.engineQueryValid){
+                    if($null -eq $Snapshot.queriedEngineMaxTickRateHz -or [double]::IsNaN([double]$Snapshot.queriedEngineMaxTickRateHz) -or [double]::IsInfinity([double]$Snapshot.queriedEngineMaxTickRateHz)){throw 'Invalid safe engine pacing query.'}
+                } elseif($null -ne $Snapshot.queriedEngineMaxTickRateHz){throw 'Unsafe engine pacing query must be null.'}
+                if($Entry.Role -eq 'Server' -and $null -ne $ServerTickRate){
+                    if([int]$Snapshot.netServerMaxTickRate -ne $ServerTickRate -or -not $Snapshot.engineQueryValid -or
+                        [Math]::Abs([double]$Snapshot.queriedEngineMaxTickRateHz-$ServerTickRate) -gt 0.0001 -or
+                        $Snapshot.useFixedFrameRate -or $Snapshot.appUseFixedTimeStep -or $Snapshot.appBenchmarking){
+                        throw ('Explicit server tick target not confirmed, or another pacing override is active: '+$Boundary)
+                    }
                 }
             }
             $ExpectedShipping=$Case.Kind -eq 'Shipping' -and $Entry.Role -ne 'Server'
             if([bool]$Summary.isShipping -ne $ExpectedShipping -or [bool]$Summary.rendered -ne ($Entry.Role -eq $RenderRole)){throw ('Build/render identity mismatch: '+$Entry.Role)}
             if($Entry.Role -eq $RenderRole){
                 if($Summary.width -ne 1600 -or $Summary.height -ne 900 -or $Summary.nullRhi){throw 'Actual rendered viewport mismatch.'}
+                foreach($NativeName in @('r.NumBufferedOcclusionQueries','r.HZBOcclusion','r.OneFrameThreadLag','r.RHICmdBypass')){
+                    $NativeValue=$Summary.quality.$NativeName
+                    if($null -eq $NativeValue -or [double]::IsNaN([double]$NativeValue) -or [double]::IsInfinity([double]$NativeValue)){throw ('Missing actual renderer CVar readback: '+$NativeName)}
+                }
+                if(($ClientOcclusion -eq 'Buffer3' -and [double]$Summary.quality.'r.NumBufferedOcclusionQueries' -ne 3) -or
+                    ($ClientOcclusion -eq 'HZB' -and [double]$Summary.quality.'r.HZBOcclusion' -ne 1)){
+                    throw ('Requested client occlusion override did not take effect: '+$ClientOcclusion)
+                }
                 $ActualView=@($Summary.viewLocation)+@($Summary.viewRotation)
                 if($null -eq $ReferenceView){$ReferenceView=$ActualView}
                 for($ViewIndex=0;$ViewIndex -lt 6;++$ViewIndex){if([Math]::Abs([double]$ActualView[$ViewIndex]-[double]$ReferenceView[$ViewIndex]) -gt 0.1){throw 'Camera changed between repeated/build cases.'}}
@@ -583,6 +709,25 @@ foreach ($Case in $Cases) {
             $Rows=@(Import-Csv -LiteralPath (Join-Path $CaseRoot ($Entry.Role+'.frames.csv')))
             $ExpectedColumns='Frame,ElapsedSeconds,FrameEndIntervalMs,WorldTickWallMs,WorldTickValid,CpuAccountingEnabled,GTEndCpuValid,GTEndThreadId,GTEndCpuQueryError,GTPreviousEndUser100ns,GTPreviousEndKernel100ns,GTEndUser100ns,GTEndKernel100ns,GTFrameCpuValid,GTFrameUser100nsDelta,GTFrameKernel100nsDelta,GTFrameCpuMs,GTWorldCpuValid,GTWorldBeginUser100ns,GTWorldBeginKernel100ns,GTWorldEndUser100ns,GTWorldEndKernel100ns,GTWorldUser100nsDelta,GTWorldKernel100nsDelta,GTWorldCpuMs'
             if($Rows.Count -eq 0 -or ($Rows[0].PSObject.Properties.Name -join ',') -cne $ExpectedColumns){throw 'Expected exact schema-2 frame columns.'}
+            if($CpuAccounting -and ($Entry.Role -eq 'Server' -or $Entry.Role -eq $RenderRole)){
+                $PacingRows=@(Import-Csv -LiteralPath (Join-Path $CaseRoot ($Entry.Role+'.pacing.csv')))
+                $PacingColumns='Frame,AppDeltaSeconds,AppIdleSeconds,AppIdleOvershootSeconds,NetDriverValid,NetServerMaxTickRate,MaxNetTickRate,EngineQueryValid,QueryInputDeltaSeconds,QueriedEngineMaxTickRateHz'
+                if($PacingRows.Count -ne $Rows.Count -or $PacingRows.Count -eq 0 -or ($PacingRows[0].PSObject.Properties.Name -join ',') -cne $PacingColumns){throw 'Missing or mismatched diagnostic pacing schema.'}
+                for($PacingIndex=0;$PacingIndex -lt $PacingRows.Count;++$PacingIndex){
+                    $PacingRow=$PacingRows[$PacingIndex]
+                    if([long]$PacingRow.Frame -ne [long]$Rows[$PacingIndex].Frame -or $PacingRow.NetDriverValid -cne '1' -or $PacingRow.EngineQueryValid -cnotin @('0','1')){throw 'Diagnostic pacing/frame identity or validity mismatch.'}
+                    foreach($Field in @('AppDeltaSeconds','AppIdleSeconds','AppIdleOvershootSeconds','QueryInputDeltaSeconds')){
+                        if([string]::IsNullOrWhiteSpace($PacingRow.$Field) -or [double]::IsNaN([double]$PacingRow.$Field) -or [double]::IsInfinity([double]$PacingRow.$Field) -or [double]$PacingRow.$Field -lt 0){throw ('Invalid diagnostic pacing sample: '+$Field)}
+                    }
+                    if($PacingRow.EngineQueryValid -eq '0'){
+                        if(-not [string]::IsNullOrEmpty($PacingRow.QueriedEngineMaxTickRateHz)){throw 'Unsafe per-frame engine pacing query must be blank.'}
+                    } elseif([string]::IsNullOrWhiteSpace($PacingRow.QueriedEngineMaxTickRateHz) -or [double]::IsNaN([double]$PacingRow.QueriedEngineMaxTickRateHz) -or [double]::IsInfinity([double]$PacingRow.QueriedEngineMaxTickRateHz)){throw 'Invalid per-frame engine pacing query.'}
+                    if($Entry.Role -eq 'Server' -and $null -ne $ServerTickRate -and
+                        ([int]$PacingRow.NetServerMaxTickRate -ne $ServerTickRate -or $PacingRow.EngineQueryValid -ne '1' -or [Math]::Abs([double]$PacingRow.QueriedEngineMaxTickRateHz-$ServerTickRate) -gt 0.0001)){throw 'Explicit server tick target changed inside diagnostic capture.'}
+                }
+                $DiagnosticInfo.Roles[$Entry.Role].Pacing=[ordered]@{File=(Join-Path $CaseRoot ($Entry.Role+'.pacing.csv'));Samples=$PacingRows.Count;
+                    Boundary='Exact global-frame pairing; FApp idle/overshoot are pacing observations, not OS scheduler states. Query is a guarded re-evaluation, not the internal UpdateTimeAndHandleMaxTickRate local.'}
+            }
             foreach($Row in $Rows){
                 if($Row.WorldTickValid -cnotin @('0','1')){throw 'Invalid selected-World frame validity.'}
                 if($Row.WorldTickValid -eq '0'){
@@ -616,7 +761,7 @@ foreach ($Case in $Cases) {
         }
         if((Get-BaselineFingerprint | ConvertTo-Json -Depth 4 -Compress) -ne $FingerprintText){throw 'Inputs changed during case.'}
         if($DiagnosticTrace){
-            foreach($Role in @('Server',$RenderRole)){
+            foreach($Role in $TraceRoles){
                 $TracePath=$DiagnosticInfo.Roles[$Role].Trace
                 if(-not (Test-Path -LiteralPath $TracePath -PathType Leaf) -or (Get-Item -LiteralPath $TracePath).Length -le 0){throw ('Missing diagnostic trace: '+$Role)}
                 $DiagnosticInfo.Roles[$Role].TraceBytes=(Get-Item -LiteralPath $TracePath).Length
@@ -675,9 +820,9 @@ foreach ($Case in $Cases) {
         }
         if($null -ne $PmProcess){if(-not $PmProcess.HasExited){Stop-Process -Id $PmProcess.Id -Force};$PmProcess.Dispose()}
         $Result.DurationSeconds=((Get-Date)-$Started).TotalSeconds
-        if($DiagnosticTrace){
+        if($HasDiagnostics){
             $DiagnosticInfo.FinishedUtc=[datetime]::UtcNow.ToString('o');$DiagnosticInfo.Failure=$Result.Error
-            Write-BaselineJson $DiagnosticInfo (Join-Path $DiagnosticCase 'diagnostic-manifest.json')
+            Write-BaselineJson $DiagnosticInfo $DiagnosticManifestPath
         }
         Write-BaselineJson $Result (Join-Path $CaseRoot 'result.json')
         $Results+=[pscustomobject]$Result
@@ -689,12 +834,14 @@ $Aggregates=@()
 foreach($Kind in $BuildKinds){ foreach($Threads in $ServerAnimationThreads){
     $Runs=@($Results | Where-Object {$_.Kind -eq $Kind -and $_.ServerAnimationThreads -eq $Threads})
     $Frames=@($Runs | ForEach-Object {$_.Roles[$RenderRole].FrameEndIntervalMeanMs})
-    $Aggregates+=[pscustomobject]@{Build=$Kind;ServerAnimationThreads=$Threads;ServerBuild='Editor dedicated server';Repeats=$Runs.Count;RenderedRole=$RenderRole;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;
+    $Aggregates+=[pscustomobject]@{Build=$Kind;ServerAnimationThreads=$Threads;ServerBuild='Editor dedicated server';Repeats=$Runs.Count;RenderedRole=$RenderRole;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;ServerPacing=$PacingPolicy;ClientOcclusion=$ClientOcclusion;ContinuousFloorChecks=[bool]$ContinuousFloorChecks;CpuDiagnostic=[bool]$CpuDiagnostic;DiagnosticOnly=$HasDiagnostics;FormalBaseline=(-not $HasDiagnostics);
         MeanFrameEndIntervalMs=($Frames | Measure-Object -Average).Average;
         MeanRunP95Ms=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].P95Ms}) | Measure-Object -Average).Average;
         MeanRunP99Ms=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].P99Ms}) | Measure-Object -Average).Average;
         MeanRunOver16_667Percent=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].FramesOver16_667Percent}) | Measure-Object -Average).Average;
         MeanServerWorldTickWallMs=(@($Runs | ForEach-Object {$_.Roles.Server.WorldTickWall.MeanMs}) | Measure-Object -Average).Average;
+        MeanServerGTFrameCpuMs=if($CpuAccounting){(@($Runs | ForEach-Object {$_.Roles.Server.RawSummary.cpuAccounting.meanFrameCpuMs}) | Measure-Object -Average).Average}else{$null};
+        MeanServerWorldCpuMs=if($CpuAccounting){(@($Runs | ForEach-Object {$_.Roles.Server.RawSummary.cpuAccounting.meanWorldCpuMs}) | Measure-Object -Average).Average}else{$null};
         MeanServerOutBytesPerSecond=(@($Runs | ForEach-Object {$_.Roles.Server.NetworkConnections.totals.outBytes.perSecond}) | Measure-Object -Average).Average;
         MeanServerOutPacketsPerSecond=(@($Runs | ForEach-Object {$_.Roles.Server.NetworkConnections.totals.outPackets.perSecond}) | Measure-Object -Average).Average;
         MeanRenderedClientInBytesPerSecond=(@($Runs | ForEach-Object {$_.Roles[$RenderRole].NetworkConnections.totals.inBytes.perSecond}) | Measure-Object -Average).Average;

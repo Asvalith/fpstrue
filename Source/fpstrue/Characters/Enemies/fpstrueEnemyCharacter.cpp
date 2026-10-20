@@ -11,11 +11,13 @@
 #include "Components/SphereComponent.h"
 #include "Components/MeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
 #include "Components/ProgressBar.h"
 #include "Blueprint/WidgetTree.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
+#include "Engine/StaticMesh.h"
 #include "EngineGlobals.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
@@ -29,6 +31,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "UObject/ConstructorHelpers.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
@@ -46,6 +49,19 @@ namespace
 		default: return Full;
 		}
 	}
+}
+
+// 静态基座 Actor 仍有效，不代表其组件仍在物理场景；UE5.5 的原生静态缓存路径未覆盖这三种失效。
+void UfpstrueEnemyMovementComponent::FindFloor(const FVector& CapsuleLocation, FFindFloorResult& OutFloorResult,
+	bool bCanUseCachedLocation, const FHitResult* DownwardSweepResult) const
+{
+	if (bCanUseCachedLocation)
+	{
+		const UPrimitiveComponent* Base = GetMovementBase();
+		bCanUseCachedLocation = IsValid(Base) && Base->IsRegistered() && Base->IsPhysicsStateCreated();
+	}
+	// 不保存另一份地面、不手写扫掠；仅撤销失效复用资格，由原生查询重新决定 Walking/Falling。
+	Super::FindFloor(CapsuleLocation, OutFloorResult, bCanUseCachedLocation, DownwardSweepResult);
 }
 
 // 没有全局 Tick 或逐帧 Actor 扫描；World 清理事件精确移除对应缓存，弱键也不会保活旧关卡。
@@ -377,7 +393,8 @@ TSharedRef<SWidget> UfpstrueEnemyHealthBarWidget::RebuildWidget()
 // ==================== 组件初始化与生命周期 ====================
 
 // 构造默认 Mesh/Movement 行为以及可复用生命、战斗组件；高层决策由自动生成的 AIController 承担。
-AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
+AfpstrueEnemyCharacter::AfpstrueEnemyCharacter(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UfpstrueEnemyMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick = false;
 	bReplicates = true;
@@ -389,6 +406,9 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 	// 每个敌人的 CharacterMovement 使用 RVO 做局部避让；AIController 仍负责路径请求和高层状态。
 	// OnPossess 会再次显式开启，避免已保存蓝图中的旧默认值让同一构建出现混合模式。
 	GetCharacterMovement()->bUseRVOAvoidance = true;
+	// 原生 Walking 可复用静止角色的有效静态地面；移动、动态基座、瞬移及强制复查仍由 CMC 失效。
+	// 保留组件蓝图的 Always Check Floor 开关，需检测从下方顶入物体的特殊关卡可以显式开启。
+	GetCharacterMovement()->bAlwaysCheckFloor = false;
 
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
@@ -398,11 +418,23 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 
 	HealthComponent = CreateDefaultSubobject<UfpstrueHealthComponent>(TEXT("HealthComponent"));
 	CombatComponent = CreateDefaultSubobject<UfpstrueEnemyCombatComponent>(TEXT("CombatComponent"));
-	EnemyHeadHitProxy = CreateDefaultSubobject<USphereComponent>(TEXT("EnemyHeadHitProxy"));
-	EnemyBodyHitProxy = CreateDefaultSubobject<UCapsuleComponent>(TEXT("EnemyBodyHitProxy"));
-	for (UShapeComponent* Proxy : {static_cast<UShapeComponent*>(EnemyHeadHitProxy.Get()), static_cast<UShapeComponent*>(EnemyBodyHitProxy.Get())})
+	// 同一份已烘焙凸包资源由六部位和所有敌人共享；不在出生/LOD切换时运行凸包Cooking。
+	static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> HitHull(TEXT("/Game/PerformanceCandidates/EnemyCollision/SM_EnemyHitConvex.SM_EnemyHitConvex"));
+	const bool bGeneratingHitHull = FParse::Param(FCommandLine::Get(), TEXT("BuildEnemyHitHull"));
+	EnemyHeadHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyHeadHitProxy"));
+	EnemyBodyHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyBodyHitProxy"));
+	EnemyLeftArmHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyLeftArmHitProxy"));
+	EnemyRightArmHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyRightArmHitProxy"));
+	EnemyLeftLegHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyLeftLegHitProxy"));
+	EnemyRightLegHitProxy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EnemyRightLegHitProxy"));
+	for (UStaticMeshComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
+		EnemyRightArmHitProxy.Get(), EnemyLeftLegHitProxy.Get(), EnemyRightLegHitProxy.Get()})
 	{
 		Proxy->SetupAttachment(GetCapsuleComponent());
+		Proxy->SetMobility(EComponentMobility::Movable);
+		// 仅首次资产生成命令允许资源尚不存在；正常游戏仍按硬引用加载并校验交付内容。
+		if (!bGeneratingHitHull) Proxy->SetStaticMesh(HitHull.Get());
+		Proxy->ComponentTags.Add(TEXT("EnemyHitProxy"));
 		Proxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Proxy->SetCollisionObjectType(ECC_Pawn);
 		// 构造阶段保持停用；BeginPlay按原Mesh的完整查询响应配置，不能把活体代理限制成仅WeaponTrace。
@@ -411,6 +443,10 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter()
 		Proxy->SetGenerateOverlapEvents(false);
 		Proxy->SetCanEverAffectNavigation(false);
 		Proxy->SetHiddenInGame(true);
+		Proxy->SetVisibility(false);
+		Proxy->SetCastShadow(false);
+		Proxy->SetVisibleInRayTracing(false);
+		Proxy->BodyInstance.bAutoWeld = false;
 		Proxy->PrimaryComponentTick.bCanEverTick = false;
 	}
 	HealthBar = CreateDefaultSubobject<UfpstrueEnemyHealthBarComponent>(TEXT("EnemyHealthBar"));
@@ -500,7 +536,7 @@ void AfpstrueEnemyCharacter::BeginPlay()
 		else UE_LOG(LogTemp, Warning, TEXT("Unknown EnemyHitProxies=%s; retaining authored mode"), *HitProxyMode);
 	}
 	ConfigureHitProxies(bSimpleMode);
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	GetCapsuleComponent()->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Ignore);
 
 	if (HealthComponent != nullptr)
@@ -554,7 +590,7 @@ void AfpstrueEnemyCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME(AfpstrueEnemyCharacter, NetworkPresentation);
 }
 
-// 两个解析形状采用统一近远规则；本地偏移从角色胶囊尺寸生成，不采样任何骨骼或客户端相机。
+// 六个真凸包采用统一近远规则；本地偏移从角色胶囊尺寸生成，不采样任何骨骼或客户端相机。
 void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 {
 	bUseSimpleHitProxies = bSimpleMode;
@@ -571,7 +607,7 @@ void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 	}
 	// Simple只替换查询几何，不把角色从Sight/近战遮挡等通道中移除。
 	// 使用作者Mesh的完整响应和对象类型；保留Reference入口的Pawn忽略与WeaponTrace阻挡契约。
-	// 两个简化形状不等于原PhysicsAsset轮廓，恢复通道语义不保证遮挡几何逐点一致。
+	// 六部位仍是根节点驱动的近似轮廓，不随挥动四肢变形；恢复通道语义不保证几何逐点一致。
 	FCollisionResponseContainer QueryResponses = CharacterMesh->GetCollisionResponseToChannels();
 	QueryResponses.SetResponse(ECC_Pawn, ECR_Ignore);
 	QueryResponses.SetResponse(FpstrueCollisionChannels::WeaponTrace, ECR_Block);
@@ -583,31 +619,40 @@ void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 	if (CharacterMesh->IsPhysicsStateCreated()) CharacterMesh->DestroyPhysicsState();
 	const float HalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 	const float Radius = GetCapsuleComponent()->GetUnscaledCapsuleRadius();
-	const float HeadRadius = FMath::Max(Radius * 0.43f, 1.0f);
-	EnemyHeadHitProxy->SetSphereRadius(HeadRadius, false);
-	EnemyHeadHitProxy->SetRelativeLocation(FVector(0.0f, 0.0f, HalfHeight * 0.82f));
-	EnemyBodyHitProxy->SetCapsuleSize(FMath::Max(Radius * 0.78f, 1.0f), FMath::Max(HalfHeight * 0.82f, Radius * 0.78f), false);
-	EnemyBodyHitProxy->SetRelativeLocation(FVector(0.0f, 0.0f, -HalfHeight * 0.18f));
-	for (UShapeComponent* Proxy : {static_cast<UShapeComponent*>(EnemyHeadHitProxy.Get()), static_cast<UShapeComponent*>(EnemyBodyHitProxy.Get())})
+	const auto ConfigurePart = [](UStaticMeshComponent* Part, const FVector& Offset, const FVector& HalfExtents)
+	{
+		// 共享资源的局部半尺寸为50cm；缩放Body而不是复制/修改共享BodySetup。
+		Part->SetRelativeLocation(Offset);
+		Part->SetRelativeScale3D(HalfExtents.ComponentMax(FVector(1.0f)) / 50.0f);
+	};
+	ConfigurePart(EnemyHeadHitProxy, FVector(0, 0, HalfHeight * 0.82f), FVector(Radius * 0.43f, Radius * 0.43f, HalfHeight * 0.17f));
+	ConfigurePart(EnemyBodyHitProxy, FVector(0, 0, HalfHeight * 0.24f), FVector(Radius * 0.55f, Radius * 0.58f, HalfHeight * 0.42f));
+	ConfigurePart(EnemyLeftArmHitProxy, FVector(0, -Radius * 0.82f, HalfHeight * 0.12f), FVector(Radius * 0.32f, Radius * 0.22f, HalfHeight * 0.40f));
+	ConfigurePart(EnemyRightArmHitProxy, FVector(0, Radius * 0.82f, HalfHeight * 0.12f), FVector(Radius * 0.32f, Radius * 0.22f, HalfHeight * 0.40f));
+	ConfigurePart(EnemyLeftLegHitProxy, FVector(0, -Radius * 0.30f, -HalfHeight * 0.59f), FVector(Radius * 0.40f, Radius * 0.24f, HalfHeight * 0.41f));
+	ConfigurePart(EnemyRightLegHitProxy, FVector(0, Radius * 0.30f, -HalfHeight * 0.59f), FVector(Radius * 0.40f, Radius * 0.24f, HalfHeight * 0.41f));
+	for (UStaticMeshComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
+		EnemyRightArmHitProxy.Get(), EnemyLeftLegHitProxy.Get(), EnemyRightLegHitProxy.Get()})
 	{
 		Proxy->SetCollisionObjectType(QueryObjectType);
 		Proxy->SetCollisionResponseToChannels(QueryResponses);
 		Proxy->SetGenerateOverlapEvents(false);
 		Proxy->SetCanEverAffectNavigation(false);
 		Proxy->SetSimulatePhysics(false);
-	}
-	// 非拥有端只消费服务器命中事实，不为每个远端敌人再创建一套查询/模拟物理对象。
-	if (HasAuthority())
-	{
-		EnemyHeadHitProxy->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-		EnemyBodyHitProxy->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		// 非拥有端只消费服务器命中事实；不再为远端敌人创建权威查询或模拟对象。
+		if (HasAuthority())
+		{
+			ensureMsgf(Proxy->GetStaticMesh() != nullptr, TEXT("Missing pre-cooked enemy convex hit mesh; generate and cook SM_EnemyHitConvex before delivery"));
+			Proxy->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		}
 	}
 }
 
 void AfpstrueEnemyCharacter::DisableHitProxies()
 {
-	EnemyHeadHitProxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	EnemyBodyHitProxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	for (UStaticMeshComponent* Proxy : {EnemyHeadHitProxy.Get(), EnemyBodyHitProxy.Get(), EnemyLeftArmHitProxy.Get(),
+		EnemyRightArmHitProxy.Get(), EnemyLeftLegHitProxy.Get(), EnemyRightLegHitProxy.Get()})
+		Proxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 }
 
 void AfpstrueEnemyCharacter::ResolveHitProxyBone(FHitResult& Hit) const
@@ -615,6 +660,10 @@ void AfpstrueEnemyCharacter::ResolveHitProxyBone(FHitResult& Hit) const
 	if (!bUseSimpleHitProxies || Hit.GetActor() != this) return;
 	if (Hit.GetComponent() == EnemyHeadHitProxy) Hit.BoneName = TEXT("head");
 	else if (Hit.GetComponent() == EnemyBodyHitProxy) Hit.BoneName = TEXT("spine_03");
+	else if (Hit.GetComponent() == EnemyLeftArmHitProxy) Hit.BoneName = TEXT("upperarm_l");
+	else if (Hit.GetComponent() == EnemyRightArmHitProxy) Hit.BoneName = TEXT("upperarm_r");
+	else if (Hit.GetComponent() == EnemyLeftLegHitProxy) Hit.BoneName = TEXT("thigh_l");
+	else if (Hit.GetComponent() == EnemyRightLegHitProxy) Hit.BoneName = TEXT("thigh_r");
 }
 
 bool AfpstrueEnemyCharacter::RequiresFullAuthorityPose() const
@@ -656,14 +705,14 @@ void AfpstrueEnemyCharacter::OnRep_NetworkPresentation()
 	RemoteAttackPlayback.Reset();
 	if (!NetworkPresentation.bAttacking || !IsValid(NetworkPresentation.Montage))
 	{
-		ApplyRenderSignificanceSettings();
+		ApplyAnimationAndRenderPolicy();
 		RefreshAnimationSharingRegistration();
 		return;
 	}
 	// ★【重要边界】共享 Follower 必须先恢复自己的 AnimInstance，再绑定本次网络攻击播放。
 	LastCombatRelevantTime = GetWorld()->GetTimeSeconds();
 	SuspendAnimationSharing();
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	UAnimInstance* Anim = GetMesh()->GetAnimInstance();
 	if (Anim == nullptr) return;
 	const AGameStateBase* State = GetWorld()->GetGameState();
@@ -676,7 +725,7 @@ void AfpstrueEnemyCharacter::OnRep_NetworkPresentation()
 		EMontagePlayReturnType::MontageLength, Position, true) > 0.0f)
 	{
 		RemoteAttackPlayback.TryBind(NetworkPresentation.AttackId, GetMesh(), NetworkPresentation.Montage);
-		ApplyRenderSignificanceSettings();
+		ApplyAnimationAndRenderPolicy();
 	}
 }
 
@@ -687,7 +736,7 @@ void AfpstrueEnemyCharacter::MulticastHitReaction_Implementation(float DamageAmo
 	LastCombatRelevantTime = GetWorld()->GetTimeSeconds();
 	HitAnimationProtectionUntil = LastCombatRelevantTime + 0.3f;
 	SuspendAnimationSharing();
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	GetWorldTimerManager().SetTimer(HitAnimationProtectionTimer, this, &ThisClass::RefreshHitAnimationProtection, 0.3f, false);
 	OnEnemyDamaged(DamageAmount, nullptr, nullptr);
 }
@@ -791,7 +840,7 @@ void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 	// Combat 已先提交攻击阶段；所有组件设置只从当前事实合成，不在入口重复写另一套策略。
 	ApplyGameplaySignificanceIntervals();
 	ApplyNetworkReplicationPolicy();
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	if (!bHighPriority)
 	{
 		RefreshAnimationSharingRegistration();
@@ -867,7 +916,7 @@ void AfpstrueEnemyCharacter::HandleDamageResolved(float DamageAmount, AActor* Da
 	}
 	// 先退出共享并立即恢复必要动画，再发受击表现；不等待下一轮集中采样，也不赠送阴影/光追名额。
 	SuspendAnimationSharing();
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	ApplyNetworkReplicationPolicy();
 	if (HasAuthority() && GetNetMode() != NM_Standalone) ForceNetUpdate();
 	// 根据最近伤害方向给 CharacterMovement 添加轻量受击冲量。
@@ -891,7 +940,7 @@ void AfpstrueEnemyCharacter::RefreshHitAnimationProtection()
 {
 	HitAnimationProtectionUntil = -MAX_flt;
 	ApplyNetworkReplicationPolicy();
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	RefreshAnimationSharingRegistration();
 }
 
@@ -1085,8 +1134,11 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 	}
 	const float FullRateThreshold = 1.0f / (1.0f + FullRateMovementDistance);
 	const float MidRateThreshold = 1.0f / (1.0f + MidRateMovementDistance);
-	const bool bRequiresFullRate = IsAttacking() || (SignificanceCombatProtectionSample != nullptr
+	const bool bAttacking = IsAttacking();
+	// 保持原有短路：攻击时不重复查询近战范围；有本轮快照时不再做一次 LOS。
+	const bool bCloseCombat = !bAttacking && (SignificanceCombatProtectionSample != nullptr
 		? *SignificanceCombatProtectionSample : IsTargetInAttackRange());
+	const bool bRequiresFullRate = bAttacking || bCloseCombat;
 
 	EFPEnemySignificanceTier NewTier = EFPEnemySignificanceTier::Background;
 	if (bRequiresFullRate || Significance >= FullRateThreshold)
@@ -1097,6 +1149,20 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 	{
 		NewTier = EFPEnemySignificanceTier::Reduced;
 	}
+
+	// 顺序后处理中的只读诊断；即使档位未变也更新，不能将追踪/寻路/受击动画保护误报为 Gameplay Full 原因。
+	GameplayTierReasonSnapshot.bHasPolicySample = true;
+	GameplayTierReasonSnapshot.SampleWorldTimeSeconds = GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : -1.0;
+	GameplayTierReasonSnapshot.SignificanceScore = Significance;
+	GameplayTierReasonSnapshot.bUsedScopedCombatSample = !bAttacking && SignificanceCombatProtectionSample != nullptr;
+	GameplayTierReasonSnapshot.bDistanceSampleValid = bHasSignificancePositionSnapshot && FMath::IsFinite(Significance)
+		&& Significance > 0.0f && Significance <= 1.0f;
+	GameplayTierReasonSnapshot.NearestPlayerDistance2D = GameplayTierReasonSnapshot.bDistanceSampleValid
+		? 1.0 / static_cast<double>(Significance) - 1.0 : 0.0;
+	GameplayTierReasonSnapshot.AppliedTier = NewTier;
+	GameplayTierReasonSnapshot.bFullByDistance = NewTier == EFPEnemySignificanceTier::Full && Significance >= FullRateThreshold;
+	GameplayTierReasonSnapshot.bFullByAttack = NewTier == EFPEnemySignificanceTier::Full && bAttacking;
+	GameplayTierReasonSnapshot.bFullByMeleeRange = NewTier == EFPEnemySignificanceTier::Full && bCloseCombat;
 
 	// 应用 Gameplay Tier，并把决策倍率传给 AIController。
 	// 档位未变化不重复下发Movement/AI设置；复制保护独立刷新，变化时再应用移动与决策倍率。
@@ -1111,7 +1177,7 @@ void AfpstrueEnemyCharacter::ApplySignificance(float Significance)
 	ApplyGameplaySignificanceIntervals();
 	ApplyNetworkReplicationPolicy();
 	// 专服也需要消费自身的姿态档位；不能依赖只在本地画面分支运行的Render预算提交。
-	if (HasAuthority() && bUseSimpleHitProxies) ApplyRenderSignificanceSettings();
+	if (HasAuthority() && bUseSimpleHitProxies) ApplyAnimationAndRenderPolicy();
 
 	if (AfpstrueEnemyAIController* EnemyAIController = Cast<AfpstrueEnemyAIController>(GetController()))
 	{
@@ -1318,12 +1384,12 @@ void AfpstrueEnemyCharacter::ApplyRenderSignificanceTier(EFPEnemyRenderSignifica
 	bGameplayAnimationProtection = bInForceFullAnimationAndLOD;
 	LastRenderSignificancePolicy = Policy;
 	bHasRenderSignificancePolicy = true;
-	ApplyRenderSignificanceSettings();
+	ApplyAnimationAndRenderPolicy();
 	RefreshAnimationSharingRegistration();
 }
 
 // 合成战斗保护、资产原值和渲染策略，是骨骼动画频率及最低 LOD 的统一应用入口。
-void AfpstrueEnemyCharacter::ApplyRenderSignificanceSettings()
+void AfpstrueEnemyCharacter::ApplyAnimationAndRenderPolicy()
 {
 	// 唯一姿态提交入口：服务器消费自身Gameplay档位，客户端消费本地Render档位。
 	// 这里只测GT策略应用，不冒充动画求值、骨骼写物理或GPU执行时间。
@@ -1400,8 +1466,11 @@ void AfpstrueEnemyCharacter::RefreshRenderBudgetMeshes()
 	// 普通 Attach 不转移所有权，否则两名敌人交换挂件时会互相覆盖缓存的原始资格。
 	// ★【重要边界】[资源所有权] 只管理本 Actor/ChildActor 拥有的 Mesh，保存原始许可；外部 Actor 仅 Attach 不自动进入该敌人的预算。
 	GetComponents(CurrentMeshes, true);
-	// 屏幕 UI 不参与世界网格的阴影/光追名额，不改变既有网格预算统计。
-	CurrentMeshes.Remove(HealthBar.Get());
+	// UI与不可见的命中凸包不进入表现预算；不能让新增碰撞组件变成额外渲染消费者。
+	CurrentMeshes.RemoveAll([this](const UMeshComponent* CandidateMesh)
+	{
+		return CandidateMesh == HealthBar.Get() || CandidateMesh->ComponentHasTag(TEXT("EnemyHitProxy"));
+	});
 	RenderBudgetMeshes.RemoveAllSwap(
 		[&CurrentMeshes](const FRenderBudgetMesh& Entry)
 		{

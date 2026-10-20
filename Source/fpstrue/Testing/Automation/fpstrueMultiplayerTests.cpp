@@ -4,6 +4,7 @@
 
 #include "Misc/AutomationTest.h"
 #include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstrueGameMode.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Weapons/fpstrueWeaponComponent.h"
@@ -19,6 +20,9 @@
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "BrainComponent.h"
+#include "Navigation/PathFollowingComponent.h"
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
 #include "Camera/CameraComponent.h"
@@ -36,11 +40,13 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
 #include "Animation/Skeleton.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #include "ReferenceSkeleton.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -93,6 +99,22 @@ bool BeginMultiplayerUnitWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& 
 	}
 	Fixture.ForwardErrorMessages(&Test);
 	return false;
+}
+
+FString DescribeEnemyAttackGate(AfpstrueEnemyCharacter& Enemy, AfpstrueEnemyAIController& Controller,
+	const FFPEnemyTacticalAssignment& Assignment, float AcceptanceRadius)
+{
+	float AgentRadius = 0.0f, AgentHalfHeight = 0.0f;
+	Enemy.GetSimpleCollisionCylinder(AgentRadius, AgentHalfHeight);
+	const UPathFollowingComponent* Following = Controller.GetPathFollowingComponent();
+	const UfpstrueEnemyCombatComponent* Combat = Enemy.GetCombatComponent();
+	return FString::Printf(TEXT("AttackReady=%d PositionReady=%d FacingReady=%d InRange=%d Role=%d Revision=%llu HasInner=%d HasReached=%d AgentRadius=%.1f AgentHalfHeight=%.1f Acceptance=%.1f GoalDistance2D=%.1f Feet=%s Goal=%s"),
+		Combat->IsAttackReady(), Controller.IsTacticalAttackPositionReady(false), Controller.IsTacticalAttackPositionReady(),
+		Combat->IsTargetInAttackRange(), static_cast<int32>(Assignment.Role), Assignment.Revision,
+		Controller.GetSurroundManager()->HasInnerSlot(&Enemy, Assignment.Revision),
+		Following != nullptr && Following->HasReached(Assignment.Goal, EPathFollowingReachMode::OverlapAgent, AcceptanceRadius),
+		AgentRadius, AgentHalfHeight, AcceptanceRadius, FVector::Dist2D(Enemy.GetNavAgentLocation(), Assignment.Goal),
+		*Enemy.GetNavAgentLocation().ToCompactString(), *Assignment.Goal.ToCompactString());
 }
 
 UfpstrueHealthComponent* AddMultiplayerTestHealth(AActor& Owner)
@@ -1423,6 +1445,139 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerSpawnReadinessTest,
+	"fpstrue.Multiplayer.Lifecycle.BoundedSpawnRecovery",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 真实碰撞拒绝、定时重试及最终失败；不把握手成功或观战状态当成已拥有游戏Pawn。
+bool FFpstrueMultiplayerSpawnReadinessTest::RunTest(const FString& Parameters)
+{
+	FTestWorldWrapper Fixture;
+	if (!BeginMultiplayerUnitWorld(Fixture, *this, false, AfpstruePvpGameMode::StaticClass())) return false;
+	UWorld* World = Fixture.GetTestWorld();
+	auto* Mode = World->GetAuthGameMode<AfpstruePvpGameMode>();
+	if (!TestNotNull(TEXT("Spawn recovery uses the real PvP mode"), Mode)) return false;
+	Mode->EnemyPopulation = 0;
+	Mode->bProvideNearbySpawnPickup = false;
+	APlayerStart* Start = World->SpawnActor<APlayerStart>(FVector(5000, 0, 1000), FRotator::ZeroRotator);
+	AActor* Blocker = World->SpawnActor<AActor>();
+	auto* Player = World->SpawnActor<AfpstruePvpPlayerController>();
+	if (!TestNotNull(TEXT("Spawn recovery player start"), Start) || !TestNotNull(TEXT("Spawn recovery blocker"), Blocker) ||
+		!TestNotNull(TEXT("Spawn recovery controller"), Player)) return false;
+	// 单个实心大盒可以被FindTeleportSpot合法推出；两堵墙只留下40cm通道，确实容不下玩家胶囊。
+	for (const float Side : {-1.0f, 1.0f})
+	{
+		UBoxComponent* Block = NewObject<UBoxComponent>(Blocker);
+		if (Blocker->GetRootComponent() == nullptr) Blocker->SetRootComponent(Block);
+		else Block->SetupAttachment(Blocker->GetRootComponent());
+		Blocker->AddInstanceComponent(Block);
+		Block->SetMobility(EComponentMobility::Static);
+		Block->SetBoxExtent(FVector(1000, 10000, 10000));
+		Block->SetCollisionObjectType(ECC_WorldStatic);
+		Block->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Block->SetCollisionResponseToAllChannels(ECR_Block);
+		Block->SetWorldLocation(Start->GetActorLocation() + FVector(Side * 1020, 0, 0));
+		Block->RegisterComponent();
+	}
+	if (!Fixture.TickTestWorld(0.05f)) { Fixture.ForwardErrorMessages(this); return false; }
+	const APawn* PawnTemplate = Mode->DefaultPawnClass.GetDefaultObject();
+	FVector BlockedLocation = Start->GetActorLocation();
+	if (!TestTrue(TEXT("The fixture has real blocking geometry at the selected spawn"),
+		World->EncroachingBlockingGeometry(PawnTemplate, BlockedLocation, FRotator::ZeroRotator)) ||
+		!TestFalse(TEXT("Native collision adjustment cannot fit a player into the narrow passage"),
+		World->FindTeleportSpot(PawnTemplate, BlockedLocation, FRotator::ZeroRotator))) return false;
+	Player->StartSpot = Start;
+	Player->bConnectionHandshakeComplete = true;
+	Mode->RestartPlayer(Player);
+	TestNull(TEXT("Blocked spawn does not force an overlapping Pawn"), Player->GetPawn());
+	TestFalse(TEXT("Connection admission without a Pawn is not gameplay ready"),
+		UfpstrueMultiplayerGameInstance::IsPawnStateReady(nullptr, Player->GetPlayerState<AfpstruePvpPlayerState>()));
+	if (!TestTrue(TEXT("One blocked attempt schedules a bounded recovery"), Mode->SpawnRecoveries.Contains(Player))) return false;
+	TestEqual(TEXT("Initial spawn consumes exactly one attempt"), Mode->SpawnRecoveries.FindChecked(Player).Attempts, 1);
+	const FTimerHandle Retry = Mode->SpawnRecoveries.FindChecked(Player).Timer;
+	Mode->FailedToRestartPlayer(Player);
+	TestTrue(TEXT("Repeated failure notification keeps the same recovery timer"), Mode->SpawnRecoveries.FindChecked(Player).Timer == Retry);
+	Blocker->SetActorEnableCollision(false);
+	for (int32 Frame = 0; Frame < 7; ++Frame)
+		if (!Fixture.TickTestWorld(0.1f)) { Fixture.ForwardErrorMessages(this); return false; }
+	auto* Pawn = Cast<AfpstrueCharacter>(Player->GetPawn());
+	TestTrue(TEXT("Clearing the obstacle recovers through normal RestartPlayer and possession"),
+		IsValid(Pawn) && Pawn->GetController() == Player && !Pawn->IsDead());
+	TestFalse(TEXT("Successful possession removes the recovery record"), Mode->SpawnRecoveries.Contains(Player));
+	TestFalse(TEXT("Successful possession cancels the old retry timer"), World->GetTimerManager().TimerExists(Retry));
+	TestTrue(TEXT("The recovered Pawn meets the same ability and state readiness gate"),
+		UfpstrueMultiplayerGameInstance::IsPawnStateReady(Pawn, Player->GetPlayerState<AfpstruePvpPlayerState>()));
+
+	// 缺少Pawn类模拟持续无法生成；不改真实资产/CDO，也不需要吞掉重复Spawn碰撞日志。
+	Mode->DefaultPawnClass = nullptr;
+	auto* Failed = World->SpawnActor<AfpstruePvpPlayerController>();
+	if (!TestNotNull(TEXT("Permanently failing spawn controller"), Failed)) return false;
+	Mode->RestartPlayer(Failed);
+	for (int32 Frame = 0; Frame < 24; ++Frame)
+		if (!Fixture.TickTestWorld(0.1f)) { Fixture.ForwardErrorMessages(this); return false; }
+	TestNull(TEXT("Exhausted recovery cannot report a spawned Pawn"), Failed->GetPawn());
+	TestEqual(TEXT("Recovery stops at the initial attempt plus three retries"), Mode->SpawnRecoveries.FindChecked(Failed).Attempts, 4);
+	TestFalse(TEXT("Exhausted recovery has no pending timer"), World->GetTimerManager().TimerExists(Mode->SpawnRecoveries.FindChecked(Failed).Timer));
+	Mode->RestartPlayer(Failed);
+	TestEqual(TEXT("An extra restart request cannot reset an exhausted transaction"), Mode->SpawnRecoveries.FindChecked(Failed).Attempts, 4);
+	Mode->PendingConnectionHandshakes.Add(Failed, World->GetTimeSeconds() + 5.0);
+	Mode->CompleteConnectionHandshake(Failed, FString());
+	TestTrue(TEXT("A later handshake terminates an already exhausted birth instead of accepting Pawn=None"), Failed->bIntentionalLeave);
+	TestNull(TEXT("The late handshake does not restart or fabricate the exhausted Pawn"), Failed->GetPawn());
+	TestEqual(TEXT("Late admission cannot replenish the exhausted spawn budget"), Mode->SpawnRecoveries.FindChecked(Failed).Attempts, 4);
+	Mode->Logout(Failed);
+	TestFalse(TEXT("Leaving removes the failed transaction"), Mode->SpawnRecoveries.Contains(Failed));
+	auto* Spectator = World->SpawnActor<AfpstruePvpPlayerController>();
+	if (!TestNotNull(TEXT("Explicit spectator controller"), Spectator)) return false;
+	Spectator->GetPlayerState<AfpstruePvpPlayerState>()->SetIsOnlyASpectator(true);
+	Mode->RestartPlayer(Spectator);
+	TestFalse(TEXT("Legal spectators do not enter Pawn recovery"), Mode->SpawnRecoveries.Contains(Spectator));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerEnemyActivationTest,
+	"fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+// 两种模式的登记入口必须拒绝本次BT启动失败；后续注入上下文不能伪造成功。
+bool FFpstrueMultiplayerEnemyActivationTest::RunTest(const FString& Parameters)
+{
+	AddExpectedError(TEXT("has an incompatible Blackboard; activation rejected."), EAutomationExpectedErrorFlags::Contains, 2);
+	AddExpectedError(TEXT("No valid enemy BehaviorTree"), EAutomationExpectedErrorFlags::Contains, 2);
+	for (UClass* ModeClass : {AfpstrueGameMode::StaticClass(), AfpstruePvpGameMode::StaticClass()})
+	{
+		FTestWorldWrapper Fixture;
+		if (!BeginMultiplayerUnitWorld(Fixture, *this, true, ModeClass)) return false;
+		UWorld* World = Fixture.GetTestWorld();
+		auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
+			FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		auto* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
+		if (!TestNotNull(TEXT("Activation enemy"), Enemy) || !TestNotNull(TEXT("Activation controller"), Controller)) return false;
+		Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
+		Enemy->FinishSpawning(FTransform::Identity);
+		Enemy->SetActorEnableCollision(false);
+		auto* TreeProperty = FindFProperty<FObjectPropertyBase>(Controller->GetClass(), TEXT("BehaviorTreeAsset"));
+		if (!TestNotNull(TEXT("Activation fixture configures the real behavior-tree property"), TreeProperty)) return false;
+		TreeProperty->SetObjectPropertyValue_InContainer(Controller, NewObject<UBehaviorTree>(Controller));
+		Controller->Possess(Enemy);
+		TestFalse(TEXT("Failed startup is not ready before any behavior tick"), Controller->IsBehaviorReady());
+		Controller->InitializeCombatContext(nullptr, nullptr);
+		TestFalse(TEXT("Context injection cannot resurrect failed startup"), Controller->IsBehaviorReady());
+		if (auto* Pvp = World->GetAuthGameMode<AfpstruePvpGameMode>())
+		{
+			Pvp->RegisterPveEnemy(Enemy);
+			TestEqual(TEXT("PvPvE does not register failed behavior startup"), Pvp->GetAliveEnemyCount(), 0);
+		}
+		else
+		{
+			auto* Single = World->GetAuthGameMode<AfpstrueGameMode>();
+			Single->RegisterEnemy(Enemy);
+			TestEqual(TEXT("Wave mode does not register failed behavior startup"), Single->RegisteredEnemies.Num(), 0);
+		}
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerPveAuthorityTest,
 	"fpstrue.Multiplayer.PvPvE.ServerCombatAndSingleCommit",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -1455,6 +1610,7 @@ bool FFpstrueMultiplayerPveAuthorityTest::RunTest(const FString& Parameters)
 	FirstPlayer->SetActorLocation(FVector(150.0f, 0.0f, 0.0f));
 	SecondPlayer->SetActorLocation(FVector(0.0f, 150.0f, 0.0f));
 	Controller->Possess(Enemy);
+	Manager->SetTargetCharacter(FirstPlayer);
 	Controller->InitializeCombatContext(FirstPlayer, Manager);
 	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
 	if (!TestNotNull(TEXT("PvPvE authority uses the production sight listener"), Perception)) return false;
@@ -1462,10 +1618,30 @@ bool FFpstrueMultiplayerPveAuthorityTest::RunTest(const FString& Parameters)
 	Perception->RegisterStimulus(FirstPlayer, Seen);
 	Perception->ProcessStimuli();
 	if (!TestTrue(TEXT("Actual sight discovers the injected player"), Controller->GetTargetCharacter() == FirstPlayer)) return false;
-	if (Controller->GetBrainComponent() != nullptr) Controller->GetBrainComponent()->StopLogic(TEXT("PvPvE deterministic combat fixture"));
+	// 暂停IsRunning会变false；这里只禁用夹具Tick，保留真实启动与上下文切换资格。
+	if (Controller->GetBrainComponent() != nullptr) Controller->GetBrainComponent()->SetComponentTickEnabled(false);
 	UfpstrueEnemyCombatComponent* Combat = Enemy->GetCombatComponent();
 	if (!TestNotNull(TEXT("PvPvE production melee component"), Combat)) return false;
+	// 临时世界不烘焙NavMesh；只提供确定的投影结果，资格和版本仍由生产队列授予。
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	FfpstrueSurroundSlot& Inner = Manager->SurroundSlots[0];
+	Inner.bHasProjectedSlotLocation = Inner.bHasProjectedApproachLocation = true;
+	Inner.ProjectedSlotLocation = Manager->CachedTargetLocation - FVector(250, 0, 0);
+	Inner.ProjectedApproachLocation = Manager->CachedTargetLocation - FVector(120, 0, 0);
+	Inner.ProjectedSlotLocation.Z = Inner.ProjectedApproachLocation.Z = Enemy->GetCharacterMovement()->GetActorFeetLocation().Z;
+	FFPEnemyTacticalAssignment Assignment;
+	if (!TestTrue(TEXT("The server grants a real inner-ring assignment before an attack permit"),
+		Manager->GetOrRequestTacticalAssignment(Enemy, Assignment) && Assignment.Role == EFPEnemyTacticalRole::Inner)) return false;
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	TestTrue(TEXT("Server-side enemy acquires an attack permit"), Manager->TryAcquireAttackPermission(Enemy));
+	AddInfo(TEXT("Before arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
+	TestTrue(TEXT("The controller retains the granted inner lease revision"), Manager->HasInnerSlot(Enemy, Controller->TacticalAssignment.Revision));
+	TestFalse(TEXT("Holding an inner lease alone cannot attack before reaching its position"), Combat->TryAttackTarget());
+	// 禁碰撞夹具的原生AgentCylinder为0，不享有胶囊半径到达容差；明确移到席位，而非放宽生产接受半径。
+	Enemy->SetActorLocation(Assignment.Goal + FVector(0, 0, Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	AddInfo(TEXT("After arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
+	TestTrue(TEXT("Arrival satisfies the real tactical position and facing gate"), Controller->IsTacticalAttackPositionReady());
 	if (!TestTrue(TEXT("Server-side enemy starts the real attack transaction"), Combat->TryAttackTarget())) return false;
 	USkeletalMesh* Blade = NewObject<USkeletalMesh>(Enemy, NAME_None, RF_Transient);
 	{
@@ -1671,7 +1847,7 @@ bool FFpstrueMultiplayerPveTargetLifecycleTest::RunTest(const FString& Parameter
 	Controller->Possess(Enemy);
 	// 临时世界没有 NetDriver；只固定多人选敌模式，参与资格仍调用真实 Mode 注册表检查。
 	Controller->bUsesMultiplayerTargets = true;
-	if (Controller->GetBrainComponent() != nullptr) Controller->GetBrainComponent()->StopLogic(TEXT("PvPvE target lifecycle fixture"));
+	if (Controller->GetBrainComponent() != nullptr) Controller->GetBrainComponent()->SetComponentTickEnabled(false);
 	const auto ReportSeen = [&](AfpstrueCharacter* Pawn)
 	{
 		FAIStimulus Seen(*GetDefault<UAISense_Sight>(), 1.0f, Pawn->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
@@ -1692,13 +1868,30 @@ bool FFpstrueMultiplayerPveTargetLifecycleTest::RunTest(const FString& Parameter
 	if (!TestNotNull(TEXT("The first player has its own surround manager"), FirstManager)) return false;
 	TestTrue(TEXT("Repeated requests reuse that player's manager"), Mode->GetOrCreateSurroundManager(FirstPawn) == FirstManager);
 	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	// 导航生成另由地图烟测覆盖；这里只放入已有占用记录，观察生产清理是否对称撤销。
-	FirstManager->EnemyToSlot.Add(EnemyKey, 0);
-	FirstManager->SurroundSlots[0].Occupant = Enemy;
+	// 导航投影另由地图烟测覆盖；通过真实队列取得席位和版本，观察换目标是否对称撤销。
+	const auto GrantInner = [&](AfpstrueSurroundManager* Manager)
+	{
+		Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+		FfpstrueSurroundSlot& Inner = Manager->SurroundSlots[0];
+		Inner.bHasProjectedSlotLocation = Inner.bHasProjectedApproachLocation = true;
+		Inner.ProjectedSlotLocation = Manager->CachedTargetLocation - FVector(250, 0, 0);
+		Inner.ProjectedApproachLocation = Manager->CachedTargetLocation - FVector(120, 0, 0);
+		Inner.ProjectedSlotLocation.Z = Inner.ProjectedApproachLocation.Z = Enemy->GetCharacterMovement()->GetActorFeetLocation().Z;
+		FFPEnemyTacticalAssignment Assignment;
+		return Manager->GetOrRequestTacticalAssignment(Enemy, Assignment) && Assignment.Role == EFPEnemyTacticalRole::Inner;
+	};
+	if (!TestTrue(TEXT("Target lifecycle starts with a queue-granted inner seat"), GrantInner(FirstManager))) return false;
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	AfpstrueSurroundManager::FCoverRequest Cover;
 	Cover.State = EFPCoverQueryResult::Found;
 	FirstManager->CoverRequests.Add(EnemyKey, Cover);
 	TestTrue(TEXT("Target lifecycle starts with a real granted attack permit"), FirstManager->TryAcquireAttackPermission(Enemy));
+	AddInfo(TEXT("Lifecycle before arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
+	TestFalse(TEXT("Target lifecycle cannot bypass arrival merely by holding the permit"), Enemy->GetCombatComponent()->TryAttackTarget());
+	Enemy->SetActorLocation(Controller->TacticalAssignment.Goal + FVector(0, 0, Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	AddInfo(TEXT("Lifecycle after arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
+	TestTrue(TEXT("The lifecycle fixture reaches its genuine tactical assignment"), Controller->IsTacticalAttackPositionReady());
 	TestTrue(TEXT("Target lifecycle starts a real combat transaction"), Enemy->GetCombatComponent()->TryAttackTarget());
 	UGameplayStatics::ApplyDamage(FirstPawn, 1000.0f, nullptr, Enemy, nullptr);
 	TestTrue(TEXT("The first retained player dies through the actual damage chain"), FirstPawn->IsDead());
@@ -1710,6 +1903,7 @@ bool FFpstrueMultiplayerPveTargetLifecycleTest::RunTest(const FString& Parameter
 	AfpstrueSurroundManager* SecondManager = Controller->GetSurroundManager();
 	if (!TestNotNull(TEXT("The replacement target has a manager"), SecondManager)) return false;
 	TestTrue(TEXT("Two players do not share the same occupied slot registry"), SecondManager != FirstManager);
+	if (!TestTrue(TEXT("The replacement target grants a new inner seat"), GrantInner(SecondManager))) return false;
 	TestTrue(TEXT("The replacement target grants its own permit"), SecondManager->TryAcquireAttackPermission(Enemy));
 	SecondPawn->Destroy();
 	TestNull(TEXT("EndPlay does not reselect the same Actor during its destruction callback"), Controller->GetTargetCharacter());
@@ -2230,19 +2424,41 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	Enemy->ConfigureHitProxies(true);
 	TestTrue(TEXT("Simple mode is a real production configuration"), Enemy->UsesSimpleHitProxies());
 	TestFalse(TEXT("An idle dedicated authority with root-bound proxies does not require full hit-bone animation"), Enemy->RequiresFullAuthorityPose());
-	TestTrue(TEXT("Head and body attach to the movement root rather than animated bones"),
-		Enemy->EnemyHeadHitProxy->GetAttachParent() == Enemy->GetRootComponent() &&
-		Enemy->EnemyBodyHitProxy->GetAttachParent() == Enemy->GetRootComponent() &&
-		Enemy->EnemyHeadHitProxy->GetAttachSocketName().IsNone() && Enemy->EnemyBodyHitProxy->GetAttachSocketName().IsNone());
-	for (UPrimitiveComponent* Proxy : {static_cast<UPrimitiveComponent*>(Enemy->EnemyHeadHitProxy.Get()),
-		static_cast<UPrimitiveComponent*>(Enemy->EnemyBodyHitProxy.Get())})
+	const auto GetProxies = [](AfpstrueEnemyCharacter& Target)
 	{
+		return TArray<UStaticMeshComponent*, TInlineAllocator<6>>{Target.EnemyHeadHitProxy.Get(), Target.EnemyBodyHitProxy.Get(),
+			Target.EnemyLeftArmHitProxy.Get(), Target.EnemyRightArmHitProxy.Get(), Target.EnemyLeftLegHitProxy.Get(), Target.EnemyRightLegHitProxy.Get()};
+	};
+	const FName ExpectedBones[] = {TEXT("head"), TEXT("spine_03"), TEXT("upperarm_l"), TEXT("upperarm_r"), TEXT("thigh_l"), TEXT("thigh_r")};
+	const TArray<UStaticMeshComponent*, TInlineAllocator<6>> Proxies = GetProxies(*Enemy);
+	TestEqual(TEXT("Six independently identified root-bound query components exist"), Proxies.Num(), 6);
+	UStaticMesh* SharedHull = Enemy->EnemyHeadHitProxy->GetStaticMesh();
+	if (!TestNotNull(TEXT("Hit proxies reference the prebaked shared convex mesh"), SharedHull) ||
+		!TestNotNull(TEXT("Shared convex mesh owns its cooked body setup"), SharedHull->GetBodySetup())) return false;
+	const UBodySetup* HullBody = SharedHull->GetBodySetup();
+	TestEqual(TEXT("Shared mesh contains one real convex and no sphere, capsule, box or extra geometry"), HullBody->AggGeom.GetElementCount(), 1);
+	if (!TestEqual(TEXT("Shared mesh has one FKConvexElem"), HullBody->AggGeom.ConvexElems.Num(), 1)) return false;
+	TestEqual(TEXT("Shared convex is the authored sixteen-vertex chamfered hull"), HullBody->AggGeom.ConvexElems[0].VertexData.Num(), 16);
+	TestTrue(TEXT("The unit convex keeps the fifty-centimeter half extents used by all part scales"),
+		HullBody->AggGeom.ConvexElems[0].ElemBox.Min.Equals(FVector(-50.0), 0.001) &&
+		HullBody->AggGeom.ConvexElems[0].ElemBox.Max.Equals(FVector(50.0), 0.001));
+	TestTrue(TEXT("The convex has real cooked Chaos geometry"), HullBody->AggGeom.ConvexElems[0].GetChaosConvexMesh() != nullptr);
+	TestTrue(TEXT("Complex weapon and sight queries resolve the same simple convex geometry"), HullBody->CollisionTraceFlag == CTF_UseSimpleAsComplex);
+	for (UStaticMeshComponent* Proxy : Proxies)
+	{
+		if (!TestNotNull(TEXT("Each of the six proxy components exists"), Proxy)) return false;
+		TestTrue(TEXT("Every part reuses the same prebaked mesh rather than cooking a private shape"), Proxy->GetStaticMesh() == SharedHull);
+		TestTrue(TEXT("Every part attaches to the movement root without a bone socket"),
+			Proxy->GetAttachParent() == Enemy->GetRootComponent() && Proxy->GetAttachSocketName().IsNone());
 		TestTrue(TEXT("Each authoritative proxy is query-only"), Proxy->GetCollisionEnabled() == ECollisionEnabled::QueryOnly);
 		TestTrue(TEXT("Each proxy blocks the real weapon trace channel"), Proxy->GetCollisionResponseToChannel(WeaponTrace) == ECR_Block);
 		TestTrue(TEXT("Proxy object type preserves the original mesh query filtering"),
 			Proxy->GetCollisionObjectType() == Enemy->GetMesh()->GetCollisionObjectType());
 		TestFalse(TEXT("Hit proxies never generate gameplay overlap events"), Proxy->GetGenerateOverlapEvents());
 		TestFalse(TEXT("Hit proxies do not change navigation geometry"), Proxy->CanEverAffectNavigation());
+		TestFalse(TEXT("Query-only hulls never become visible render geometry"), Proxy->IsVisible());
+		TestFalse(TEXT("Query-only hulls cannot consume a shadow slot"), Proxy->CastShadow);
+		TestFalse(TEXT("Query-only hulls cannot consume a ray-tracing slot"), Proxy->bVisibleInRayTracing);
 		for (int32 Channel = 0; Channel < ECC_OverlapAll_Deprecated; ++Channel)
 			TestTrue(TEXT("Every proxy query response preserves the original mesh contract rather than clearing non-weapon channels"),
 				Proxy->GetCollisionResponseToChannel(static_cast<ECollisionChannel>(Channel)) ==
@@ -2264,30 +2480,28 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 			!TestTrue(TEXT("World hit preserves the authoritative target and exact proxy component"),
 				Hit.GetActor() == &Target && Hit.GetComponent() == &Expected)) return false;
 		Target.ResolveHitProxyBone(Hit);
-		TestEqual(TEXT("Proxy normalization preserves head/body damage identity"), Hit.BoneName, ExpectedBone);
+		TestEqual(TEXT("Proxy normalization preserves the exact part damage identity"), Hit.BoneName, ExpectedBone);
 		TestTrue(TEXT("Identity normalization cannot move or replace the actual physics hit"),
 			Hit.GetActor() == &Target && Hit.GetComponent() == &Expected && Hit.bBlockingHit && !Hit.ImpactPoint.ContainsNaN());
 		return true;
 	};
-	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 300.0f, TEXT("head")) ||
-		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, 300.0f, TEXT("spine_03")) ||
-		!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 6000.0f, TEXT("head")) ||
-		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, 6000.0f, TEXT("spine_03"))) return false;
-	const float NearHeadDistance = Enemy->EnemyHeadHitProxy->GetScaledSphereRadius() + 5.0f;
-	const float NearBodyDistance = Enemy->EnemyBodyHitProxy->GetScaledCapsuleRadius() + 5.0f;
-	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, NearHeadDistance, TEXT("head")) ||
-		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, NearBodyDistance, TEXT("spine_03"))) return false;
-
-	const FVector HeadLocal = Enemy->EnemyHeadHitProxy->GetRelativeLocation();
-	const FVector BodyLocal = Enemy->EnemyBodyHitProxy->GetRelativeLocation();
+	TArray<FVector, TInlineAllocator<6>> LocalCenters;
+	for (int32 Index = 0; Index < Proxies.Num(); ++Index)
+	{
+		const float NearDistance = static_cast<float>(Proxies[Index]->Bounds.BoxExtent.Size()) + 5.0f;
+		if (!TraceProxy(*Enemy, *Proxies[Index], NearDistance, ExpectedBones[Index]) ||
+			!TraceProxy(*Enemy, *Proxies[Index], 300.0f, ExpectedBones[Index]) ||
+			!TraceProxy(*Enemy, *Proxies[Index], 6000.0f, ExpectedBones[Index])) return false;
+		LocalCenters.Add(Proxies[Index]->GetRelativeLocation());
+	}
 	Enemy->GetMesh()->SetComponentTickEnabled(false);
 	Enemy->SetActorLocationAndRotation(FVector(1700.0f, 400.0f, 650.0f), FRotator(0.0f, 90.0f, 0.0f), false, nullptr, ETeleportType::TeleportPhysics);
-	TestTrue(TEXT("Head follows root movement and rotation without an animation tick"),
-		Enemy->EnemyHeadHitProxy->GetComponentLocation().Equals(Enemy->GetActorTransform().TransformPosition(HeadLocal), 0.001f));
-	TestTrue(TEXT("Body follows root movement and rotation without an animation tick"),
-		Enemy->EnemyBodyHitProxy->GetComponentLocation().Equals(Enemy->GetActorTransform().TransformPosition(BodyLocal), 0.001f));
-	if (!TraceProxy(*Enemy, *Enemy->EnemyHeadHitProxy, 300.0f, TEXT("head")) ||
-		!TraceProxy(*Enemy, *Enemy->EnemyBodyHitProxy, 300.0f, TEXT("spine_03"))) return false;
+	for (int32 Index = 0; Index < Proxies.Num(); ++Index)
+	{
+		TestTrue(TEXT("Every convex follows root movement and rotation without an animation tick"),
+			Proxies[Index]->GetComponentLocation().Equals(Enemy->GetActorTransform().TransformPosition(LocalCenters[Index]), 0.001f));
+		if (!TraceProxy(*Enemy, *Proxies[Index], 300.0f, ExpectedBones[Index])) return false;
+	}
 
 	AActor* Wall = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Simple hit-proxy real occluder"), Wall)) return false;
@@ -2313,9 +2527,8 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	Enemy->ConfigureHitProxies(false);
 	TestFalse(TEXT("Reference selects the original live skeletal hit path"), Enemy->UsesSimpleHitProxies());
 	TestTrue(TEXT("Reference retains full dedicated authority pose for the skeletal hit path"), Enemy->RequiresFullAuthorityPose());
-	TestTrue(TEXT("Reference disables both additional hit proxies"),
-		Enemy->EnemyHeadHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision &&
-		Enemy->EnemyBodyHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	for (UPrimitiveComponent* Proxy : Proxies)
+		TestTrue(TEXT("Reference disables every additional convex proxy"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	TestTrue(TEXT("Reference restores original live query collision"), Enemy->GetMesh()->GetCollisionEnabled() == ECollisionEnabled::QueryOnly);
 	Enemy->ConfigureHitProxies(true);
 	TestFalse(TEXT("Returning to simplified queries releases only the unneeded full-pose requirement"), Enemy->RequiresFullAuthorityPose());
@@ -2324,9 +2537,8 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	AfpstrueEnemyCharacter* Client = SpawnEnemy(AfpstrueEnemyCharacter::StaticClass(), FVector(10000.0f, 10000.0f, 500.0f), true);
 	if (!TestNotNull(TEXT("Client-role proxy instance"), Client)) return false;
 	Client->ConfigureHitProxies(true);
-	TestTrue(TEXT("Client keeps component identity without authoritative query shapes"),
-		Client->EnemyHeadHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision &&
-		Client->EnemyBodyHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	for (UPrimitiveComponent* Proxy : GetProxies(*Client))
+		TestTrue(TEXT("Client keeps every convex component without authoritative queries"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	const FVector ClientCenter = Client->EnemyBodyHitProxy->GetComponentLocation();
 	FHitResult ClientHit;
 	TestFalse(TEXT("A client-role enemy cannot expose a local authoritative body query"),
@@ -2341,8 +2553,7 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 		AfpstrueEnemyCharacter* Occluder = SpawnEnemy(AfpstrueEnemyCharacter::StaticClass(), Location, false,
 			VisibilityResponse, CameraResponse);
 		if (!TestNotNull(TEXT("Sight-channel fixture creates another real AI"), Occluder)) return false;
-		for (UPrimitiveComponent* Proxy : {static_cast<UPrimitiveComponent*>(Occluder->EnemyHeadHitProxy.Get()),
-			static_cast<UPrimitiveComponent*>(Occluder->EnemyBodyHitProxy.Get())})
+		for (UPrimitiveComponent* Proxy : GetProxies(*Occluder))
 		{
 			TestTrue(TEXT("Simple proxies preserve an authored Custom Visibility response"),
 				Proxy->GetCollisionResponseToChannel(ECC_Visibility) == VisibilityResponse);
@@ -2382,9 +2593,9 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	TestEqual(TEXT("Switching the actual enemy to Simple retires all old live skeletal bodies"), AssetMesh->Bodies.Num(), 0);
 	TestFalse(TEXT("Actual live Simple mesh has no residual physics state"), AssetMesh->IsPhysicsStateCreated());
 	TestTrue(TEXT("Retiring live bodies does not mutate the source death asset"), AssetMesh->GetPhysicsAsset() == DeathPhysics);
-	TestTrue(TEXT("Simplifying the actual legacy enemy does not remove its Sight-channel occlusion"),
-		AssetEnemy->EnemyHeadHitProxy->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block &&
-		AssetEnemy->EnemyBodyHitProxy->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block);
+	for (UPrimitiveComponent* Proxy : GetProxies(*AssetEnemy))
+		TestTrue(TEXT("All six parts preserve the actual legacy enemy Sight-channel occlusion"),
+			Proxy->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block);
 	if (!TraceProxy(*AssetEnemy, *AssetEnemy->EnemyHeadHitProxy, 300.0f, TEXT("head"))) return false;
 	FHitResult DeathHit;
 	const FVector HeadCenter = AssetEnemy->EnemyHeadHitProxy->GetComponentLocation();
@@ -2394,9 +2605,8 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	AssetEnemy->ResolveHitProxyBone(DeathHit);
 	UGameplayStatics::ApplyPointDamage(AssetEnemy, 10000.0f, FVector::ForwardVector, DeathHit, nullptr, nullptr, nullptr);
 	TestTrue(TEXT("Actual point-damage path reaches the enemy death transaction"), AssetEnemy->IsDead());
-	TestTrue(TEXT("Death retires both live proxy shapes"),
-		AssetEnemy->EnemyHeadHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision &&
-		AssetEnemy->EnemyBodyHitProxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+	for (UPrimitiveComponent* Proxy : GetProxies(*AssetEnemy))
+		TestTrue(TEXT("Death retires every live convex proxy"), Proxy->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	TestTrue(TEXT("Death restores the original PhysicsAsset and simulation"), AssetMesh->GetPhysicsAsset() == DeathPhysics && AssetMesh->IsSimulatingPhysics());
 	TestTrue(TEXT("Death recreates actual skeletal rigid bodies"), AssetMesh->Bodies.Num() > 0);
 	TestEqual(TEXT("Death impulse retains the normalized head bone identity"), AssetEnemy->DeathDamageContext.BoneName, FName(TEXT("head")));

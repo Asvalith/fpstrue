@@ -10,9 +10,35 @@ class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
 class UEnvQuery;
 struct FEnvQueryResult;
+struct FNavigationPath;
 
 // 掩体查询按需异步执行；Pending 不等于找不到掩体。
 enum class EFPCoverQueryResult : uint8 { Pending, Found, Failed };
+
+// 席位是长期接近资格，单次攻击许可仍由 ActiveAttackers 单独管理。
+enum class EFPEnemyTacticalRole : uint8 { Waiting, Outer, Inner };
+
+struct FFPEnemyTacticalAssignment
+{
+	EFPEnemyTacticalRole Role = EFPEnemyTacticalRole::Waiting;
+	FVector Goal = FVector::ZeroVector;
+	uint64 Revision = 0;
+};
+
+struct FFPEnemyTacticalDebugSnapshot
+{
+	int32 InnerCapacity = 0;
+	int32 OuterCapacity = 0;
+	int32 UsableInnerSlots = 0;
+	int32 UsableOuterSlots = 0;
+	int32 OccupiedInnerSlots = 0;
+	int32 OccupiedOuterSlots = 0;
+	int32 QueuedEnemies = 0;
+	int32 ActiveAttackers = 0;
+	uint64 GrantCount = 0;
+	uint64 ReleaseCount = 0;
+	uint64 TimeoutCount = 0;
+};
 
 // 单个包围槽的静态布局、占用者和 NavMesh 投影缓存。
 USTRUCT()
@@ -55,8 +81,15 @@ public:
 	void ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy);
 	// AIController 提交 MoveTo 前消费 World 共用帧预算；多个玩家的 Manager 不会各增加一份额度。
 	bool TryConsumeMoveRequestBudget(bool bCombatPriority);
-	// 为敌人分配槽位，并返回更靠近玩家的攻击接近点。
-	bool GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation);
+	// 单次入队，重复决策只读本次分配；无席位时返回稳定外围目标，不退回玩家中心。
+	bool GetOrRequestTacticalAssignment(AfpstrueEnemyCharacter* Enemy, FFPEnemyTacticalAssignment& OutAssignment);
+	bool HasInnerSlot(AfpstrueEnemyCharacter* Enemy, uint64 Revision = 0) const;
+	// 终点和原生 NavMesh 路径分别校验；外围单位绕圈接近，被动入圈时只允许向外恢复。
+	bool ResolveTacticalMoveGoal(AfpstrueEnemyCharacter* Enemy, const FFPEnemyTacticalAssignment& Assignment, FVector& OutGoal) const;
+	bool IsTacticalPathAllowed(AfpstrueEnemyCharacter* Enemy, const FNavigationPath& Path, uint32 FirstPoint = 0) const;
+	// 单位到不了自己的位置时退回候场，保留身份与短退避，防止立即抢回同一坏路径。
+	void ReportTacticalMoveFailure(AfpstrueEnemyCharacter* Enemy, uint64 Revision);
+	FFPEnemyTacticalDebugSnapshot GetTacticalDebugSnapshot() const;
 	// 远距离追击读取共享玩家位置，避免每个 AI 重复采样目标。
 	bool GetSharedTargetSnapshot(FVector& OutLocation) const;
 
@@ -89,8 +122,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Attack", meta = (ClampMin = "50.0"))
 	float AttackApproachRadius = 120.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Attack", meta = (ClampMin = "100.0"))
-	float OuterAttackApproachRadius = 220.0f;
+	// 接近迟迟没有进展时归还席位并排到队尾；到位后不按每次挥砍重新排队。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Slots", meta = (ClampMin = "1.0"))
+	float SlotApproachTimeout = 8.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Budget")
 	bool bEnableActiveAttackerBudget = true;
@@ -143,7 +177,11 @@ protected:
 
 private:
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
+	friend class FFpstrueMultiplayerPveAuthorityTest;
 	friend class FFpstrueSurroundCacheLifecycleTest;
+	friend class FFpstrueSurroundTacticalQueueTest;
+	friend class FFpstrueSurroundTacticalBoundaryTest;
+	friend class FFpstrueEnemyCombatLifecycleTest;
 	friend class FFpstrueEnemyLowHealthRetreatTest;
 	friend class FFpstrueMultiplayerPveBudgetTest;
 	// 根据内外环配置创建稳定槽位布局。
@@ -159,10 +197,14 @@ private:
 	void HandleCoverQueryFinished(TSharedPtr<FEnvQueryResult> Result, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, uint32 Revision);
 	// 移除失效敌人的槽位和攻击名额，防止弱引用表膨胀。
 	void CleanupInvalidEntries();
-	// 按距离和内外环优先级选择最佳空闲槽位。
-	int32 FindBestFreeSlot(const FVector& EnemyLocation);
-	// 内环空出时把合适的外环敌人提升进来。
-	void PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex);
+	int32 FindBestFreeSlot(const FVector& EnemyLocation, int32 RingIndex) const;
+	void PumpTacticalQueue();
+	void AssignSlot(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, int32 SlotIndex);
+	void RemoveParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy);
+	void RequeueParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy);
+	void NotifyTacticalChanges();
+	bool BuildAssignment(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, FFPEnemyTacticalAssignment& OutAssignment) const;
+	float GetInnerBoundary(AfpstrueEnemyCharacter* Enemy) const;
 	// 根据玩家位置、槽位角度和半径计算未投影位置。
 	// 此生成规则集中在 EQS Generator，不再保留第二个手写选点实现。
 	// 调试模式下绘制已投影槽位，并以颜色区分是否占用。
@@ -185,8 +227,30 @@ private:
 	// 语法复习：弱指针作为键时可能留下失效键，因此 CleanupInvalidEntries 必须负责清理。
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
-	uint64 MoveRequestBudgetFrame = MAX_uint64;
-	int32 MoveRequestsConsumedThisFrame = 0;
+	struct FTacticalParticipant
+	{
+		uint64 RequestSequence = 0;
+		uint64 AssignmentRevision = 0;
+		FVector WaitingOffset = FVector::ZeroVector;
+		FVector LastProgressLocation = FVector::ZeroVector;
+		double LastProgressTime = 0.0;
+		double RetryAfter = 0.0;
+	};
+	struct FTacticalRequest
+	{
+		TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy;
+		uint64 Sequence = 0;
+	};
+	// Participants 是唯一请求身份账本；FIFO 不再配一张重复的去重集合。
+	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, FTacticalParticipant> Participants;
+	TArray<FTacticalRequest> WaitingQueue;
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> PendingTacticalNotifications;
+	uint64 NextRequestSequence = 0;
+	uint64 NextAssignmentRevision = 0;
+	uint64 TacticalGrantCount = 0;
+	uint64 TacticalReleaseCount = 0;
+	uint64 TacticalTimeoutCount = 0;
+	bool bPumpingTacticalQueue = false;
 	// 模板仅建立一次，参数使用请求快照；运行中不修改 EQS 已缓存的模板。
 	UPROPERTY(Transient)
 	TObjectPtr<UEnvQuery> ApproachQueryTemplate;

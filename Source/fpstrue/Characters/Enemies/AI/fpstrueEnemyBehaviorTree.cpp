@@ -9,6 +9,8 @@
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Object.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Int.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Vector.h"
 #include "BehaviorTree/Composites/BTComposite_Selector.h"
 #include "BehaviorTree/Composites/BTComposite_Sequence.h"
 #include "Engine/World.h"
@@ -128,6 +130,13 @@ template <typename TKey> void AddKey(UBlackboardData& Blackboard, FName Name)
 	Entry.KeyType = NewObject<TKey>(&Blackboard);
 }
 
+void AddTacticalKeys(UBlackboardData& Blackboard)
+{
+	AddKey<UBlackboardKeyType_Int>(Blackboard, FPEnemyBlackboard::TacticalRole);
+	AddKey<UBlackboardKeyType_Vector>(Blackboard, FPEnemyBlackboard::TacticalGoal);
+	AddKey<UBlackboardKeyType_Bool>(Blackboard, FPEnemyBlackboard::HasInnerSlot);
+}
+
 // 将组合节点或任务挂到父节点，并返回可继续添加装饰器的子节点记录。
 FBTCompositeChild& AddChild(UBTCompositeNode& Parent, UBTNode& Node)
 {
@@ -177,7 +186,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 		return false;
 	}
 	// 区分可复用的完整默认 schema 与尚未配置的黑板，不把任意已有内容当作空白资产。
-	const bool bReuseBlackboard = Blackboard->Keys.Num() == 7 && Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey &&
+	const bool bReuseBlackboard = (Blackboard->Keys.Num() == 7 || Blackboard->Keys.Num() == 10) && Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey &&
 								  FPHasEnemyBlackboardSchema(Blackboard);
 	if (!bReuseBlackboard && Blackboard->Keys.Num() > 1)
 	{
@@ -213,6 +222,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::InAttackRange);
 		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::InChaseRange);
 		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Retreating);
+		AddTacticalKeys(*Blackboard);
 	}
 	Tree->BlackboardAsset = Blackboard;
 
@@ -273,11 +283,12 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 		return false;
 	};
 	if (Tree == nullptr || Blackboard == nullptr || Tree->BlackboardAsset != Blackboard || Blackboard->Parent != nullptr ||
-		!Tree->RootDecorators.IsEmpty() || !Tree->RootDecoratorOps.IsEmpty() || (Blackboard->Keys.Num() != 6 && Blackboard->Keys.Num() != 7))
+		!Tree->RootDecorators.IsEmpty() || !Tree->RootDecoratorOps.IsEmpty() ||
+		(Blackboard->Keys.Num() != 6 && Blackboard->Keys.Num() != 7 && Blackboard->Keys.Num() != 9 && Blackboard->Keys.Num() != 10))
 		return Reject(TEXT("Context"), FString::Printf(TEXT("blackboard=%s treeBlackboard=%s parent=%s keys=%d rootDecorators=%d rootOps=%d"),
 			*GetPathNameSafe(Blackboard), *GetPathNameSafe(Tree == nullptr ? nullptr : Tree->BlackboardAsset.Get()), *GetPathNameSafe(Blackboard == nullptr ? nullptr : Blackboard->Parent.Get()),
 			Blackboard == nullptr ? -1 : Blackboard->Keys.Num(), Tree == nullptr ? -1 : Tree->RootDecorators.Num(), Tree == nullptr ? -1 : Tree->RootDecoratorOps.Num()));
-	const bool bCurrent = Blackboard->Keys.Num() == 7;
+	const bool bCurrent = Blackboard->GetKeyID(FPEnemyBlackboard::Retreating) != FBlackboard::InvalidKey;
 	UBehaviorTree* Expected = NewObject<UBehaviorTree>(GetTransientPackage(), NAME_None, RF_Transient);
 	UBlackboardData* ExpectedBlackboard = NewObject<UBlackboardData>(Expected);
 	if (!PopulateDefaultTree(Expected, ExpectedBlackboard)) return Reject(TEXT("ReferenceBuild"));
@@ -305,6 +316,14 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 			if (Object->BaseClass != CastChecked<UBlackboardKeyType_Object>(Default->KeyType)->BaseClass)
 				return Reject(TEXT("BlackboardObjectBaseClass"), FString::Printf(TEXT("key=%s actual=%s expected=%s"), *Entry.EntryName.ToString(),
 					*GetNameSafe(Object->BaseClass), *GetNameSafe(CastChecked<UBlackboardKeyType_Object>(Default->KeyType)->BaseClass)));
+	}
+	const bool bHasTacticalKeys = SeenKeys.Contains(FPEnemyBlackboard::TacticalRole);
+	if (SeenKeys.Num() != (bCurrent ? 7 : 6) + (bHasTacticalKeys ? 3 : 0)) return Reject(TEXT("BlackboardKeySet"));
+	for (const FBlackboardEntry& Entry : ExpectedBlackboard->Keys)
+	{
+		const bool bTactical = Entry.EntryName == FPEnemyBlackboard::TacticalRole || Entry.EntryName == FPEnemyBlackboard::TacticalGoal || Entry.EntryName == FPEnemyBlackboard::HasInnerSlot;
+		if ((!bCurrent && Entry.EntryName == FPEnemyBlackboard::Retreating) || (!bHasTacticalKeys && bTactical)) continue;
+		if (!SeenKeys.Contains(Entry.EntryName)) return Reject(TEXT("BlackboardMissingDefaultKey"), Entry.EntryName.ToString());
 	}
 	TSet<const UBTNode*> Nodes;
 	TMap<const UBTNode*, const FBTCompositeChild*> Branches;
@@ -411,6 +430,11 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 	}
 	if (bCurrent)
 	{
+		if (Blackboard->GetKeyID(FPEnemyBlackboard::TacticalRole) == FBlackboard::InvalidKey)
+		{
+			AddTacticalKeys(*Blackboard);
+			Blackboard->MarkPackageDirty();
+		}
 #if WITH_EDITOR
 		if (bHistoricalRootOrder && Graph != nullptr) Graph->UpdateAsset();
 #endif
@@ -418,6 +442,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 	}
 	// 所有拒绝检查完成后才追加键和节点，保持旧资产、旧节点及策划可编辑布局。
 	AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Retreating);
+	if (Blackboard->GetKeyID(FPEnemyBlackboard::TacticalRole) == FBlackboard::InvalidKey) AddTacticalKeys(*Blackboard);
 	UBTCompositeNode* Choice = Root->Children[2].ChildComposite;
 	FBTCompositeChild Retreat = AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Retreat, TEXT("RetreatToCover"));
 	Choice->Children.Pop();
@@ -474,5 +499,17 @@ bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard)
 			return false;
 		}
 	}
+	// 旧自定义树的七键契约仍兼容；战术镜像要么没有，要么完整且各实例独立。
+	const FName TacticalNames[] = {FPEnemyBlackboard::TacticalRole, FPEnemyBlackboard::TacticalGoal, FPEnemyBlackboard::HasInnerSlot};
+	UClass* TacticalTypes[] = {UBlackboardKeyType_Int::StaticClass(), UBlackboardKeyType_Vector::StaticClass(), UBlackboardKeyType_Bool::StaticClass()};
+	int32 TacticalKeyCount = 0;
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(TacticalNames); ++Index)
+	{
+		const FBlackboardEntry* Entry = Blackboard->GetKey(Blackboard->GetKeyID(TacticalNames[Index]));
+		if (Entry == nullptr) continue;
+		if (Entry->bInstanceSynced || Entry->KeyType == nullptr || Entry->KeyType->GetClass() != TacticalTypes[Index]) return false;
+		++TacticalKeyCount;
+	}
+	if (TacticalKeyCount != 0 && TacticalKeyCount != UE_ARRAY_COUNT(TacticalNames)) return false;
 	return true;
 }

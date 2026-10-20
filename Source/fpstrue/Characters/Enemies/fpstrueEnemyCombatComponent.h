@@ -193,6 +193,8 @@ private:
 	uint32 AttackSequence = 0;
 	TWeakObjectPtr<AfpstrueCharacter> AttackTarget;
 	TWeakObjectPtr<AfpstrueSurroundManager> AttackPermissionSource;
+	// 与本次挥砍一起捕获；重新获得同一个席位也不能复活旧伤害窗口。
+	uint64 AttackTacticalRevision = 0;
 	FFPActionPlayback AttackPlayback;
 	bool bEndingPlay = false;
 	bool bStartingPlayback = false;

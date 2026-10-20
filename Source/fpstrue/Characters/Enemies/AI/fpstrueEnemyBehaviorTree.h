@@ -32,6 +32,9 @@ namespace FPEnemyBlackboard
 	inline const FName InAttackRange(TEXT("InAttackRange"));
 	inline const FName InChaseRange(TEXT("InChaseRange"));
 	inline const FName Retreating(TEXT("Retreating"));
+	inline const FName TacticalRole(TEXT("TacticalRole"));
+	inline const FName TacticalGoal(TEXT("TacticalGoal"));
+	inline const FName HasInnerSlot(TEXT("HasInnerSlot"));
 }
 
 inline const FName FPEnemyDecisionWake(TEXT("FPEnemyDecisionWake"));

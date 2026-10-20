@@ -493,51 +493,25 @@ bool AfpstrueGameMode::SpawnEnemyAtPoint(AActor* SpawnPoint, int32 SpawnPointReu
 		return false;
 	}
 
-	// 每次外部生命周期回调后复核本局与新敌人；未登记对象也必须在失败时停止自动启动的 AI。
-	const auto CanActivateSpawnedEnemy = [this, SpawnedEnemy]()
-	{
-		if (IsRunning() && IsValid(SpawnedEnemy) && !SpawnedEnemy->IsDead())
-		{
-			return true;
-		}
-		// 未登记的敌人漏过了结算时的注册表遍历；补停其 Possess 自动启动的 BT。
-		if (IsValid(SpawnedEnemy))
-		{
-			if (AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController()))
-			{
-				Controller->StopAI();
-			}
-		}
-		return false;
-	};
-	if (!CanActivateSpawnedEnemy())
-	{
-		return false;
-	}
-
-	if (SpawnedEnemy->GetController() == nullptr)
+	if (IsRunning() && IsValid(SpawnedEnemy) && !SpawnedEnemy->IsDead() && SpawnedEnemy->GetController() == nullptr)
 	{
 		SpawnedEnemy->SpawnDefaultController();
 	}
-	// Controller 的 BeginPlay/OnPossess 也是外部回调边界，不能只检查 Pawn 的 Spawn。
-	if (!CanActivateSpawnedEnemy())
+	AfpstrueEnemyAIController* EnemyController = IsValid(SpawnedEnemy) ? Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController()) : nullptr;
+	// Controller 的 BeginPlay/OnPossess 和上下文注入是外部回调边界；启动失败不能靠注入重新开放。
+	const auto CanActivateSpawnedEnemy = [this, SpawnedEnemy, EnemyController]()
 	{
-		return false;
-	}
-
-	AfpstrueEnemyAIController* EnemyController = Cast<AfpstrueEnemyAIController>(SpawnedEnemy->GetController());
-	if (EnemyController == nullptr)
-	{
-		UE_LOG(LogTemp, Error, TEXT("Enemy %s has controller %s; expected fpstrueEnemyAIController."), *GetNameSafe(SpawnedEnemy),
-			   *GetNameSafe(SpawnedEnemy->GetController()));
-		// 不把无法接入本项目 AI 的 Pawn 登记为成功，也不在世界留下孤立实例。
-		if (AController* InvalidController = SpawnedEnemy->GetController())
+		if (IsRunning() && IsValid(SpawnedEnemy) && !SpawnedEnemy->IsDead() &&
+			IsValid(EnemyController) && EnemyController->GetPawn() == SpawnedEnemy && EnemyController->IsBehaviorReady()) return true;
+		// 未登记对象不在结算注册表中：失败时直接回收，停止BT和资源释放走各自EndPlay入口。
+		if (IsValid(SpawnedEnemy))
 		{
-			InvalidController->Destroy();
+			if (AController* Controller = SpawnedEnemy->GetController()) Controller->Destroy();
+			SpawnedEnemy->Destroy();
 		}
-		SpawnedEnemy->Destroy();
 		return false;
-	}
+	};
+	if (!CanActivateSpawnedEnemy()) return false;
 	// ★【重要边界】[回调重入] 控制器创建/目标注入可同步终止对局或杀死敌人，返回后必须复核再登记。
 	EnemyController->InitializeCombatContext(PlayerCharacter, SurroundManager);
 	if (!CanActivateSpawnedEnemy())
@@ -569,7 +543,8 @@ void AfpstrueGameMode::RegisterEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	// 只登记 BeginPlay 完成的存活敌人：Death 负责逻辑死亡，EndPlay 覆盖包括 Destroy 在内的全部离场。
 	// 注册表是 GameMode 对“当前存活参与者”的唯一视图；Contains 命中时不重复绑定事件或累计数量。
-	if (!IsValid(Enemy) || !Enemy->HasActorBegunPlay() || Enemy->IsDead())
+	const auto* Controller = IsValid(Enemy) ? Cast<AfpstrueEnemyAIController>(Enemy->GetController()) : nullptr;
+	if (Controller == nullptr || !Controller->IsBehaviorReady() || !Enemy->HasActorBegunPlay() || Enemy->IsDead())
 	{
 		return;
 	}

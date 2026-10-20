@@ -21,7 +21,7 @@ param(
     [switch]$SelfTest,
     [string]$ValidateAutomationReport = '',
     [ValidateRange(1, 65534)][int]$Port = 7797,
-    [ValidateRange(1, 10000)][int]$MinimumTests = 92,
+    [ValidateRange(1, 10000)][int]$MinimumTests = 101,
     [ValidateRange(1, 16)][int]$MaxParallelActions = 4,
     [ValidateRange(1, 2000)][int]$MinimumDeliveryFreeGB = 50
 )
@@ -40,13 +40,17 @@ $RequiredAutomationTests = @(
     'fpstrue.AI.BehaviorTree.LowHealthRetreatLifecycle'
     'fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff'
     'fpstrue.AI.BehaviorTree.RuntimeLifecycle'
+    'fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence'
     'fpstrue.AI.EQS.AsyncParametersAndMissingNavigation'
     'fpstrue.AI.EQS.TemplateAndItemIdentity'
     'fpstrue.AI.EQS.TwoOwnersInflightGcAndRecreate'
+    'fpstrue.AI.Movement.NativeStationaryFloorCache'
     'fpstrue.AI.Perception.MultiplayerIdleSearchAndStop'
     'fpstrue.AI.Perception.AuthoritativeGunshotInvestigation'
     'fpstrue.AI.Perception.SightOcclusionAndFacing'
     'fpstrue.AI.Surround.CacheAndSlotOwnership'
+    'fpstrue.AI.Surround.TacticalQueueAndRecovery'
+    'fpstrue.AI.Surround.TacticalBoundaryAndAssignments'
     'fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig'
     'fpstrue.Gameplay.Boundaries.AI.FacingTolerance'
     'fpstrue.Gameplay.Boundaries.AI.RotationConfig'
@@ -98,6 +102,8 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Health.AuthorityAndGASAttributeCommit'
     'fpstrue.Multiplayer.Health.ReplicatedAttributeNotifications'
     'fpstrue.Multiplayer.Hitscan.HistoryGeometryTimeAndLifecycle'
+    'fpstrue.Multiplayer.Lifecycle.BoundedSpawnRecovery'
+    'fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired'
     'fpstrue.Multiplayer.Movement.SavedModesReplayAndAuthority'
     'fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget'
     'fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState'
@@ -120,10 +126,13 @@ $RequiredAutomationTests = @(
     'fpstrue.Performance.Benchmark.PauseWatchdogAndExitContract'
     'fpstrue.Performance.Benchmark.SampleValidation'
     'fpstrue.Performance.Significance.RenderPriorityOrder'
+    'fpstrue.Performance.Significance.GameplayTierReasonSnapshot'
+    'fpstrue.Performance.Significance.RenderBudgetRetentionOrder'
     'fpstrue.Performance.Significance.RenderScoringSnapshotEquivalence'
     'fpstrue.Performance.Significance.RenderTopKSelection'
     'fpstrue.Performance.Significance.ScopedCombatProtection'
     'fpstrue.Rendering.EnemyBudget.MeshOwnershipAndDeath'
+    'fpstrue.Rendering.EnemyBudget.IndependentBudgetRetention'
     'fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle'
     'fpstrue.Rendering.EnemyBudget.TierHysteresis'
 )

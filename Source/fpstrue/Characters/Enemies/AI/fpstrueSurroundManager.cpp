@@ -4,10 +4,12 @@
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
+#include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "DrawDebugHelpers.h"
 #include "EngineGlobals.h"
 #include "Engine/World.h"
 #include "NavigationSystem.h"
+#include "NavigationData.h"
 #include "Characters/Enemies/AI/fpstrueEnemyPositionQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "EnvironmentQuery/EnvQuery.h"
@@ -37,7 +39,8 @@ namespace
  * 并发攻击名额和每帧 MoveTo 提交预算，从而减少围攻拥堵和重复导航请求。
  *
  * 数据结构职责：
- *   TArray<Slot> 保存固定内外环布局；TMap<Enemy, Index> 保存稳定占位；TSet<Enemy> 保存攻击许可。
+ *   Participants 是唯一请求身份账本，FIFO 决定内圈准入先后；固定内外环和 EnemyToSlot 保存稳定占位，
+ *   ActiveAttackers 仅保存单次出手许可，完成一次攻击不重新排站位队列。
  * 敌人键使用 TWeakObjectPtr，Manager 不拥有敌人生命周期；死亡/销毁由主动释放和失效项清理双重兜底。
  * 玩家位置与槽位 NavMesh 投影按 Timer/位移阈值批量刷新，单个 AIController 只读取缓存结果。
  */
@@ -123,6 +126,9 @@ void AfpstrueSurroundManager::UpdateSharedTargetSnapshot(bool bForce)
 	}
 
 	const double Now = GetWorld()->GetTimeSeconds();
+	// 与共享位置 Timer 复用同一低频维护点；即使玩家没移动也要回收失效/卡住的席位。
+	CleanupInvalidEntries();
+	PumpTacticalQueue();
 	const FVector CurrentTargetLocation = TargetCharacter->GetActorLocation();
 	const bool bMovedEnough =
 		FVector::DistSquared(CurrentTargetLocation, CachedTargetLocation) >= FMath::Square(SharedTargetMoveThreshold);
@@ -203,7 +209,7 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 	Request.SetFloatParam(TEXT("Cover"), 0.0f).SetFloatParam(TEXT("InnerCount"), FMath::Clamp(InnerSlotCount, 4, 24));
 	Request.SetFloatParam(TEXT("OuterCount"), FMath::Clamp(OuterSlotCount, 4, 32));
 	Request.SetFloatParam(TEXT("InnerRadius"), InnerRadius).SetFloatParam(TEXT("OuterRadius"), OuterRadius);
-	Request.SetFloatParam(TEXT("InnerApproach"), AttackApproachRadius).SetFloatParam(TEXT("OuterApproach"), OuterAttackApproachRadius);
+	Request.SetFloatParam(TEXT("InnerApproach"), AttackApproachRadius).SetFloatParam(TEXT("OuterApproach"), OuterRadius);
 	Request.SetFloatParam(TEXT("ProjectionX"), NavigationProjectionExtent.X).SetFloatParam(TEXT("ProjectionY"), NavigationProjectionExtent.Y).SetFloatParam(TEXT("ProjectionZ"), NavigationProjectionExtent.Z);
 	ApproachQueryStartedTime = NavigationCacheTime = Now;
 	bNeedsNavigationRetry = false;
@@ -281,6 +287,7 @@ void AfpstrueSurroundManager::HandleApproachQueryFinished(TSharedPtr<FEnvQueryRe
 	bNeedsNavigationRetry = Available != SurroundSlots.Num();
 	PublishedTargetLocation = QueryTarget;
 	CSV_CUSTOM_STAT(fpstrueEQS, ApproachAvailableSlots, Available, ECsvCustomStatOp::Set);
+	PumpTacticalQueue();
 }
 
 // 低血撤退只在首次请求时发查询；后续轮询同一缓存，未获得提交预算时等待而非执行同步查询。
@@ -388,159 +395,284 @@ bool AfpstrueSurroundManager::GetSharedTargetSnapshot(FVector& OutLocation) cons
 
 // ==================== 稳定槽位的申请与释放 ====================
 
-// 槽位位置和攻击接近点都来自同一缓存，避免 AIController 在每次决策中重复导航投影。
-bool AfpstrueSurroundManager::GetOrAssignAttackApproachLocation(AfpstrueEnemyCharacter* Enemy, FVector& OutLocation)
+// 首次申请建立唯一请求，之后复用稳定席位；FIFO 决定准入先后，距离只决定同环选哪个空位。
+bool AfpstrueSurroundManager::GetOrRequestTacticalAssignment(AfpstrueEnemyCharacter* Enemy, FFPEnemyTacticalAssignment& OutAssignment)
 {
-	// 已分配的敌人直接复用原槽位；只有首次申请才寻找空位，避免每轮决策改变目标导致来回晃动。
-	if (!HasAuthority() || GetNetMode() == NM_Client) return false;
-	if (FVector::DistSquared(CachedTargetLocation, PublishedTargetLocation) > FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold))) return false;
-	if (!IsValid(Enemy) || Enemy->IsDead() || !IsValid(TargetCharacter) || TargetCharacter->IsDead()
-		|| TargetCharacter->IsActorBeingDestroyed())
+	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Enemy) || Enemy->IsDead()
+		|| Enemy->IsActorBeingDestroyed() || Enemy->GetWorld() != GetWorld()
+		|| !bHasSharedTargetSnapshot || !IsValid(TargetCharacter) || TargetCharacter->IsDead()) return false;
+	const TWeakObjectPtr<AfpstrueEnemyCharacter> Key(Enemy);
+	if (!Participants.Contains(Key))
 	{
-		return false;
+		FTacticalParticipant& Participant = Participants.Add(Key);
+		Participant.RequestSequence = ++NextRequestSequence;
+		Participant.AssignmentRevision = ++NextAssignmentRevision;
+		Participant.LastProgressLocation = Enemy->GetActorLocation();
+		Participant.LastProgressTime = GetWorld()->GetTimeSeconds();
+		// 黄金角把同向涌入的候场者摊开；每个请求固定一个位置，队列前进不会让全员洗牌。
+		const float Angle = static_cast<float>(Participant.RequestSequence % 256) * 2.39996323f;
+		const float Radius = FMath::Max(OuterRadius, InnerRadius + 150.0f) + 180.0f
+			+ static_cast<float>((Participant.RequestSequence / 32) % 4) * 140.0f;
+		Participant.WaitingOffset = FVector(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0.0f);
+		WaitingQueue.Add({Key, Participant.RequestSequence});
+		PumpTacticalQueue();
 	}
-
-	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	const int32* AssignedSlot = EnemyToSlot.Find(EnemyKey);
-	if (AssignedSlot != nullptr && (!SurroundSlots.IsValidIndex(*AssignedSlot) ||
-		SurroundSlots[*AssignedSlot].Occupant != EnemyKey || !SurroundSlots[*AssignedSlot].bHasProjectedApproachLocation))
-	{
-		ReleaseSurroundSlot(Enemy);
-		AssignedSlot = nullptr;
-	}
-	int32 SlotIndex = AssignedSlot != nullptr ? *AssignedSlot : INDEX_NONE;
-	if (AssignedSlot == nullptr)
-	{
-		// 为尚未占槽的敌人选择并记录一个可用槽位。
-		if (EnemyToSlot.Num() >= SurroundSlots.Num())
-		{
-			CleanupInvalidEntries();
-			if (EnemyToSlot.Num() >= SurroundSlots.Num())
-			{
-				return false;
-			}
-		}
-
-		SlotIndex = FindBestFreeSlot(Enemy->GetActorLocation());
-		if (!SurroundSlots.IsValidIndex(SlotIndex))
-		{
-			return false;
-		}
-		SurroundSlots[SlotIndex].Occupant = Enemy;
-		EnemyToSlot.Add(EnemyKey, SlotIndex);
-	}
-
-	// 槽位和共享追踪使用同一份目标快照，避免同一决策周期混用实时位置与缓存位置。
-	// 复用路径已校验身份/投影，新分配路径只选择有有效接近点的槽位；此处不重复检查同一结果。
-	OutLocation = SurroundSlots[SlotIndex].ProjectedApproachLocation;
-	return true;
+	return BuildAssignment(Key, OutAssignment);
 }
 
-// 优先选内环可导航空位，再选外环；同环以最近二维距离择位，无可用位置返回 INDEX_NONE。
-int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation)
+bool AfpstrueSurroundManager::BuildAssignment(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, FFPEnemyTacticalAssignment& OutAssignment) const
 {
-	// 先扫描内环再扫描外环，并选择与敌人二维距离最近的可导航空位；槽位数固定，线性扫描成本可控。
-	for (int32 RingIndex = 0; RingIndex <= 1; ++RingIndex)
+	const FTacticalParticipant* Participant = Participants.Find(Enemy);
+	if (Participant == nullptr) return false;
+	OutAssignment = {};
+	OutAssignment.Revision = Participant->AssignmentRevision;
+	OutAssignment.Goal = CachedTargetLocation + Participant->WaitingOffset;
+	if (const int32* SlotIndex = EnemyToSlot.Find(Enemy))
 	{
-		int32 BestSlotIndex = INDEX_NONE;
-		float BestDistanceSquared = TNumericLimits<float>::Max();
-
-		for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
-		{
-			const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-			if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid() || !Slot.bHasProjectedApproachLocation)
-			{
-				continue;
-			}
-
-			const float DistanceSquared = FVector::DistSquared2D(EnemyLocation, Slot.ProjectedApproachLocation);
-			if (DistanceSquared < BestDistanceSquared)
-			{
-				BestDistanceSquared = DistanceSquared;
-				BestSlotIndex = SlotIndex;
-			}
-		}
-
-		if (BestSlotIndex != INDEX_NONE)
-		{
-			return BestSlotIndex;
-		}
+		if (FVector::DistSquared(CachedTargetLocation, PublishedTargetLocation)
+			> FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold))) return false;
+		if (!SurroundSlots.IsValidIndex(*SlotIndex)) return false;
+		const FfpstrueSurroundSlot& Slot = SurroundSlots[*SlotIndex];
+		if (Slot.Occupant != Enemy || (Slot.RingIndex == 0 ? !Slot.bHasProjectedApproachLocation : !Slot.bHasProjectedSlotLocation)) return false;
+		OutAssignment.Role = Slot.RingIndex == 0 ? EFPEnemyTacticalRole::Inner : EFPEnemyTacticalRole::Outer;
+		OutAssignment.Goal = Slot.RingIndex == 0 ? Slot.ProjectedApproachLocation : Slot.ProjectedSlotLocation;
 	}
-
-	return INDEX_NONE;
+	return !OutAssignment.Goal.ContainsNaN();
 }
 
-// 幂等移除敌人的占位和攻击许可；只有占用身份仍一致时才清槽并安排内环补位。
-void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
+bool AfpstrueSurroundManager::HasInnerSlot(AfpstrueEnemyCharacter* Enemy, uint64 Revision) const
 {
-	// 释放槽位时同时归还攻击许可；若释放的是内环，再尝试从外环稳定补位。
-	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Enemy))
-	{
-		return;
-	}
-	const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey(Enemy);
-	ActiveAttackers.Remove(EnemyKey);
-	int32 ReleasedSlotIndex = INDEX_NONE;
-	if (!EnemyToSlot.RemoveAndCopyValue(EnemyKey, ReleasedSlotIndex))
-	{
-		return;
-	}
-
-	// 弱引用身份比较包含对象序号；旧映射不能清掉被重新占用的同一下标。
-	// ★【重要边界】[资源归还] 释放槽位必须核对当前占用者身份，旧登记不能清空已被其他敌人占用的位置。
-	if (!SurroundSlots.IsValidIndex(ReleasedSlotIndex) || SurroundSlots[ReleasedSlotIndex].Occupant != EnemyKey)
-	{
-		return;
-	}
-	const bool bReleasedInnerSlot = SurroundSlots[ReleasedSlotIndex].RingIndex == 0;
-	SurroundSlots[ReleasedSlotIndex].Occupant.Reset();
-	if (bReleasedInnerSlot)
-	{
-		PromoteOuterOccupantToInnerSlot(ReleasedSlotIndex);
-	}
+	if (!IsValid(Enemy) || Enemy->IsDead() || !bHasSharedTargetSnapshot || !IsValid(TargetCharacter) || TargetCharacter->IsDead()) return false;
+	const FTacticalParticipant* Participant = Participants.Find(Enemy);
+	const int32* SlotIndex = EnemyToSlot.Find(Enemy);
+	return Participant != nullptr && (Revision == 0 || Revision == Participant->AssignmentRevision)
+		&& SlotIndex != nullptr && SurroundSlots.IsValidIndex(*SlotIndex)
+		&& SurroundSlots[*SlotIndex].RingIndex == 0 && SurroundSlots[*SlotIndex].Occupant == Enemy;
 }
 
-// 给可导航的内环空位选取最近外环占用者，更新稳定映射而不重新洗牌整圈敌人。
-void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotIndex)
+int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation, int32 RingIndex) const
 {
-	// 内环出现空位时选择离该位置最近的外环敌人迁入，避免随机洗牌造成整圈目标抖动。
-	if (!SurroundSlots[InnerSlotIndex].bHasProjectedApproachLocation)
-	{
-		return;
-	}
-
-	const FfpstrueSurroundSlot& InnerSlot = SurroundSlots[InnerSlotIndex];
-	const FVector InnerLocation =
-		InnerSlot.bHasProjectedSlotLocation ? InnerSlot.ProjectedSlotLocation : InnerSlot.ProjectedApproachLocation;
-	int32 BestOuterSlotIndex = INDEX_NONE;
+	int32 BestSlotIndex = INDEX_NONE;
 	float BestDistanceSquared = TNumericLimits<float>::Max();
-
 	for (int32 SlotIndex = 0; SlotIndex < SurroundSlots.Num(); ++SlotIndex)
 	{
 		const FfpstrueSurroundSlot& Slot = SurroundSlots[SlotIndex];
-		if (Slot.RingIndex == 0 || !Slot.Occupant.IsValid())
+		if (Slot.RingIndex != RingIndex || Slot.Occupant.IsValid()
+			|| (RingIndex == 0 ? !Slot.bHasProjectedApproachLocation : !Slot.bHasProjectedSlotLocation)) continue;
+		const FVector& Goal = RingIndex == 0 ? Slot.ProjectedApproachLocation : Slot.ProjectedSlotLocation;
+		const float DistanceSquared = FVector::DistSquared2D(EnemyLocation, Goal);
+		if (DistanceSquared < BestDistanceSquared) { BestDistanceSquared = DistanceSquared; BestSlotIndex = SlotIndex; }
+	}
+	return BestSlotIndex;
+}
+
+void AfpstrueSurroundManager::AssignSlot(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, int32 SlotIndex)
+{
+	if (const int32* Previous = EnemyToSlot.Find(Enemy))
+		if (SurroundSlots.IsValidIndex(*Previous) && SurroundSlots[*Previous].Occupant == Enemy) SurroundSlots[*Previous].Occupant.Reset();
+	SurroundSlots[SlotIndex].Occupant = Enemy;
+	EnemyToSlot.Add(Enemy, SlotIndex);
+	FTacticalParticipant& Participant = Participants.FindChecked(Enemy);
+	Participant.AssignmentRevision = ++NextAssignmentRevision;
+	Participant.LastProgressLocation = Enemy->GetActorLocation();
+	Participant.LastProgressTime = GetWorld()->GetTimeSeconds();
+	if (SurroundSlots[SlotIndex].RingIndex == 0) Participant.RequestSequence = 0;
+	++TacticalGrantCount;
+	PendingTacticalNotifications.Add(Enemy);
+}
+
+// 同一服务器 Game Thread 内先提交全部账本，再发“重新决策”通知；通知不直接启动攻击。
+void AfpstrueSurroundManager::PumpTacticalQueue()
+{
+	if (bPumpingTacticalQueue || !bHasSharedTargetSnapshot || !IsValid(TargetCharacter) || TargetCharacter->IsDead()) return;
+	bPumpingTacticalQueue = true;
+	const double Now = GetWorld()->GetTimeSeconds();
+	const bool bPositionsCurrent = FVector::DistSquared(CachedTargetLocation, PublishedTargetLocation)
+		<= FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold));
+	bool bInnerHasRoom = bPositionsCurrent;
+	for (int32 Index = 0; Index < WaitingQueue.Num();)
+	{
+		const FTacticalRequest Request = WaitingQueue[Index];
+		FTacticalParticipant* Participant = Participants.Find(Request.Enemy);
+		if (Participant == nullptr || Participant->RequestSequence != Request.Sequence)
 		{
+			WaitingQueue.RemoveAt(Index);
 			continue;
 		}
-
-		const float DistanceSquared = FVector::DistSquared2D(Slot.Occupant->GetActorLocation(), InnerLocation);
-		if (DistanceSquared < BestDistanceSquared)
+		if (!Request.Enemy.IsValid() || Request.Enemy->IsDead() || Request.Enemy->IsActorBeingDestroyed())
 		{
-			BestDistanceSquared = DistanceSquared;
-			BestOuterSlotIndex = SlotIndex;
+			// 使用原 weak 键清理，不把 Get()==nullptr 变成另一把空键。
+			RemoveParticipant(Request.Enemy);
+			continue;
 		}
+		const int32 InnerSlot = bInnerHasRoom && Now >= Participant->RetryAfter
+			? FindBestFreeSlot(Request.Enemy->GetActorLocation(), 0) : INDEX_NONE;
+		if (InnerSlot != INDEX_NONE)
+		{
+			AssignSlot(Request.Enemy, InnerSlot);
+			WaitingQueue.RemoveAt(Index);
+			continue;
+		}
+		if (Now >= Participant->RetryAfter) bInnerHasRoom = false;
+		++Index;
 	}
+	// 晋升先释放外环，随后按同一 FIFO 为无槽位者补外环；已有外环身份不洗牌。
+	if (bPositionsCurrent)
+		for (const FTacticalRequest& Request : WaitingQueue)
+			if (!EnemyToSlot.Contains(Request.Enemy) && Now >= Participants.FindChecked(Request.Enemy).RetryAfter)
+			{
+				const int32 OuterSlot = FindBestFreeSlot(Request.Enemy->GetActorLocation(), 1);
+				if (OuterSlot == INDEX_NONE) break;
+				AssignSlot(Request.Enemy, OuterSlot);
+			}
+	bPumpingTacticalQueue = false;
+	NotifyTacticalChanges();
+}
 
-	if (!SurroundSlots.IsValidIndex(BestOuterSlotIndex))
+void AfpstrueSurroundManager::NotifyTacticalChanges()
+{
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> Notifications = MoveTemp(PendingTacticalNotifications);
+	PendingTacticalNotifications.Reset();
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& Enemy : Notifications)
+		if (Enemy.IsValid())
+			if (AfpstrueEnemyAIController* Controller = Cast<AfpstrueEnemyAIController>(Enemy->GetController()))
+				Controller->OnTacticalAssignmentChanged(this);
+}
+
+void AfpstrueSurroundManager::RemoveParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy)
+{
+	ActiveAttackers.Remove(Enemy);
+	const bool bRemoved = Participants.Remove(Enemy) > 0;
+	WaitingQueue.RemoveAll([Enemy](const FTacticalRequest& Request) { return Request.Enemy == Enemy; });
+	int32 SlotIndex = INDEX_NONE;
+	if (EnemyToSlot.RemoveAndCopyValue(Enemy, SlotIndex)
+		&& SurroundSlots.IsValidIndex(SlotIndex) && SurroundSlots[SlotIndex].Occupant == Enemy)
 	{
-		return;
+		// ★【重要边界】[资源归还] 旧映射不能清掉已经由另一敌人占据的同一下标。
+		SurroundSlots[SlotIndex].Occupant.Reset();
 	}
+	if (bRemoved) { ++TacticalReleaseCount; PendingTacticalNotifications.Add(Enemy); }
+}
 
-	// 同一占用者从外环移到内环，槽位容器与敌人映射同时提交新位置。
-	TWeakObjectPtr<AfpstrueEnemyCharacter> PromotedEnemy = SurroundSlots[BestOuterSlotIndex].Occupant;
-	SurroundSlots[BestOuterSlotIndex].Occupant.Reset();
-	SurroundSlots[InnerSlotIndex].Occupant = PromotedEnemy;
-	EnemyToSlot.FindOrAdd(PromotedEnemy) = InnerSlotIndex;
+void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client || Enemy == nullptr) return;
+	RemoveParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
+	PumpTacticalQueue();
+	NotifyTacticalChanges();
+}
+
+void AfpstrueSurroundManager::RequeueParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy)
+{
+	int32 SlotIndex = INDEX_NONE;
+	if (EnemyToSlot.RemoveAndCopyValue(Enemy, SlotIndex)
+		&& SurroundSlots.IsValidIndex(SlotIndex) && SurroundSlots[SlotIndex].Occupant == Enemy)
+		SurroundSlots[SlotIndex].Occupant.Reset();
+	ActiveAttackers.Remove(Enemy);
+	WaitingQueue.RemoveAll([Enemy](const FTacticalRequest& Request) { return Request.Enemy == Enemy; });
+	FTacticalParticipant& Participant = Participants.FindChecked(Enemy);
+	Participant.RequestSequence = ++NextRequestSequence;
+	Participant.AssignmentRevision = ++NextAssignmentRevision;
+	Participant.LastProgressTime = GetWorld()->GetTimeSeconds();
+	Participant.RetryAfter = Participant.LastProgressTime + 1.0;
+	WaitingQueue.Add({Enemy, Participant.RequestSequence});
+	PendingTacticalNotifications.Add(Enemy);
+	++TacticalReleaseCount;
+}
+
+void AfpstrueSurroundManager::ReportTacticalMoveFailure(AfpstrueEnemyCharacter* Enemy, uint64 Revision)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client) return;
+	const FTacticalParticipant* Participant = Participants.Find(Enemy);
+	if (Participant == nullptr || Participant->AssignmentRevision != Revision || !EnemyToSlot.Contains(Enemy)) return;
+	RequeueParticipant(Enemy);
+	PumpTacticalQueue();
+}
+
+float AfpstrueSurroundManager::GetInnerBoundary(AfpstrueEnemyCharacter* Enemy) const
+{
+	return InnerRadius + Enemy->GetCapsuleComponent()->GetScaledCapsuleRadius() + 10.0f;
+}
+
+bool AfpstrueSurroundManager::ResolveTacticalMoveGoal(AfpstrueEnemyCharacter* Enemy,
+	const FFPEnemyTacticalAssignment& Assignment, FVector& OutGoal) const
+{
+	FFPEnemyTacticalAssignment Current;
+	if (!IsValid(Enemy) || !BuildAssignment(Enemy, Current) || Current.Revision != Assignment.Revision) return false;
+	OutGoal = Current.Goal;
+	if (Current.Role == EFPEnemyTacticalRole::Inner) return true;
+	const float Boundary = GetInnerBoundary(Enemy);
+	FVector From = Enemy->GetActorLocation() - CachedTargetLocation;
+	FVector To = OutGoal - CachedTargetLocation;
+	From.Z = To.Z = 0.0f;
+	if (To.SizeSquared() < FMath::Square(Boundary)) return false;
+	if (From.SizeSquared() < FMath::Square(Boundary))
+	{
+		// 被动进入内圈后先沿当前半径向外恢复；不瞬移，也不让路径横穿玩家。
+		const FVector Direction = From.IsNearlyZero() ? To.GetSafeNormal() : From.GetSafeNormal();
+		OutGoal = CachedTargetLocation + Direction * (Boundary + 100.0f);
+		OutGoal.Z = Current.Goal.Z;
+		return true;
+	}
+	const FVector Segment = To - From;
+	const float Alpha = Segment.SizeSquared() > SMALL_NUMBER ? FMath::Clamp(-FVector::DotProduct(From, Segment) / Segment.SizeSquared(), 0.0f, 1.0f) : 0.0f;
+	if ((From + Alpha * Segment).SizeSquared() >= FMath::Square(Boundary)) return true;
+	// 直接弦会穿圈：下一段沿外侧圆弧走最多 30 度，后续决策继续消费原席位。
+	const float FromAngle = FMath::Atan2(From.Y, From.X);
+	const float Delta = FMath::FindDeltaAngleRadians(FromAngle, FMath::Atan2(To.Y, To.X));
+	const float Step = FMath::Clamp(Delta, -PI / 6.0f, PI / 6.0f);
+	const float Radius = FMath::Max(FMath::Max(From.Size(), To.Size()), (Boundary + 20.0f) / FMath::Cos(PI / 12.0f));
+	const float NextAngle = From.Size() < Radius - 5.0f ? FromAngle : FromAngle + Step;
+	OutGoal = CachedTargetLocation + FVector(FMath::Cos(NextAngle) * Radius, FMath::Sin(NextAngle) * Radius, 0.0f);
+	OutGoal.Z = Current.Goal.Z;
+	return true;
+}
+
+bool AfpstrueSurroundManager::IsTacticalPathAllowed(AfpstrueEnemyCharacter* Enemy, const FNavigationPath& Path, uint32 FirstPoint) const
+{
+	if (!IsValid(Enemy) || !Participants.Contains(Enemy)) return false;
+	if (HasInnerSlot(Enemy)) return true;
+	const float Boundary = GetInnerBoundary(Enemy);
+	FVector From = Enemy->GetActorLocation() - CachedTargetLocation;
+	From.Z = 0.0f;
+	const TArray<FNavPathPoint>& Points = Path.GetPathPoints();
+	for (uint32 Index = FirstPoint; Index < static_cast<uint32>(Points.Num()); ++Index)
+	{
+		FVector To = Points[Index].Location - CachedTargetLocation;
+		To.Z = 0.0f;
+		const FVector Segment = To - From;
+		if (From.SizeSquared() < FMath::Square(Boundary - 1.0f))
+		{
+			if (FVector::DotProduct(From, Segment) < -1.0f || To.SizeSquared() + 1.0f < From.SizeSquared()) return false;
+		}
+		else
+		{
+			const float Alpha = Segment.SizeSquared() > SMALL_NUMBER ? FMath::Clamp(-FVector::DotProduct(From, Segment) / Segment.SizeSquared(), 0.0f, 1.0f) : 0.0f;
+			if ((From + Alpha * Segment).SizeSquared() < FMath::Square(Boundary - 1.0f)) return false;
+		}
+		From = To;
+	}
+	return true;
+}
+
+FFPEnemyTacticalDebugSnapshot AfpstrueSurroundManager::GetTacticalDebugSnapshot() const
+{
+	FFPEnemyTacticalDebugSnapshot Snapshot;
+	for (const FfpstrueSurroundSlot& Slot : SurroundSlots)
+	{
+		const bool bInner = Slot.RingIndex == 0;
+		(bInner ? Snapshot.InnerCapacity : Snapshot.OuterCapacity)++;
+		if (bInner ? Slot.bHasProjectedApproachLocation : Slot.bHasProjectedSlotLocation)
+			(bInner ? Snapshot.UsableInnerSlots : Snapshot.UsableOuterSlots)++;
+		if (Slot.Occupant.IsValid() && !Slot.Occupant->IsDead())
+			(bInner ? Snapshot.OccupiedInnerSlots : Snapshot.OccupiedOuterSlots)++;
+	}
+	Snapshot.QueuedEnemies = WaitingQueue.Num();
+	Snapshot.ActiveAttackers = ActiveAttackers.Num();
+	Snapshot.GrantCount = TacticalGrantCount;
+	Snapshot.ReleaseCount = TacticalReleaseCount;
+	Snapshot.TimeoutCount = TacticalTimeoutCount;
+	return Snapshot;
 }
 
 // ==================== 攻击与 MoveTo 全局预算 ====================
@@ -549,7 +681,7 @@ void AfpstrueSurroundManager::PromoteOuterOccupantToInnerSlot(int32 InnerSlotInd
 bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter* Enemy)
 {
 	// 当前是容量限制而非 Top-N 排名：名额未满时先申请先获得，攻击结束后由 Controller/CombatComponent 归还。
-	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Enemy) || Enemy->IsDead())
+	if (!HasAuthority() || GetNetMode() == NM_Client || !HasInnerSlot(Enemy))
 	{
 		return false;
 	}
@@ -571,7 +703,7 @@ bool AfpstrueSurroundManager::TryAcquireAttackPermission(AfpstrueEnemyCharacter*
 	{
 		// 只有预算确实满时才扫描弱引用，避免每次攻击申请都遍历两张表。
 		CleanupInvalidEntries();
-		if (ActiveAttackers.Num() >= AttackLimit)
+		if (!HasInnerSlot(Enemy) || ActiveAttackers.Num() >= AttackLimit)
 		{
 			return false;
 		}
@@ -624,8 +756,6 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 		if (Budget.Maximum == MAX_int32) Budget.Maximum = FMath::Max(MaxMoveRequestsPerFrame, 1);
 		Budget.ReservedCombat = FMath::Clamp(Budget.ReservedCombat, 0, Budget.Maximum - 1);
 	}
-	MoveRequestBudgetFrame = Budget.Frame;
-	MoveRequestsConsumedThisFrame = Budget.Consumed;
 	const int32 RequestLimit = bCombatPriority ? Budget.Maximum : Budget.Maximum - Budget.ReservedCombat;
 	if (Budget.Consumed >= RequestLimit)
 	{
@@ -633,7 +763,7 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 	}
 
 	// 近战槽位请求可以使用预留额度，远距离追踪不会挤占整帧的导航提交。
-	MoveRequestsConsumedThisFrame = ++Budget.Consumed;
+	++Budget.Consumed;
 	return true;
 }
 
@@ -660,10 +790,11 @@ void AfpstrueSurroundManager::ResetManager()
 		for (const int32 QueryId : OldCoverQueries) Queries->AbortQuery(QueryId);
 	}
 	PublishedTargetLocation = FVector::ZeroVector;
+	for (const auto& Pair : Participants) PendingTacticalNotifications.Add(Pair.Key);
+	Participants.Reset();
+	WaitingQueue.Reset();
 	EnemyToSlot.Reset();
 	ActiveAttackers.Reset();
-	MoveRequestBudgetFrame = MAX_uint64;
-	MoveRequestsConsumedThisFrame = 0;
 	TargetCharacter = nullptr;
 	bHasSharedTargetSnapshot = false;
 	bNeedsNavigationRetry = false;
@@ -677,36 +808,39 @@ void AfpstrueSurroundManager::ResetManager()
 		Slot.bHasProjectedApproachLocation = false;
 	}
 	GetWorldTimerManager().ClearTimer(SharedTargetTimerHandle);
+	NotifyTacticalChanges();
 }
 
 // 删除死亡或失效弱引用，并核对槽位身份后清占用，避免旧登记误清新占用者。
 void AfpstrueSurroundManager::CleanupInvalidEntries()
 {
-	// 弱引用不会阻止 Actor 销毁；清掉已失效或死亡敌人的登记，并同步清空对应槽位占用。
-	for (auto Iterator = EnemyToSlot.CreateIterator(); Iterator; ++Iterator)
+	// 低频维护只看已登记参与者；没有逐 AI Tick，也不会把候场等同于暂停感知/伤害。
+	const double Now = GetWorld()->GetTimeSeconds();
+	TArray<TWeakObjectPtr<AfpstrueEnemyCharacter>, TInlineAllocator<16>> Removed;
+	for (auto& Pair : Participants)
 	{
-		if (Iterator.Key().IsValid() && !Iterator.Key()->IsDead())
+		AfpstrueEnemyCharacter* Enemy = Pair.Key.Get();
+		if (!IsValid(Enemy) || Enemy->IsDead() || Enemy->IsActorBeingDestroyed()) { Removed.Add(Pair.Key); continue; }
+		FTacticalParticipant& Participant = Pair.Value;
+		if (!EnemyToSlot.Contains(Pair.Key)) continue;
+		FFPEnemyTacticalAssignment Assignment;
+		const bool bValidGoal = BuildAssignment(Pair.Key, Assignment);
+		const FVector Location = Enemy->GetActorLocation();
+		const bool bAtGoal = bValidGoal && FVector::DistSquared2D(Location, Assignment.Goal) <= FMath::Square(125.0f);
+		const bool bHasProgress = bValidGoal && FVector::DistSquared2D(Location, Assignment.Goal) + FMath::Square(25.0f)
+			< FVector::DistSquared2D(Participant.LastProgressLocation, Assignment.Goal);
+		if (bAtGoal || bHasProgress || Enemy->IsAttacking())
 		{
-			continue;
+			Participant.LastProgressLocation = Location;
+			Participant.LastProgressTime = Now;
 		}
-
-		const int32 SlotIndex = Iterator.Value();
-		if (SurroundSlots.IsValidIndex(SlotIndex) && SurroundSlots[SlotIndex].Occupant == Iterator.Key())
+		else if (Now - Participant.LastProgressTime >= FMath::Max(1.0f, SlotApproachTimeout))
 		{
-			SurroundSlots[SlotIndex].Occupant.Reset();
+			RequeueParticipant(Pair.Key);
+			++TacticalTimeoutCount;
 		}
-		Iterator.RemoveCurrent();
 	}
-
-	// 攻击许可不依赖是否有槽位，需独立清除失效持有者。
-	for (auto Iterator = ActiveAttackers.CreateIterator(); Iterator; ++Iterator)
-	{
-		const TWeakObjectPtr<AfpstrueEnemyCharacter> EnemyKey = *Iterator;
-		if (!EnemyKey.IsValid() || EnemyKey->IsDead())
-		{
-			Iterator.RemoveCurrent();
-		}
-	}
+	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& Enemy : Removed) RemoveParticipant(Enemy);
 }
 
 // 把相对极角和半径换算为世界位置；可选半径用于同角度的攻击接近点。

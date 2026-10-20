@@ -276,25 +276,30 @@ bool FFpstrueGameModeStartupTest::RunTest(const FString& Parameters)
 		GameMode->TotalWaves = 1;
 		GameMode->BaseEnemiesPerWave = 1;
 		GameMode->SpawnInterval = 1000.0f;
-		TWeakObjectPtr<AfpstrueSpawnReentryTestEnemy> SpawnedEnemy;
-		TWeakObjectPtr<AfpstrueEnemyAIController> SpawnedController;
+		// 失败激活现在会销毁未登记对象；保留测试引用用于检查其 EndPlay 结果，不能用 weak 有效性证明回调是否发生。
+		TStrongObjectPtr<AfpstrueSpawnReentryTestEnemy> SpawnedEnemy;
+		TStrongObjectPtr<AfpstrueEnemyAIController> SpawnedController;
+		bool bReachedEnemyBeginPlay = false;
 		bool bBrainWasRunningBeforeCallback = false;
 		// 在实际 BeginPlay 中结束对局或杀死当前敌人，检验生成后复核与控制器清理。
 		AfpstrueSpawnReentryTestEnemy::OnTestBeginPlay = [&](AfpstrueSpawnReentryTestEnemy& Enemy)
 		{
-			SpawnedEnemy = &Enemy;
-			SpawnedController = Cast<AfpstrueEnemyAIController>(Enemy.GetController());
-			bBrainWasRunningBeforeCallback = SpawnedController.IsValid() && SpawnedController->GetBrainComponent() != nullptr &&
+			bReachedEnemyBeginPlay = true;
+			SpawnedEnemy.Reset(&Enemy);
+			SpawnedController.Reset(Cast<AfpstrueEnemyAIController>(Enemy.GetController()));
+			bBrainWasRunningBeforeCallback = SpawnedController.Get() != nullptr && SpawnedController->GetBrainComponent() != nullptr &&
 											 SpawnedController->GetBrainComponent()->IsRunning();
 			// 第一种杀死玩家同步结算；第二种敌人自身死亡，仍不应该加入存活注册表。
 			UGameplayStatics::ApplyDamage(Scenario == 0 ? static_cast<AActor*>(Player) : &Enemy, 100000.0f, nullptr, nullptr, nullptr);
 		};
 		GameMode->StartGameMode();
 		AfpstrueSpawnReentryTestEnemy::OnTestBeginPlay = nullptr;
-		if (!TestTrue(TEXT("Production spawn reached the enemy BeginPlay callback"), SpawnedEnemy.IsValid()) ||
+		if (!TestTrue(TEXT("Production spawn reached the enemy BeginPlay callback"), bReachedEnemyBeginPlay) ||
 			!TestTrue(TEXT("Possess had already started a real behavior brain"), bBrainWasRunningBeforeCallback) ||
-			!TestTrue(TEXT("Spawned controller is available for cleanup assertions"), SpawnedController.IsValid()))
+			!TestNotNull(TEXT("Spawned controller is available for cleanup assertions"), SpawnedController.Get()))
 			return false;
+		TestTrue(TEXT("Rejected spawn is destroyed rather than left as an unregistered actor"), SpawnedEnemy->IsActorBeingDestroyed());
+		TestTrue(TEXT("Rejected spawn controller is reclaimed with its enemy"), SpawnedController->IsActorBeingDestroyed());
 		TestFalse(TEXT("The unregistered spawned enemy cannot keep its behavior tree running"),
 				  SpawnedController->GetBrainComponent()->IsRunning());
 		TestNull(TEXT("No target is injected after a terminating spawn callback"), SpawnedController->GetTargetCharacter());

@@ -8,6 +8,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
@@ -20,7 +21,10 @@
 #include "Components/ShapeComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
+#include "Engine/StaticMesh.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/GameEngine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/PendingNetGame.h"
 #include "Engine/NetConnection.h"
@@ -745,6 +749,14 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	{
 		FThreadCpuSample PreviousEndCpu, EndCpu, WorldBeginCpu, WorldEndCpu;
 	};
+	struct FFramePacing
+	{
+		uint64 Frame = 0;
+		double DeltaSeconds = 0, IdleSeconds = 0, IdleOvershootSeconds = 0;
+		float QueryInputDeltaSeconds = 0, QueriedEngineMaxTickRate = 0;
+		int32 NetServerMaxTickRate = 0, MaxNetTickRate = 0;
+		bool bNetDriverValid = false, bEngineQueryValid = false;
+	};
 	struct FConnectionCounters
 	{
 		TWeakObjectPtr<UNetConnection> Connection;
@@ -766,9 +778,12 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	TArray<FFrame> Frames;
 	// 原始 OS 样本只在诊断开关开启时分配，不增加普通基线每个 FFrame 的驻留尺寸。
 	TArray<FFrameCpu> CpuFrames;
+	// 逐帧节拍字段仅随独立诊断启用；不扩充历史 schema-2 frames.csv 或普通基线热路径。
+	TArray<FFramePacing> PacingFrames;
 	FString Role, ControlPath, Directory, Phase = TEXT("STARTING"), Reason, ViewPolicy = TEXT("Player");
 	FString EnemyReplication = TEXT("Tiered");
 	FString AnimationStartSnapshot = TEXT("null");
+	FString PacingStartSnapshot = TEXT("null");
 	TWeakObjectPtr<UNetDriver> NetworkDriver;
 	FNetworkBoundary NetworkStart, NetworkStop;
 	uint32 NetworkIdentitySamples = 0;
@@ -785,8 +800,9 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	int32 MinEnemies = MAX_int32, MaxEnemies = 0, MinPlayers = MAX_int32, MaxPlayers = 0;
 	// Same population scan also records authority-side activity. Clients do not
 	// infer AI decisions from pose; their activity fields remain explicitly null.
-	int32 AIControllers = 0, Chasing = 0, Attacking = 0, Moving = 0;
+	int32 AIControllers = 0, BehaviorReady = 0, Chasing = 0, Attacking = 0, Moving = 0;
 	int32 MinAIControllers = MAX_int32, MaxAIControllers = 0, MinChasing = MAX_int32, MaxChasing = 0;
+	int32 MinBehaviorReady = MAX_int32, MaxBehaviorReady = 0;
 	int32 MinAttacking = MAX_int32, MaxAttacking = 0, MinMoving = MAX_int32, MaxMoving = 0;
 	float ViewFOV = 0;
 	FVector ViewLocation = FVector::ZeroVector;
@@ -794,6 +810,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	FFPEnemyHealthBarMetrics Bars;
 	bool bQualityApplied = false;
 	bool bScreenshotRequested = false;
+	bool bContinuousFloorChecks = false, bContinuousFloorChecksPrepared = false;
 
 	// ★ 诊断边界：只在显式开关下直接读取当前 GT 的 OS 累计计时，不使用 UE 的缓存 CPU 百分比。
 	// 100ns 是 FILETIME 单位而非逐帧精度；保留原值与有符号差值，不把量化零值/跨边界突增 clamp 掉。
@@ -873,6 +890,63 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return TEXT("\"") + Text + TEXT("\"");
 	}
 
+	FFramePacing ReadFramePacing() const
+	{
+		check(IsInGameThread());
+		FFramePacing Sample;
+		Sample.Frame = GFrameCounter;
+		Sample.DeltaSeconds = FApp::GetDeltaTime();
+		Sample.IdleSeconds = FApp::GetIdleTime();
+		Sample.IdleOvershootSeconds = FApp::GetIdleTimeOvershoot();
+		Sample.QueryInputDeltaSeconds = static_cast<float>(Sample.DeltaSeconds);
+		if (const UWorld* Current = World.Get())
+			if (const UNetDriver* Driver = Current->GetNetDriver())
+			{
+				Sample.bNetDriverValid = true;
+				Sample.NetServerMaxTickRate = Driver->GetNetServerMaxTickRate();
+				Sample.MaxNetTickRate = Driver->MaxNetTickRate;
+			}
+		// UE5.5 的 const GetMaxTickRate 仍包含故障注入：CauseHitches 会 Sleep，
+		// t.UnsteadyFPS 会推进随机/静态状态。只对已审计的精确引擎类且两项关闭时重读，
+		// 不调用 UpdateTimeAndHandleMaxTickRate，也不更新 RunningAverageDeltaTime。
+		const IConsoleVariable* CauseHitches = IConsoleManager::Get().FindConsoleVariable(TEXT("CauseHitches"));
+		const IConsoleVariable* UnsteadyFPS = IConsoleManager::Get().FindConsoleVariable(TEXT("t.UnsteadyFPS"));
+		if (GEngine != nullptr && GEngine->GetClass() == UGameEngine::StaticClass() &&
+			CauseHitches != nullptr && CauseHitches->GetInt() == 0 && UnsteadyFPS != nullptr && UnsteadyFPS->GetInt() == 0 &&
+			FMath::IsFinite(Sample.QueryInputDeltaSeconds) && Sample.QueryInputDeltaSeconds >= 0)
+		{
+			Sample.QueriedEngineMaxTickRate = GEngine->GetMaxTickRate(Sample.QueryInputDeltaSeconds, true);
+			Sample.bEngineQueryValid = FMath::IsFinite(Sample.QueriedEngineMaxTickRate);
+		}
+		return Sample;
+	}
+
+	FString BuildPacingSnapshot() const
+	{
+		const FFramePacing Sample = ReadFramePacing();
+		const auto Number = [](bool bValid, double Value) { return bValid ? FString::Printf(TEXT("%.9f"), Value) : FString(TEXT("null")); };
+		FString Json = FString::Printf(TEXT("{\"frame\":%llu,\"engineClass\":%s,\"netDriverValid\":%s,\"netServerMaxTickRate\":%s,\"maxNetTickRate\":%s,\"queryInputDeltaSeconds\":%.9f,\"queriedEngineMaxTickRateHz\":%s,\"engineQueryValid\":%s,\"appDeltaSeconds\":%.9f,\"appIdleSeconds\":%.9f,\"appIdleOvershootSeconds\":%.9f"),
+			Sample.Frame, *Quote(GEngine != nullptr ? GEngine->GetClass()->GetPathName() : FString()),
+			Sample.bNetDriverValid ? TEXT("true") : TEXT("false"), *Number(Sample.bNetDriverValid, Sample.NetServerMaxTickRate),
+			*Number(Sample.bNetDriverValid, Sample.MaxNetTickRate), Sample.QueryInputDeltaSeconds,
+			*Number(Sample.bEngineQueryValid, Sample.QueriedEngineMaxTickRate), Sample.bEngineQueryValid ? TEXT("true") : TEXT("false"),
+			Sample.DeltaSeconds, Sample.IdleSeconds, Sample.IdleOvershootSeconds);
+		Json += FString::Printf(TEXT(",\"smoothFrameRateConfigured\":%s,\"frameRateSmoothingAllowed\":%s,\"useFixedFrameRate\":%s,\"fixedFrameRateHz\":%s,\"appUseFixedTimeStep\":%s,\"appFixedDeltaSeconds\":%.9f,\"appBenchmarking\":%s,\"cvars\":{"),
+			GEngine != nullptr && GEngine->bSmoothFrameRate ? TEXT("true") : TEXT("false"),
+			GEngine != nullptr && GEngine->IsAllowedFramerateSmoothing() ? TEXT("true") : TEXT("false"),
+			GEngine != nullptr && GEngine->bUseFixedFrameRate ? TEXT("true") : TEXT("false"),
+			*Number(GEngine != nullptr, GEngine != nullptr ? GEngine->FixedFrameRate : 0),
+			FApp::UseFixedTimeStep() ? TEXT("true") : TEXT("false"), FApp::GetFixedDeltaTime(), FApp::IsBenchmarking() ? TEXT("true") : TEXT("false"));
+		const TCHAR* Names[] = {TEXT("t.MaxFPS"), TEXT("CauseHitches"), TEXT("t.UnsteadyFPS")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Names); ++Index)
+		{
+			if (Index > 0) Json += TEXT(",");
+			const IConsoleVariable* Variable = IConsoleManager::Get().FindConsoleVariable(Names[Index]);
+			Json += Quote(Names[Index]) + TEXT(":") + Number(Variable != nullptr, Variable != nullptr ? Variable->GetFloat() : 0);
+		}
+		return Json + TEXT("}}");
+	}
+
 	// 仅在采集边界读取实例与共享资产配置，不在逐帧/人口校验循环遍历 PhysicsAsset。
 	// 这些值描述门禁与实际组件配置，不宣称任何一次动画任务已经派发到 Worker。
 	FString BuildAnimationSnapshot() const
@@ -884,27 +958,89 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		int32 PostInstances = 0, PostCanParallel = 0, PostDisabled = 0, SimpleEnemies = 0, FullAuthorityPose = 0;
 		int32 MeshCollisionEnabled = 0, MeshPhysicsStates = 0, ValidMeshBodyInstances = 0, ConstraintEntries = 0;
 		int32 HitProxyComponents = 0, QueryEnabledHitProxies = 0, HitProxyPhysicsStates = 0;
+		int32 ConvexHitElements = 0, OtherHitElements = 0, AlwaysCheckFloorEnemies = 0;
+		TSet<const UStaticMesh*> HitHullAssets;
 		int32 GameplayTiers[3] = {}, RenderTiers[3] = {}, VisibilityOptions[5] = {};
+		int32 GameplayReasonSampled = 0, GameplayDistanceValid = 0;
+		int32 FullByDistance = 0, FullByAttack = 0, FullByMeleeRange = 0, FullReasonUnknown = 0;
+		FString EnemyDetails;
+		const auto Boolean = [](bool bValue) { return bValue ? TEXT("true") : TEXT("false"); };
+		const double SnapshotWorldTime = Current != nullptr ? Current->GetTimeSeconds() : -1.0;
 		TMap<const UPhysicsAsset*, int32> AssetReferences;
 		if (Current != nullptr) for (TActorIterator<AfpstrueEnemyCharacter> It(Current); It; ++It)
 		{
 			const AfpstrueEnemyCharacter* Enemy = *It;
 			if (Enemy->IsActorBeingDestroyed() || Enemy->IsDead()) continue;
 			++Alive;
+			AlwaysCheckFloorEnemies += Enemy->GetCharacterMovement() != nullptr && Enemy->GetCharacterMovement()->bAlwaysCheckFloor ? 1 : 0;
 			SimpleEnemies += Enemy->UsesSimpleHitProxies() ? 1 : 0;
 			FullAuthorityPose += Enemy->RequiresFullAuthorityPose() ? 1 : 0;
 			++GameplayTiers[FMath::Clamp(int32(Enemy->GetGameplaySignificanceTier()), 0, 2)];
 			++RenderTiers[FMath::Clamp(int32(Enemy->GetRenderSignificanceTier()), 0, 2)];
-			// 查询代理与 Mesh 的资产 Body 数是不同口径；组件可不创建 Chaos 物理状态。
-			TInlineComponentArray<UShapeComponent*> Shapes;
-			Enemy->GetComponents(Shapes);
-			for (const UShapeComponent* Shape : Shapes)
+			const FFPEnemyGameplayTierReasonSnapshot& PolicyReason = Enemy->GetGameplayTierReasonSnapshot();
+			GameplayReasonSampled += PolicyReason.bHasPolicySample ? 1 : 0;
+			GameplayDistanceValid += PolicyReason.bDistanceSampleValid ? 1 : 0;
+			const bool bGameplayFull = Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full;
+			const bool bReasonKnown = PolicyReason.bHasPolicySample && PolicyReason.AppliedTier == Enemy->GetGameplaySignificanceTier();
+			if (bGameplayFull)
 			{
-				if (Shape->GetFName() != TEXT("EnemyHeadHitProxy") && Shape->GetFName() != TEXT("EnemyBodyHitProxy")) continue;
+				FullByDistance += bReasonKnown && PolicyReason.bFullByDistance ? 1 : 0;
+				FullByAttack += bReasonKnown && PolicyReason.bFullByAttack ? 1 : 0;
+				FullByMeleeRange += bReasonKnown && PolicyReason.bFullByMeleeRange ? 1 : 0;
+				FullReasonUnknown += !bReasonKnown || (!PolicyReason.bFullByDistance && !PolicyReason.bFullByAttack && !PolicyReason.bFullByMeleeRange) ? 1 : 0;
+			}
+			FString FullReasons;
+			const auto AddReason = [&FullReasons](const TCHAR* Name)
+			{
+				if (!FullReasons.IsEmpty()) FullReasons += TEXT(",");
+				FullReasons += Quote(Name);
+			};
+			if (!bReasonKnown) AddReason(TEXT("Unknown"));
+			else
+			{
+				if (PolicyReason.bFullByDistance) AddReason(TEXT("Distance"));
+				if (PolicyReason.bFullByAttack) AddReason(TEXT("Attacking"));
+				if (PolicyReason.bFullByMeleeRange) AddReason(TEXT("MeleeRangeWhileNotAttacking"));
+			}
+			const USkeletalMeshComponent* DetailMesh = Enemy->GetMesh();
+			const UCharacterMovementComponent* DetailMovement = Enemy->GetCharacterMovement();
+			const FString Leader = DetailMesh != nullptr && DetailMesh->LeaderPoseComponent.IsValid()
+				? Quote(DetailMesh->LeaderPoseComponent->GetPathName()) : TEXT("null");
+			if (!EnemyDetails.IsEmpty()) EnemyDetails += TEXT(",");
+			EnemyDetails += FString::Printf(TEXT("{\"actor\":%s,\"objectId\":%u,\"gameplayTier\":%d,\"renderTier\":%d,\"hasPolicySample\":%s,\"sampleWorldTimeSeconds\":%s,\"sampleAgeSeconds\":%s,\"distanceSampleValid\":%s,\"nearestPlayerDistance2D\":%s,\"sampleSignificanceScore\":%s,\"sampleAppliedTier\":%s,\"usedScopedCombatSample\":%s,\"lastSampleFullReasons\":[%s],\"movementTickIntervalSeconds\":%s,\"animationTickIntervalSeconds\":%s,\"leaderPose\":%s,\"attackingNow\":%s,\"fullAuthorityPoseNow\":%s,\"meshTickEnabled\":%s,\"meshLODCount\":%d,\"appliedMinimumLOD\":%d,\"predictedLOD\":%d}"),
+				*Quote(Enemy->GetPathName()), Enemy->GetUniqueID(), int32(Enemy->GetGameplaySignificanceTier()), int32(Enemy->GetRenderSignificanceTier()),
+				Boolean(PolicyReason.bHasPolicySample),
+				*(PolicyReason.bHasPolicySample ? FString::Printf(TEXT("%.6f"), PolicyReason.SampleWorldTimeSeconds) : FString(TEXT("null"))),
+				*(PolicyReason.bHasPolicySample ? FString::Printf(TEXT("%.6f"), FMath::Max(0.0, SnapshotWorldTime - PolicyReason.SampleWorldTimeSeconds)) : FString(TEXT("null"))),
+				Boolean(PolicyReason.bDistanceSampleValid),
+				*(PolicyReason.bDistanceSampleValid ? FString::Printf(TEXT("%.6f"), PolicyReason.NearestPlayerDistance2D) : FString(TEXT("null"))),
+				*(PolicyReason.bHasPolicySample && FMath::IsFinite(PolicyReason.SignificanceScore) ? FString::Printf(TEXT("%.9g"), PolicyReason.SignificanceScore) : FString(TEXT("null"))),
+				*(PolicyReason.bHasPolicySample ? FString::FromInt(int32(PolicyReason.AppliedTier)) : FString(TEXT("null"))),
+				Boolean(PolicyReason.bUsedScopedCombatSample), *FullReasons,
+				*(DetailMovement != nullptr ? FString::Printf(TEXT("%.9f"), DetailMovement->GetComponentTickInterval()) : FString(TEXT("null"))),
+				*(DetailMesh != nullptr ? FString::Printf(TEXT("%.9f"), DetailMesh->GetComponentTickInterval()) : FString(TEXT("null"))),
+				*Leader, Boolean(Enemy->IsAttacking()), Boolean(Enemy->RequiresFullAuthorityPose()),
+				Boolean(DetailMesh != nullptr && DetailMesh->IsComponentTickEnabled()), DetailMesh != nullptr ? DetailMesh->GetNumLODs() : 0,
+				Enemy->GetAppliedMinimumLOD(), DetailMesh != nullptr ? DetailMesh->GetPredictedLODLevel() : INDEX_NONE);
+			// 查询代理与 Mesh 的资产 Body 数是不同口径；组件可不创建 Chaos 物理状态。
+			TInlineComponentArray<UStaticMeshComponent*> Shapes;
+			Enemy->GetComponents(Shapes);
+			for (const UStaticMeshComponent* Shape : Shapes)
+			{
+				if (!Shape->ComponentHasTag(TEXT("EnemyHitProxy"))) continue;
 				++HitProxyComponents;
 				const ECollisionEnabled::Type Collision = Shape->GetCollisionEnabled();
 				QueryEnabledHitProxies += Collision == ECollisionEnabled::QueryOnly || Collision == ECollisionEnabled::QueryAndPhysics ? 1 : 0;
 				HitProxyPhysicsStates += Shape->IsPhysicsStateCreated() ? 1 : 0;
+				if (const UStaticMesh* Hull = Shape->GetStaticMesh())
+				{
+					HitHullAssets.Add(Hull);
+					if (const UBodySetup* Body = Hull->GetBodySetup())
+					{
+						ConvexHitElements += Body->AggGeom.ConvexElems.Num();
+						OtherHitElements += Body->AggGeom.GetElementCount() - Body->AggGeom.ConvexElems.Num();
+					}
+				}
 			}
 			const USkeletalMeshComponent* Mesh = Enemy->GetMesh();
 			if (Mesh == nullptr) continue;
@@ -933,7 +1069,6 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			}
 			if (const UPhysicsAsset* Asset = Mesh->GetPhysicsAsset()) ++AssetReferences.FindOrAdd(Asset);
 		}
-		const auto Boolean = [](bool bValue) { return bValue ? TEXT("true") : TEXT("false"); };
 		FString Json = FString::Printf(TEXT("{\"netMode\":%d,\"dedicatedServer\":%s,\"shouldUseThreadingForPerformance\":%s,\"forceUsePerfThreads\":%s,\"oneThread\":%s,\"noPerfThreads\":%s,\"projectAllowsMultithreadedAnimation\":%s,\"enemies\":%d,\"simpleHitProxyEnemies\":%d,\"fullAuthorityPoseEnemies\":%d,\"cvars\":{"),
 			Current != nullptr ? int32(Current->GetNetMode()) : -1, Boolean(IsRunningDedicatedServer()), Boolean(FApp::ShouldUseThreadingForPerformance()),
 			Boolean(FParse::Param(FCommandLine::Get(), TEXT("useperfthreads"))), Boolean(FParse::Param(FCommandLine::Get(), TEXT("onethread"))),
@@ -949,8 +1084,9 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		Json += FString::Printf(TEXT("},\"mesh\":{\"count\":%d,\"tickEnabled\":%d,\"everyFrameTick\":%d,\"uroEnabled\":%d,\"leaderPoseFollowers\":%d,\"postProcessDisabled\":%d,\"collisionEnabled\":%d,\"physicsStatesCreated\":%d,\"validBodyInstances\":%d,\"constraintInstanceEntries\":%d,\"gameplayTiers\":[%d,%d,%d],\"renderTiers\":[%d,%d,%d],\"visibilityOptionsByEnum\":[%d,%d,%d,%d,%d]},"),
 			Meshes, MeshTickEnabled, EveryFrameMeshTicks, URO, LeaderFollowers, PostDisabled, MeshCollisionEnabled, MeshPhysicsStates, ValidMeshBodyInstances, ConstraintEntries,
 			GameplayTiers[0], GameplayTiers[1], GameplayTiers[2], RenderTiers[0], RenderTiers[1], RenderTiers[2], VisibilityOptions[0], VisibilityOptions[1], VisibilityOptions[2], VisibilityOptions[3], VisibilityOptions[4]);
-		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"hitProxyComponents\":{\"count\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d},\"physicsAssetConfiguration\":["),
-			MainInstances, MainMultithreaded, MainCanParallel, MainRootMotionEverything, PostInstances, PostCanParallel, HitProxyComponents, QueryEnabledHitProxies, HitProxyPhysicsStates);
+		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"movement\":{\"alwaysCheckFloorEnemies\":%d},\"hitProxyComponents\":{\"count\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d,\"convexElements\":%d,\"otherElements\":%d,\"uniqueHullAssets\":%d},\"physicsAssetConfiguration\":["),
+			MainInstances, MainMultithreaded, MainCanParallel, MainRootMotionEverything, PostInstances, PostCanParallel, AlwaysCheckFloorEnemies,
+			HitProxyComponents, QueryEnabledHitProxies, HitProxyPhysicsStates, ConvexHitElements, OtherHitElements, HitHullAssets.Num());
 		TArray<const UPhysicsAsset*> Assets;
 		AssetReferences.GetKeys(Assets);
 		Assets.Sort([](const UPhysicsAsset& Left, const UPhysicsAsset& Right) { return Left.GetPathName() < Right.GetPathName(); });
@@ -964,7 +1100,26 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			Json += FString::Printf(TEXT("{\"asset\":%s,\"meshReferences\":%d,\"authoredBodies\":%d,\"authoredShapes\":%d,\"authoredConstraints\":%d}"),
 				*Quote(Asset->GetPathName()), AssetReferences.FindChecked(Asset), Bodies, Shapes, Asset->ConstraintSetup.Num());
 		}
-		Json += TEXT("],\"boundary\":\"Two GameThread boundary snapshots outside timed frame capture. Authored PhysicsAsset counts are configuration, not active Chaos shape counts; valid BodyInstance/created-state counts are separate. Eligibility flags do not prove dispatch or worker execution; verify in an independent Trace. No CVar, instance, collision or LOD is changed by this observer.\"}");
+		Json += FString::Printf(TEXT("],\"gameplayFullReasons\":{\"sampleWorldTimeSeconds\":%.6f,\"sampledEnemies\":%d,\"unsampledEnemies\":%d,\"validDistanceSamples\":%d,\"distance\":%d,\"attacking\":%d,\"meleeRangeWhileNotAttacking\":%d,\"unknown\":%d,\"countsCanOverlap\":true,\"distanceSource\":\"Inverse of last applied max-player 1/(1+2D-distance) score, not a fresh player query\"},\"enemyDetails\":[%s]"),
+			SnapshotWorldTime, GameplayReasonSampled, Alive - GameplayReasonSampled, GameplayDistanceValid,
+			FullByDistance, FullByAttack, FullByMeleeRange, FullReasonUnknown, *EnemyDetails);
+		// Only observe the authoritative ledger at capture boundaries; never request a
+		// seat here, or a performance observer would change the workload it measures.
+		Json += TEXT(",\"tacticalManagers\":[");
+		bool bFirstManager = true;
+		if (Current != nullptr) for (TActorIterator<AfpstrueSurroundManager> It(Current); It; ++It)
+		{
+			if (It->IsActorBeingDestroyed()) continue;
+			const FFPEnemyTacticalDebugSnapshot Slots = It->GetTacticalDebugSnapshot();
+			if (!bFirstManager) Json += TEXT(",");
+			bFirstManager = false;
+			Json += FString::Printf(TEXT("{\"manager\":%s,\"innerCapacity\":%d,\"outerCapacity\":%d,\"usableInnerSlots\":%d,\"usableOuterSlots\":%d,\"occupiedInnerSlots\":%d,\"occupiedOuterSlots\":%d,\"queuedEnemies\":%d,\"activeAttackers\":%d,\"grantCount\":%llu,\"releaseCount\":%llu,\"timeoutCount\":%llu}"),
+				*Quote(It->GetName()), Slots.InnerCapacity, Slots.OuterCapacity, Slots.UsableInnerSlots, Slots.UsableOuterSlots,
+				Slots.OccupiedInnerSlots, Slots.OccupiedOuterSlots, Slots.QueuedEnemies, Slots.ActiveAttackers,
+				Slots.GrantCount, Slots.ReleaseCount, Slots.TimeoutCount);
+		}
+		Json += TEXT("]");
+		Json += TEXT(",\"boundary\":\"Two GameThread boundary snapshots outside timed frame capture. Per-enemy reasons describe the last applied gameplay sample, not fresh LOS or current target acquisition; null means unknown, never zero distance. Authored PhysicsAsset counts are configuration, not active Chaos shape counts; valid BodyInstance/created-state counts are separate. Eligibility flags and LeaderPose links do not prove dispatch or worker execution; verify in an independent Trace. No CVar, instance, collision or LOD is changed by this observer.\"}");
 		return Json;
 	}
 
@@ -1171,6 +1326,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			Frames.Add({GFrameCounter, Now - CaptureAt, Interval, LastWorldMs, bSameWorldFrame});
 			if (bCpuAccounting) CpuFrames.Add({PreviousEndCpu, EndCpu,
 				bSameWorldFrame ? LastWorldBeginCpu : FThreadCpuSample{}, bSameWorldFrame ? LastWorldEndCpu : FThreadCpuSample{}});
+			if (bCpuAccounting) PacingFrames.Add(ReadFramePacing());
 		}
 		LastEndAt = Now;
 		PreviousEndCpu = EndCpu;
@@ -1203,7 +1359,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			!FMath::IsNearlyEqual(Current->GetWorldSettings()->GetEffectiveTimeDilation(), 1.0f))
 			return Fail(TEXT("WorldOrTimeChanged"));
 		Enemies = Players = 0;
-		AIControllers = Chasing = Attacking = Moving = 0;
+		AIControllers = BehaviorReady = Chasing = Attacking = Moving = 0;
 		Bars = {};
 		for (TActorIterator<AfpstrueEnemyCharacter> It(Current); It; ++It)
 		{
@@ -1215,6 +1371,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				if (const auto* AI = Cast<AfpstrueEnemyAIController>(It->GetController()))
 				{
 					++AIControllers;
+					BehaviorReady += AI->IsBehaviorReady() ? 1 : 0;
 					if (AI->GetAIState() == EFPEnemyAIState::Chase) ++Chasing;
 					if (AI->GetAIState() == EFPEnemyAIState::Attack) ++Attacking;
 				}
@@ -1366,6 +1523,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		CaptureStopAnchor = MarkCaptureBoundary(TEXT("STOP"));
 		if (!ReadNetworkBoundary(NetworkStop)) return false;
 		const FString AnimationStopSnapshot = BuildAnimationSnapshot();
+		const FString PacingStopSnapshot = BuildPacingSnapshot();
 		FString NetworkJson;
 		if (!BuildNetworkJson(NetworkJson)) return false;
 		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueBaseline_FlushArtifacts);
@@ -1406,11 +1564,31 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 
 		}
 		if (!SaveAtomic(TEXT(".frames.csv"), Csv)) return Fail(TEXT("FrameArtifactWriteFailed"));
+		if (bCpuAccounting)
+		{
+			if (PacingFrames.Num() != Frames.Num()) return Fail(TEXT("PacingFrameCountMismatch"));
+			FString PacingCsv(TEXT("Frame,AppDeltaSeconds,AppIdleSeconds,AppIdleOvershootSeconds,NetDriverValid,NetServerMaxTickRate,MaxNetTickRate,EngineQueryValid,QueryInputDeltaSeconds,QueriedEngineMaxTickRateHz\n"));
+			PacingCsv.Reserve(PacingFrames.Num() * 160);
+			for (int32 Index = 0; Index < PacingFrames.Num(); ++Index)
+			{
+				const FFramePacing& Sample = PacingFrames[Index];
+				if (Sample.Frame != Frames[Index].Frame) return Fail(TEXT("PacingFrameIdentityMismatch"));
+				PacingCsv += FString::Printf(TEXT("%llu,%.9f,%.9f,%.9f,%d,%s,%s,%d,%.9f,%s\n"),
+					Sample.Frame, Sample.DeltaSeconds, Sample.IdleSeconds, Sample.IdleOvershootSeconds, Sample.bNetDriverValid ? 1 : 0,
+					Sample.bNetDriverValid ? *FString::FromInt(Sample.NetServerMaxTickRate) : TEXT(""),
+					Sample.bNetDriverValid ? *FString::FromInt(Sample.MaxNetTickRate) : TEXT(""), Sample.bEngineQueryValid ? 1 : 0,
+					Sample.QueryInputDeltaSeconds, Sample.bEngineQueryValid ? *FString::Printf(TEXT("%.9f"), Sample.QueriedEngineMaxTickRate) : TEXT(""));
+			}
+			if (!SaveAtomic(TEXT(".pacing.csv"), PacingCsv)) return Fail(TEXT("PacingArtifactWriteFailed"));
+		}
 		const FPlatformMemoryStats Memory = FPlatformMemory::GetStats();
 		Phase = TEXT("FLUSHED");
 		FString Json = TEXT("{") + CommonJson();
 		Json += TEXT(",\"networkConnections\":") + NetworkJson;
 		Json += TEXT(",\"animationDiagnostics\":{\"start\":") + AnimationStartSnapshot + TEXT(",\"stop\":") + AnimationStopSnapshot + TEXT("}");
+		Json += TEXT(",\"pacingDiagnostics\":{\"start\":") + PacingStartSnapshot + TEXT(",\"stop\":") + PacingStopSnapshot
+			+ TEXT(",\"perFrameDiagnostic\":") + (bCpuAccounting ? TEXT("true") : TEXT("false"))
+			+ TEXT(",\"interpretation\":\"NetServerMaxTickRate is read from the live World's NetDriver. QueriedEngineMaxTickRateHz is a safe boundary/frame-end re-evaluation using the recorded FApp delta, not the local GivenMaxTickRate inside UpdateTimeAndHandleMaxTickRate; fixed-rate/benchmark overrides and platform handlers may differ. Query is null for custom engine classes, missing fault-injection CVars or enabled CauseHitches/t.UnsteadyFPS to avoid getter side effects. FApp idle/overshoot are engine-reported pacing, not scheduler Ready/Wait classification. Separate diagnostic pacing.csv retains raw values and exact global frame pairing; never subtract idle and relabel the remainder CPU execution. Default launches retain inherited pacing.\"}");
 		const bool bFrameCpuPresent = CpuValidFrames > 0, bWorldCpuPresent = CpuValidWorlds > 0;
 		const bool bCpuComplete = bCpuAccounting && PLATFORM_WINDOWS && CpuFrames.Num() == Frames.Num() && CpuValidFrames == Frames.Num()
 			&& CpuValidWorlds == Frames.Num() && CpuQueryFailures == 0 && NegativeFrameCpuDeltas == 0 && NegativeWorldCpuDeltas == 0;
@@ -1444,15 +1622,16 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			Memory.UsedPhysical / 1048576.0, Memory.PeakUsedPhysical / 1048576.0);
 		Json += TEXT(",\"actualMapPackage\":") + Quote(World.IsValid() ? World->GetOutermost()->GetName() : FString());
 		if (Role == TEXT("Server"))
-			Json += FString::Printf(TEXT(",\"aiActivity\":{\"validationSamples\":%d,\"movingSpeedThresholdCmPerSecond\":5,\"controllers\":%d,\"minControllers\":%d,\"maxControllers\":%d,\"chasing\":%d,\"minChasing\":%d,\"maxChasing\":%d,\"attacking\":%d,\"minAttacking\":%d,\"maxAttacking\":%d,\"moving\":%d,\"minMoving\":%d,\"maxMoving\":%d}"),
-				ValidationSamples, AIControllers, MinAIControllers, MaxAIControllers, Chasing, MinChasing, MaxChasing,
+			Json += FString::Printf(TEXT(",\"aiActivity\":{\"validationSamples\":%d,\"movingSpeedThresholdCmPerSecond\":5,\"controllers\":%d,\"minControllers\":%d,\"maxControllers\":%d,\"behaviorReady\":%d,\"minBehaviorReady\":%d,\"maxBehaviorReady\":%d,\"chasing\":%d,\"minChasing\":%d,\"maxChasing\":%d,\"attacking\":%d,\"minAttacking\":%d,\"maxAttacking\":%d,\"moving\":%d,\"minMoving\":%d,\"maxMoving\":%d}"),
+				ValidationSamples, AIControllers, MinAIControllers, MaxAIControllers, BehaviorReady, MinBehaviorReady, MaxBehaviorReady, Chasing, MinChasing, MaxChasing,
 				Attacking, MinAttacking, MaxAttacking, Moving, MinMoving, MaxMoving);
 		else Json += TEXT(",\"aiActivity\":null");
 		Json += TEXT(",\"quality\":{");
 		const TCHAR* QualityNames[] = {TEXT("sg.ResolutionQuality"), TEXT("sg.ViewDistanceQuality"), TEXT("sg.AntiAliasingQuality"),
 			TEXT("sg.ShadowQuality"), TEXT("sg.GlobalIlluminationQuality"), TEXT("sg.ReflectionQuality"), TEXT("sg.PostProcessQuality"),
 			TEXT("sg.TextureQuality"), TEXT("sg.EffectsQuality"), TEXT("sg.FoliageQuality"), TEXT("sg.ShadingQuality"), TEXT("r.VSync"), TEXT("t.MaxFPS"),
-			TEXT("r.ScreenPercentage"), TEXT("r.DynamicRes.OperationMode"), TEXT("r.DynamicGlobalIlluminationMethod"), TEXT("r.ReflectionMethod"), TEXT("r.RayTracing")};
+			TEXT("r.ScreenPercentage"), TEXT("r.DynamicRes.OperationMode"), TEXT("r.DynamicGlobalIlluminationMethod"), TEXT("r.ReflectionMethod"), TEXT("r.RayTracing"),
+			TEXT("r.NumBufferedOcclusionQueries"), TEXT("r.HZBOcclusion"), TEXT("r.OneFrameThreadLag"), TEXT("r.RHICmdBypass")};
 		for (int32 Index = 0; Index < UE_ARRAY_COUNT(QualityNames); ++Index)
 		{
 			if (Index > 0) Json += TEXT(",");
@@ -1494,6 +1673,21 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		if (Phase != TEXT("STARTING") && (!bWorldReady || !bCountsReady)) return Fail(TEXT("WorldPopulationOrViewChanged"));
 		if (Phase == TEXT("STARTING") && bWorldReady && bCountsReady)
 		{
+			// 反向消融只在显式基线 DS、完整 160 人口就绪后应用一次，发生在预热前。
+			// 默认不写此属性；不在生成过程中或采集循环每帧覆盖真实 CMC 配置。
+			if (Role == TEXT("Server") && bContinuousFloorChecks && !bContinuousFloorChecksPrepared)
+			{
+				if (PreparedEnemies.Num() != 160) return Fail(TEXT("FloorReferenceRequiresPrepared160Enemies"));
+				for (const auto& WeakEnemy : PreparedEnemies)
+				{
+					const AfpstrueEnemyCharacter* Enemy = WeakEnemy.Get();
+					if (!IsValid(Enemy) || Enemy->IsActorBeingDestroyed() || Enemy->IsDead() || Enemy->GetCharacterMovement() == nullptr)
+						return Fail(TEXT("FloorReferenceEnemyInvalidBeforePreparation"));
+				}
+				for (const auto& WeakEnemy : PreparedEnemies) WeakEnemy->GetCharacterMovement()->bAlwaysCheckFloor = true;
+				bContinuousFloorChecksPrepared = true;
+				UE_LOG(LogTemp, Display, TEXT("PVP_BASELINE FLOOR_REFERENCE role=Server enemies=160 alwaysCheckFloor=1 appliedOnceBeforeWarmup=1"));
+			}
 			if (bRendered && bScreenshotRequested)
 				FScreenshotRequest::RequestScreenshot(FPaths::Combine(Directory, Role + TEXT("_Ready.png")), true, false);
 			ReadyAt = Now;
@@ -1505,6 +1699,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			if (Command != TEXT("START") || Phase != TEXT("READY") || Now - ReadyAt < 19.8)
 				return Fail(TEXT("StartBeforeReadyOr20SecondWarmup"));
 			AnimationStartSnapshot = BuildAnimationSnapshot();
+			PacingStartSnapshot = BuildPacingSnapshot();
 			CaptureAt = FPlatformTime::Seconds();
 			if (!ReadNetworkBoundary(NetworkStart)) return false;
 			LastEndAt = WorldStartAt = 0;
@@ -1522,6 +1717,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			if (Role == TEXT("Server"))
 			{
 				MinAIControllers = FMath::Min(MinAIControllers, AIControllers); MaxAIControllers = FMath::Max(MaxAIControllers, AIControllers);
+				MinBehaviorReady = FMath::Min(MinBehaviorReady, BehaviorReady); MaxBehaviorReady = FMath::Max(MaxBehaviorReady, BehaviorReady);
 				MinChasing = FMath::Min(MinChasing, Chasing); MaxChasing = FMath::Max(MaxChasing, Chasing);
 				MinAttacking = FMath::Min(MinAttacking, Attacking); MaxAttacking = FMath::Max(MaxAttacking, Attacking);
 				MinMoving = FMath::Min(MinMoving, Moving); MaxMoving = FMath::Max(MaxMoving, Moving);
@@ -1547,6 +1743,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	Capture->bRendered = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineRendered"));
 	Capture->bScreenshotRequested = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineScreenshot"));
 	Capture->bCpuAccounting = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineCpuAccounting"));
+	Capture->bContinuousFloorChecks = FParse::Param(FCommandLine::Get(), TEXT("PvpBaselineAlwaysCheckFloor"));
 	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineView="), Capture->ViewPolicy);
 	FParse::Value(FCommandLine::Get(), TEXT("EnemyReplication="), Capture->EnemyReplication);
 	FString Root;
@@ -1560,7 +1757,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 		(Capture->EnemyReplication != TEXT("Tiered") && Capture->EnemyReplication != TEXT("Reference")) ||
 		World == nullptr || World->WorldType != EWorldType::Game || GIsEditor || bProcessBenchmarkConsumed ||
 		(bServer ? (World->GetNetMode() != NM_DedicatedServer || UE_BUILD_SHIPPING) : World->GetNetMode() != NM_Client) ||
-		(bServer && Capture->bRendered) || FParse::Param(FCommandLine::Get(), TEXT("PvpProfile")) ||
+		(bServer && Capture->bRendered) || (!bServer && Capture->bContinuousFloorChecks) || FParse::Param(FCommandLine::Get(), TEXT("PvpProfile")) ||
 		FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) || FParse::Param(FCommandLine::Get(), TEXT("AutoBenchmark")) ||
 		!IFileManager::Get().DirectoryExists(*Capture->Directory))
 	{
@@ -1569,7 +1766,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	}
 	// Fresh output is mandatory; a previous successful file cannot satisfy a new
 	// failed run. The parent creates a new case directory and WAIT file first.
-	for (const TCHAR* Suffix : {TEXT(".status.json"), TEXT(".frames.csv"), TEXT(".summary.json")})
+	for (const TCHAR* Suffix : {TEXT(".status.json"), TEXT(".frames.csv"), TEXT(".summary.json"), TEXT(".pacing.csv")})
 		if (IFileManager::Get().FileExists(*FPaths::Combine(Capture->Directory, Capture->Role + Suffix)))
 		{
 			FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineOutputAlreadyExists"));
@@ -1578,7 +1775,11 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	bProcessBenchmarkConsumed = true;
 	FMath::RandInit(1337);
 	Capture->Frames.Reserve(FPvpBaselineCapture::MaxFrames);
-	if (Capture->bCpuAccounting) Capture->CpuFrames.Reserve(FPvpBaselineCapture::MaxFrames);
+	if (Capture->bCpuAccounting)
+	{
+		Capture->CpuFrames.Reserve(FPvpBaselineCapture::MaxFrames);
+		Capture->PacingFrames.Reserve(FPvpBaselineCapture::MaxFrames);
+	}
 	Capture->StartHandle = FWorldDelegates::OnWorldTickStart.AddSP(Capture, &FPvpBaselineCapture::BeginWorld);
 	Capture->EndHandle = FWorldDelegates::OnWorldTickEnd.AddSP(Capture, &FPvpBaselineCapture::EndWorld);
 	Capture->FrameHandle = FCoreDelegates::OnEndFrame.AddSP(Capture, &FPvpBaselineCapture::EndFrame);

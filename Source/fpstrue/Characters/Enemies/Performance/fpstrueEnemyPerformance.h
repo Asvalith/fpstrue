@@ -98,6 +98,10 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 
 
 	// 预算：Full Render、阴影和硬件光追的最大敌人数量，以及阴影和光追的最大距离
+	// 只给同一视锥层级内的上轮名额持有者加分；三种预算各自记录，不改变原始评分或自然档位。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Budget", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BudgetRetentionMargin = 0.05f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Budget", meta = (ClampMin = "0"))
 	int32 MaxFullRenderEnemies = 12;
 
@@ -223,6 +227,23 @@ struct FFPEnemyRenderPriorityLess
 };
 
 /**
+ * 在进入堆之前构造本预算的临时键，保持比较器严格弱序，不在比较中使用近似相等。
+ * 共同缩放后分数仍在 [0,1]，避免高分持有者加成被比较器的 Clamp 截掉；原始 Key 不被改写。
+ * 主/扩展视锥优先级保持原样，新视野中的对象不会被旧名额的分数加成挡住。
+ */
+FORCEINLINE FFPEnemyRenderPriorityKey FPEnemyRenderBudgetPriorityKey(
+	const FFPEnemyRenderPriorityKey& Key, bool bWasHolder, float RetentionMargin)
+{
+	FFPEnemyRenderPriorityKey BudgetKey = Key;
+	const float SafeMargin = FMath::IsFinite(RetentionMargin) ? FMath::Clamp(RetentionMargin, 0.0f, 1.0f) : 0.0f;
+	if (SafeMargin > 0.0f && FMath::IsFinite(Key.Score))
+	{
+		BudgetKey.Score = (FMath::Clamp(Key.Score, 0.0f, 1.0f) + (bWasHolder ? SafeMargin : 0.0f)) / (1.0f + SafeMargin);
+	}
+	return BudgetKey;
+}
+
+/**
  * 有界 Top-K 堆中的轻量条目。CandidateIndex 指回本轮连续候选数组，排序键按值保存，
  * 避免堆比较期间再访问 Actor、组件或分散内存。
  */
@@ -322,6 +343,7 @@ protected:
 private:
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
 	friend class FFpstrueMultiplayerClientPerformanceTest;
+	friend class FFpstrueEnemyRenderBudgetStabilityTest;
 	// 周期间复用容量；Actor 指针只在当前 Update 的同步采样/应用阶段使用。
 	struct FEnemyRenderCandidate
 	{
@@ -338,11 +360,18 @@ private:
 		bool bShouldBeVisibleInRayTracing = false;
 	};
 	TArray<FEnemyRenderCandidate> CandidateBuffer;
+	// 仅保存上轮实际名额的弱引用；每轮按当前资格重建，不能保活敌人或跨网络端共享。
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> FullBudgetHolders;
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ShadowBudgetHolders;
+	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RayTracingBudgetHolders;
 
 	// ==================== 集中更新与策略校验 ====================
 
 	// 一次完成 Gameplay 更新、Render 采样、Top-K 预算选择、组件应用和 CSV 统计。
 	void Update();
+	// 只消费本轮纯值样本与本预算历史，不写 Actor、Gameplay 档位或网络策略。
+	void AllocatePresentationBudgets(int32& FullBudgetDowngradeCount, int32& ShadowBudgetRejectedCount,
+									 int32& RayTracingBudgetRejectedCount);
 	// 预算选完后统一应用并读回实际结果；统计不参与下一轮决策。
 	void ApplyAndRecordCandidates(int32 FullBudgetDowngradeCount, int32 ShadowBudgetRejectedCount,
 								  int32 RayTracingBudgetRejectedCount);

@@ -4,6 +4,7 @@
 
 #if WITH_EDITOR
 #include "ActorFactories/ActorFactory.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AI/NavigationSystemBase.h"
 #include "Builders/CubeBuilder.h"
 #include "Camera/CameraActor.h"
@@ -26,11 +27,17 @@
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/Parse.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/ConvexElem.h"
 #include "StaticMeshCompiler.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
+#include "UObject/UObjectGlobals.h"
 
 #endif
 
@@ -45,6 +52,73 @@ UfpstrueEnemyUIArenaCommandlet::UfpstrueEnemyUIArenaCommandlet()
 int32 UfpstrueEnemyUIArenaCommandlet::Main(const FString& Params)
 {
 #if WITH_EDITOR
+	if (FParse::Param(*Params, TEXT("BuildEnemyHitHull")))
+	{
+		// 只在编辑器生成一次共享单位凸包。活体组件仅缩放并引用资产，运行时不做几何构建或 Cooking。
+		const FString HullPackageName(TEXT("/Game/PerformanceCandidates/EnemyCollision/SM_EnemyHitConvex"));
+		const FString HullObjectPath = HullPackageName + TEXT(".SM_EnemyHitConvex");
+		const auto ValidateHull = [](const UStaticMesh* Mesh)
+		{
+			const UBodySetup* Body = Mesh != nullptr ? Mesh->GetBodySetup() : nullptr;
+			return Body != nullptr && Body->CollisionTraceFlag == CTF_UseSimpleAsComplex &&
+				Body->AggGeom.GetElementCount() == 1 && Body->AggGeom.ConvexElems.Num() == 1 &&
+				Body->AggGeom.ConvexElems[0].VertexData.Num() == 16 &&
+				Body->AggGeom.ConvexElems[0].ElemBox.Min.Equals(FVector(-50.0), 0.001) &&
+				Body->AggGeom.ConvexElems[0].ElemBox.Max.Equals(FVector(50.0), 0.001) &&
+				Body->AggGeom.ConvexElems[0].GetChaosConvexMesh() != nullptr;
+		};
+		if (FPackageName::DoesPackageExist(HullPackageName))
+		{
+			const UStaticMesh* ExistingHull = LoadObject<UStaticMesh>(nullptr, *HullObjectPath);
+			FStaticMeshCompilingManager::Get().FinishAllCompilation();
+			const bool bValid = ValidateHull(ExistingHull);
+			UE_LOG(LogTemp, Display, TEXT("ENEMY_HIT_HULL EXISTS Valid=%d Asset=%s Reused=1 Overwritten=0"), bValid, *HullObjectPath);
+			if (!bValid) UE_LOG(LogTemp, Error, TEXT("ENEMY_HIT_HULL FAIL ExistingAssetInvalid Overwritten=0"));
+			return bValid ? 0 : 1;
+		}
+		UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (Cube == nullptr) return 1;
+		FStaticMeshCompilingManager::Get().FinishAllCompilation();
+		UPackage* HullPackage = CreatePackage(*HullPackageName);
+		UStaticMesh* Hull = DuplicateObject<UStaticMesh>(Cube, HullPackage, TEXT("SM_EnemyHitConvex"));
+		if (Hull == nullptr || Hull->GetBodySetup() == nullptr) return 1;
+		Hull->SetFlags(RF_Public | RF_Standalone);
+		Hull->SetLightingGuid();
+		UBodySetup* Body = Hull->GetBodySetup();
+		if (Body == Cube->GetBodySetup())
+		{
+			UE_LOG(LogTemp, Error, TEXT("ENEMY_HIT_HULL FAIL DuplicatedMeshMustOwnBodySetup Saved=0"));
+			return 1;
+		}
+		Body->RemoveSimpleCollision();
+		Body->CollisionTraceFlag = CTF_UseSimpleAsComplex;
+		FKConvexElem& Convex = Body->AggGeom.ConvexElems.AddDefaulted_GetRef();
+		// XY切掉四个角；上下两层形成真正16顶点八棱柱，不使用盒/胶囊冒充凸包。
+		const FVector2D Ring[] = {{-30.0, -50.0}, {30.0, -50.0}, {50.0, -30.0}, {50.0, 30.0},
+			{30.0, 50.0}, {-30.0, 50.0}, {-50.0, 30.0}, {-50.0, -30.0}};
+		for (const double Z : {-50.0, 50.0})
+			for (const FVector2D& XY : Ring) Convex.VertexData.Emplace(XY.X, XY.Y, Z);
+		Convex.UpdateElemBox();
+		Hull->Build(false);
+		FStaticMeshCompilingManager::Get().FinishAllCompilation();
+		Body->InvalidatePhysicsData();
+		Body->CreatePhysicsMeshes();
+		if (!ValidateHull(Hull))
+		{
+			UE_LOG(LogTemp, Error, TEXT("ENEMY_HIT_HULL FAIL InvalidSingleCookedConvex Saved=0"));
+			return 1;
+		}
+		HullPackage->MarkPackageDirty();
+		const FString HullFilename = FPackageName::LongPackageNameToFilename(HullPackageName, FPackageName::GetAssetPackageExtension());
+		if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(HullFilename), true)) return 1;
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.SaveFlags = SAVE_NoError;
+		const bool bSaved = UPackage::SavePackage(HullPackage, Hull, *HullFilename, SaveArgs);
+		if (bSaved) FAssetRegistryModule::AssetCreated(Hull);
+		UE_LOG(LogTemp, Display, TEXT("ENEMY_HIT_HULL CREATED Saved=%d Asset=%s Convex=1 Vertices=16 RuntimeCooking=0"), bSaved, *HullObjectPath);
+		return bSaved ? 0 : 1;
+	}
 	const FString Package = TEXT("/Game/PerformanceCandidates/EnemyUI160/EnemyUI160_ArenaOverview55x192");
 	const FString Filename = FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension());
 	// 首次创建后只读复用；需要改场地时先显式保留旧证据，不能在 A/B 中途悄悄覆写。
