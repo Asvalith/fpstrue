@@ -11,8 +11,12 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "UObject/ObjectKey.h"
 
+// 玩家专用求值器：只修改输出姿态与本实例缓存；World 查询依赖 AnimInstance 的同步求值门禁。
+// 【设计取舍】PreUpdate 的坐标/资格快照只隔离读取，不会让后续 World 查询自动变成线程安全。
+// 复用 AnimationCore 两骨解算，项目只适配支撑与锁脚；解算只写姿态，不回写胶囊或 CMC 移动。
 struct FFpstrueFootIKProxy : FAnimInstanceProxy
 {
+	// 关联所属动画实例；贴地缓存按实例默认初始化，不与其他角色共享。
 	explicit FFpstrueFootIKProxy(UAnimInstance* Instance) : FAnimInstanceProxy(Instance) {}
 	struct FGround
 	{
@@ -45,6 +49,7 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 	bool bSettledIdle = false;
 	TWeakObjectPtr<AfpstrueCharacter> QueryOwner;
 	FFpstrueFootIKDebug Debug;
+	// 扫描鞋底投影覆盖的薄盒，更新本脚最高可行走支撑，弥补离散探针之间的窄障碍。
 	void CoverFootprint(ACharacter* Character, int32 Side, const FBox& Bounds,
 		const FCollisionObjectQueryParams& Objects, const FCollisionQueryParams& Query)
 	{
@@ -67,6 +72,7 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		}
 	}
 
+	// 沿线返回首个非 Pawn 的可行走支撑；Hits 由调用者复用，查询次数累计进诊断。
 	bool FindWorldSupport(ACharacter* Character, const FVector& Start, const FVector& End,
 		const FCollisionObjectQueryParams& Objects, const FCollisionQueryParams& Query, FHitResult& Support, TArray<FHitResult>& Hits)
 	{
@@ -114,6 +120,7 @@ struct FFpstrueFootIKProxy : FAnimInstanceProxy
 		ToeProbes[0] = IK->LeftToeProbes; ToeProbes[1] = IK->RightToeProbes;
 	}
 
+	// 先求值本帧输入姿态，再查支撑、稳定支撑脚并解腿；无资格时原样保留主图输出。
 	virtual bool Evaluate(FPoseContext& Output) override
 	{
 		// 薄 AnimBP 的 LinkedInputPose 由引擎填入本帧主图结果，不能用上帧后处理后的 Socket 当输入骨骼。

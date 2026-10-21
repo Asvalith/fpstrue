@@ -97,6 +97,7 @@ void UfpstrueBTDecorator_DecisionFlag::Configure(FName KeyName, bool bExpectedVa
 
 namespace
 {
+// 输出阻止自动迁移的具体属性并返回 false，保留策划已有配置。
 bool RejectEnemyTreeUpgradeProperty(const UBTNode& Node, const UBTNode& Default, const FProperty& Property)
 {
 	FString ActualValue, DefaultValue;
@@ -130,6 +131,7 @@ template <typename TKey> void AddKey(UBlackboardData& Blackboard, FName Name)
 	Entry.KeyType = NewObject<TKey>(&Blackboard);
 }
 
+// 将角色、目标点和内圈资格加入默认黑板；这里只建字段，不拥有实际战术分配。
 void AddTacticalKeys(UBlackboardData& Blackboard)
 {
 	AddKey<UBlackboardKeyType_Int>(Blackboard, FPEnemyBlackboard::TacticalRole);
@@ -275,8 +277,10 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	return true;
 }
 
+// 默认资产迁移分两段：先完整确认仍是已知模板，再追加撤退/战术字段；任一用户编辑都会阻止迁移。
 bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTree* Tree, UBlackboardData* Blackboard)
 {
+	// 1. 验证上下文与黑板 schema，并生成只用于比较的默认参考树。
 	const auto Reject = [Tree](const TCHAR* Stage, const FString& Detail = FString())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("FPEnemyBTUpgrade rejected: tree=%s stage=%s %s"), *GetPathNameSafe(Tree), Stage, *Detail);
@@ -325,6 +329,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 		if ((!bCurrent && Entry.EntryName == FPEnemyBlackboard::Retreating) || (!bHasTacticalKeys && bTactical)) continue;
 		if (!SeenKeys.Contains(Entry.EntryName)) return Reject(TEXT("BlackboardMissingDefaultKey"), Entry.EntryName.ToString());
 	}
+	// 2. 校验运行节点、分支和可编辑属性，不在检查途中修改输入资产。
 	TSet<const UBTNode*> Nodes;
 	TMap<const UBTNode*, const FBTCompositeChild*> Branches;
 	TFunction<bool(const UBTNode*, const UBTNode*)> Matches = [&](const UBTNode* Node, const UBTNode* Default)
@@ -363,6 +368,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 	if (!Matches(Tree->RootNode, Expected->RootNode)) return Reject(TEXT("RuntimeDefaultTemplate"));
 #if WITH_EDITOR
 	UBehaviorTreeGraph* Graph = Cast<UBehaviorTreeGraph>(Tree->BTGraph);
+	// 3. 有编辑图时同时验证图与运行树的一一对应，避免只修运行结构而覆盖策划布局。
 	TMap<const UBTNode*, UBehaviorTreeGraphNode*> GraphNodes;
 	UBehaviorTreeGraphNode_Root* GraphRoot = nullptr;
 	if ((Tree->IsAsset() && Graph == nullptr) || (Tree->BTGraph != nullptr && (Graph == nullptr || Graph->GetClass() != UBehaviorTreeGraph::StaticClass())))
@@ -419,6 +425,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 			return Reject(TEXT("HistoricalRootLayout"), TEXT("Wait and Choice must leave space for Sample between them."));
 	}
 #endif
+	// 4. 所有校验通过后才提交已知历史顺序修正及缺少的默认节点。
 	if (bHistoricalRootOrder)
 	{
 		Root->Children.Swap(1, 2);

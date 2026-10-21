@@ -11,6 +11,11 @@
 class UBehaviorTree;
 class UBlackboardData;
 
+/**
+ * 【设计取舍】共用树模板和无状态节点省重复配置；每个敌人的黑板、节点内存和事务仍独立。
+ * 间隔采样与事件唤醒减少轮询，代价是存在决策等待；攻击提交由 Controller/Combat 再实时复核。
+ * 树只选动作，Manager 授群体资格，Combat 结算伤害；黑板不是许可所有者，客户端不运行权威树。
+ */
 // 每个节点只执行一种行为；分支优先级由 Selector 和 Blackboard 条件决定。
 UENUM(BlueprintType)
 enum class EFPEnemyBehaviorAction : uint8
@@ -89,6 +94,7 @@ class FPSTRUE_API UfpstrueBTDecorator_DecisionFlag : public UBTDecorator_Blackbo
 public:
 	// 设置黑板布尔条件及期望值，禁用等待期间基于旧快照的分支中止。
 	void Configure(FName KeyName, bool bExpectedValue);
+	// 默认树迁移前比较条件及可编辑属性；用户改过任一规则即拒绝自动覆盖。
 	bool HasSameCondition(const UfpstrueBTDecorator_DecisionFlag& Other) const;
 };
 

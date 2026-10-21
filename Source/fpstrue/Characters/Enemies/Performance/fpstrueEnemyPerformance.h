@@ -7,8 +7,8 @@
 #include "AnimationSharingTypes.h"
 #include "fpstrueEnemyPerformance.generated.h"
 
-UENUM(BlueprintType)
 // 渲染档位只描述表现成本，不替代敌人的追击、攻击等玩法状态。
+UENUM(BlueprintType)
 enum class EFPEnemyRenderSignificanceTier : uint8
 {
 	Full,
@@ -159,6 +159,7 @@ struct FFPEnemyRenderSignificanceSample
  */
 struct FPSTRUE_API FFPEnemyRenderScoringContext
 {
+	// 由本轮相机及已校验策略预计算公共投影参数，后续每个敌人只提供自己的 Bounds。
 	FFPEnemyRenderScoringContext(const FFPEnemyRenderViewContext& ViewContext, const FFPEnemyRenderSignificancePolicy& Policy);
 
 	// LastPrimaryFrustumTime 是调用者独占的历史值；纯数学计算不访问 World 或可变 UObject。
@@ -193,7 +194,6 @@ private:
  * 不能在比较器中使用 IsNearlyEqual；“近似相等”不具备传递性，会破坏排序算法要求的严格弱序。
  */
 
-//排序键
 struct FFPEnemyRenderPriorityKey
 {
 	float Score = 0.0f;
@@ -302,7 +302,11 @@ class AfpstrueGameMode;
 class AfpstrueEnemyCharacter;
 class UfpstrueEnemyAnimationSharingCoordinator;
 
-/** 敌人显著性调度模块：集中采样所有敌人，通过有界 Top-K 分配 LOD、动画、阴影和骨骼 RT 预算。 */
+/**
+ * 显著性调度：GameMode/GameState 启动 Timer → GT 采样快照 → 插件更新玩法评分 → 本端分配表现预算 → GT 应用。
+ * 服务器玩法只看有效玩家位置及战斗保护；客户端相机只决定自己的 LOD、动画、阴影和 RT。
+ * 候选、预算持有者和策略归本组件，不复制评分/名额，也不授予 AI 目标或攻击资格。
+ */
 UCLASS(ClassGroup = (Performance))
 class FPSTRUE_API UfpstrueEnemySignificanceCoordinator : public UActorComponent
 {
@@ -322,10 +326,15 @@ public:
 	void Stop();
 	// 只读诊断用于自动化验证启动、发现副本和采样端职责，不参与玩法判断。
 	bool IsRunning() const { return bRunning; }
+	// 上轮实际发现的存活敌人数，不代表所有注册 Actor 数。
 	int32 GetTrackedEnemyCount() const { return LastTrackedEnemyCount; }
+	// 上轮构建的服务器玩法视点数；插件有效时才用于评分，不是相机视锥数量。
 	int32 GetGameplayViewpointCount() const { return LastGameplayViewpointCount; }
+	// 每次进入有效更新递增，便于验证 Timer 是否持续运行。
 	uint32 GetUpdateSerial() const { return UpdateSerial; }
+	// 只在采到有效本地相机并执行表现预算更新时递增。
 	uint32 GetRenderUpdateSerial() const { return RenderUpdateSerial; }
+	// 多人模式是否曾处理非空表现候选；只读启动诊断，不代表当前可见性。
 	bool HasRenderedEnemies() const { return bReportedRenderUpdate; }
 
 protected:
@@ -424,9 +433,10 @@ public:
 };
 
 /**
- * Animation Sharing 的唯一运行时所有者。
+ * Animation Sharing 的唯一项目侧登记入口；World Manager 生命周期仍由引擎管理。
  * Render Significance 决定谁可进入共享池以及共享 Leader 是否值得更新，
  * Gameplay Significance 不读取视锥，也不依赖本组件。
+ * 单机/客户端创建兼容池后按资格增删 Follower；联网权威端不使用共享姿态代替判定姿态。
  */
 UCLASS(ClassGroup = (Performance))
 class FPSTRUE_API UfpstrueEnemyAnimationSharingCoordinator final : public UActorComponent
@@ -452,7 +462,7 @@ public:
 	int32 GetRegisteredEnemyCount() const { return RegisteredActorHandles.Num(); }
 
 protected:
-	// World 退出时释放共享 Manager、运行时 Setup 和 Skeleton 引用。
+	// World 退出时注销 Follower 并释放 Manager/Setup/Skeleton 强引用，不手动销毁引擎 World 池。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	// ==================== 共享池配置 ====================

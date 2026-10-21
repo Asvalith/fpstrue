@@ -8,6 +8,8 @@
 
 // 仅保存可调数值，不包含当前弹药、动作阶段、Timer 或播放身份。
 // 每件武器首次装备时复制一次；共享资产不是所有武器共享的运行状态。
+// 【设计取舍】实例快照保证进行中的射速/换弹规则稳定，代价是运行时编辑共享资产不会热改已装备武器。
+// 切换另一套配置应使用相应武器实例，不能把共享 DataAsset 当成可写的弹药或动作状态容器。
 USTRUCT(BlueprintType)
 struct FPSTRUE_API FFPWeaponSettings
 {
@@ -19,7 +21,7 @@ struct FPSTRUE_API FFPWeaponSettings
 	FName GripSocketName = TEXT("GripPoint");
 
 	// Fire
-	// 每分钟射击数；用于自动射击 Timer 和单发提交节流，保证两条路径使用同一射速。
+	// 每分钟射击数；能力生成连射输入与武器消费已准入队列使用同一单发间隔。
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "1.0"))
 	float RoundsPerMinute = 600.0f;
 
@@ -133,6 +135,7 @@ struct FPSTRUE_API FFPWeaponSettings
 	bool Validate(FString& OutError) const;
 };
 
+// 设计者编辑的共享数值资产：首次装备校验并复制到武器实例，不保存弹药、动作或播放身份。
 UCLASS(BlueprintType)
 class FPSTRUE_API UfpstrueWeaponConfig : public UDataAsset
 {

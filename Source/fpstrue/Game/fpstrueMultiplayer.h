@@ -26,6 +26,12 @@ class UfpstrueWeaponComponent;
 class UProgressBar;
 class UTextBlock;
 
+/*
+ * 联机职责入口：GameInstance 管连接旅行；Controller 转发拥有者握手并估计服务器时间；
+ * GameMode 管服务端对象保留、生成与重生；PlayerState/GameState 发布事实；HUD/Widget 只读显示。
+ * 连接与委托均由 Game Thread 驱动；命中、弹药、生命和 AI 决策分别归各业务模块，不在这里重复实现。
+ */
+
 // 原 ingame 布局的只读表现桥；由 HUD 推送当前值，不查询单机 GameMode 或在 UMG 属性绑定里轮询角色。
 UCLASS(Blueprintable)
 class FPSTRUE_API UfpstruePvpIngameWidget : public UUserWidget
@@ -102,7 +108,6 @@ enum class EFPConnectionState : uint8
 {
 	Idle, Connecting, WaitingReady, Connected, RetryWait, Leaving, Failed
 };
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FFPConnectionChanged, EFPConnectionState, State);
 
 // 拥有者时钟只用于给射击意图标注估计时间；时间和命中仍由服务器校验，不构成客户端裁决权限。
 UCLASS()
@@ -117,6 +122,7 @@ public:
 	// 开发版联机验收先完成原玩家战斗，再进入敌人阶段；Shipping 不执行自动场景。
 	UFUNCTION(Server, Reliable) void ServerBeginPveSmoke();
 	UFUNCTION(Client, Reliable) void ClientAllowPveSmokeCounterattack();
+	// 供开发验收输入驱动器读取服务器已允许的反击阶段，不代表正式战斗权限。
 	bool IsPveSmokeCounterattackReady() const { return bSmokePveCounterattackReady; }
 	double GetClockUncertaintySeconds() const;
 	// 网络断开会先进入 PawnLeavingGame，再进入 GameMode Logout；不能在 Logout 才尝试保留已经销毁的 Pawn。
@@ -125,6 +131,7 @@ public:
 	UFUNCTION(Server, Reliable) void ServerLeavePvp();
 	// 仅开发实机验收读取服务器导航路线；客户端仍通过正常 CMC 输入行走，不传送 Pawn。
 	const TArray<FVector>& GetNormalVisualRoute() const { return NormalVisualRoute; }
+	// 路线接收版本用于输入驱动器识别新规划，不参与移动复制。
 	int32 GetNormalVisualRouteRevision() const { return NormalVisualRouteRevision; }
 	// 只返回开发验收路线数据；不移动角色、不生成敌人，也不接纳客户端伤害或目标坐标。
 	UFUNCTION(Server, Reliable) void ServerRequestNormalVisualEnemyRoute();
@@ -200,6 +207,7 @@ public:
 	// 暂时离线保留同一个服务器 PlayerState，不复制客户端成绩来恢复身份。
 	virtual void OnDeactivated() override;
 	void SetRetainedForReconnect(bool bRetained);
+	// 查询服务器复制的离线保留事实；本地不据此延长恢复期限。
 	UFUNCTION(BlueprintPure, Category = "Multiplayer|Connection") bool IsDisconnected() const { return bDisconnected; }
 
 private:
@@ -210,7 +218,8 @@ private:
 	UPROPERTY(Replicated) bool bDisconnected = false;
 };
 
-// 客户端通过GameState和引擎PlayerArray读取比赛状态及所有参与玩家的计分。
+// 【设计取舍】GameMode 在服务器接纳、计分和重生，GameState/PlayerState 发布公共事实，客户端 UI 不读 GameMode。
+// 协调器即使挂在复制 Actor 上，也各端独立计算预算；不因此复制相机评分或本地渲染档位。
 UCLASS()
 class FPSTRUE_API AfpstruePvpGameState : public AGameStateBase
 {
@@ -218,7 +227,9 @@ class FPSTRUE_API AfpstruePvpGameState : public AGameStateBase
 
 public:
 	AfpstruePvpGameState();
+	// 返回本端性能分级协调器；实例存在于两端，评分和预算不经网络复制。
 	UfpstrueEnemySignificanceCoordinator* GetEnemySignificanceCoordinator() const { return EnemySignificanceCoordinator; }
+	// 返回本端动画共享协调器，不拥有 AI 战斗或命中权限。
 	UfpstrueEnemyAnimationSharingCoordinator* GetEnemyAnimationSharingCoordinator() const { return EnemyAnimationSharingCoordinator; }
 	// 注册比赛活动状态和已结算死亡总数的复制。
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
@@ -347,6 +358,7 @@ private:
 	bool bSmokeOfflineSceneFailed = false;
 #endif
 	friend class FFpstrueMultiplayerResumeSessionTest;
+	// 服务器独占的恢复登记：弱引用真实对象，不保存可由客户端提交的生命/弹药快照。
 	struct FRejoinSlot
 	{
 		TWeakObjectPtr<AfpstrueCharacter> Pawn;
@@ -394,7 +406,7 @@ private:
 #endif
 };
 
-// 本地控制台提供局域网入口；连接使用引擎地址直连，不依赖在线会话服务。
+// 跨世界的本地连接状态机；使用引擎地址直连，不代替在线账号认证或服务器玩法权威。
 UCLASS(Config = Game)
 class FPSTRUE_API UfpstrueMultiplayerGameInstance : public UGameInstance
 {
@@ -403,8 +415,7 @@ class FPSTRUE_API UfpstrueMultiplayerGameInstance : public UGameInstance
 public:
 	virtual void Init() override;
 	virtual void Shutdown() override;
-	// Only an explicitly requested loopback performance baseline bypasses the
-	// Shipping startup URL filter; normal startup/travel remains engine-owned.
+	// 仅显式回环基线接管 Shipping 启动 URL，普通启动与旅行仍由引擎负责。
 	virtual void StartGameInstance() override;
 	// 使用配置的PvP地图或当前GameDefaultMap开启监听服务器。
 	UFUNCTION(Exec)
@@ -415,9 +426,10 @@ public:
 	UFUNCTION(Exec) void CancelPvpConnection();
 	UFUNCTION(Exec) void LeavePvp();
 	UFUNCTION(Exec) void RetryPvpConnection();
+	// UI 读取本地连接阶段；服务端接纳后仍可能等待必要复制数据到达。
 	UFUNCTION(BlueprintPure, Category = "Multiplayer|Connection") EFPConnectionState GetConnectionState() const { return ConnectionState; }
+	// UI 读取最近一次连接/旅行错误，不含恢复票据。
 	UFUNCTION(BlueprintPure, Category = "Multiplayer|Connection") FString GetConnectionError() const { return LastConnectionError; }
-	UPROPERTY(BlueprintAssignable, Category = "Multiplayer|Connection") FFPConnectionChanged OnConnectionStateChanged;
 	void BeginConnectionHandshake(AfpstruePvpPlayerController* Player);
 	void AcceptConnectionToken(AfpstruePvpPlayerController* Player, const FString& Token, int32 ResumeId, bool bRestored);
 	void RejectConnection(const FString& Reason);

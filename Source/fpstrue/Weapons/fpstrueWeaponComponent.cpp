@@ -39,13 +39,14 @@
  * 玩家武器的单发结算与换弹事务实现。
  * GAS 独占动作互斥和本地连射输入；组件拥有已准入网络执行队列、装备、弹药、射速约束与后坐力恢复。
  * 角色向 ASC 提交输入；单机动画通过 Notify 提交换弹，联网由服务器时长完成。
- * 蓝图负责枪口、音效和换弹素材选择；C++ 拥有命中/弹药结算以及明确的播放身份和结束边界。
+ * 原生/蓝图表现桥选择素材并消费事实；C++ 拥有命中/弹药结算以及明确的播放身份和结束边界。
  *
  * 主要调用链：
- *   输入 -> Character::StartWeaponFire -> ASC / Fire GA -> Fire -> Hitscan -> ApplyPointDamage
+ *   输入 -> Character -> ASC / Fire GA -> 单机 Fire / 联网 TargetData -> 准入队列 -> 执行复核 -> Fire -> Hitscan
+ *   权威结算 -> 弹药/动作快照 + 逐发 ACK + 单发表现多播；拥有者只预测表现和未确认弹药缺口。
  *   输入 -> Character::RequestWeaponReload -> ASC / Reload GA -> BeginAbilityReload -> PlaybackRequested(ReloadId)
- *   已绑定实例的 ReloadCommit Notify -> 提交弹药；全部播放正常结束 -> Completed；主动中断 -> Cancelled。
- *   播放链缺失 -> TimedOut，仅解除动作锁，不伪装成正常装填；播放失败 -> PlaybackFailed。
+ *   单机：已绑定 ReloadCommit Notify -> 提交弹药；全部播放正常结束 -> Completed；主动中断 -> Cancelled。
+ *   单机播放链缺失 -> TimedOut，仅解除动作锁；播放失败 -> PlaybackFailed。联网由服务器 Timer 完成事务。
  *
  * CurrentAmmo、ReserveAmmo 和后坐力累计量都只由本组件写入；Character/HUD 通过只读接口和
  * Delegate 观察结果，从结构上避免蓝图、角色和武器各保存一份可变状态。
@@ -56,8 +57,16 @@ namespace
 constexpr float RecoilRecoveryTickInterval = 1.0f / 60.0f;
 constexpr float GaussianSpreadSigmaCount = 3.0f;
 constexpr float MaxTotalSpreadAngle = 45.0f;
+constexpr double MaxShotFutureSeconds = 0.025;
+constexpr double MaxNetworkShotAgeSeconds = 0.30;
 // 本版远端呈现采用有限的固定回退，不声称复原 UE 平滑器每一帧的实际显示时间。
 constexpr double TargetInterpolationSeconds = 0.05;
+
+// 准入按延迟收紧时间窗；排队执行仍不得超过历史判定的最长窗口。
+bool IsShotTimeWithinWindow(double FireTime, double Now, double MaxAge)
+{
+	return FMath::IsFinite(FireTime) && FireTime <= Now + MaxShotFutureSeconds && FireTime >= Now - MaxAge;
+}
 
 // 素材替换只复用已验证的声音/特效反馈，不复制另一套射击、弹药或命中逻辑。
 void ConfigureNativeWeaponFeedback(UfpstrueWeaponComponent& Weapon, uint32 AssetLoadFlags)
@@ -90,12 +99,14 @@ uint64 GetWeaponShotNetGuid(const AActor* Actor)
 		: Driver->GuidCache->GetNetGUID(Actor)).ObjectId;
 }
 
+// 诊断日志取得跨进程可核对的 PlayerId；无 PlayerState 时明确返回无效编号。
 int32 GetShotPlayerId(const AfpstrueCharacter* Character)
 {
 	const APlayerState* PlayerState = IsValid(Character) ? Character->GetPlayerState() : nullptr;
 	return PlayerState != nullptr ? PlayerState->GetPlayerId() : INDEX_NONE;
 }
 
+// 只在显式烟测记录拒绝阶段、时间窗与连接统计，不放宽准入或执行的规则。
 void LogShotTimeRejection(const FFPShotRequest& Request, const AfpstrueCharacter* Character, const AActor* Weapon,
 	const TCHAR* Stage, double Now, double AllowedAge, const TCHAR* SpecificReason = nullptr)
 {
@@ -103,7 +114,7 @@ void LogShotTimeRejection(const FFPShotRequest& Request, const AfpstrueCharacter
 	const APlayerState* Player = Character ? Character->GetPlayerState() : nullptr;
 	const UNetConnection* Connection = Character ? Character->GetNetConnection() : nullptr;
 	const TCHAR* Reason = SpecificReason ? SpecificReason : !FMath::IsFinite(Request.ServerFireTime) ? TEXT("NonFinite")
-		: Request.ServerFireTime > Now + 0.025 ? TEXT("Future") : TEXT("Stale");
+		: Request.ServerFireTime > Now + MaxShotFutureSeconds ? TEXT("Future") : TEXT("Stale");
 	UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_TIME_REJECT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu Stage=%s Reason=%s AgeMs=%.3f AllowedAgeMs=%.3f PingMs=%.3f InLostTotal=%d OutLostTotal=%d"),
 		Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(Weapon), Stage, Reason,
 		(Now - Request.ServerFireTime) * 1000.0, AllowedAge * 1000.0, Player ? Player->GetPingInMilliseconds() : 0.0,
@@ -280,7 +291,6 @@ void UfpstrueWeaponComponent::RefreshNetworkEquipment()
 	{
 		LastPresentedReloadId = ActiveReloadId;
 		OnWeaponReloadPlaybackRequested.Broadcast(ActiveReloadId, NetworkState.bEmptyReload);
-		OnWeaponReloadStarted.Broadcast(NetworkState.bEmptyReload);
 	}
 }
 
@@ -343,7 +353,6 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 	{
 		LastPresentedReloadId = ActiveReloadId;
 		OnWeaponReloadPlaybackRequested.Broadcast(ActiveReloadId, NetworkState.bEmptyReload);
-		OnWeaponReloadStarted.Broadcast(NetworkState.bEmptyReload);
 	}
 	if (NetworkState.Action == EFPWeaponActionState::Disabled)
 	{
@@ -361,12 +370,15 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 }
 
 // 服务器只广播已完成的射线；客户端处理音效、弹道和本地后坐力，不从结果中再次扣血。
-void UfpstrueWeaponComponent::MulticastShot_Implementation(FVector_NetQuantize TraceStart, FVector_NetQuantize TraceEnd,
-	const FHitResult& Hit, int32 PresentationKey, int32 ShotIndex, uint32 EquipmentGeneration, uint32 Session)
+void UfpstrueWeaponComponent::MulticastShot_Implementation(const FHitResult& Hit, int32 ShotIndex,
+	uint32 EquipmentGeneration, uint32 Session)
 {
 	if (GetOwner() == nullptr || GetOwner()->HasAuthority()) return;
+	// 【设计取舍】命中特效未做本地预测，必须先接收权威落点；后面的去重只抑制已预测的枪声/后坐力。
+	// 不能把整段广播放到预测去重之后，否则拥有者会漏掉合法命中特效。
 	const bool bHit = Hit.bBlockingHit;
-	OnWeaponTraceFinished.Broadcast(bHit, TraceStart, TraceEnd, bHit ? FVector(Hit.ImpactPoint) : FVector(TraceEnd), Hit);
+	OnWeaponTraceFinished.Broadcast(bHit, Hit.TraceStart, Hit.TraceEnd,
+		bHit ? FVector(Hit.ImpactPoint) : FVector(Hit.TraceEnd), Hit);
 	AfpstrueCharacter* Holder = Character.Get();
 	// 松开之后仍保留有界的已播放记录，迟到的服务器表现不能让同一发再响一次、再抖一次。
 	if (Holder != nullptr && Holder->IsLocallyControlled() && Session != 0)
@@ -395,9 +407,13 @@ void UfpstrueWeaponComponent::MulticastShot_Implementation(FVector_NetQuantize T
 // 只检查执行资源和装备资格，不使用可能迟到的动作快照决定能力互斥。
 bool UfpstrueWeaponComponent::CanExecuteShot() const
 {
-	// 本接口只校验执行资源；Fire/Aim/Reload 的冲突由各 GA 标签决定。
 	return CanAcceptOwnerInput() && GetWorld() != nullptr && Character->GetController() != nullptr
 		&& Character->GetFirstPersonCameraComponent() != nullptr;
+}
+
+bool UfpstrueWeaponComponent::MatchesShotEquipment(const FFPShotRequest& Request) const
+{
+	return Request.Avatar == Character.Get() && Request.EquipmentGeneration == EquipmentRevision;
 }
 
 // 同一 GA 在拥有者先播放表现，在服务器执行原有结算；两端绝不各自生成一份权威伤害。
@@ -480,7 +496,9 @@ bool UfpstrueWeaponComponent::BuildShotRequest(FFPShotRequest& OutRequest)
 	return true;
 }
 
-// ★【网络裁决】身份、时间、客户端节奏和服务器实际射速分别校验；任何拒绝都不能扣弹或造成伤害。
+// 准入：验证新输入并入队；只有 ExecuteNetworkShot 能把它交给 Fire 提交。
+// 【设计取舍】准入与执行是两个时点，不是重复结算：有界队列吸收射速节拍与到包时机的差异，
+// 等待期间仍可能死亡、换枪或换弹，所以执行前必须复核；只有 Fire 扣弹和施加伤害。
 EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& Request)
 {
 	auto Reject = [this, &Request](EFPShotResult Result)
@@ -501,8 +519,7 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	const UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr;
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || !CanExecuteShot()
 		|| ASC == nullptr || !ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing)) return Reject(EFPShotResult::InvalidContext);
-	if (Request.Avatar != Character.Get() || Request.EquipmentGeneration != EquipmentRevision
-		|| Request.EquipmentGeneration == 0 || Request.FireSession == 0 || Request.ShotId == 0
+	if (!MatchesShotEquipment(Request) || Request.EquipmentGeneration == 0 || Request.FireSession == 0 || Request.ShotId == 0
 		|| Request.ShotId > MAX_int32) return Reject(EFPShotResult::InvalidIdentity);
 	if (Request.ShotId <= LastReceivedShotId)
 	{
@@ -518,9 +535,8 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	const double Now = GetWorld()->GetTimeSeconds();
 	const APlayerState* PlayerState = Character->GetPlayerState();
 	const double OneWayDelay = PlayerState != nullptr ? PlayerState->GetPingInMilliseconds() * 0.0005 : 0.0;
-	const double MaxRequestAge = FMath::Clamp(OneWayDelay * 1.5 + 0.05, 0.10, 0.30);
-	if (!FMath::IsFinite(Request.ServerFireTime) || Request.ServerFireTime > Now + 0.025
-		|| Request.ServerFireTime < Now - MaxRequestAge)
+	const double MaxRequestAge = FMath::Clamp(OneWayDelay * 1.5 + 0.05, 0.10, MaxNetworkShotAgeSeconds);
+	if (!IsShotTimeWithinWindow(Request.ServerFireTime, Now, MaxRequestAge))
 	{
 #if !UE_BUILD_SHIPPING
 		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Admission"), Now, MaxRequestAge);
@@ -540,7 +556,7 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	if (Delay > FMath::Min(Interval + 0.002, 0.15)) return Reject(EFPShotResult::RateLimited);
 	const bool bMustWait = HasPendingNetworkShots() || Delay > KINDA_SMALL_NUMBER;
 	// 只记录服务器当前已授权的瞄准条件，不能让排队期间切换 ADS 改写本发散布。
-	PendingNetworkShots.Add({Request, Character->IsAiming(), FirePresentationKey, FPlatformTime::Seconds()});
+	PendingNetworkShots.Add({Request, Character->IsAiming(), FPlatformTime::Seconds()});
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_ADMISSION ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu ServerTime=%.6f AgeMs=%.3f AllowedAgeMs=%.3f PendingBefore=%d PendingAfter=%d QueueDelayMs=%.3f FrameDeltaMs=%.3f"),
@@ -549,8 +565,7 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 #endif
 	if (bMustWait)
 	{
-		// 尾部入队没有改变当前队头，不清掉其原截止时间，避免每次网络到达又引入一次 Timer 帧量化。
-		// 首个队头或丢失调度才重新安排；回调内必要的提前唤醒重排仍由公共 Schedule 正常处理。
+		// 尾部入队不重排现有队头 Timer，避免网络到达反复推迟其截止时间。
 		if (PendingNetworkShots.Num() == 1 || !GetWorld()->GetTimerManager().TimerExists(NetworkShotTimerHandle))
 			SchedulePendingNetworkShot();
 		return EFPShotResult::Queued;
@@ -558,7 +573,7 @@ EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& R
 	return ExecuteNetworkShot(Request) ? EFPShotResult::Accepted : LastShotResult;
 }
 
-// 冷却到期再检查原入队身份与生命周期；服务器绝对节拍消费，不按客户端旧时间补射多发。
+// 执行：队头出队后重新验证，不能假定准入后装备、生命、弹药和冷却仍然有效。
 bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested)
 {
 	// 只有队头可以执行；先取出自己的快照，再允许伤害/表现回调强取消余下队列。
@@ -571,7 +586,6 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 	}
 	const FFPShotRequest Request = PendingNetworkShots[0].Request;
 	const bool bAimingAtAdmission = PendingNetworkShots[0].bAimingAtAdmission;
-	const int32 AdmittedPresentationKey = PendingNetworkShots[0].PresentationKey;
 #if !UE_BUILD_SHIPPING
 	const double AdmissionMonotonicSeconds = PendingNetworkShots[0].AdmissionMonotonicSeconds;
 	const int32 PendingBeforeExecution = PendingNetworkShots.Num();
@@ -594,16 +608,15 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 		|| ASC == nullptr || ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Dead)
 		|| ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading)) Result = EFPShotResult::InvalidContext;
 	// 入队时已经持有有效的 GAS 授权；正常松开或下一次按下不能篡改旧会话的执行身份。
-	else if (Request.Avatar != Character.Get() || Request.EquipmentGeneration != EquipmentRevision)
+	else if (!MatchesShotEquipment(Request))
 		Result = EFPShotResult::InvalidIdentity;
 	else if (Request.ShotId <= LastExecutedShotId || Request.ShotId > LastReceivedShotId) Result = EFPShotResult::Duplicate;
 	else if (!HasAmmo()) Result = EFPShotResult::NoAmmo;
-	else if (!FMath::IsFinite(Request.ServerFireTime) || Request.ServerFireTime > GetWorld()->GetTimeSeconds() + 0.025
-		|| Request.ServerFireTime < GetWorld()->GetTimeSeconds() - 0.30)
+	else if (!IsShotTimeWithinWindow(Request.ServerFireTime, GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds))
 	{
 		Result = EFPShotResult::InvalidTime;
 #if !UE_BUILD_SHIPPING
-		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), 0.30);
+		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds);
 #endif
 	}
 	else if (GetNextShotDelay(true) > KINDA_SMALL_NUMBER) Result = EFPShotResult::RateLimited;
@@ -614,7 +627,7 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 		{
 			Result = EFPShotResult::InvalidTime;
 #if !UE_BUILD_SHIPPING
-			LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), 0.30, TEXT("MissingHistory"));
+			LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds, TEXT("MissingHistory"));
 #endif
 		}
 		else
@@ -623,7 +636,7 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 #if !UE_BUILD_SHIPPING
 			const int32 AmmoBefore = CurrentAmmo;
 #endif
-			if (!Fire(&Request, bAimingAtAdmission, AdmittedPresentationKey)) Result = EFPShotResult::InvalidContext;
+			if (!Fire(&Request, bAimingAtAdmission)) Result = EFPShotResult::InvalidContext;
 #if !UE_BUILD_SHIPPING
 			if (Result == EFPShotResult::Accepted && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
 				UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_COMMIT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu AmmoBefore=%d AmmoAfter=%d"),
@@ -697,7 +710,7 @@ void UfpstrueWeaponComponent::AcknowledgeShot(const FFPShotRequest& Request, EFP
 {
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
 	// 只有本代际实际消费过的新编号才推进快照；重复 ACK 或别人的旧代际不能覆盖已接受的裁决。
-	if (Result != EFPShotResult::Duplicate && Request.Avatar == Character.Get() && Request.EquipmentGeneration == EquipmentRevision
+	if (Result != EFPShotResult::Duplicate && MatchesShotEquipment(Request)
 		&& Request.ShotId > LastProcessedShotId && Request.ShotId <= LastReceivedShotId)
 	{
 		LastProcessedShotId = Request.ShotId;
@@ -723,6 +736,8 @@ void UfpstrueWeaponComponent::AcknowledgeShot(const FFPShotRequest& Request, EFP
 void UfpstrueWeaponComponent::ClientShotResult_Implementation(uint32 EquipmentGeneration, uint32 Session, uint32 ShotId,
 	EFPShotResult Result, int32 Ammo, int32 Reserve, uint32 StateRevision)
 {
+	// 【设计取舍】可靠 ACK 终结每发输入账本，属性复制恢复最新持久状态，二者不能互相替代。
+	// Revision 只防迟到 ACK 回写旧弹药；被拒绝的预测不回放反向枪声，也不冒充完整状态回滚。
 	if (GetOwner() == nullptr || GetOwner()->HasAuthority() || EquipmentGeneration != EquipmentRevision) return;
 	if (Result != EFPShotResult::Queued && Result != EFPShotResult::Duplicate) OutstandingShots.Remove(ShotId);
 	if (StateRevision >= LastAmmoStateRevision)
@@ -756,9 +771,6 @@ bool UfpstrueWeaponComponent::HasReloadAmmo() const
 }
 
 // ==================== 武器拾取入口 ====================
-// Copyright Epic Games, Inc. All Rights Reserved.
-
-
 /*
  * 一次性武器拾取入口。
  * Sphere 只负责发现候选玩家，真正的装备规则由 WeaponComponent::AttachWeapon 决定；成功后立即关闭重叠、
@@ -934,16 +946,14 @@ void UfpstruePickUpComponent::OnHiddenInGameChanged()
 	Super::OnHiddenInGameChanged();
 }
 
-//在游戏开始时绑定 OnSphereBeginOverlap 事件
+// 组件启动时只绑定一次权威拾取入口，装备资格仍由重叠回调和武器事务检查。
 void UfpstruePickUpComponent::BeginPlay()
 {
-	//先调用父类的 BeginPlay() 方法，确保组件的基本初始化逻辑被执行
 	Super::BeginPlay();
-	//OnComponentBeginOverlap添加动态广播OnSphereBeginOverlap方法，确保当发生重叠时会通过this回调OnSphereBeginOverlap函数
 	OnComponentBeginOverlap.AddUniqueDynamic(this, &UfpstruePickUpComponent::OnSphereBeginOverlap);
 }
 
-//Sphere 真正发生重叠以后调用
+// 服务器发现玩家候选后申请完整装备，成功才消费并广播；先占用以阻止装备通知重入拾取。
 void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
@@ -951,11 +961,9 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 	{
 		return;
 	}
-	//找到碰到的角色（之后判断是不是玩家）
 	AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(OtherActor);
 	//拾取组件的 Owner 是武器 Actor，不是刚进入范围的玩家。
 	AActor* OwnerActor = GetOwner();
-	//从武器 Actor 取得装备组件；随后一起校验玩家与武器是否存在。
 	UfpstrueWeaponComponent* WeaponComponent = OwnerActor != nullptr ? OwnerActor->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 
 	if (Character == nullptr || WeaponComponent == nullptr)
@@ -971,18 +979,14 @@ void UfpstruePickUpComponent::OnSphereBeginOverlap(UPrimitiveComponent* Overlapp
 		bConsumed = false;
 		return;
 	}
-	//停止拾取组件的碰撞检测，防止重复触发
+	// 成功后先关闭入口再广播；监听者即使同步销毁拾取物，也不会再次装备。
 	SetGenerateOverlapEvents(false);
-	//禁用碰撞，防止拾取组件与其他物体发生碰撞
 	SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	//绑定到当前对象this的监听函数全部解除
 	OnComponentBeginOverlap.RemoveAll(this);
-	//广播拾取事件，通知其他系统或蓝图，角色已拾取该物品
 	OnPickUp.Broadcast(Character);
 
 	if (IsValid(this))
 	{
-		//注销组件，从Actor数组中移除，标记为待销毁。UObject内存回收由UE的对象生命周期/GC机制处理。
 		DestroyComponent();
 	}
 }
@@ -1199,13 +1203,9 @@ void UfpstrueWeaponComponent::ApplyDeathDropPhysics(const FTransform* InitialTra
 
 // ==================== Equipment Eligibility / Read-only Action View ====================
 
-// 清理统一进入 DisableWeapon 或 InterruptOwnerInput；动作阶段与持续任务由 GAS 管理。
-// ★【重要边界】[异步身份] GA 激活版本、装备版本和 ReloadId 分别核对各自归属；清 Timer 不能替代身份校验。
-
 // 判断武器是否仍与存活角色正确装备且未禁用；生命周期失效与临时输入中断分开处理。
 bool UfpstrueWeaponComponent::IsOperational() const
 {
-	// 汇总装备关系与角色生命周期；已经卸下的组件不能再接受射击或装填。
 	const AfpstrueCharacter* OwningCharacter = Character.Get();
 	return !bEndingPlay && IsValid(OwningCharacter) && OwningCharacter->CanMaintainEquipment()
 		&& bEquipmentEnabled
@@ -1238,7 +1238,6 @@ bool UfpstrueWeaponComponent::CanAcceptOwnerInput() const
 // 将同步开火命令交给 ASC，由 Fire GA 检查资格并持有动作生命周期。
 void UfpstrueWeaponComponent::StartFire()
 {
-	// 公开兼容入口只向 ASC 请求，不直接写状态或执行一发。
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
 	if (UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr)
 		ASC->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Fire));
@@ -1247,25 +1246,17 @@ void UfpstrueWeaponComponent::StartFire()
 // 只结束正在进行的连射；松开扳机不能解除换弹或重新启用已禁用武器。
 void UfpstrueWeaponComponent::StopFire()
 {
-	// 只退出 Firing；松开扳机不能解除 Reloading/Disabled。
-
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
 	if (UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr)
 		ASC->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Fire));
 }
 
 // 一次射击的提交入口：校验射速与装备，先扣弹并命中结算，再报告这一发的事实。
-bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAtAdmission, int32 AdmittedPresentationKey)
+bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAtAdmission)
 {
-	// 每发射击的提交顺序固定为“校验 -> 扣弹 -> 表现/伤害”，保证一次请求最多结算一次弹药。
-	// 本地输入由 Fire GA 调度；网络执行器仅消费已准入事实，回调不能让旧装备继续排队。
-	// 最后一发仍须完成命中与表现，再由 GA 或网络执行器请求同一个服务器换弹能力。
-
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || !CanExecuteShot() || !HasAmmo()
 		|| GetNextShotDelay(Request != nullptr) > KINDA_SMALL_NUMBER) return false;
 	UWorld* const World = GetWorld();
-	// 射击入口先校验持有者，再读取相机与控制器。
-	// 语法复习：弱指针解析为局部裸指针后，只在当前 Game Thread 调用栈内临时使用，不保存到下一帧。
 	AfpstrueCharacter* OwningCharacter = Character.Get();
 	UCameraComponent* Camera = OwningCharacter->GetFirstPersonCameraComponent();
 	const double CurrentTimeSeconds = World->GetTimeSeconds();
@@ -1278,26 +1269,22 @@ bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAt
 		? CurrentTimeSeconds + Interval : NextShotTimeSeconds + Interval;
 	LastShotTimeSeconds = CurrentTimeSeconds;
 	const uint32 ShotEquipment = EquipmentRevision;
-	// ★【重要边界】[状态提交] 扣弹和本发命中先成为事实，再通知表现；回调可以中断后续连射，不能撤销这一发。
-	// 先完成扣弹与命中结算，再通知 HUD/开火表现；监听者重入不能取消一发已扣弹的命中。
+	// 先提交扣弹和命中，再通知表现；监听者可以中断后续连射，不能撤销已提交的这一发。
 	--CurrentAmmo;
-	// ★【听觉权威边界】真实扣弹提交后才产生枪声事件；预测、拒绝、视觉重播均不能刺激 AI。
-	// 取当前服务端枪声位置，不拿历史命中回溯位置或隐藏玩家的未来位置作为调查目标。
+	// 听觉使用当前权威枪口位置，不使用历史回溯位置；预测或视觉重播不产生听觉事件。
 	AfpstrueEnemyAIController::ReportAuthoritativeGunshot(OwningCharacter, Camera->GetComponentLocation());
 	// ★【表现身份】外部伤害/弹道回调可重启开火；本发广播始终携带提交时的编号，不借用新激活的计数。
-	const int32 ShotKey = Request != nullptr ? AdmittedPresentationKey : FirePresentationKey;
 	const int32 ShotIndex = Request != nullptr ? static_cast<int32>(Request->ShotId) : FirePresentationShot + 1;
 	// 旧会话排空时仍广播它自己的身份，不能把旧 ShotId 和新会话的快照进度混配。
 	if (Request == nullptr || (Request->FireSession == FireSession && Request->EquipmentGeneration == EquipmentRevision))
 		FirePresentationShot = ShotIndex;
-	FireLineTrace(*World, *OwningCharacter, *Camera, ShotKey, ShotIndex, Request,
+	FireLineTrace(*World, *OwningCharacter, *Camera, ShotIndex, Request,
 		Request != nullptr ? bAimingAtAdmission : OwningCharacter->IsAiming());
 	if (EquipmentRevision == ShotEquipment && IsOperational())
 		ApplyRecoil(Cast<APlayerController>(OwningCharacter->GetController()));
 	BroadcastAmmoChanged();
 	// 这是已发生的一发，而不是继续开火的许可；命中/弹药回调中断动作也不能吞掉事实事件。
 	OnWeaponFirePerformed.Broadcast();
-	// 这里只返回已完成事实；新的输入仍须通过 GAS，已准入队列只按服务器节拍排空。
 	return true;
 }
 
@@ -1321,7 +1308,7 @@ float UfpstrueWeaponComponent::GetNextShotDelay(bool bAdmittedNetworkSchedule) c
 
 // 按本发授权的瞄准条件和连射散布执行一条 Hitscan，结算部位伤害及物理冲量，再报告弹道结果。
 void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& OwningCharacter, UCameraComponent& Camera,
-	int32 PresentationKey, int32 ShotIndex, const FFPShotRequest* Request, bool bAimingForShot)
+	int32 ShotIndex, const FFPShotRequest* Request, bool bAimingForShot)
 {
 	// 根据瞄准状态和连续射击次数计算散布，并在同一入口完成单射线查询。
 	// Fire 已校验本发的角色/相机；在外部伤害或表现回调之前直接使用这些依赖，不重复解析装备关系。
@@ -1353,6 +1340,10 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 		? AfpstrueCharacter::TraceHistoricalHit(&World, &OwningCharacter,
 			Request->ServerFireTime - (GetNetMode() != NM_Standalone ? TargetInterpolationSeconds : 0.0), Start, End, HitResult)
 		: World.LineTraceSingleByChannel(HitResult, Start, End, FpstrueCollisionChannels::WeaponTrace, QueryParams);
+	// 【设计取舍】复用 FHitResult 原生量化与序列化，不重复发送其已有端点，也不另造命中表现协议。
+	// 命中、未命中和历史形状共用同一份端点；在伤害回调前固定，避免回调移动射手后串入新位置。
+	HitResult.TraceStart = Start;
+	HitResult.TraceEnd = End;
 	// 纯数学历史查询已经结束，世界未被移动；先固定表现身份，随后才允许伤害/蓝图同步重入。
 	const uint32 ShotGeneration = Request != nullptr ? Request->EquipmentGeneration : EquipmentRevision;
 	const uint32 ShotSession = Request != nullptr ? Request->FireSession : FireSession;
@@ -1395,7 +1386,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 	}
 	const FVector TraceTarget = bHit ? HitResult.ImpactPoint : End;
 	OnWeaponTraceFinished.Broadcast(bHit, Start, End, TraceTarget, HitResult);
-	if (GetNetMode() != NM_Standalone) MulticastShot(Start, End, HitResult, PresentationKey, ShotIndex, ShotGeneration, ShotSession);
+	if (GetNetMode() != NM_Standalone) MulticastShot(HitResult, ShotIndex, ShotGeneration, ShotSession);
 #if !UE_BUILD_SHIPPING
 	if (bHit && HitActor != nullptr && HitActor->IsA<AfpstrueCharacter>() && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=Hit Shooter=%s Target=%s"), *OwningCharacter.GetName(), *HitActor->GetName());
@@ -1407,7 +1398,7 @@ void UfpstrueWeaponComponent::FireLineTrace(UWorld& World, AfpstrueCharacter& Ow
 /*
  * Reload GA 持有 Reloading 标签；执行器创建带 ID 的事务和播放请求。
  * 单机绑定 Notify 在装填帧转移弹药；联网由服务器时长提交，客户端 Notify 不授权装弹。
- * 原生实例结束委托负责收口：全部正常完成才 Completed，一项被打断即 Cancelled。
+ * 单机由原生实例结束委托收口：全部正常完成才 Completed，一项被打断即 Cancelled；联网播放不改服务器事务。
  * 显式正常完成可补交缺失的 Commit；取消、失败和超时不补交也不回滚已提交的弹药。
  * 播放链未结束时，唯一兜底 Timer 以 TimedOut 解除锁；无动画玩法可保存 ID 调用 ForTransaction 接口。
  *
@@ -1476,18 +1467,10 @@ bool UfpstrueWeaponComponent::BeginAbilityReload(int32& OutReloadId)
 		// 蓝图明确提交 ReloadId/Mesh/Montage，禁止通过广播前后列表差分猜测动画归属。
 		// 原生权威身体也消费同一事实以刷新命中骨骼；专服的枪械/第一人称表现各自在监听入口跳过。
 		OnWeaponReloadPlaybackRequested.Broadcast(RequestedReloadId, bWasEmptyReload);
-		if (IsCurrentReload(RequestedReloadId)) OnWeaponReloadStarted.Broadcast(bWasEmptyReload);
 	}
 
 	// true 表示请求曾被接纳；监听者可能已同步结束换弹，广播之后不再写回状态或重设计时器。
 	return true;
-}
-
-// 诊断旧的无身份装弹调用；保留反射兼容入口，但拒绝替旧通知借用当前换弹编号。
-bool UfpstrueWeaponComponent::CommitReload()
-{
-	UE_LOG(LogTemp, Warning, TEXT("Legacy identityless CommitReload rejected on %s. Use a saved ReloadId or native ReloadCommit notify."), *GetPathName());
-	return false;
 }
 
 // 核对活跃换弹事务编号；装备资格在具体播放或提交入口另行检查。
@@ -1546,6 +1529,8 @@ bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshCom
 }
 
 // 登记明确的活动播放实例并接管结束委托；同 Mesh 已有不同播放时拒绝覆盖。
+// 【设计取舍】ReloadId 区分装填事务，Montage 实例 ID 区分同一素材的重播；只比较资源指针不够。
+// 明确绑定比扫描“当前动画”多保存一份身份，但旧 Notify/结束回调因此不能误提交新一轮装填。
 bool UfpstrueWeaponComponent::BindReloadMontage(int32 ReloadId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* Montage)
 {
 	if (!IsCurrentReload(ReloadId) || !IsOperational() || !IsValid(PlaybackMesh)
@@ -1588,7 +1573,6 @@ void UfpstrueAnimNotify_ReloadCommit::Notify(USkeletalMeshComponent* MeshComp, U
 		return;
 	}
 
-	// 语法复习：UE Cast 只做 UObject 继承关系检查；两个无继承关系的组件之间 Cast 永远失败。
 	// MeshComp 是播放动画的骨骼组件，应从它的 Owner 取得装备关系。
 	UfpstrueWeaponComponent* WeaponComponent = Cast<UfpstrueWeaponComponent>(MeshComp);
 	if (const AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(MeshComp->GetOwner()))
@@ -1615,7 +1599,6 @@ void UfpstrueAnimNotify_ReloadCommit::BranchingPointNotify(FBranchingPointNotify
 // 返回动画编辑器显示名称，不读取或修改换弹事务。
 FString UfpstrueAnimNotify_ReloadCommit::GetNotifyName_Implementation() const
 {
-	// 为动画编辑器提供可读名称，不参与运行时换弹状态判断。
 	return TEXT("Reload Commit");
 }
 
@@ -1635,8 +1618,7 @@ bool UfpstrueWeaponComponent::CommitReloadFromNotify(USkeletalMeshComponent* Pla
 bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 {
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return false;
-	// ★【重要边界】[结算去重] 当前事务、装备资格和单次提交标记共同保护装弹；重复通知不能再次搬运备弹。
-	// bReloadAmmoCommitted 是单次提交保护：同一轮换弹的重复 Notify 只会第一次搬运弹药。
+	// 当前事务、装备资格和单次提交标记共同保护装弹；重复通知不能再次搬运备弹。
 	if (!IsCurrentReload(ReloadId) || bReloadAmmoCommitted || !IsOperational())
 	{
 		return false;
@@ -1646,7 +1628,7 @@ bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 	const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
 	CurrentAmmo += AmmoToLoad;
 	ReserveAmmo -= AmmoToLoad;
-	// 先标记已提交再通知 HUD，防止监听者重入 CommitReload 导致重复装弹。
+	// 先标记已提交再通知 HUD，防止监听者重入同一事务导致重复装弹。
 	bReloadAmmoCommitted = true;
 #if !UE_BUILD_SHIPPING
 	if (GetNetMode() != NM_Standalone && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
@@ -1656,12 +1638,6 @@ bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 #endif
 	BroadcastAmmoChanged();
 	return true;
-}
-
-// 诊断旧的无身份完成调用；正常结束必须来源于已绑定实例或保存的事务编号。
-void UfpstrueWeaponComponent::FinishReload()
-{
-	UE_LOG(LogTemp, Warning, TEXT("Legacy identityless FinishReload rejected on %s. Use PlayReloadMontage or a saved ReloadId."), *GetPathName());
 }
 
 // 同步取消当前换弹；延迟回调应使用保存编号的 CancelReloadForTransaction。
@@ -1736,7 +1712,7 @@ void UfpstrueWeaponComponent::ApplyRecoil(APlayerController* PlayerController)
 
 	// 控制后坐力与散布保持原样；本层只影响最终 POV，绕过 CameraBoom 对短脉冲的平滑。
 	// 不使用 Initializer：UE 对带 Initializer 的单实例 shake 会重建，无法保留连发回弹。
-	if (PlayerController->IsLocalController() && PlayerController->PlayerCameraManager != nullptr
+	if (PlayerController->PlayerCameraManager != nullptr
 		&& PlayerController->GetViewTarget() == OwningCharacter && Settings.VisualRecoilScale > 0.0f)
 	{
 		const float VisualScale = Settings.VisualRecoilScale
@@ -1813,8 +1789,6 @@ void UfpstrueWeaponComponent::StopVisualRecoil()
 	}
 	VisualRecoilShake.Reset();
 }
-
-// Copyright Epic Games, Inc. All Rights Reserved.
 
 // 配置单实例视觉震动和自定义 Pattern，让连发重触发而不是无限叠加震动层。
 UfpstrueWeaponCameraShake::UfpstrueWeaponCameraShake(const FObjectInitializer& ObjectInitializer)

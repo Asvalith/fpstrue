@@ -214,7 +214,7 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 // ==================== 集中更新管线 ====================
 /*
 	 * 单轮固定阶段：
-	 * 0.守卫检查（单机使用 GameMode 注册表，多人发现本 World 副本）
+	 * 0. 检查运行上下文（单机使用 GameMode 注册表，多人发现本 World 副本）；
 	 * 1. 收齐存活敌人并采样一次近战保护，借给本轮 Gameplay、Render 和 Sharing 使用；
 	 * 2. Gameplay：权威端用有效玩家 Transform 更新评分；专服到此结束，客户端不执行此阶段；
 	 * 3. 从 PlayerCameraManager 创建唯一 Render ViewContext，填充样本并用纯数值 Top-K 分配名额；
@@ -222,6 +222,9 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 	 * 阶段之间不边采样边抢预算；本轮快照与本端各预算自己的名额历史共同决定结果。
 	 */
 
+// 【设计取舍】集中一轮发现、位置/近战采样与相机派生值复用，省重复读取，不承诺消除 O(N) 遍历。
+// 单机复用登记表，多人保留 World 类型迭代以覆盖晚复制/脚本生成；不是每个 AI 再搜索全部玩家。
+// 两端只共享状态事实：服务器 Gameplay 档位不看镜头，客户端 Render 评分与预算不回传授权。
 void UfpstrueEnemySignificanceCoordinator::Update()
 {
 
@@ -333,7 +336,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemySignificance_RenderScoreAndBudget);
 	// Render 层：相机视锥、屏占比和相机距离只服务于渲染分级。
 	FFPEnemyRenderViewContext ViewContext;
-	///采样阶段：统一视点、FOV、宽高比和采样时刻
+	// 采样阶段：统一视点、FOV、宽高比和采样时刻。
 	PlayerController->GetPlayerViewPoint(ViewContext.ViewLocation, ViewContext.ViewRotation);
 	ViewContext.HorizontalFOVDegrees =
 		PlayerController->PlayerCameraManager != nullptr ? PlayerController->PlayerCameraManager->GetFOVAngle() : 90.0f;
@@ -383,6 +386,9 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	}
 }
 
+// 【设计取舍】小 K 时用有界堆替代全排序；名额保持加分减少邻近评分抢占，接受并非瞬时最高原始分。
+// 自然档位另有迟滞/降档延时，名额仍受硬上限约束；Full、阴影、RT 各分预算，避免一项升级全套放行。
+// 战斗可恢复必要姿态但不额外获阴影/RT，这些预算也不能反向授予服务器攻击资格。
 void UfpstrueEnemySignificanceCoordinator::AllocatePresentationBudgets(int32& FullBudgetDowngradeCount,
 	int32& ShadowBudgetRejectedCount, int32& RayTracingBudgetRejectedCount)
 {
@@ -680,7 +686,6 @@ void UfpstrueEnemyAnimationSharingStateProcessor::ProcessActorState_Implementati
 // 提供共享状态对应的原生枚举，确保状态整数与插件 Setup 使用同一编号。
 UEnum* UfpstrueEnemyAnimationSharingStateProcessor::GetAnimationStateEnum_Implementation()
 {
-	// 把项目 AI 状态枚举交给插件，插件据此解释 ProcessActorState 输出的整数状态。
 	return StaticEnum<EFPEnemyAIState>();
 }
 
@@ -729,7 +734,6 @@ void UfpstrueEnemyAnimationSharingCoordinator::Start(TSubclassOf<AfpstrueEnemyCh
 		return;
 	}
 
-	// 优先复用本组件之前创建的池，不覆盖关卡或其他系统已经占有的共享 Manager。
 	// ★【重要边界】[资源所有权] 一个 World 的共享 Manager 只复用本组件创建且骨架兼容的实例，不能覆盖其他系统的 Setup。
 	UAnimationSharingManager* WorldManager = UAnimationSharingManager::GetManagerForWorld(GetWorld());
 	if (WorldManager != nullptr && WorldManager == SharingManager && RuntimeSetup != nullptr)
@@ -862,7 +866,6 @@ bool UfpstrueEnemyAnimationSharingCoordinator::BuildRuntimeSetup(TSubclassOf<Afp
 // 资格变化时才加入或退出共享池；已登记敌人仅更新渲染显著性，不重复注册。
 void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(AfpstrueEnemyCharacter* Enemy)
 {
-	// 该函数是幂等的：资格不变时只更新 Significance；资格改变时才真正注册或注销 Actor。
 	if (!bRunning || SharingManager == nullptr || !IsValid(Enemy))
 	{
 		return;
@@ -904,7 +907,6 @@ void UfpstrueEnemyAnimationSharingCoordinator::RefreshEnemyRegistration(Afpstrue
 // 注销本敌人的 Follower，并把骨骼 LOD 控制权还给角色；重复调用不重复注销。
 void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharacter* Enemy)
 {
-	// 战斗/死亡退出共享后把 LOD 控制权还给 EnemyCharacter，避免插件残留标志覆盖项目自己的骨骼 LOD 策略。
 	if (SharingManager == nullptr || Enemy == nullptr)
 	{
 		return;
@@ -936,10 +938,7 @@ void UfpstrueEnemyAnimationSharingCoordinator::SuspendEnemy(AfpstrueEnemyCharact
 // 接收插件注册或紧缩数组后的句柄变化；回调只更新本地登记，不能重入插件增删操作。
 void UfpstrueEnemyAnimationSharingCoordinator::HandleActorHandleUpdated(int32 NewHandle, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy)
 {
-	// UE 5.5 在注册和注销的 RemoveAtSwap 中同步回调，此时插件数组可能尚未完成更新。
-	// 这里只维护已知登记的句柄，绝不调用 Register/Unregister 或更新插件数据，避免重入。
-	// Stop 期间也必须接收尚未注销对象的 swap 句柄；资格检查和注销由外层入口执行。
-	// ★【重要边界】[回调重入] RemoveAtSwap 的句柄回调只能维护已知登记，不能调用插件增删接口或把已退出对象重新注册。
+	// UE 5.5 注册/RemoveAtSwap 会同步回调，Stop 期间也要更新尚未注销者的句柄；实际资格与增删留在外层。
 	AfpstrueEnemyCharacter* EnemyCharacter = Enemy.Get();
 	if (EnemyCharacter == nullptr)
 	{

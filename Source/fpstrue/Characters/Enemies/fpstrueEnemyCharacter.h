@@ -36,6 +36,7 @@ class FPSTRUE_API UfpstrueEnemyMovementComponent : public UCharacterMovementComp
 {
 	GENERATED_BODY()
 public:
+	// 仅撤销无效静态地面缓存的复用资格，实际地面检测仍走 CMC 原生实现。
 	virtual void FindFloor(const FVector& CapsuleLocation, FFindFloorResult& OutFloorResult, bool bCanUseCachedLocation,
 		const FHitResult* DownwardSweepResult = nullptr) const override;
 };
@@ -71,21 +72,34 @@ class FPSTRUE_API UfpstrueEnemyHealthBarComponent : public UWidgetComponent
 {
 	GENERATED_BODY()
 public:
+	// 默认使用事件重绘的世界血条；不创建生命状态，也不参与敌人决策。
 	UfpstrueEnemyHealthBarComponent();
+	// 释放旧表现后按新模式重建；专服强制 Off，不创建 Widget 资源。
 	void Configure(EFPEnemyHealthBarMode InMode);
+	// 生命事件写入显示比例；数值没变时不重复更新 Widget 或请求重绘。
 	void SetHealthFraction(float Fraction);
+	// 关闭 Tick 并释放 Widget/RenderTarget；死亡及切换模式共用此出口。
 	void ReleasePresentation();
+	// 返回本组件实际模式，包含专服关闭后的结果。
 	EFPEnemyHealthBarMode GetPresentationMode() const { return Mode; }
+	// 返回最近一次本地视锥测试结果，不代表无遮挡或已经生成像素。
 	bool IsInLocalView() const { return bInLocalView; }
 	// 与运行时相同的视锥/朝向入口，也允许自动化在没有真实 viewport 的世界中验证边界。
 	void UpdateForView(const FVector& CameraLocation, const FRotator& CameraRotation, float HorizontalFOV, float AspectRatio);
+	// 把本组件当前资源数与累计事件数加到调用者统计，不触发资源创建。
 	void AppendMetrics(FFPEnemyHealthBarMetrics& Metrics) const;
+	// 读取进程启动时的诊断模式；Shipping 固定事件重绘方案。
 	static EFPEnemyHealthBarMode GetConfiguredMode();
+	// 将模式转换成稳定报告标签，未知值按 WorldEvent 显示。
 	static const TCHAR* GetModeName(EFPEnemyHealthBarMode InMode);
+	// 诊断时遍历指定 World 的敌人并聚合血条指标，不作为逐帧业务入口。
 	static FFPEnemyHealthBarMetrics CollectMetrics(UWorld* World);
+	// 同帧复用相机快照，更新朝向/视锥后交回原生 Widget Tick；不轮询生命。
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 protected:
+	// 屏外或已释放时拒绝绘制；重绘周期等其余规则由 UWidgetComponent 决定。
 	virtual bool ShouldDrawWidget() const override;
+	// 保留原生绘制并只统计真实 RenderTarget 调用，不把请求数当绘制数。
 	virtual void DrawWidgetToRenderTarget(float DeltaTime) override;
 private:
 	friend class FFpstrueWorldHealthBarViewCacheTest;
@@ -104,17 +118,25 @@ private:
 		struct FEntry { uint64 Frame = MAX_uint64; FViewSnapshot View; };
 		TMap<TWeakObjectPtr<UWorld>, FEntry> Worlds;
 		FDelegateHandle CleanupHandle;
+		// 订阅 World 清理事件，使缓存随关卡退出而精确失效。
 		FViewCache();
+		// 解除清理委托，避免全局回调引用已退出的缓存对象。
 		~FViewCache();
+		// 仅移除结束 World 的帧快照，不影响同时运行的其他 World。
 		void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 	};
+	// 返回进程内共享、按弱 World 键隔离的 GT 相机缓存。
 	static FViewCache& GetViewCache();
+	// 预计算相机轴、投影比例与血条朝向，返回不含可变组件状态的值快照。
 	static FViewSnapshot BuildViewSnapshot(const FVector& Location, const FRotator& Rotation, float HorizontalFOV, float AspectRatio);
+	// 从本地玩家和有效 viewport 采样；专服或视点未就绪时返回失败。
 	static bool SampleLocalView(UWorld* World, FViewSnapshot& OutView);
 	// 采样器只在本次同步调用中借用；测试可验证真实缓存而不伪造 viewport 或增加公开测试接口。
 	static bool ResolveViewSnapshot(UWorld* World, uint64 Frame, bool bUseCache, FViewSnapshot& OutView, bool& bCacheHit,
 		TFunctionRef<bool(UWorld*, FViewSnapshot&)> Sampler);
+	// 消费共享相机值但读取自身当前位置；重入视野时补一次事件重绘。
 	void UpdateForView(const FViewSnapshot& View);
+	// 仅 WorldEvent 模式向原生 Widget 提交一次重绘请求，不立即执行 GPU 绘制。
 	void RequestEventRedraw();
 	EFPEnemyHealthBarMode Mode = EFPEnemyHealthBarMode::WorldEvent;
 	bool bInLocalView = false;
@@ -133,6 +155,7 @@ public:
 	UfpstrueEnemyHealthBarWidget(const FObjectInitializer& ObjectInitializer);
 	// 构建前收到的复制值也先缓存，真正创建控件时补上；不使用逐帧属性绑定。
 	void SetHealthFraction(float Fraction);
+	// 返回已接收的显示比例，不代表再次读取权威生命。
 	float GetHealthFraction() const { return HealthFraction; }
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
@@ -205,6 +228,7 @@ public:
 	bool UsesSimpleHitProxies() const { return bUseSimpleHitProxies; }
 	// 基线读取实际保护条件；普通服务器姿态不再受本地相机/阴影名额控制。
 	bool RequiresFullAuthorityPose() const;
+	// 返回上轮玩法档位的诊断原因，调用者不能据此改写或复制档位。
 	const FFPEnemyGameplayTierReasonSnapshot& GetGameplayTierReasonSnapshot() const { return GameplayTierReasonSnapshot; }
 	// 原生射线命中代理后补齐部位身份，沿用现有爆头与死亡冲量入口；不伪造历史姿态。
 	void ResolveHitProxyBone(FHitResult& Hit) const;
@@ -224,10 +248,6 @@ public:
 	float GetChaseRange() const { return ChaseRange; }
 
 	// ==================== 战斗与玩法接口 ====================
-
-	// 动画结束 Notify 通过角色入口通知 CombatComponent 完成攻击。
-	UFUNCTION(BlueprintCallable, Category = "Combat", meta = (DeprecatedFunction, DeprecationMessage = "Use Enemy Attack Finished native Notify with playback identity"))
-	void HandleAttackFinishedNotify();
 
 	// AttackWindow Notify 直接取得已缓存组件，驱动武器 Sweep 的开启、更新与结束。
 	UFUNCTION(BlueprintPure, Category = "Combat")
@@ -263,7 +283,6 @@ public:
 	// Coordinator 和共享系统检查攻击、范围及最近受击保护期。
 	bool RequiresGameplayAnimationProtection(float CurrentTime, float GraceSeconds) const;
 	// GameMode 注入同一 World 的共享协调器；弱引用只表达协作关系，不取得所有权。
-	// 语法复习：前置声明足以声明指针和函数，但 TWeakObjectPtr 赋值需要看到完整 UObject 继承关系，实现在 .cpp。
 	void SetAnimationSharingCoordinator(UfpstrueEnemyAnimationSharingCoordinator* InCoordinator);
 
 	// ==================== Benchmark 诊断接口 ====================
@@ -299,7 +318,6 @@ protected:
 	// ==================== 组件 ====================
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Health")
-	// 语法复习：UPROPERTY + TObjectPtr 是 UE5 的强 GC 引用；组件内存仍由 UObject 生命周期管理。
 	TObjectPtr<UfpstrueHealthComponent> HealthComponent;
 
 	// 位置锚定敌人身体 Mesh，跟随客户端网络平滑；Screen 仅负责各客户端投影/正对屏幕，不挂到玩家或相机。
@@ -405,10 +423,6 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI|Animation")
 	void OnAttackPlaybackRequested(int64 AttackId);
 
-	// 攻击已开始的观察通知，不负责隐式选择或绑定动画。
-	UFUNCTION(BlueprintImplementableEvent, Category = "AI")
-	void OnAttackStarted();
-
 	// 蓝图播放敌人受伤表现。
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
 	void OnEnemyDamaged(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
@@ -420,7 +434,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// 语法复习：friend 只开放 private 访问权，不改变对象所有权；内部桥接仅开放给性能协调器和 CombatComponent。
+	// 仅向明确协作者和回归测试开放内部访问；不改变对象所有权。
 	friend class UfpstrueEnemyAnimationSharingCoordinator;
 	friend class UfpstrueEnemySignificanceCoordinator;
 	friend class UfpstrueEnemyCombatComponent;
@@ -450,7 +464,9 @@ private:
 	void RefreshHitAnimationProtection();
 	// 服务器播放绑定或取消时发布快照；晚加入只恢复尚未结束的播放，不重放历史事件。
 	void PublishAttackPresentation(uint32 AttackId, UAnimMontage* Montage, float PlayRate, bool bPlaying);
+	// 当前快照复制到客户端后恢复攻击进度或死亡表现，不开启伤害窗口。
 	UFUNCTION() void OnRep_NetworkPresentation();
+	// 广播一次允许丢失的受击表现；生命与死亡事实由可恢复状态复制。
 	UFUNCTION(NetMulticast, Unreliable)
 	void MulticastHitReaction(float DamageAmount);
 
@@ -470,6 +486,7 @@ private:
 	static bool IsReferenceReplicationRequested(const TCHAR* CommandLine);
 	// BeginPlay配置一次，Simple继承原Mesh对象类型及查询响应，死亡时关闭；切换LOD不重建PhysicsAsset或代理。
 	void ConfigureHitProxies(bool bSimpleMode);
+	// 关闭全部活体盒体查询；布娃娃碰撞另由死亡 PhysicsAsset 接管。
 	void DisableHitProxies();
 
 	// ==================== Render 分级与动画共享 ====================
@@ -544,7 +561,7 @@ private:
 	};
 	TArray<FRenderBudgetMesh> RenderBudgetMeshes;
 
-	// 语法复习：TWeakObjectPtr 不延长协调器生命周期；使用前通过 Get()/IsValid() 解析。
+	// 协作弱引用不延长协调器生命周期，退出时允许自然失效。
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
 

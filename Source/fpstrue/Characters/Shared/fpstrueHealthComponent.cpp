@@ -6,8 +6,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameplayEffectExtension.h"
 #include "Net/UnrealNetwork.h"
-#include "Characters/Player/fpstrueCharacter.h"
-#include "Weapons/fpstrueCombatAbilities.h"
+#include "Abilities/GameplayAbility.h"
 
 // Fire 的能力激活和逐发数据使用同一 ASC 可靠通道；只为当前激活消费数据，不保留已取消轮次的晚包。
 void UfpstrueHealthComponent::ServerSetReplicatedTargetData_Implementation(FGameplayAbilitySpecHandle AbilityHandle,
@@ -87,12 +86,14 @@ void UfpstrueHealthAttributeSet::PostGameplayEffectExecute(const FGameplayEffect
 	}
 }
 
+// 将复制的生命变化交给 GAS 聚合器；旧蓝图通知留到本属性集批次接收完成后统一发布。
 void UfpstrueHealthAttributeSet::OnRep_Health(const FGameplayAttributeData& Previous)
 {
 	GAMEPLAYATTRIBUTE_REPNOTIFY(UfpstrueHealthAttributeSet, Health, Previous);
 	bReceivedHealthAttributes = true;
 }
 
+// 更新 GAS 最大生命聚合器并标记本批次有变化，不在这里单独广播兼容镜像。
 void UfpstrueHealthAttributeSet::OnRep_MaxHealth(const FGameplayAttributeData& Previous)
 {
 	GAMEPLAYATTRIBUTE_REPNOTIFY(UfpstrueHealthAttributeSet, MaxHealth, Previous);
@@ -108,7 +109,7 @@ void UfpstrueHealthAttributeSet::PostRepNotifies()
 	if (UfpstrueHealthComponent* HealthComponent = Cast<UfpstrueHealthComponent>(GetOwningAbilitySystemComponent()))
 	{
 		HealthComponent->HealthAttributes = this;
-		HealthComponent->OnRep_HealthSnapshot();
+		HealthComponent->ConsumeReplicatedHealthAttributes(*this);
 	}
 }
 
@@ -154,6 +155,8 @@ UfpstrueHealthResetEffect::UfpstrueHealthResetEffect()
 UfpstrueHealthComponent::UfpstrueHealthComponent()
 {
 	SetIsReplicatedByDefault(true);
+	// 【设计取舍】Minimal 限制活动效果细节的复制，不代替 AttributeSet 数值复制；
+	// 客户端兼容读接口只是本地镜像，不能再复制一份生命状态与 GAS 竞争更新顺序。
 	SetReplicationMode(EGameplayEffectReplicationMode::Minimal);
 }
 
@@ -193,7 +196,6 @@ void UfpstrueHealthComponent::BeginPlay()
 // 先拒绝新的生命事务并丢弃待处理请求，再解除 Owner 委托，防止退出阶段继续通知。
 void UfpstrueHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// ★【重要边界】[生命周期] 退出标记先于委托解绑；正在分发的通知返回后也会停止，待处理伤害不跨生命周期继续执行。
 	bEndingHealthPlay = true;
 	PendingMutations.Reset();
 	CancelAllAbilities();
@@ -210,7 +212,7 @@ void UfpstrueHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void UfpstrueHealthComponent::HandleOwnerTakeAnyDamage(AActor* DamagedActor, float Damage, const UDamageType* DamageType,
 													   AController* InstigatedBy, AActor* DamageCauser)
 {
-	// 先拒绝无效伤害和尸体重复伤害，再统一 Clamp；外部系统不能绕过这里直接写 CurrentHealth。
+	// 拒绝无效输入；尸体伤害在事务执行时判定，兼容排在前面的生命重置。
 	if (!HasHealthAuthority() || DamagedActor != GetOwner() || !FMath::IsFinite(Damage) || Damage <= 0.0f)
 	{
 		return;
@@ -230,6 +232,8 @@ FActiveGameplayEffectHandle UfpstrueHealthComponent::ApplyGameplayEffectSpecToSe
 		});
 	if (!bChangesHealth) return Super::ApplyGameplayEffectSpecToSelf(GameplayEffect, PredictionKey);
 	if (bEndingHealthPlay || !HasHealthAuthority()) return FActiveGameplayEffectHandle();
+	// 【设计取舍】本项目把生命写入限制为即时非周期事务，才能统一通知和死亡顺序；
+	// 持续/周期生命效果明确拒绝，而非宣称这层适配已经覆盖所有 GAS 效果生命周期。
 	if (GameplayEffect.Def->DurationPolicy != EGameplayEffectDurationType::Instant || GameplayEffect.GetPeriod() > 0.0f)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Health GAS only accepts instant non-periodic Health/MaxHealth effects on %s; refusing %s."),
@@ -258,6 +262,8 @@ FActiveGameplayEffectHandle UfpstrueHealthComponent::ApplyGameplayEffectSpecToSe
 }
 
 // 将请求按值排队，解决同线程委托重入；不是后台队列，也不把结算延迟到下一帧。
+// 【设计取舍】串行提交让伤害/重置监听者看见有序状态；保留容量上限阻止事件自激无限延长通知链。
+// 这解决 Game Thread 重入，不提供跨线程访问能力，也不能替代业务攻击身份校验。
 void UfpstrueHealthComponent::EnqueueMutation(const FMutation& Mutation)
 {
 	// 退出期间不接纳请求；同步通知链达到上限时只拒绝新请求，不丢弃已有事务。
@@ -277,8 +283,7 @@ void UfpstrueHealthComponent::EnqueueMutation(const FMutation& Mutation)
 		}
 		return;
 	}
-	// ★【重要边界】[回调重入] 这里串行化的是同一游戏线程里的嵌套通知，不是多线程队列；回调追加的伤害由外层接着处理。
-	// 重入调用只追加；最外层持有分发保护，继续处理回调期间追加的请求。
+	// 重入只追加，由最外层按顺序处理；整个队列始终在 Game Thread 内执行。
 	PendingMutations.Add(Mutation);
 	if (bDispatchingMutation)
 	{
@@ -313,6 +318,14 @@ void UfpstrueHealthComponent::ApplyMutation(const FMutation& Mutation)
 	{
 		const float RequestedMaximum = Mutation.Type == EMutation::ResetMaximum ? Mutation.Value : MaxHealth;
 		const float SafeMaximum = FMath::IsFinite(RequestedMaximum) ? FMath::Max(RequestedMaximum, 1.0f) : 100.0f;
+		// 【设计取舍】只跳过已回满且上限相同的内置重置，避免无变化 GE 和 Reset/Changed 反馈环。
+		// 外部 GE 不能仅凭数值相同就整体跳过；其余效果职责仍由 GAS 执行。
+		if (PreviousMaximum == SafeMaximum && PreviousHealth == SafeMaximum)
+		{
+			MaxHealth = PreviousMaximum;
+			CurrentHealth = PreviousHealth;
+			return;
+		}
 		EffectSpec = MakeOutgoingSpec(UfpstrueHealthResetEffect::StaticClass(), 1.0f, MakeEffectContext());
 		if (!EffectSpec.IsValid()) return;
 		EffectSpec.Data->SetSetByCallerMagnitude(FpstrueGameplayTags::Data_MaxHealth, SafeMaximum);
@@ -331,9 +344,7 @@ void UfpstrueHealthComponent::ApplyMutation(const FMutation& Mutation)
 	}
 	if (!EffectSpec.IsValid()) return;
 
-	// ★【重要边界】[结算去重] 先提交扣血与首次死亡标记，再发送通知；多个敌人的连续伤害不能重复触发同一死亡结算。
-	// 伤害先提交数值和死亡边沿；回调中的新伤害无法改写本事务的结果。
-	// 内部只调用基类，不能再从公共覆写入口排一次队；外部 GE 与旧 UE 伤害共享后面的结算和通知。
+	// 内部调用基类提交 GE，不能再走公共入口重复排队。先提交状态，再通知监听者。
 	Super::ApplyGameplayEffectSpecToSelf(*EffectSpec.Data.Get(), Mutation.PredictionKey);
 	if (bEndingHealthPlay) return;
 	MaxHealth = HealthAttributes->GetMaxHealth();
@@ -342,12 +353,15 @@ void UfpstrueHealthComponent::ApplyMutation(const FMutation& Mutation)
 	// Reset 是数值操作，不是生命会话事件。无变化不再广播，避免 Reset -> Changed -> Reset 自激。
 	if (CurrentHealth == PreviousHealth && MaxHealth == PreviousMaximum)
 	{
-		CommitHealthSnapshot();
-		return; // 浮点精度下未改变数值，也不发出可重复生成同类请求的通知。
+		return;
 	}
 	const bool bDied = IsDead() && !bDeathBroadcast;
 	bDeathBroadcast = IsDead();
-	CommitHealthSnapshot();
+	// GAS 属性是唯一复制数据；真实变化只请求一次 Actor 调度，不维护第二份版本化镜像。
+	if (AActor* Owner = GetOwner(); Owner != nullptr && Owner->GetIsReplicated() && Owner->GetNetMode() != NM_Standalone)
+	{
+		Owner->ForceNetUpdate();
+	}
 	SetLooseGameplayTagCount(FpstrueGameplayTags::State_Dead, IsDead() ? 1 : 0);
 	if (bDied)
 	{
@@ -362,16 +376,12 @@ void UfpstrueHealthComponent::ApplyMutation(const FMutation& Mutation)
 		OnDamageResolved.Broadcast(AppliedDamage, Mutation.Causer.Get(), Mutation.Instigator.Get(), Mutation.Context);
 		if (bEndingHealthPlay) return;
 		OnDamageReceived.Broadcast(AppliedDamage, Mutation.Causer.Get(), Mutation.Instigator.Get());
-		if (bEndingHealthPlay)
-		{
-			return;
-		}
+		if (bEndingHealthPlay) return;
 	}
 	OnHealthChanged.Broadcast(CurrentHealth);
 
 	if (bDied && !bEndingHealthPlay)
 	{
-		// 死亡是边沿事件而不是持续状态：只在首次从存活跨到 0 时广播一次。
 		OnDeath.Broadcast();
 	}
 }
@@ -383,36 +393,16 @@ bool UfpstrueHealthComponent::HasHealthAuthority() const
 	return Owner != nullptr && Owner->HasAuthority();
 }
 
-// 快照提交先于所有委托；同步重入仍由原事务队列串行化，不直接重入下一次复制提交。
-void UfpstrueHealthComponent::CommitHealthSnapshot()
-{
-	if (!HasHealthAuthority()) return;
-	if (HealthSnapshot.Revision != 0 && HealthSnapshot.CurrentHealth == CurrentHealth && HealthSnapshot.MaxHealth == MaxHealth)
-	{
-		return;
-	}
-	HealthSnapshot.CurrentHealth = CurrentHealth;
-	HealthSnapshot.MaxHealth = MaxHealth;
-	++HealthSnapshot.Revision;
-	if (HealthSnapshot.Revision == 0) ++HealthSnapshot.Revision;
-	if (AActor* Owner = GetOwner(); Owner != nullptr && Owner->GetIsReplicated() && Owner->GetNetMode() != NM_Standalone)
-	{
-		Owner->ForceNetUpdate();
-	}
-}
-
-// 客户端只消费服务器快照，不伪造伤害上下文；回满清除生命组件的死亡通知锁，但不复活角色表现。
-void UfpstrueHealthComponent::OnRep_HealthSnapshot()
+// 客户端只消费本属性集的接收批次；回满重置死亡通知边沿，不复活角色表现。
+void UfpstrueHealthComponent::ConsumeReplicatedHealthAttributes(const UfpstrueHealthAttributeSet& Attributes)
 {
 	if (bEndingHealthPlay || HasHealthAuthority()) return;
-	// 保留旧反射入口，但不消费外部写入的旧快照；只从已经复制到本地的真实 GAS 属性读取。
-	EnsureHealthAttributes();
-	if (HealthAttributes == nullptr) return;
-	MaxHealth = FMath::IsFinite(HealthAttributes->GetMaxHealth()) ? FMath::Max(HealthAttributes->GetMaxHealth(), 1.0f) : 100.0f;
-	CurrentHealth = FMath::IsFinite(HealthAttributes->GetHealth()) ? FMath::Clamp(HealthAttributes->GetHealth(), 0.0f, MaxHealth) : 0.0f;
-	HealthSnapshot.CurrentHealth = CurrentHealth;
-	HealthSnapshot.MaxHealth = MaxHealth;
-	++HealthSnapshot.Revision;
+	const float ReceivedMaximum = FMath::IsFinite(Attributes.GetMaxHealth()) ? FMath::Max(Attributes.GetMaxHealth(), 1.0f) : 100.0f;
+	const float ReceivedHealth = FMath::IsFinite(Attributes.GetHealth()) ? FMath::Clamp(Attributes.GetHealth(), 0.0f, ReceivedMaximum) : 0.0f;
+	if (bReceivedInitialHealth && CurrentHealth == ReceivedHealth && MaxHealth == ReceivedMaximum) return;
+	bReceivedInitialHealth = true;
+	MaxHealth = ReceivedMaximum;
+	CurrentHealth = ReceivedHealth;
 	const bool bDied = IsDead() && !bDeathBroadcast;
 	bDeathBroadcast = IsDead();
 	SetLooseGameplayTagCount(FpstrueGameplayTags::State_Dead, IsDead() ? 1 : 0);
@@ -434,9 +424,6 @@ void UfpstrueHealthComponent::SetMaxHealthAndReset(float NewMaxHealth)
 // 提交回满血量请求，不等于完整复活角色；数值未变化时不重复发布血量事件。
 void UfpstrueHealthComponent::ResetHealth()
 {
-	// ★【重要边界】[生命周期] 回满血只是数值重置，不会复活角色；移动、AI、武器和死亡表现仍由各自所有者恢复。
-	// 把配置值修正到合法范围，并重建本组件的“存活”状态；可供对象复用或新一局初始化。
-	// 这里只恢复生命数据；角色自身的移动、武器和死亡表现标志仍需由 Owner 配套恢复。
 	EnqueueMutation({EMutation::Reset});
 }
 

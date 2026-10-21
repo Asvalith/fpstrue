@@ -112,13 +112,23 @@
 #include "Rendering/SkinWeightVertexBuffer.h"
 #include "Tests/AutomationCommon.h"
 
+/*
+ * 编辑器资源工具与显式画面验收入口，不是运行时玩法的一部分（WITH_EDITOR）。
+ * Prepare/Repair/Calibrate 命令默认检查，只有 Apply 才在限定路径备份、改图/默认值并保存；
+ * RAR/Template 首次生成还会备份并保存所用骨架的兼容声明与动作槽，不是完全零源资产写入。
+ * 资源 Audit 只读取/采样，不编译或保存资源；AuditPickupWalk/AuditStandaloneLoop 则显式驱动真实
+ * 游戏输入、等待正常结算并写截图，不能当作只读玩法检查。所有入口在编辑器 Game Thread 执行。
+ * 主链：检查来源与已有结构 -> Apply 时备份/构造 -> 编译 -> 保存；验收链不替代 GAS/服务器结算。
+ */
+
+// 固定单机关卡和旧武器的联机适配：保留原执行图，只在 Apply 时增加独立运行门和持有者读取桥。
 namespace FpstruePvpAssetPreparation
 {
 constexpr const TCHAR* MapPackage = TEXT("/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked");
 constexpr const TCHAR* WeaponObject = TEXT("/Game/FirstPerson/Blueprints/weapon/BP_Weapon.BP_Weapon");
 constexpr const TCHAR* GateMarker = TEXT("PvP: preserve the original menu chain only in Standalone");
 
-// Only this fixed pair of shipped assets is in scope. Check mode never edits or compiles graphs.
+// 记录资源准备失败原因并返回 false，供检查与写入流程在原调用点中止。
 bool Fail(const FString& Reason)
 {
 	UE_LOG(LogTemp, Error, TEXT("PVP_ASSET_PREP FAIL %s"), *Reason);
@@ -233,7 +243,7 @@ bool ReplaceOwnerRead(UK2Node_VariableGet* Read, FName ComponentName, UFunction*
 	return true;
 }
 
-// Compile both edited blueprints before publishing either package. A compile error never saves a partial graph.
+// 编译一个已编辑蓝图并返回实际错误状态；只编译，不在此保存包。
 bool Compile(UBlueprint* Blueprint)
 {
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
@@ -245,7 +255,7 @@ bool Compile(UBlueprint* Blueprint)
 	return Results.NumErrors == 0 && Blueprint->Status != BS_Error;
 }
 
-// Console registration happens when the editor module loads, before editor -ExecCmds are consumed.
+// 无参数只检查固定地图/武器；Apply 备份后最小接线、全部编译通过，再保存相应地图和武器包。
 void Run(const TArray<FString>& Args)
 {
 	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
@@ -568,7 +578,7 @@ FAutoConsoleCommand PrepareRARBodyCommand(
 	FConsoleCommandWithArgsDelegate::CreateStatic(&PrepareRARBody));
 } // namespace FpstruePvpAssetPreparation
 
-// 只生成本项目自己的表现资产。模板和旧玩家蓝图不被重设父类、不删除节点，也不承担 GAS 规则。
+// 生成项目自己的 RAR 表现资产，不导入供应方玩法；Apply 会额外备份并更新所用骨架的兼容声明和动作槽。
 namespace FpstrueRARPresentation
 {
 const FString Root = TEXT("/Game/FirstPerson/Animations/RAR/");
@@ -585,6 +595,7 @@ struct FClip
 	bool bAdditive;
 };
 
+// 记录表现资源工具的具体失败原因，并将失败交还当前构造/检查流程。
 bool Error(const FString& Message)
 {
 	UE_LOG(LogTemp, Error, TEXT("RAR_PRESENTATION FAIL %s"), *Message);
@@ -597,6 +608,7 @@ template <typename T> T* Load(const FString& Package)
 	return LoadObject<T>(nullptr, *(Package + TEXT(".") + FPackageName::GetShortName(Package)));
 }
 
+// 比较实际原始骨名、父子关系和参考变换，不能用资源名称或兼容列表代替骨架一致性。
 bool SameReferencePose(const USkeletalMesh* OldMesh, const USkeletalMesh* NewMesh)
 {
 	const FReferenceSkeleton& A = OldMesh->GetRefSkeleton();
@@ -615,7 +627,7 @@ bool SameReferencePose(const USkeletalMesh* OldMesh, const USkeletalMesh* NewMes
 	return true;
 }
 
-// 新资产从不覆盖现有文件；骨架兼容与槽位修改在唯一备份后才执行。
+// 在调用方已完成路径不存在检查后创建项目资产，登记待保存包；此 helper 本身不写盘。
 template <typename T> T* NewAsset(const FString& Package, TArray<UPackage*>& Packages)
 {
 	UPackage* Outer = CreatePackage(*Package);
@@ -634,6 +646,7 @@ void Expose(UAnimGraphNode_Base* Node, FName Name)
 	Node->ReconstructNode();
 }
 
+// 返回生成动画节点的结构型输出引脚；缺失时由图构造器记录连接失败。
 UEdGraphPin* PoseOutput(UEdGraphNode* Node)
 {
 	for (UEdGraphPin* Pin : Node->Pins)
@@ -642,12 +655,14 @@ UEdGraphPin* PoseOutput(UEdGraphNode* Node)
 	return nullptr;
 }
 
+// 只构造当前新建/限定修复的 AnimGraph；bOK 汇总连接错误，不拥有玩法状态，也不自行编译保存。
 struct FGraphBuilder
 {
 	UEdGraph* Graph = nullptr;
 	const UEdGraphSchema_K2* Schema = nullptr;
 	bool bOK = true;
 	int32 Serial = 0;
+	// 创建带说明和稳定布局的新节点，并补齐动画编译扩展所需的放置生命周期。
 	template <typename T> T* Node(const FString& Comment)
 	{
 		T* Result = FpstruePvpAssetPreparation::AddNode<T>(Graph, (Serial % 6) * 320, (Serial / 6) * 250);
@@ -657,6 +672,7 @@ struct FGraphBuilder
 		if constexpr (TIsDerivedFrom<T, UAnimGraphNode_Base>::IsDerived) Result->PostPlacedNewNode();
 		return Result;
 	}
+	// 通过图 Schema 接线；任一缺失或类型不兼容都累计到 bOK，不悄悄跳过错误。
 	void Link(UEdGraphPin* Out, UEdGraphPin* In)
 	{
 		if (Out == nullptr || In == nullptr || !Schema->TryCreateConnection(Out, In))
@@ -667,7 +683,9 @@ struct FGraphBuilder
 				In != nullptr ? *GetNameSafe(In->GetOwningNode()) : TEXT("null"), In != nullptr ? *In->PinName.ToString() : TEXT("null")));
 		}
 	}
+	// 将上游姿态输出连接到指定姿态输入。
 	void Pose(UEdGraphNode* Out, UEdGraphNode* In, FName Pin) { Link(PoseOutput(Out), In->FindPin(Pin)); }
+	// 生成对原生动画快照属性的只读引脚，不生成角色查询或业务状态写入。
 	void Value(FName Property, UEdGraphNode* In, FName Pin)
 	{
 		auto* Read = Node<UK2Node_VariableGet>(TEXT("只读取 NativeUpdateAnimation 的本帧快照，不查询或修改玩法规则。"));
@@ -675,6 +693,7 @@ struct FGraphBuilder
 		Read->AllocateDefaultPins();
 		Link(Read->FindPin(Property), In->FindPin(Pin));
 	}
+	// 创建序列播放器；按需绑定移动播放速率，循环选择由动作类型明确传入。
 	UAnimGraphNode_SequencePlayer* Sequence(UAnimSequence* Asset, bool bLoop = true, bool bMovementRate = false)
 	{
 		auto* Player = Node<UAnimGraphNode_SequencePlayer>(TEXT("本项目安全序列副本；无模板业务 Notify，动作资格与结算仍归原 GAS/Weapon。"));
@@ -684,6 +703,7 @@ struct FGraphBuilder
 		if (bMovementRate) { Expose(Player, TEXT("PlayRate")); Value(TEXT("LocomotionPlayRate"), Player, TEXT("PlayRate")); }
 		return Player;
 	}
+	// 创建显式 HitTime 受击采样器；时间跳转不触发 Notify 或提取 Root Motion。
 	UAnimGraphNode_SequenceEvaluator* Hit(UAnimSequence* Asset)
 	{
 		auto* Evaluator = Node<UAnimGraphNode_SequenceEvaluator>(TEXT("每次受击由 Native PresentHit 将 HitTime 归零；按显式时间采样，连续受击不会停留在上次尾帧，也不触发 Notify 或提取 Root Motion。"));
@@ -699,6 +719,7 @@ struct FGraphBuilder
 		Value(TEXT("HitTime"), Evaluator, TEXT("ExplicitTime"));
 		return Evaluator;
 	}
+	// 按原生快照权重混合两份完整姿态。
 	UAnimGraphNode_TwoWayBlend* Blend(UEdGraphNode* A, UEdGraphNode* B, FName Alpha)
 	{
 		auto* Result = Node<UAnimGraphNode_TwoWayBlend>(TEXT("以原生派生权重混合表现，不建立第二套冲刺/瞄准状态。"));
@@ -706,6 +727,7 @@ struct FGraphBuilder
 		Pose(A, Result, TEXT("A")); Pose(B, Result, TEXT("B")); Value(Alpha, Result, TEXT("Alpha"));
 		return Result;
 	}
+	// 按快照布尔值选择姿态；重新激活子项时重置其非循环动画时间。
 	UAnimGraphNode_BlendListByBool* Select(UEdGraphNode* TruePose, UEdGraphNode* FalsePose, FName ValueName)
 	{
 		auto* Result = Node<UAnimGraphNode_BlendListByBool>(TEXT("实际移动/落地状态选择；重新激活时重置非循环起落序列。"));
@@ -716,6 +738,7 @@ struct FGraphBuilder
 		Value(ValueName, Result, TEXT("bActiveValue"));
 		return Result;
 	}
+	// 在完整基准姿态上应用 LocalSpace 增量，未指定权重时完整叠加。
 	UAnimGraphNode_ApplyAdditive* Add(UEdGraphNode* Base, UEdGraphNode* Delta, FName Alpha = NAME_None)
 	{
 		auto* Result = Node<UAnimGraphNode_ApplyAdditive>(TEXT("先建立非叠加基准姿态，再应用 LocalSpace 增量；不能把增量直接输出为完整姿态。"));
@@ -725,6 +748,7 @@ struct FGraphBuilder
 		if (!Alpha.IsNone()) Value(Alpha, Result, TEXT("Alpha"));
 		return Result;
 	}
+	// 使用匹配的 MeshSpace 节点叠加旋转增量，避免误用 LocalSpace 解释受击资源。
 	UAnimGraphNode_ApplyMeshSpaceAdditive* AddMesh(UEdGraphNode* Base, UEdGraphNode* Delta, FName Alpha)
 	{
 		auto* Result = Node<UAnimGraphNode_ApplyMeshSpaceAdditive>(TEXT("受击资源为 MeshSpace Rotation 增量，使用匹配的叠加节点；不改源素材叠加类型，也不占换弹动作槽。"));
@@ -733,6 +757,7 @@ struct FGraphBuilder
 		Pose(Base, Result, TEXT("Base")); Pose(Delta, Result, TEXT("Additive")); Value(Alpha, Result, TEXT("Alpha"));
 		return Result;
 	}
+	// 在基础姿态上接入指定动作槽；播放资格和换弹提交仍属于原生业务模块。
 	UAnimGraphNode_Slot* Slot(UEdGraphNode* Source, FName SlotName = TEXT("RARAction"))
 	{
 		auto* Result = Node<UAnimGraphNode_Slot>(TEXT("RARAction 只承载本项目 Fire/Reload/Equip 表现；无模板状态或弹药提交。"));
@@ -742,6 +767,7 @@ struct FGraphBuilder
 	}
 };
 
+// 用指定原生父类和实际网格骨架创建新 AnimBP，交调用方建图、编译并决定保存。
 UAnimBlueprint* AnimBlueprint(const FString& Name, UClass* Parent, USkeletalMesh* Mesh, TArray<UPackage*>& Packages, const FString& DestinationRoot = Root)
 {
 	const FString Path = DestinationRoot + Name;
@@ -757,6 +783,7 @@ UAnimBlueprint* AnimBlueprint(const FString& Name, UClass* Parent, USkeletalMesh
 	return Blueprint;
 }
 
+// 解析蓝图的 AnimGraph 与 K2 Schema，返回仅作用于该图的构造上下文。
 FGraphBuilder Builder(UAnimBlueprint* Blueprint)
 {
 	FGraphBuilder Result;
@@ -767,6 +794,7 @@ FGraphBuilder Builder(UAnimBlueprint* Blueprint)
 	return Result;
 }
 
+// 把最终姿态接到工厂生成的 Root；缺少 Root 则标记构造失败。
 void FinishGraph(FGraphBuilder& B, UEdGraphNode* Result)
 {
 	for (UEdGraphNode* Node : B.Graph->Nodes)
@@ -788,6 +816,7 @@ UEdGraphNode* UpperBody(FGraphBuilder& B, const TMap<FName, UAnimSequence*>& Cli
 	return B.AddMesh(B.Slot(Full), B.Hit(Clips[TEXT("Hit")]), TEXT("HitAlpha"));
 }
 
+// 第一人称手臂只输出统一持枪上半身链，不生成移动、伤害或装备逻辑。
 bool BuildArms(UAnimBlueprint* Blueprint, const TMap<FName, UAnimSequence*>& Clips)
 {
 	FGraphBuilder B = Builder(Blueprint);
@@ -796,6 +825,7 @@ bool BuildArms(UAnimBlueprint* Blueprint, const TMap<FName, UAnimSequence*>& Cli
 	return B.bOK;
 }
 
+// 全身图把真实四向移动/起落与持枪上身分层，再应用复制瞄准对应的本地骨骼表现。
 bool BuildBody(UAnimBlueprint* Blueprint, UBlendSpace* Directions, UBlendSpace* Unarmed, const TMap<FName, UAnimSequence*>& Clips)
 {
 	FGraphBuilder B = Builder(Blueprint);
@@ -849,6 +879,7 @@ bool BuildBody(UAnimBlueprint* Blueprint, UBlendSpace* Directions, UBlendSpace* 
 	return B.bOK;
 }
 
+// 以单个安全序列创建单动作槽 Montage，移除构造器空轨道和通知；此处不承担业务结算。
 UAnimMontage* Montage(const FString& Name, UAnimSequence* Clip, TArray<UPackage*>& Packages, const FString& DestinationRoot = Root, FName SlotName = TEXT("RARAction"))
 {
 	auto* Result = NewAsset<UAnimMontage>(DestinationRoot + Name, Packages);
@@ -1034,7 +1065,7 @@ void Run(const TArray<FString>& Args)
 		Packages.Num(), PlayerPackage, *BackupDirectory);
 }
 
-// 修复范围只有本项目刚生成的两个 AnimBP 和八个 Montage；不重建素材、不保存源模板或骨架。
+// 检查输入是否唯一来自本 AnimInstance 的指定原生属性读取，不修改节点。
 bool ReadsNativeValue(const UEdGraphPin* Input, FName Name)
 {
 	if (Input == nullptr || Input->LinkedTo.Num() != 1) return false;
@@ -1051,6 +1082,7 @@ struct FHitRepair
 	UEdGraphPin* AdditiveInput = nullptr;
 };
 
+// 只读确认唯一受击叠加链，输出待替换的旧播放器或识别已修复的显式采样器。
 bool InspectHit(UAnimBlueprint* Blueprint, UAnimSequence* Hit, FHitRepair& Repair)
 {
 	if (Blueprint == nullptr || Blueprint->ParentClass != UfpstruePlayerAnimInstance::StaticClass()
@@ -1118,6 +1150,7 @@ bool InspectMontage(UAnimMontage* MontageAsset, UAnimSequence* Clip, bool& bNeed
 	return true;
 }
 
+// 默认检查两个项目 AnimBP 和八个 Montage；Apply 备份后修重复受击采样/空轨道，编译并只保存这些包。
 void RepairHit(const TArray<FString>& Args)
 {
 	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
@@ -1342,6 +1375,7 @@ FAutoConsoleCommand Command(TEXT("fp.PrepareRARPresentation"),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
 }
 
+// UE5.5 成套素材的项目表现适配及窄修复；Apply 只写明示目标，原供应方玩法蓝图不参与运行。
 namespace FpstrueTemplatePresentation
 {
 using namespace FpstrueRARPresentation;
@@ -1728,6 +1762,7 @@ struct FFacingRepairGraph
 	bool bRepaired = false;
 };
 
+// 只有唯一连接时才返回上游姿态节点，供窄修复核实已有拓扑而非猜测节点名称。
 UEdGraphNode* SinglePoseSource(UEdGraphPin* Input)
 {
 	return Input && Input->LinkedTo.Num() == 1 ? Input->LinkedTo[0]->GetOwningNode() : nullptr;
@@ -2128,6 +2163,7 @@ void RepairUnarmedHit(const TArray<FString>& Args)
 FAutoConsoleCommand HitCommand(TEXT("fp.RepairTemplateUnarmedHit"), TEXT("Move the existing template body hit additive after the armed-only layer; Apply backs up and saves this AnimBP only."), FConsoleCommandWithArgsDelegate::CreateStatic(&RepairUnarmedHit));
 }
 
+// 玩家后处理图的离线鞋底标定：检查实际骨链/蒙皮，Apply 仅创建或更新项目玩家 IK 包，不处理敌人。
 namespace FpstrueFootIKPreparation
 {
 using namespace FpstrueRARPresentation;
@@ -2410,6 +2446,7 @@ FAutoConsoleCommand Command(TEXT("fp.PrepareFootIK"),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&Prepare));
 }
 
+// 正常联网客户端的显式输入驱动验收：空手 -> 行走拾取 -> 双端动作 -> 可选战斗/死亡/重生；不保存资源。
 namespace FpstruePickupWalkAudit
 {
 // 仅显式客户端验收使用；Timer 持有短期状态，所有世界/玩家/武器都是弱引用，世界退出即随 Timer 释放。
@@ -2502,6 +2539,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			Local->AddPitchInput(FMath::Clamp(FMath::FindDeltaAngleDegrees(Local->GetControlRotation().Pitch, DesiredView.Pitch), -MaxPitchDelta, MaxPitchDelta) / PitchScale);
 	}
 
+	// 记录角色、网络平滑和最终骨骼的真实朝向，区分复制事实与本地动画表现，不写角色姿态。
 	void LogFacingPose(AfpstrueCharacter* Character, bool bRemote, const TCHAR* Phase, float ServerTime)
 	{
 		auto* Mesh = Character->GetMesh();
@@ -2816,6 +2854,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 	}
 
+	// 统计当前世界尚存的旧武器副本，验证联机替换是否完整；不主动回收它们。
 	int32 CountLegacyPickups() const
 	{
 		int32 Count = 0;
@@ -2826,6 +2865,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		return Count;
 	}
 
+	// 单次结束验收，释放已按住的输入和 Timer，保留实际结果与未通过原因。
 	void Finish(bool bPassed, const TCHAR* Reason)
 	{
 		if (bFinished) return;
@@ -2843,6 +2883,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			bPassed ? TEXT("PASS") : TEXT("FAIL"), Reason, CountLegacyPickups());
 	}
 
+	// 仅向空闲截图系统提交不覆盖的请求；返回 true 只是已请求，不等于 PNG 已生成。
 	bool RequestCapture(const TCHAR* Name)
 	{
 		if (FScreenshotRequest::IsScreenshotRequested()) return false;
@@ -2853,6 +2894,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		return true;
 	}
 
+	// 在限定期限内推进真实客户端拾取/双端表现门禁；Pawn 丢失即失败，不传送或伪造装备状态。
 	void Tick()
 	{
 		if (bFinished) return;
@@ -3124,6 +3166,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 };
 
+// 只为显式普通有画面客户端创建一份短期验收状态；Timer 持有状态，世界销毁即停止。
 void Start(UWorld* World)
 {
 	static TWeakPtr<FWalkState> Active;
@@ -3150,6 +3193,7 @@ FAutoConsoleCommandWithWorld PickupWalkCommand(TEXT("fp.AuditPickupWalk"),
 	FConsoleCommandWithWorldDelegate::CreateStatic(&Start));
 }
 
+// 原单机结算 UI 的限定修复：默认只检查，Apply 备份并保存重开接线/文字对比度，不改界面布局。
 namespace FpstrueStandaloneUIRepair
 {
 // 只处理原结算 Widget 的已知重开入口和文字颜色；先检查和备份，不删图、事件、注释或改布局。
@@ -3248,6 +3292,7 @@ void Run(const TArray<FString>& Args)
 FAutoConsoleCommand Command(TEXT("fp.RepairStandaloneUI"), TEXT("Check original winorfail restart/color pins; Apply narrowly backs up and repairs current-map restart and label contrast."), FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
 }
 
+// 显式单机画面验收：真实菜单输入 -> 自然胜负 -> 原按钮重开；仅临时缩短配置，写截图但不保存资源。
 namespace FpstrueStandaloneVisualAudit
 {
 // 读回活体 Pawn 的真实导航尺寸及实际选中的数据；不修改胶囊、NavProps 或查询结果。
@@ -3270,7 +3315,7 @@ bool LogNavigationCoverage(ACharacter* Pawn)
 	return bCovered;
 }
 
-// 原关卡 AnyKey 与结算按钮拥有流程；验收走原输入/按钮，不直接调用 StartGame/FinishGame。
+// 递归读取文本控件的可见文案，供验收选择原菜单/结算按钮，不依赖固定子控件名称。
 FString ReadText(UWidget* Widget)
 {
 	if (const auto* Text = Cast<UTextBlock>(Widget)) return Text->GetText().ToString();
@@ -3280,6 +3325,7 @@ FString ReadText(UWidget* Widget)
 	return Result;
 }
 
+// Ticker 持有的一次单机验收状态，可跨原按钮触发的地图重开继续观察；不拥有生产资源配置。
 struct FState
 {
 	FString Directory;
@@ -3348,6 +3394,7 @@ struct FState
 		return false;
 	}
 
+	// 逐帧送入原菜单/行走输入并观察真实结果与重开世界；超时或不符即结束，不直接设置胜负。
 	bool Tick(float)
 	{
 		const double Now = FPlatformTime::Seconds();
@@ -3466,6 +3513,7 @@ struct FState
 	}
 };
 
+// 只在显式胜/负用例和绝对截图目录齐备时启动，Ticker 每帧驱动以保持 CMC 输入连续。
 void Start()
 {
 	static TWeakPtr<FState> Active;

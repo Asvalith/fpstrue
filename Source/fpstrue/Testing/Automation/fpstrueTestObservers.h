@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "Weapons/fpstrueWeaponComponent.h"
@@ -11,6 +12,18 @@
 
 class AfpstrueGameMode;
 class AfpstrueCharacter;
+
+// 只计数生产受击 RPC 的 ProcessEvent 分派，不替换扣血或 RPC 实现，不代表真实网络送达。
+UCLASS(Transient, NotBlueprintable)
+class AfpstrueDamagePresentationTestCharacter : public AfpstrueCharacter
+{
+	GENERATED_BODY()
+public:
+	int32 OwnerDamageFeedbackRequests = 0;
+	int32 NativeHitRequests = 0;
+	// 记录两类瞬时反馈后继续原分派，用于证明无蓝图接收者时不会发送空通知。
+	virtual void ProcessEvent(UFunction* Function, void* Parameters) override;
+};
 
 // 只替代导航投影；本回归仍走生产 SpawnActor 碰撞规则、Possess 与 BeginPlay。
 UCLASS(Transient, NotBlueprintable)
@@ -78,6 +91,7 @@ class UfpstrueHealthMutationTestObserver : public UObject
 public:
 	TWeakObjectPtr<UfpstrueHealthComponent> Health;
 	bool bResetDuringDamage = false;
+	bool bResetDuringDeath = false;
 	bool bDamageDuringHealthChange = false;
 	bool bAlwaysResetDuringHealthChange = false;
 	bool bAlternateMaximumDuringHealthChange = false;
@@ -96,13 +110,22 @@ public:
 class UfpstrueWeaponComponent;
 class AfpstrueCharacter;
 
+// 记录实际射击 RPC 的事实与去重身份，不为测试保留生产协议的冗余字段。
+struct FObservedShotPresentation
+{
+	FHitResult Hit;
+	int32 ShotIndex = 0;
+	uint32 EquipmentGeneration = 0;
+	uint32 Session = 0;
+};
+
 // 只观察生产 RPC 分派的实参，不替换开火、伤害或网络发送逻辑。
 UCLASS(Transient, NotBlueprintable)
 class UfpstrueShotPresentationTestWeapon : public UfpstrueWeaponComponent
 {
 	GENERATED_BODY()
 public:
-	TArray<FIntPoint> ShotPresentations;
+	TArray<FObservedShotPresentation> ShotPresentations;
 	// 在真实 MulticastShot 进入 ProcessEvent 时保存身份，随后继续执行原实现。
 	virtual void ProcessEvent(UFunction* Function, void* Parameters) override;
 };

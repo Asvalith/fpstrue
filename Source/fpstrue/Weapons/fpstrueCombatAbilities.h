@@ -11,12 +11,16 @@
 class UAbilityTask_WaitDelay;
 
 // 使用 ASC 同一 Actor 通道传送逐发输入；不发送客户端命中结论，也不复用 LocationInfo 偷藏字段。
+// 【设计取舍】只适配射击所需的业务字段，能力激活、目标数据传输和松开事件继续复用 GAS；
+// 本结构不承担可靠重传、连接管理或网络时间校正，避免形成第二套网络栈。
 USTRUCT()
 struct FGameplayAbilityTargetData_FPShot : public FGameplayAbilityTargetData
 {
 	GENERATED_BODY()
 	UPROPERTY() FFPShotRequest Request;
+	// GAS 用真实结构类型识别逐发 TargetData，消费端不猜测其他 TargetData 的内存布局。
 	virtual UScriptStruct* GetScriptStruct() const override { return StaticStruct(); }
+	// 只序列化 Avatar 引用、逐发身份、时间与量化方向；不序列化命中或伤害结论。
 	bool NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess);
 };
 
@@ -65,16 +69,14 @@ private:
 	void Pulse();
 	// 逐发 TargetData 消费后立即清缓存；能力只负责准入，武器排空已经授权的有界执行队列。
 	void HandleShotData(const FGameplayAbilityTargetDataHandle& Data, FGameplayTag ApplicationTag);
-	// 没有逐发输入的服务器能力不能永久持有 Firing；持续输入会重置空闲保护。
+	// 远端拥有者停止发送有效逐发输入时，服务器释放 Firing。
 	UFUNCTION()
-	void HandleAimTimeout();
+	void HandleShotDataTimeout();
 
 	TWeakObjectPtr<UfpstrueWeaponComponent> ActiveWeapon;
 	FDelegateHandle ShotDataHandle;
 	UPROPERTY()
-	TObjectPtr<UAbilityTask_WaitDelay> AimTimeoutTask;
-	// 正常松开立即释放输入能力，已准入输入由武器排空，不阻塞下一次合法按下。
-	bool bInputReleased = false;
+	TObjectPtr<UAbilityTask_WaitDelay> ShotDataTimeoutTask;
 	// 外部通知可同步结束并重新激活同一个能力实例，旧 Pulse 不能替新动作安排任务。
 	uint32 ActivationRevision = 0;
 	bool bEnding = false;
@@ -123,6 +125,7 @@ class FPSTRUE_API UfpstrueAimAbility : public UGameplayAbility
 public:
 	// 瞄准本地预测并取消冲刺，换弹或死亡时不接受新的瞄准。
 	UfpstrueAimAbility();
+	// 在 GAS 通用资格之外，要求当前角色装备仍可执行武器动作。
 	virtual bool CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 		const FGameplayTagContainer* SourceTags = nullptr, const FGameplayTagContainer* TargetTags = nullptr,
 		FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
@@ -136,9 +139,10 @@ protected:
 		FGameplayAbilityActivationInfo ActivationInfo, bool bReplicateEndAbility, bool bWasCancelled) override;
 
 private:
+	// WaitInputRelease 的本地/服务器释放回调；只结束当前瞄准，状态由 GAS 标签移除。
 	UFUNCTION()
 	void HandleInputReleased(float TimeHeld);
-	// Commit/表现广播可以取消并重启同一实例，旧激活栈不能给新一轮注册释放任务。
+	// Commit 的同步广播可取消并重启同一实例；IsActive 无法区分新旧激活。
 	uint32 ActivationRevision = 0;
 };
 
@@ -151,6 +155,7 @@ class FPSTRUE_API UfpstrueSprintAbility : public UGameplayAbility
 public:
 	// 角色仍用原按键切换语义，第二次按下取消当前能力。
 	UfpstrueSprintAbility();
+	// 复用 GAS 标签互斥，并拒绝死亡、退出或控制权迁移中的角色输入。
 	virtual bool CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 		const FGameplayTagContainer* SourceTags = nullptr, const FGameplayTagContainer* TargetTags = nullptr,
 		FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
@@ -164,6 +169,6 @@ protected:
 		FGameplayAbilityActivationInfo ActivationInfo, bool bReplicateEndAbility, bool bWasCancelled) override;
 
 private:
-	// 身份只保护异步/回调归属，不另外维护冲刺动作状态。
+	// 与 Aim 相同，只跨 Commit 回调检查激活身份，不另存冲刺状态。
 	uint32 ActivationRevision = 0;
 };

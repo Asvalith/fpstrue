@@ -5,7 +5,9 @@
 #include "CoreMinimal.h"
 #include "Engine/EngineTypes.h"
 
-// fpstrue 主模块公共入口；具体玩法职责分别位于 Character、GameMode、AI、Combat 和性能协调组件中。
+// 运行时公共契约：碰撞通道、单次 Montage 播放身份、性能计数和只读启动覆盖。
+// Character/武器/AI 通过这些小型契约协作；此模块不拥有生命、装备、对局或性能采集流程。
+// 播放身份由 Game Thread 的动作调用方维护；只读参数不让 Worker 获取可变 UObject 状态。
 // 注释导航：搜索“★【重要边界】”可串起关键流程；普通判空和常规计算不使用此标记。
 // [状态提交/结算去重]：内部状态先落定，再通知外部；同一动作的结果只提交一次。
 // [回调重入/异步身份]：外部调用可能同步改变状态，延迟回调必须证明自己仍属于原动作。
@@ -20,7 +22,7 @@
  */
 namespace FpstrueCollisionChannels
 {
-	// 玩家 Hitscan 专用查询通道：场景和敌人骨骼阻挡，角色胶囊、Trigger、UI 和尸体忽略。
+	// 玩家 Hitscan 查询通道：场景和活体命中体阻挡；角色移动胶囊、Trigger、UI 和尸体忽略。
 	inline constexpr ECollisionChannel WeaponTrace = ECC_GameTraceChannel3;
 }
 
@@ -30,7 +32,10 @@ class USkeletalMeshComponent;
 struct FAnimNotifyEventReference;
 struct FAnimMontageInstance;
 
-/** 一次明确播放的引用，不管理动作状态，也不从全局 Montage 列表推断业务归属。 */
+/**
+ * 【设计取舍】动作 ID 区分业务事务，Mesh/动画实例/播放 ID 区分同资产重播；多记少量身份换来旧 Notify 不能提交新动作。
+ * 只持弱引用，不延长角色或资源生命；绑定失败由业务方取消/兜底，不从“当前 Montage”猜归属。
+ */
 struct FPSTRUE_API FFPActionPlayback
 {
 	TWeakObjectPtr<USkeletalMeshComponent> Mesh;

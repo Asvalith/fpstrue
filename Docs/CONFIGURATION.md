@@ -62,7 +62,7 @@ AI 决策间隔、路径刷新距离、槽位和预算继续在所属蓝图/组�
 
 - `BP_Weapon` 的 reload 图由 `OnWeaponReloadPlaybackRequested` 进入，将该事件的 `ReloadId` 传给手臂和枪械两次 `PlayReloadMontage`。普通/空仓的原素材选择保留；装填继续由原生 `ReloadCommit` Notify 提交，原生实例结束回调收尾。
 - `enemy_BP` 的攻击图由 `OnAttackPlaybackRequested` 进入，将 `AttackId` 和选中的 Montage 传给 Combat 的 `PlayAttackMontageForAttack`。受击动画不再调用无参数攻击完成接口。
-- 无参数 `CommitReload`、`FinishReload`、`HandleAttackFinishedNotify` 已弃用并拒绝执行；`OnWeaponReloadStarted` / `OnAttackStarted` 仅供观察，不负责播放。自定义异步回调必须保存发起时的编号。
+- 无参数 `CommitReload`、`FinishReload`、`HandleAttackFinishedNotify` 的旧资产迁移已完成，现已删除这些无调用占位接口。没有消费者的 `OnWeaponReloadStarted` / `OnAttackStarted` 也不再保留。自定义异步回调必须保存发起时的编号，原生 Notify 则校验实际播放实例。
 - 一次性迁移已经完成，迁移与图审计 Commandlet 已从 Source 删除；原资产及工具源码备份保留在 `Saved/Backups/ActionPlaybackMigration/`，不属于正常玩法构建内容。
 - 两个目标蓝图均为 Git LFS 跟踪资产，代码与资产应一起交付；只有 Source 归档的环境必须同步已迁移资产，只更新 DLL 不会自动重接旧蓝图。自动化中的两个真实资产测试不允许用缺失资产跳过来冒充通过。
 

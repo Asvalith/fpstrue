@@ -1,4 +1,9 @@
-// Development-only inspection of the final pose. Never runs in ordinary play.
+/**
+ * Editor 验收观测器，仅显式 -PvpFootIKReview 时以 10 Hz 采样玩家最终姿态。
+ * 等待本次动画求值完成 → CPU 蒙皮指定真实足底顶点 → 独立查地面 → 记录间隙、支撑面滑移及相邻采样位移。
+ * 观测历史按 World/玩家 Mesh 隔离，不写玩法、动画配置或资产，也不恢复/接入敌人脚步 IK。
+ * 为读最终姿态会主动同步动画任务，日志排除了 Morph/Cloth；不可拿此诊断开销当正常性能基线。
+ */
 #include "CoreMinimal.h"
 #if WITH_EDITOR && !UE_BUILD_SHIPPING
 #include "Characters/Shared/fpstrueFootIK.h"
@@ -46,7 +51,7 @@ struct FWorldSample
 };
 TMap<TWeakObjectPtr<UWorld>, FWorldSample> Worlds;
 
-// Each index is an authored sole vertex, not an ankle-height approximation.
+// 只蒙皮资产指定的真实足底顶点到世界坐标；缺少 LOD0、权重或变换时失败，不以脚踝高度替代。
 bool SkinSole(USkeletalMeshComponent* Mesh, const TArray<int32>& Vertices,
 	TArray<FMatrix44f>& Matrices, TArray<FVector>& Positions)
 {
@@ -83,7 +88,7 @@ struct FFloorSample
 	bool bHit = false;
 };
 
-// The diagnostic performs its own geometry query; runtime bPlanted is not proof.
+// 对蒙皮足底点独立查找可行走支撑面，返回最小法向间隙；运行时 bPlanted 本身不是接地证据。
 FFloorSample MeasureFloor(UWorld* World, ACharacter* Character, const TArray<int32>& Vertices,
 	const TArray<FVector>& Positions)
 {
@@ -107,8 +112,8 @@ FFloorSample MeasureFloor(UWorld* World, ACharacter* Character, const TArray<int
 	return Result;
 }
 
-// Keep the same material vertex throughout a plant; switching lowest vertices
-// during heel/toe roll must not manufacture an apparent slide measurement.
+// 同一落脚代际始终跟踪同一顶点在支撑组件局部空间的位移；脚跟/脚尖最低点切换不能制造假滑移。
+// 不再接地或样本失效时清除该次记录并返回 0，是否有效仍由 Floor/Planted 等日志字段判断。
 float MeasurePlant(FPlantSample& Plant, const FFloorSample& Floor, bool bPlanted, uint32 Revision,
 	const TArray<int32>& Vertices, const TArray<FVector>& Positions, float Now, float& Age, bool& bChanged)
 {
@@ -127,9 +132,8 @@ float MeasurePlant(FPlantSample& Plant, const FFloorSample& Floor, bool bPlanted
 	return FVector::Dist(Plant.AnchorLocal, Support->GetComponentTransform().InverseTransformPosition(Positions[Index]));
 }
 
-// This independent interval survives a new plant. Compare the SAME material
-// vertex at adjacent samples before selecting the next interval's vertex;
-// legitimate steps and stopping-pose jumps remain visible, not labelled slip.
+// 跨落脚代际比较相邻采样的同一材质顶点，记录合法迈步及停步跳变，但不将这类位移直接称为滑移。
+// 首次或没有可比顶点时返回 -1；完成比较后才选择下一采样区间要跟踪的顶点。
 float MeasureVertexMotion(FVertexMotionSample& Previous, const FFloorSample& Floor,
 	const TArray<int32>& Vertices, const TArray<FVector>& Positions, float Now, float& Delta, int32& Vertex)
 {
@@ -148,6 +152,7 @@ float MeasureVertexMotion(FVertexMotionSample& Previous, const FFloorSample& Flo
 	return Displacement;
 }
 
+// 仅为报告分类当前空中、转身或速度阶段，不反向控制玩家动画状态机。
 FString PosePhase(const AfpstrueCharacter* Character)
 {
 	if (Character->GetCharacterMovement()->IsFalling()) return TEXT("Air");
@@ -156,11 +161,12 @@ FString PosePhase(const AfpstrueCharacter* Character)
 	return Speed <= 3.0 ? TEXT("Idle") : (Speed > 450.0 ? TEXT("Sprint") : TEXT("Walk"));
 }
 
+// 对一名玩家的左右脚执行同轮独立测量；缺少 IK/CPU 顶点数据时记录缺失，不用骨骼高度伪造足底。
 void SampleCharacter(UWorld* World, FWorldSample& Session, AfpstrueCharacter* Character, const TCHAR* Kind)
 {
 	USkeletalMeshComponent* Mesh = Character->GetMesh();
 	if (!Mesh) return;
-	// Diagnostic synchronization only, sampled at 10 Hz. This is not a perf run.
+	// 仅诊断时以 10 Hz 强制等待并行求值；这会引入同步成本，不是普通游戏的性能采集。
 	Mesh->HandleExistingParallelEvaluationTask(true, true);
 	auto* IK = Cast<UfpstrueFootIKAnimInstance>(Mesh->GetPostProcessInstance());
 	const float Now = World->GetTimeSeconds();
@@ -204,10 +210,11 @@ void SampleCharacter(UWorld* World, FWorldSample& Session, AfpstrueCharacter* Ch
 			Displacement, SampleDelta, DisplacementVertex, *GetNameSafe(Support ? Support->GetOwner() : nullptr),
 			*GetPathNameSafe(Support), Support ? static_cast<int32>(Support->CanCharacterStepUpOn.GetValue()) : INDEX_NONE);
 	}
-	// Player Facing screenshots remain owned by the ordinary rendered acceptance driver.
+	// 此处只写测量日志，玩家朝向截图仍交给正常带画面的验收驱动。
 
 }
 
+// World 末尾回调只在明确诊断参数和已开始的游戏 World 中工作，并限频采样存活玩家而非敌人。
 void Tick(UWorld* World, ELevelTick, float)
 {
 	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpFootIKReview")) || !World || !World->IsGameWorld()
@@ -231,15 +238,18 @@ void Tick(UWorld* World, ELevelTick, float)
 		SampleCharacter(World, Session, Player, Player->IsLocallyControlled() ? TEXT("LocalPlayer") : TEXT("RemotePlayer"));
 }
 
+// World 退出即释放本次测量历史，旧关卡支撑点和顶点不能带入下一轮验收。
 void Cleanup(UWorld* World, bool, bool) { Worlds.Remove(World); }
 struct FHooks
 {
 	FDelegateHandle TickHandle, CleanupHandle;
+	// 仅登记观测/清理回调；实际采样仍受 Tick 中的显式参数限制。
 	FHooks()
 	{
 		TickHandle = FWorldDelegates::OnWorldPostActorTick.AddStatic(&Tick);
 		CleanupHandle = FWorldDelegates::OnWorldCleanup.AddStatic(&Cleanup);
 	}
+	// 模块退出时对称解除原生委托，避免静态观测器留下失效回调。
 	~FHooks()
 	{
 		FWorldDelegates::OnWorldPostActorTick.Remove(TickHandle);

@@ -303,6 +303,7 @@ if ($ExecutionMode -eq 'Editor') {
     $EditorCacheGraph = 'fpstrueEditorTestDDC'
     $EditorArguments = @(
         ('"' + $ProjectPath + '"'), '-NoLiveCoding', ('-ddc=' + $EditorCacheGraph),
+        '-ini:Game:[StartupActions]:bAddPacks=False',
         ('-LocalDataCachePath="' + $LocalCacheDirectory + '"')
     )
 }

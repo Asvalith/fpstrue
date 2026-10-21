@@ -21,7 +21,8 @@ struct FPSTRUE_API FFpstrueFootIKDebug
 	uint32 ProbeTraceCount = 0;
 };
 
-// 玩家使用 InputPose→Result 薄后处理图；原生 Proxy 在当前输入姿态上解腿，不读取上帧 IK 后的脚高作为误差。
+// 玩家模块安装 InputPose→Result 薄后处理图：PreUpdate 采样资格 -> 当前主图姿态查询支撑 -> 两骨 IK -> 诊断回读。
+// 只有玩家身体使用；Proxy 独占贴地/锁脚缓存，不决定移动、命中规则或敌人 LOD，当前世界查询始终在 Game Thread。
 UCLASS(Transient, Blueprintable)
 class FPSTRUE_API UfpstrueFootIKAnimInstance : public UAnimInstance
 {
@@ -40,15 +41,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category="Foot IK") TArray<int32> RightSoleVertices;
 	// 仅接受项目玩家角色；敌人及其他 Pawn 不安装此后处理，不共享玩家脚部资格。
 	static void Install(ACharacter* Character);
+	// 请求下次 PreUpdate 清除锁脚和骨盆缓存，并立即标记诊断为未启用。
 	void ResetFootPlacement();
+	// 返回最近一次求值的诊断副本；LeaderPose 跟随者不宣称独立完成贴地。
 	FFpstrueFootIKDebug GetFootIKDebug() const;
+	// 求值结束后在 Game Thread 从 Proxy 取回只读诊断，不再执行地面查询。
 	virtual void NativePostEvaluateAnimation() override;
-	// 此玩家后处理在本帧输入姿态上查询World，必须在首次初始化、离地和落地前都拒绝Worker求值。
-	// UE5.5可在Proxy::PreUpdate之前缓存派发条件，不能用上一轮贴地资格动态开启并行。
-	// 原生主图与后处理共用Mesh求值门禁，因此仅安装本后处理的玩家身体同步；不修改敌人或全局并行开关。
+	// 【设计取舍】依赖本帧输入姿态再查询 World，固定拒绝 Worker 求值，不用上一帧资格动态放行。
+	// UE5.5 可能在 PreUpdate 前缓存派发条件；代价是安装本后处理的玩家身体主图也同步。
+	// 敌人与全局并行开关不受影响，不能把这一玩家后处理描述成已完成并行化。
 	virtual bool CanRunParallelWork() const override { return false; }
 protected:
+	// 为本动画实例创建独占的贴地求值与缓存 Proxy。
 	virtual FAnimInstanceProxy* CreateAnimInstanceProxy() override;
+	// 由引擎在动画实例退出时成对释放本类创建的 Proxy。
 	virtual void DestroyAnimInstanceProxy(FAnimInstanceProxy* InProxy) override;
 private:
 	friend struct FFpstrueFootIKProxy;

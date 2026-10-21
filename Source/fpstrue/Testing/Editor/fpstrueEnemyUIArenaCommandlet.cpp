@@ -46,6 +46,7 @@ UfpstrueEnemyUIArenaCommandlet::UfpstrueEnemyUIArenaCommandlet()
 int32 UfpstrueEnemyUIArenaCommandlet::Main(const FString& Params)
 {
 #if WITH_EDITOR
+	// 1. 输出仅为这个固定专项包；已存在时不加载重写，也不隐式删除或替换地图。
 	const FString Package = TEXT("/Game/PerformanceCandidates/EnemyUI160/EnemyUI160_ArenaOverview55x192");
 	const FString Filename = FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension());
 	// 首次创建后只读复用；需要改场地时先显式保留旧证据，不能在 A/B 中途悄悄覆写。
@@ -55,6 +56,7 @@ int32 UfpstrueEnemyUIArenaCommandlet::Main(const FString& Params)
 		return 0;
 	}
 	if (GEditor == nullptr) return 1;
+	// 2. 在新的内存 World 搭建场地、出生点及专项镜头，尚不提交任何资产文件。
 	UWorld* World = UEditorLoadingAndSavingUtils::NewBlankMap(false);
 	if (World == nullptr) return 1;
 	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
@@ -111,6 +113,7 @@ int32 UfpstrueEnemyUIArenaCommandlet::Main(const FString& Params)
 	FStaticMeshCompilingManager::Get().FinishAllCompilation();
 	World->UpdateWorldComponents(true, false);
 	FNavigationSystem::AddNavigationSystemToWorld(*World, FNavigationSystemRunMode::EditorMode);
+	// 3. 仅接受 55×192 的单导航代理配置，避免把不同胶囊条件混进同一性能场地。
 	auto* Navigation = UNavigationSystemV1::GetCurrent(World);
 	if (Navigation == nullptr) return 1;
 	Floor->GetStaticMeshComponent()->RecreatePhysicsState();
@@ -136,6 +139,7 @@ int32 UfpstrueEnemyUIArenaCommandlet::Main(const FString& Params)
 		Navigation->GetNavigationBounds().Num(), Navigation->GetSupportedAgents().Num(), *GetNameSafe(Navigation->GetDefaultNavDataInstance()),
 		Floor->GetStaticMeshComponent()->IsNavigationRelevant(), bStartProjected, *StartOnNavigation.Location.ToCompactString());
 	int32 ProjectedPoints = 0, NavigablePoints = 0;
+	// 投影成功不等于路径可达；每个格点还必须存在从固定玩家起点到达的完整路径。
 	for (const FVector& Position : SpawnGrid)
 	{
 		FNavLocation Projected;
@@ -149,6 +153,7 @@ int32 UfpstrueEnemyUIArenaCommandlet::Main(const FString& Params)
 		UE_LOG(LogTemp, Error, TEXT("ENEMY_UI_ARENA FAIL Navigation=%d/160 Projected=%d/160 Saved=0"), NavigablePoints, ProjectedPoints);
 		return 1;
 	}
+	// 4. 全部点通过后才保存这个新地图；本工具不通过 SaveDirtyPackages 提交其他脏资产。
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Filename), true);
 	if (!FEditorFileUtils::SaveMap(World, Filename)) return 1;
 	UE_LOG(LogTemp, Display, TEXT("ENEMY_UI_ARENA CREATED Map=%s Navigation=160/160 Grid=16x10 SpacingCm=120 Camera=%s OriginalMapsUntouched=1"),

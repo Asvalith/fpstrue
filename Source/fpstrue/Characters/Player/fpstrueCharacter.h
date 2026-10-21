@@ -49,10 +49,15 @@ class FPSTRUE_API UfpstruePlayerAnimInstance : public UAnimInstance
 {
 	GENERATED_BODY()
 public:
+	// 配置默认 RAR 动作资源，派生蓝图可以覆盖；不在构造中绑定运行时武器。
 	UfpstruePlayerAnimInstance();
+	// 重建实例时复位验收身份、禁用 RootMotion 位移并绑定当前装备事实。
 	virtual void NativeInitializeAnimation() override;
+	// 解绑角色/武器事实、终止旧播放并作废旧实例的延迟验收请求。
 	virtual void NativeUninitializeAnimation() override;
+	// Game Thread 采样移动、GAS 派生姿态和朝向；动画图只消费快照，不结算玩法。
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
+	// 本地 RAR 手臂求值后将素材 FOV 曲线投影到本世界材质参数，不改变命中视点。
 	virtual void NativePostEvaluateAnimation() override;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float GroundSpeed = 0.0f;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float ForwardSpeed = 0.0f;
@@ -84,9 +89,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float HitAlpha = 0.0f;
 	UPROPERTY(BlueprintReadOnly, Transient, Category = "Presentation") float HitTime = 0.0f;
 private:
+	// 成对切换事实订阅，换弹已开始时按当前进度补播，不生成另一套动作时钟。
 	void BindCurrentWeapon();
+	// 装备变化即刻重绑，避免首发早于下一次动画更新时漏播。
 	UFUNCTION() void HandleEquipmentChanged(UfpstrueWeaponComponent* Weapon);
+	// 按当前瞄准表现选择开火 Montage，不重复扣弹或结算命中。
 	UFUNCTION() void PresentFire();
+	// 选择普通/空仓素材，再由武器按 ReloadId 统一播放、绑定与取消。
 	UFUNCTION() void PresentReload(int32 ReloadId, bool bWasEmpty);
 	TWeakObjectPtr<UfpstrueWeaponComponent> AnimationWeapon;
 	TWeakObjectPtr<AfpstrueCharacter> EquipmentSource;
@@ -94,6 +103,7 @@ private:
 	float LandingRemaining = 0.0f;
 	bool bWasFalling = false;
 #if !UE_BUILD_SHIPPING
+	// 仅显式视觉验收延迟截取有效动作帧；旧实例、旧装备或旧事务不生成截图。
 	void CapturePresentation(const TCHAR* Phase);
 	TSet<FName> PendingPresentationCaptures;
 	uint32 PresentationCaptureRevision = 0;
@@ -101,16 +111,23 @@ private:
 };
 
 // 每次移动携带当时的模式，不把当前 GAS 标签错误套用到历史移动；这里只保存计算上下文，不执行能力。
+// 【设计取舍】只占用 CMC 两个自定义 bit，预测、ACK 和纠正仍用原生协议，不另发一套移动 RPC。
+// 模式切换时拒绝合并会多保留少量 Move，换来历史重放的速度上下文正确；模式位本身不是服务器授权。
 class FPSTRUE_API FSavedMove_fpstrueCharacter : public FSavedMove_Character
 {
 public:
 	using Super = FSavedMove_Character;
 	bool bSavedAiming = false;
 	bool bSavedSprinting = false;
+	// 回收原生 SavedMove 时清空附加模式位，避免复用上一次动作。
 	virtual void Clear() override;
+	// 在原生移动压缩标志中携带 Aim/Sprint 两个业务输入位。
 	virtual uint8 GetCompressedFlags() const override;
+	// 不合并模式不同的移动，保留加减速切换发生的时间边界。
 	virtual bool CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const override;
+	// 保存本次移动实际采用的模式，不能在日后回放时改用当前标签。
 	virtual void SetMoveFor(ACharacter* Character, float InDeltaTime, const FVector& Accel, FNetworkPredictionData_Client_Character& ClientData) override;
+	// 回放前恢复历史模式，只写移动计算上下文，不激活能力或通知蓝图。
 	virtual void PrepMoveFor(ACharacter* Character) override;
 };
 
@@ -120,12 +137,19 @@ class FPSTRUE_API UfpstrueCharacterMovementComponent : public UCharacterMovement
 {
 	GENERATED_BODY()
 public:
+	// 以本次移动的 Aim/Sprint 上下文选择速度，其他移动模式复用 CMC 原生规则。
 	virtual float GetMaxSpeed() const override;
+	// 延迟创建使用项目 SavedMove 的原生客户端预测缓存，不替换 UE 的 ACK/纠正协议。
 	virtual FNetworkPredictionData_Client* GetPredictionData_Client() const override;
+	// 解包模式位；服务器只接受当前 GAS 授权或有界历史授权，不信任客户端速度。
 	virtual void UpdateFromCompressedFlags(uint8 Flags) override;
+	// UE 完成历史 Move 重放后恢复当前模式，防止旧 Move 覆盖已取消的冲刺/瞄准。
 	virtual bool ClientUpdatePositionAfterServerUpdate() override;
+	// 角色提交当前 GAS 派生意图；权威端保留刚结束模式的短暂合法时间窗。
 	void SetMovementIntent(bool bAiming, bool bSprinting);
+	// SavedMove 读取当前移动计算使用的瞄准模式，而非直接查询 GAS。
 	bool IsAimMovementRequested() const { return bMoveAiming; }
+	// SavedMove 读取当前移动计算使用的冲刺模式，瞄准优先级由写入口统一约束。
 	bool IsSprintMovementRequested() const { return bMoveSprinting; }
 private:
 	friend class FSavedMove_fpstrueCharacter;
@@ -160,8 +184,8 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	// 动作激活由 ASC 和 PredictionKey 承载；武器逐发请求另带身份与时间，但不能绕过能力授权。
 	virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override;
-	// 持久血量走复制；瞬时受击反馈单发给拥有该角色的客户端，不让本地再扣一次血。
-	UFUNCTION(Client, Reliable) void ClientReceiveDamage(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
+	// 持久血量走复制；仅有旧蓝图受击实现时向拥有者发送可丢弃的反馈，不在客户端再扣血。
+	UFUNCTION(Client, Unreliable) void ClientReceiveDamage(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy);
 	/// 对外接口（查询、请求）
 
 	// 创建相机、第一人称 Mesh 和 HealthComponent，角色本身不启用 Tick。
@@ -192,19 +216,26 @@ public:
 
 	// ★【命中边界】服务器短期历史只保存 PhysicsAsset 的球、盒、胶囊；不移动真实角色，不重播动画或伤害。
 	static constexpr float MaxHitHistorySeconds = 0.35f;
+	// 在本玩家的相邻历史形状间插值求射线最近交点；无有效历史时返回 false，不回退移动胶囊。
 	bool TraceHistoricalHit(double ServerTime, const FVector& Start, const FVector& End, FHitResult& OutHit) const;
 	// 世界遮挡仍取当前状态（含动态门）；角色用历史形状。没有动态障碍历史时不能宣称恢复了过去整个世界。
 	static bool TraceHistoricalHit(UWorld* World, const AfpstrueCharacter* Shooter, double ServerTime,
 		const FVector& Start, const FVector& End, FHitResult& OutHit);
+	// 返回射手历史视点；只在有界的一帧采样空隙允许取最后视点，不外推目标命中体。
 	bool GetHistoricalViewOrigin(double ServerTime, FVector& OutOrigin) const;
 	// 正常由骨骼完成回调记录；显式接口也只允许权威端按当前世界时间采样，不能由客户端灌入历史。
 	void RecordServerHitHistory();
+	// 清空历史并递增代际，避免跨死亡/传送插值；可选释放各帧预留形状内存。
 	void ResetHitHistory(bool bReleaseMemory = false);
+	// 测试/诊断读取历史断代编号，不参与网络复制或命中授权。
 	uint32 GetHitHistoryEpoch() const { return HitHistoryEpoch; }
 	// 只读容量诊断：比较实际常驻预算，不把整个进程或着色器编译峰值冒充历史缓存收益。
 	SIZE_T GetHitHistoryAllocatedBytes() const;
+	// 返回所有环形帧预留的形状槽位数，不等同于当前有效历史样本数。
 	int32 GetHitHistoryReservedShapeCount() const;
+	// 返回单条历史形状的真实 sizeof，供常驻内存预算核算。
 	static SIZE_T GetHitHistoryShapeStride();
+	// 成功的实际传送断开命中历史；仅试探 Teleport 时不清空已有历史。
 	virtual bool TeleportTo(const FVector& DestLocation, const FRotator& DestRotation, bool bIsATest = false, bool bNoCheck = false) override;
 
 	//Character只暴露当前装备关系，武器运行时状态由WeaponComponent持有
@@ -223,16 +254,23 @@ public:
 	// WeaponComponent 用它选择瞄准散布和后坐力倍率。
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsAiming() const { return bIsAiming; }
+	// 查询 GAS 派生/远端复制的冲刺显示镜像，不创建独立动作资格。
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool IsSprinting() const { return bIsSprinting; }
+	// 查询该角色是否使用 RAR 成套表现资源。
 	bool UsesRARPresentation() const { return bUseRARPresentation; }
+	// 查询该角色是否使用 UE5.5 模板成套表现资源。
 	bool UsesTemplatePresentation() const { return bUseTemplatePresentation; }
+	// 统一识别两种原生表现桥，旧蓝图表现保留自己的接线。
 	bool UsesNativePresentation() const { return bUseRARPresentation || bUseTemplatePresentation; }
 	static constexpr float ViewPitchLimit = 75.0f;
 	static constexpr float ViewYawLimit = 75.0f;
 	static constexpr float TurnTriggerYaw = 55.0f;
+	// 只读脚部朝向边界状态，客户端据服务器时钟重建转身表现。
 	const FFpstrueBodyFacingState& GetBodyFacingState() const { return BodyFacingState; }
+	// 优先使用 GameState 同步服务器时钟，单机/未就绪时使用当前世界时间。
 	float GetBodyFacingServerTime() const;
+	// 仅服务器在停走/转身边界更新复制状态，不把视觉脚部朝向用于移动或射击授权。
 	void UpdateBodyFacing(float TurnDuration);
 
 	//转发HealthComponent，角色本身不再直接管理生命值状态
@@ -263,7 +301,6 @@ public:
 protected:
 	// ==================== 生命周期、输入与事件处理 ====================
 
-	//生命周期回调：Actor 销毁前、控制器变更时、引擎在 Possess 时调用（参数是增强输入组件）
 	// 停止持续开火、移除输入映射并解除健康事件。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	// Controller 变化时把 Mapping Context 迁移到新的本地玩家子系统。
@@ -302,14 +339,10 @@ protected:
 	UFUNCTION()
 	void HandleDeath();
 
-	//蓝图事件：瞄准状态变化、武器装备、血量变化、受伤、死亡
+	// 原单机蓝图实际实现的瞄准、血量、受伤和死亡事件。
 	// 蓝图用它切换瞄准动画和 UI。
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnAimChanged(bool bNewIsAiming);
-
-	// 蓝图用它播放装备表现。
-	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
-	void OnWeaponEquipped(UfpstrueWeaponComponent* WeaponComponent);
 
 	// 蓝图/HUD 响应血量变化。
 	UFUNCTION(BlueprintImplementableEvent, Category = "Health")
@@ -330,10 +363,12 @@ private:
 	UPROPERTY(EditDefaultsOnly, Category = "Presentation") bool bUseTemplatePresentation = false;
 	// 装备复制与武器快照可能乱序到达，通过两侧幂等补齐，不由客户端执行拾取结算。
 	UFUNCTION() void OnRep_EquippedWeapon();
+	// 应用姿态镜像对应的速度，并仅在真实瞄准边沿通知本地蓝图；不激活能力。
 	UFUNCTION() void OnRep_MovementModifiers();
 #if !UE_BUILD_SHIPPING
 	// 只在显式 -PvpSmokeTest 参数下运行客户端脚本输入；不是正常玩法 Tick。
 	void RunPvpSmokeStep();
+	// 将烟测按下的 W 归还给原 Controller，控制权迁移/死亡也可安全成对释放。
 	void ReleaseNetworkSmokeMovementKey();
 	TWeakObjectPtr<class APlayerController> NetworkSmokeMovementController;
 	FTimerHandle NetworkSmokeTimer;
@@ -466,5 +501,6 @@ private:
 	FDelegateHandle BoneHistoryHandle;
 	TWeakObjectPtr<class UPhysicsAsset> RecordedPhysicsAsset;
 	bool bLoggedUnsupportedHitGeometry = false;
+	// 定位同一历史代际内包围时间点的两帧与插值因子；越界或空历史直接失败。
 	bool FindHitHistoryFrames(double ServerTime, const FHitHistoryFrame*& Older, const FHitHistoryFrame*& Newer, float& Alpha) const;
 };

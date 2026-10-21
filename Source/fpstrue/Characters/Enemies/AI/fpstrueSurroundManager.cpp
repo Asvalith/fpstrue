@@ -56,7 +56,6 @@ AfpstrueSurroundManager::AfpstrueSurroundManager()
 // 构建稳定内外环槽位；只有调试开关开启时才启动可视化 Timer。
 void AfpstrueSurroundManager::BeginPlay()
 {
-	// 关卡开始时建立固定槽位拓扑；调试绘制只有显式开启后才产生 Timer 成本。
 	Super::BeginPlay();
 	if (!HasAuthority() || GetNetMode() == NM_Client) return;
 	for (auto It = WorldMoveRequestBudgets.CreateIterator(); It; ++It)
@@ -73,7 +72,6 @@ void AfpstrueSurroundManager::BeginPlay()
 // 停止调试与共享快照更新，并清除当前对局的槽位、许可和缓存。
 void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 清理两个 Timer、弱引用容器和槽位占用，避免关卡切换后保留旧玩家或敌人。
 	GetWorldTimerManager().ClearTimer(DebugDrawTimerHandle);
 	if (FWorldMoveRequestBudget* Budget = WorldMoveRequestBudgets.Find(GetWorld())) Budget->Managers.Remove(this);
 	ResetManager();
@@ -83,7 +81,6 @@ void AfpstrueSurroundManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // 注入唯一共享目标；换目标时撤销全部旧分配，有效目标建立快照并启动低频刷新。
 void AfpstrueSurroundManager::SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter)
 {
-	// GameMode 在开局注入唯一玩家；目标变化时重建快照并重新启动共享刷新 Timer。
 	if (!HasAuthority() || GetNetMode() == NM_Client) return;
 	if (!IsValid(NewTargetCharacter) || NewTargetCharacter->IsDead() || NewTargetCharacter->IsActorBeingDestroyed()
 		|| NewTargetCharacter->GetWorld() != GetWorld()) NewTargetCharacter = nullptr;
@@ -179,14 +176,10 @@ void AfpstrueSurroundManager::BuildSlots()
 	}
 }
 
-// 一次性投影所有站位点和攻击接近点；失败保留重试标记，各 AI 仅消费投影结果而非共享路径。
+// 批量异步查询站位与内圈接近点；各 AI 只消费发布结果，不各自投影，也不共享导航路径。
 void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 {
 	if (!HasAuthority() || GetNetMode() == NM_Client) return;
-	// 同时缓存“站位点”和更靠近玩家的“攻击接近点”，AI 决策阶段不再重复 ProjectPointToNavigation。
-	// 导航系统存在且投影成功时才输出可用位置，失败不伪造可达点。
-	// 每次只集中投影一次；失败标志独立于位置快照有效性。
-	// 上述投影缓存职责保留，但生产和筛选已由异步 EQS 执行；不再保留手写投影循环。
 	UWorld* World = GetWorld();
 	UEnvQueryManager* Queries = World != nullptr ? UEnvQueryManager::GetCurrent(World) : nullptr;
 	if (Queries == nullptr || !bHasSharedTargetSnapshot) return;
@@ -224,6 +217,8 @@ void AfpstrueSurroundManager::RebuildProjectedSlotCache()
 }
 
 // 校验查询身份后一次发布新位置，候选排序不影响槽位身份；相邻点还需满足几何间距。
+// 【设计取舍】EQS 分片降低同步查询尖峰，但结果可能迟于目标移动、换目标或释放；完成不等于仍可使用。
+// QueryID、请求代际和目标快照共同限定发布资格，失效则走已有低频重试，不每敌人补一次同步查询。
 void AfpstrueSurroundManager::HandleApproachQueryFinished(TSharedPtr<FEnvQueryResult> Result, uint32 Revision, FVector QueryTarget)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEQS_PublishApproach);
@@ -469,6 +464,7 @@ int32 AfpstrueSurroundManager::FindBestFreeSlot(const FVector& EnemyLocation, in
 	return BestSlotIndex;
 }
 
+// 授予在通知之前完成；Controller 收到变更时，读取到的已是新的唯一归属。
 void AfpstrueSurroundManager::AssignSlot(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, int32 SlotIndex)
 {
 	if (const int32* Previous = EnemyToSlot.Find(Enemy))
@@ -484,51 +480,53 @@ void AfpstrueSurroundManager::AssignSlot(TWeakObjectPtr<AfpstrueEnemyCharacter> 
 	PendingTacticalNotifications.Add(Enemy);
 }
 
-// 同一服务器 Game Thread 内先提交全部账本，再发“重新决策”通知；通知不直接启动攻击。
+// 同一服务器 Game Thread 内先完成分配，再统一通知；目标失效也必须送达已经产生的释放通知。
 void AfpstrueSurroundManager::PumpTacticalQueue()
 {
-	if (bPumpingTacticalQueue || !bHasSharedTargetSnapshot || !IsValid(TargetCharacter) || TargetCharacter->IsDead()) return;
-	bPumpingTacticalQueue = true;
-	const double Now = GetWorld()->GetTimeSeconds();
-	const bool bPositionsCurrent = FVector::DistSquared(CachedTargetLocation, PublishedTargetLocation)
-		<= FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold));
-	bool bInnerHasRoom = bPositionsCurrent;
-	for (int32 Index = 0; Index < WaitingQueue.Num();)
+	if (bPumpingTacticalQueue) return;
+	if (bHasSharedTargetSnapshot && IsValid(TargetCharacter) && !TargetCharacter->IsDead())
 	{
-		const FTacticalRequest Request = WaitingQueue[Index];
-		FTacticalParticipant* Participant = Participants.Find(Request.Enemy);
-		if (Participant == nullptr || Participant->RequestSequence != Request.Sequence)
+		TGuardValue<bool> PumpGuard(bPumpingTacticalQueue, true);
+		const double Now = GetWorld()->GetTimeSeconds();
+		const bool bPositionsCurrent = FVector::DistSquared(CachedTargetLocation, PublishedTargetLocation)
+			<= FMath::Square(FMath::Max(25.0f, SharedTargetMoveThreshold));
+		bool bInnerHasRoom = bPositionsCurrent;
+		for (int32 Index = 0; Index < WaitingQueue.Num();)
 		{
-			WaitingQueue.RemoveAt(Index);
-			continue;
-		}
-		if (!Request.Enemy.IsValid() || Request.Enemy->IsDead() || Request.Enemy->IsActorBeingDestroyed())
-		{
-			// 使用原 weak 键清理，不把 Get()==nullptr 变成另一把空键。
-			RemoveParticipant(Request.Enemy);
-			continue;
-		}
-		const int32 InnerSlot = bInnerHasRoom && Now >= Participant->RetryAfter
-			? FindBestFreeSlot(Request.Enemy->GetActorLocation(), 0) : INDEX_NONE;
-		if (InnerSlot != INDEX_NONE)
-		{
-			AssignSlot(Request.Enemy, InnerSlot);
-			WaitingQueue.RemoveAt(Index);
-			continue;
-		}
-		if (Now >= Participant->RetryAfter) bInnerHasRoom = false;
-		++Index;
-	}
-	// 晋升先释放外环，随后按同一 FIFO 为无槽位者补外环；已有外环身份不洗牌。
-	if (bPositionsCurrent)
-		for (const FTacticalRequest& Request : WaitingQueue)
-			if (!EnemyToSlot.Contains(Request.Enemy) && Now >= Participants.FindChecked(Request.Enemy).RetryAfter)
+			const FTacticalRequest Request = WaitingQueue[Index];
+			FTacticalParticipant* Participant = Participants.Find(Request.Enemy);
+			if (Participant == nullptr || Participant->RequestSequence != Request.Sequence)
 			{
-				const int32 OuterSlot = FindBestFreeSlot(Request.Enemy->GetActorLocation(), 1);
-				if (OuterSlot == INDEX_NONE) break;
-				AssignSlot(Request.Enemy, OuterSlot);
+				WaitingQueue.RemoveAt(Index);
+				continue;
 			}
-	bPumpingTacticalQueue = false;
+			if (!Request.Enemy.IsValid() || Request.Enemy->IsDead() || Request.Enemy->IsActorBeingDestroyed())
+			{
+				// 使用原 weak 键清理，不把 Get()==nullptr 变成另一把空键。
+				RemoveParticipant(Request.Enemy);
+				continue;
+			}
+			const int32 InnerSlot = bInnerHasRoom && Now >= Participant->RetryAfter
+				? FindBestFreeSlot(Request.Enemy->GetActorLocation(), 0) : INDEX_NONE;
+			if (InnerSlot != INDEX_NONE)
+			{
+				AssignSlot(Request.Enemy, InnerSlot);
+				WaitingQueue.RemoveAt(Index);
+				continue;
+			}
+			if (Now >= Participant->RetryAfter) bInnerHasRoom = false;
+			++Index;
+		}
+		// 晋升先释放外环，随后按同一 FIFO 为无槽位者补外环；已有外环身份不洗牌。
+		if (bPositionsCurrent)
+			for (const FTacticalRequest& Request : WaitingQueue)
+				if (!EnemyToSlot.Contains(Request.Enemy) && Now >= Participants.FindChecked(Request.Enemy).RetryAfter)
+				{
+					const int32 OuterSlot = FindBestFreeSlot(Request.Enemy->GetActorLocation(), 1);
+					if (OuterSlot == INDEX_NONE) break;
+					AssignSlot(Request.Enemy, OuterSlot);
+				}
+	}
 	NotifyTacticalChanges();
 }
 
@@ -557,12 +555,12 @@ void AfpstrueSurroundManager::RemoveParticipant(TWeakObjectPtr<AfpstrueEnemyChar
 	if (bRemoved) { ++TacticalReleaseCount; PendingTacticalNotifications.Add(Enemy); }
 }
 
+// 退出的唯一顺序是移除 → 补位 → Pump 内统一通知，不重复调用通知出口。
 void AfpstrueSurroundManager::ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy)
 {
 	if (!HasAuthority() || GetNetMode() == NM_Client || Enemy == nullptr) return;
 	RemoveParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter>(Enemy));
 	PumpTacticalQueue();
-	NotifyTacticalChanges();
 }
 
 void AfpstrueSurroundManager::RequeueParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy)
@@ -770,13 +768,11 @@ bool AfpstrueSurroundManager::TryConsumeMoveRequestBudget(bool bCombatPriority)
 	return true;
 }
 
-// ==================== 清理、槽位选择与调试 ====================
-// 槽位选择与补位算法紧邻申请/释放入口；此处集中清理与调试。
+// ==================== 清理与调试 ====================
 
 // 对局结束或更换目标时统一清空跨敌人资源并停掉共享刷新，允许之后重新注入目标。
 void AfpstrueSurroundManager::ResetManager()
 {
-	// 对局结束时一次性归零槽位、攻击名额、帧预算和目标缓存，Manager 可安全退出或重新初始化。
 	// ★【重要边界】[生命周期/异步身份] 清空身份与登记后再 Abort；回调不能恢复已经结束的世界状态。
 	const int32 OldApproach = ApproachQueryId;
 	ApproachQueryId = INDEX_NONE;
@@ -846,14 +842,9 @@ void AfpstrueSurroundManager::CleanupInvalidEntries()
 	for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& Enemy : Removed) RemoveParticipant(Enemy);
 }
 
-// 把相对极角和半径换算为世界位置；可选半径用于同角度的攻击接近点。
-	// 使用缓存玩家位置、槽位极角和半径计算二维世界坐标；随后由批量 NavMesh 投影修正可达性。
-// 以上原始坐标计算说明保留；对应实现集中到 EQS Generator，调试只绘制已发布的结果。
-
 // 调试时绘制有效投影槽位，以青色和绿色区分占用与空闲；不参与正式决策。
 void AfpstrueSurroundManager::DrawDebugSlots()
 {
-	// 仅开发调试使用：绿色为空位、青色为占用位，不参与正式站位决策。
 	if (!bDrawDebugSlots || !IsValid(TargetCharacter))
 	{
 		return;

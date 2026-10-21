@@ -16,8 +16,6 @@ class AfpstrueSurroundManager;
 class UAnimMontage;
 struct FAnimMontageInstance;
 
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 /** 可复用的敌人近战参数；赋给 CombatComponent 后，整组参数覆盖其旧蓝图默认值。 */
 UCLASS(BlueprintType)
 class FPSTRUE_API UfpstrueEnemyCombatConfig : public UDataAsset
@@ -63,6 +61,8 @@ enum class EFPEnemyAttackPhase : uint8
  *
  * AIController 只请求开始攻击；AnimNotifyState 只报告动画窗口；本组件统一决定能否攻击、何时造成伤害、
  * 如何处理中断/重复 Notify，并向开始时捕获的 SurroundManager 归还攻击名额。
+ * 服务器 Game Thread 主链：资格复核 → 取得出手许可 → 建立事务 → 绑定播放 → 窗口 Sweep → 完成/中断归还。
+ * 客户端仅消费 EnemyCharacter 复制的播放快照，不从本地动画通知提交伤害。
  */
 UCLASS(ClassGroup = (Combat))
 class FPSTRUE_API UfpstrueEnemyCombatComponent : public UActorComponent
@@ -100,8 +100,6 @@ public:
 	void UpdateAttackWindow();
 	// 只关闭伤害窗口；采样值不再使用，下次 Begin 会重新建立。
 	void EndAttackWindow();
-	// 只保留旧资产符号用于迁移诊断；没有身份的异步通知不能结束当前攻击。
-	void HandleAttackFinishedNotify();
 	// 只有通知携带的 Mesh 和 Montage 实例属于当前攻击时，才允许完成本次事务。
 	void HandleAttackFinishedNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference);
 	// 原生 Notify 使用动画携带的播放实例身份；不从当前事务倒填旧回调的身份。
@@ -182,7 +180,7 @@ private:
 	void BindAttackPlaybackCompletion(FAnimMontageInstance& Instance);
 	// 未绑定时使用配置兜底，绑定后覆盖实际剩余播放时间；始终只保留一个有限的一次性 Timer。
 	void ScheduleAttackFailSafe(const FAnimMontageInstance* Playback = nullptr);
-	// 完成攻击并通知 AI 释放攻击名额。
+	// 正常完成先提交冷却，再由 ResetCombat 归还出手名额；不重新排长期席位。
 	void FinishAttack();
 
 	// 攻击事务状态集中在组件中，EnemyCharacter 不再并行维护窗口、命中集合和结束计时器。
@@ -198,7 +196,6 @@ private:
 	FFPActionPlayback AttackPlayback;
 	bool bEndingPlay = false;
 	bool bStartingPlayback = false;
-	bool bReportedLegacyFinish = false;
 	bool bDisableAttackSweepForBenchmark = false;
 	FVector PreviousWeaponBase = FVector::ZeroVector;
 	FVector PreviousWeaponTip = FVector::ZeroVector;

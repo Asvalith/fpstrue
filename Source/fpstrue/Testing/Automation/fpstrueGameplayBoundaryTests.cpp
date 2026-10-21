@@ -12,10 +12,13 @@ void UfpstrueShotPresentationTestWeapon::ProcessEvent(UFunction* Function, void*
 {
 	if (Function != nullptr && Parameters != nullptr && Function->GetFName() == FName(TEXT("MulticastShot")))
 	{
-		const FIntProperty* Key = FindFProperty<FIntProperty>(Function, TEXT("PresentationKey"));
+		const FStructProperty* Hit = FindFProperty<FStructProperty>(Function, TEXT("Hit"));
 		const FIntProperty* Shot = FindFProperty<FIntProperty>(Function, TEXT("ShotIndex"));
-		if (Key != nullptr && Shot != nullptr)
-			ShotPresentations.Emplace(Key->GetPropertyValue_InContainer(Parameters), Shot->GetPropertyValue_InContainer(Parameters));
+		const FUInt32Property* Generation = FindFProperty<FUInt32Property>(Function, TEXT("EquipmentGeneration"));
+		const FUInt32Property* Session = FindFProperty<FUInt32Property>(Function, TEXT("Session"));
+		if (Hit != nullptr && Hit->Struct == FHitResult::StaticStruct() && Shot != nullptr && Generation != nullptr && Session != nullptr)
+			ShotPresentations.Add({*Hit->ContainerPtrToValuePtr<FHitResult>(Parameters), Shot->GetPropertyValue_InContainer(Parameters),
+				Generation->GetPropertyValue_InContainer(Parameters), Session->GetPropertyValue_InContainer(Parameters)});
 	}
 	Super::ProcessEvent(Function, Parameters);
 }
@@ -505,7 +508,7 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 	Combat->EndAttackWindow();
 	TestTrue(TEXT("Closing the damage window leaves the attack transaction active"), Facing.Enemy->IsAttacking());
 	Combat->ResetCombat();
-	Facing.Enemy->HandleAttackFinishedNotify();
+	Combat->HandleAttackFinishedNotify(Facing.Enemy->GetMesh(), FAnimNotifyEventReference());
 	TestFalse(TEXT("A late finish notification cannot restart a reset attack"), Facing.Enemy->IsAttacking());
 	return true;
 }
@@ -953,6 +956,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueShotPresentationReentryTest,
 bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
+	const UFunction* ShotRPC = UfpstrueWeaponComponent::StaticClass()->FindFunctionByName(TEXT("MulticastShot"));
+	if (!TestNotNull(TEXT("Shot presentation retains its native RPC"), ShotRPC)) return false;
+	TestEqual(TEXT("The RPC carries one hit result and three identity fields"), static_cast<int32>(ShotRPC->NumParms), 4);
+	TestNull(TEXT("TraceStart is not serialized a second time"), FindFProperty<FProperty>(ShotRPC, TEXT("TraceStart")));
+	TestNull(TEXT("TraceEnd is not serialized a second time"), FindFProperty<FProperty>(ShotRPC, TEXT("TraceEnd")));
+	TestNull(TEXT("The unused activation-key RPC field is removed"), FindFProperty<FProperty>(ShotRPC, TEXT("PresentationKey")));
 	for (const bool bRestartFromDamage : {true, false})
 	{
 		const FString Label = bRestartFromDamage ? TEXT("Damage callback: ") : TEXT("Trace callback: ");
@@ -988,16 +997,22 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		int32 Reentries = 0;
 		int32 OldKey = 0;
 		int32 ReplacementKey = 0;
+		uint32 OriginalGeneration = 0;
+		uint32 OriginalSession = 0;
 		const auto RestartFire = [&]()
 		{
 			if (Reentries++ != 0) return;
 			OldKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
+			OriginalGeneration = State->EquipmentGeneration;
+			OriginalSession = State->FireSession;
 			Weapon->StopFire();
 			Weapon->StartFire();
 			ReplacementKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
 			TestTrue(Label + TEXT("The replacement ability really activates"), Fire->IsActive());
 			TestNotEqual(Label + TEXT("The replacement owns a different activation key"), ReplacementKey, OldKey);
 			TestEqual(Label + TEXT("A new activation starts before its first shot"), State->FirePresentationShot, 0);
+			// 模拟伤害/表现回调改变当前世界；旧射线仍须保留查询时的端点。
+			Player->SetActorLocation(Player->GetActorLocation() + FVector(0.0f, 500.0f, 0.0f));
 		};
 		TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
 		FDelegateHandle DamageObserver;
@@ -1020,8 +1035,17 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		TestTrue(Label + TEXT("The original activation has a real nonzero key"), OldKey > 0);
 		TestEqual(Label + TEXT("Only the original shot spends ammunition synchronously"), Weapon->GetCurrentAmmo(), AmmoBefore - 1);
 		if (!TestEqual(Label + TEXT("Exactly one real MulticastShot was dispatched"), Weapon->ShotPresentations.Num(), 1)) return false;
-		TestEqual(Label + TEXT("The old shot RPC retains its committed activation key"), Weapon->ShotPresentations[0].X, OldKey);
-		TestEqual(Label + TEXT("The old shot RPC retains ordinal one instead of the new round's zero"), Weapon->ShotPresentations[0].Y, 1);
+		const FObservedShotPresentation& Shot = Weapon->ShotPresentations[0];
+		TestEqual(Label + TEXT("The shot retains its committed equipment generation"), Shot.EquipmentGeneration, OriginalGeneration);
+		TestEqual(Label + TEXT("The shot retains its committed fire session"), Shot.Session, OriginalSession);
+		TestEqual(Label + TEXT("The old shot RPC retains ordinal one instead of the new round's zero"), Shot.ShotIndex, 1);
+		TestTrue(Label + TEXT("The ordinary environment hit remains blocking"), Shot.Hit.bBlockingHit);
+		TestTrue(Label + TEXT("The compact RPC retains the queried environment actor"), Shot.Hit.GetActor() == Target);
+		TestTrue(Label + TEXT("The hit stores its original start before a callback moves the shooter"),
+			Shot.Hit.TraceStart.Equals(EyeLocation, 0.001f));
+		TestTrue(Label + TEXT("The hit stores the complete original ray endpoint, not its impact point"),
+			FMath::IsNearlyEqual((Shot.Hit.TraceEnd - Shot.Hit.TraceStart).Size(),
+				static_cast<double>(Weapon->GetWeaponSettings().LineTraceRange), 0.01));
 		TestEqual(Label + TEXT("The new round keeps its own published key"), State->FirePresentationKey, ReplacementKey);
 		TestEqual(Label + TEXT("The old call stack cannot increment the replacement round"), State->FirePresentationShot, 0);
 		Health->OnDamageResolved.Remove(DamageObserver);
@@ -1038,6 +1062,28 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		TestEqual(Label + TEXT("The replacement shot preserves its own activation key"), State->FirePresentationKey, ReplacementKey);
 		TestEqual(Label + TEXT("The replacement round starts with ordinal one"), State->FirePresentationShot, 1);
 		TestFalse(Label + TEXT("Cleanup ends the replacement fire ability"), Fire->IsActive());
+	}
+	// 无阻挡时没有 ImpactPoint 可代替射线终点；仍经真实 Fire/查询/RPC 分派检查 FHitResult 端点。
+	{
+		FGameplayWorld Fixture(*this);
+		if (!Fixture.Initialize()) return false;
+		UfpstrueShotPresentationTestWeapon* Weapon = Cast<UfpstrueShotPresentationTestWeapon>(
+			EquipWeaponWithOneSpentRound(Fixture, *this, nullptr, UfpstrueShotPresentationTestWeapon::StaticClass()));
+		if (!TestNotNull(TEXT("Unobstructed shot uses the production weapon"), Weapon)) return false;
+		FVector EyeLocation;
+		FRotator EyeRotation;
+		Weapon->GetOwningCharacter()->GetActorEyesViewPoint(EyeLocation, EyeRotation);
+		{
+			TGuardValue<FString> ListenMode(Fixture.GetWorld()->NextURL, TEXT("?listen"));
+			Weapon->StartFire();
+			Weapon->StopFire();
+		}
+		if (!TestEqual(TEXT("An unobstructed shot still dispatches one presentation RPC"), Weapon->ShotPresentations.Num(), 1)) return false;
+		const FHitResult& Miss = Weapon->ShotPresentations[0].Hit;
+		TestFalse(TEXT("A miss remains nonblocking after compacting the RPC"), Miss.bBlockingHit);
+		TestTrue(TEXT("A miss retains its original trace start"), Miss.TraceStart.Equals(EyeLocation, 0.001f));
+		TestTrue(TEXT("A miss retains the full trace endpoint"), FMath::IsNearlyEqual((Miss.TraceEnd - Miss.TraceStart).Size(),
+			static_cast<double>(Weapon->GetWeaponSettings().LineTraceRange), 0.01));
 	}
 	return true;
 }
@@ -1131,11 +1177,11 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadLegacyCallbackTest, "fpstrue.Gameplay.Boundaries.Weapon.LegacyCallbacksFailClosed",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueReloadStaleTransactionTest, "fpstrue.Gameplay.Boundaries.Weapon.StaleTransactionCallbacksIgnored",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
-// 检查旧无参换弹接口输出诊断并拒绝执行，不能借当前编号把迟到回调套到新事务上。
-bool FFpstrueReloadLegacyCallbackTest::RunTest(const FString& Parameters)
+// 旧换弹结束后启动新事务，迟到的提交、完成和取消都不能借用新编号。
+bool FFpstrueReloadStaleTransactionTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
 	FGameplayWorld World(*this);
@@ -1143,16 +1189,20 @@ bool FFpstrueReloadLegacyCallbackTest::RunTest(const FString& Parameters)
 	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this);
 	if (!Weapon) return false;
 	TestTrue(TEXT("Old reload starts"), Weapon->RequestReload());
+	const int32 OldId = Weapon->GetActiveReloadId();
 	Weapon->CancelReload();
 	TestTrue(TEXT("New reload starts before stale callbacks arrive"), Weapon->RequestReload());
 	const int32 NewId = Weapon->GetActiveReloadId();
+	TestNotEqual(TEXT("The new reload has its own identity"), NewId, OldId);
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
-	AddExpectedMessage(TEXT("Legacy identityless CommitReload rejected"), ELogVerbosity::Warning);
-	AddExpectedMessage(TEXT("Legacy identityless FinishReload rejected"), ELogVerbosity::Warning);
-	TestFalse(TEXT("Identityless legacy commit emits a diagnostic and is rejected"), Weapon->CommitReload());
-	Weapon->FinishReload();
-	TestEqual(TEXT("Identityless completion cannot end the new reload"), Weapon->GetActiveReloadId(), NewId);
-	TestEqual(TEXT("Identityless commit cannot fill the new reload"), Weapon->GetCurrentAmmo(), AmmoBefore);
+	const int32 ReserveBefore = Weapon->GetReserveAmmo();
+	TestFalse(TEXT("A stale transaction cannot commit ammunition"), Weapon->CommitReloadForTransaction(OldId));
+	Weapon->FinishReloadForTransaction(OldId);
+	TestEqual(TEXT("Stale completion cannot end the new reload"), Weapon->GetActiveReloadId(), NewId);
+	Weapon->CancelReloadForTransaction(OldId);
+	TestEqual(TEXT("Stale cancellation cannot end the new reload"), Weapon->GetActiveReloadId(), NewId);
+	TestEqual(TEXT("Stale callbacks cannot fill the new reload"), Weapon->GetCurrentAmmo(), AmmoBefore);
+	TestEqual(TEXT("Stale callbacks cannot spend reserve ammunition"), Weapon->GetReserveAmmo(), ReserveBefore);
 	Weapon->FinishReloadForTransaction(NewId);
 	TestFalse(TEXT("The explicit current identity can complete normally"), Weapon->IsReloading());
 	TestEqual(TEXT("Explicit completion preserves the legitimate ammo path"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());

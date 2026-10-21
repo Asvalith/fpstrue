@@ -2,6 +2,7 @@
 
 using UnrealBuildTool;
 
+// 编译装配入口：Target 选择本模块，本规则仅声明依赖与头文件路径，不参与运行时模块调度。
 public class fpstrue : ModuleRules
 {
 	// 声明玩法模块的编译依赖；编辑器专属功能仅进入 Editor 目标，不引入游戏目标。

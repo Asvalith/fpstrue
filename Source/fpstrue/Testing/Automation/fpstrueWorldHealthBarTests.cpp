@@ -1,5 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+// 世界血条回归：真实 WidgetComponent 的模式、视角返回与服务器禁用边界。
+// 临时世界仅验证组件状态与锚点，不替代双客户端最终画面验收。
+
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -15,6 +18,7 @@
 
 namespace
 {
+// 建立独立世界并生成禁用自动 AI 的真实敌人，返回其生产血条组件的宿主。
 AfpstrueEnemyCharacter* SpawnHealthBarEnemy(FTestWorldWrapper& Fixture, FAutomationTestBase& Test)
 {
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(&Test); return nullptr; }
@@ -36,6 +40,7 @@ AfpstrueEnemyCharacter* SpawnHealthBarEnemy(FTestWorldWrapper& Fixture, FAutomat
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWorldHealthBarModesTest,
 	"fpstrue.Multiplayer.EnemyUI.WorldModesAndEventRedraw", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 逐档核对关闭、历史屏幕空间和世界空间血条的创建、重绘及血量事件行为。
 bool FFpstrueWorldHealthBarModesTest::RunTest(const FString&)
 {
 	FTestWorldWrapper Fixture;
@@ -85,6 +90,7 @@ bool FFpstrueWorldHealthBarModesTest::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWorldHealthBarViewTest,
 	"fpstrue.Multiplayer.EnemyUI.WorldViewReturnAndSmoothedAnchor", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证血条朝向本地镜头但保持敌人锚点，离开再返回视野时能恢复并正确重绘。
 bool FFpstrueWorldHealthBarViewTest::RunTest(const FString&)
 {
 	FTestWorldWrapper Fixture;
@@ -145,6 +151,7 @@ bool FFpstrueWorldHealthBarViewTest::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWorldHealthBarServerTest,
 	"fpstrue.Multiplayer.EnemyUI.DedicatedServerHasNoPresentation", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 固定专服角色后请求客户端展示模式，仍必须没有 Widget、Tick 和可见渲染资源。
 bool FFpstrueWorldHealthBarServerTest::RunTest(const FString&)
 {
 	FTestWorldWrapper Fixture;

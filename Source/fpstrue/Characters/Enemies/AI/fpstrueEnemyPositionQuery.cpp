@@ -29,6 +29,7 @@ namespace
 		return Value != nullptr && FMath::IsFinite(*Value) ? *Value : DefaultValue;
 	}
 
+	// 三个位置分量必须同时存在且有限；缺失时返回失败，不用默认零向量冒充已知位置。
 	bool ReadSnapshot(const FEnvQueryInstance& QueryInstance, const TCHAR* XName, const TCHAR* YName,
 		const TCHAR* ZName, FVector& OutLocation)
 	{
@@ -44,6 +45,7 @@ namespace
 		return true;
 	}
 
+	// 把 float 请求参数约束到候选数量范围后取整。
 	int32 ReadCount(const FEnvQueryInstance& QueryInstance, const TCHAR* Name, int32 DefaultCount,
 		int32 MinCount, int32 MaxCount)
 	{
@@ -51,6 +53,7 @@ namespace
 			static_cast<float>(MinCount), static_cast<float>(MaxCount)));
 	}
 
+	// 读取环半径并约束生成范围，避免异常参数产生无界空间布局。
 	float ReadRadius(const FEnvQueryInstance& QueryInstance, const TCHAR* Name, float DefaultRadius)
 	{
 		return FMath::Clamp(ReadParam(QueryInstance, Name, DefaultRadius), 50.0f, 5000.0f);
@@ -280,6 +283,7 @@ void UfpstrueEnvQueryTest_Position::RunTest(FEnvQueryInstance& QueryInstance) co
 
 namespace
 {
+// 只构造不可变查询图；Attack 复用几何测试，Cover 额外使用原生 PathExist 验证可达性。
 UEnvQuery* CreateEnemyPositionQueryTemplate(UObject& Outer, bool bCover)
 {
 	const FName QueryName(bCover ? TEXT("FPEnemyCoverPositionQuery") : TEXT("FPEnemyAttackPositionQuery"));

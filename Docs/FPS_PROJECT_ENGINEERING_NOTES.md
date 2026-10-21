@@ -759,13 +759,14 @@ Character 输入
 ```text
 RequestReload
  -> ActionState=Reloading
- -> 动画 Notify 调 CommitReload
+ -> 创建 ReloadId，播放请求显式携带该编号
+ -> 原生动画 Notify 校验播放实例，调用 CommitReloadForTransaction
  -> bReloadAmmoCommitted 防重复搬弹
- -> FinishReload 恢复 Ready
- -> 若 Notify 丢失，由 Fail-safe Timer 调 FinishReload
+ -> 已绑定的实例结束后按 ReloadId 收尾
+ -> 若完成回调丢失，由 Fail-safe Timer 按事务编号超时解锁
 ```
 
-当前局限必须诚实说明：它没有 Reload Sequence/Generation。`bReloadAmmoCommitted` 能挡住同一轮重复 Notify，但如果旧动画的迟到 Notify 恰好落入下一轮 Reloading 状态，理论上可能提交新一轮换弹。更严格实现应给每轮事务分配序号，并让 Notify 携带或校验序号。
+当前每轮换弹已有 `ReloadId`，动画通知另校验 Mesh 和 Montage 播放实例；旧事务及同一动画资产的旧实例都不能提交新一轮换弹。无参数的旧提交／完成兼容入口已经删除；`bReloadAmmoCommitted` 只负责同一事务内防止重复搬弹，不代替身份校验。
 
 ### 11.2 推荐的数据驱动拆分（未来扩展，不是当前已实现）
 

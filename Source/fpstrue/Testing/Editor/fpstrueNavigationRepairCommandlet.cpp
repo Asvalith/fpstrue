@@ -47,6 +47,7 @@ UfpstrueNavigationRepairCommandlet::UfpstrueNavigationRepairCommandlet()
 int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 {
 #if WITH_EDITOR
+	// 固定写入白名单；Params 不允许指定任意地图来绕过此工具的检查与备份约定。
 	const FString Package = TEXT("/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked");
 	const FString Filename = FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension());
 	if (FParse::Param(*Params, TEXT("AuditNavigation")))
@@ -87,6 +88,7 @@ int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 				UE_LOG(LogTemp, Display, TEXT("NAV_AUDIT IGNORE_SELF Actor=%s Location=%s"), *It->GetPathName(), *It->GetActorLocation().ToString());
 			}
 		const FCollisionShape AuditShape = FCollisionShape::MakeCapsule(55.0f, 96.0f);
+		// 用真实玩家胶囊复查路径段，报告阻挡组件及物理/导航导出差异；不修改两种几何。
 		auto SweepAudit = [&](const TCHAR* Kind, int32 Index, const FVector& From, const FVector& To)
 		{
 			TArray<FHitResult> Hits;
@@ -143,11 +145,12 @@ int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 		UE_LOG(LogTemp, Display, TEXT("NAV_AUDIT COMPLETE Points=%d Save=0 Build=0"), AuditPath->PathPoints.Num());
 		return 0;
 	}
+	// 修复阶段 1：显式 RepairNavigation 与备份必须在加载并修改内存地图之前成立。
 	FString BackupRoot;
 	FParse::Value(*Params, TEXT("BackupRoot="), BackupRoot);
 	BackupRoot.TrimQuotesInline();
 	BackupRoot = FPaths::ConvertRelativePathToFull(BackupRoot);
-	// 必须先有精确备份；工具不在内存修改后才补一份所谓“原稿”。
+	// 本入口只核对备份地图及 manifest 文件存在；备份内容/哈希由外部备份流程负责，不在修改后补原稿。
 	const FString BackupMap = FPaths::Combine(BackupRoot, TEXT("Content/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked.umap"));
 	if (GEditor == nullptr || !FParse::Param(*Params, TEXT("RepairNavigation")) ||
 		!FPaths::FileExists(FPaths::Combine(BackupRoot, TEXT("manifest.json"))) || !FPaths::FileExists(BackupMap))
@@ -157,6 +160,7 @@ int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 	}
 	UWorld* World = UEditorLoadingAndSavingUtils::LoadMap(Filename);
 	if (World == nullptr) return 1;
+	// 修复阶段 2：恢复离线导航构建所需的 World/组件状态，并确认代理尺寸与当前角色匹配。
 	auto* ExistingNavigation = UNavigationSystemV1::GetCurrent(World);
 	const auto* ExistingData = ExistingNavigation ? ExistingNavigation->GetDefaultNavDataInstance(FNavigationSystem::DontCreate) : nullptr;
 	const bool bOriginalGameWorld = World->IsGameWorld();
@@ -196,6 +200,7 @@ int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 	}
 	const bool bRepairLights = FParse::Param(*Params, TEXT("RepairLightNavigation"));
 	int32 VerifiedLightVolumes = 0;
+	// 可选补偿只针对指定灯柱资产的真实低位盒体；高灯臂或不匹配几何不得扩大成地面禁行墙。
 	if (bRepairLights)
 	{
 		int32 VerifiedLights = 0, AddedVolumes = 0;
@@ -282,6 +287,7 @@ int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 		}
 	}
 	Navigation->Build();
+	// 修复阶段 3：检查构建输入，再用角色 CDO 胶囊和已复现卡点验收；日志不替代这些失败门槛。
 	int32 OctreeEntries = 0, GeometryEntries = 0, AreaCount = 0;
 	if (const FNavigationOctree* Octree = Navigation->GetNavOctree())
 		Octree->FindAllElements([&](const FNavigationOctreeElement& Element)
@@ -354,6 +360,7 @@ int32 UfpstrueNavigationRepairCommandlet::Main(const FString& Params)
 			LightPath->PathPoints.Num(), bLightStillBlocks, LightBlockedSegments);
 		if (LightBlockedSegments != 0) return 1;
 	}
+	// 修复阶段 4：所有离线几何/路径门槛通过后只保存目标地图；实际 CMC 行走仍需后续实机验收。
 	if (!FEditorFileUtils::SaveMap(World, Filename)) return 1;
 	UE_LOG(LogTemp, Display, TEXT("NAV_REPAIR SAVED Map=%s Radius=55 Height=192 PhysicsSettingsChanged=0 FactorySourceChanged=0 RuntimeCMCVerificationPending=1"), *Package);
 	return 0;

@@ -50,6 +50,8 @@ namespace
 }
 
 // 静态基座 Actor 仍有效，不代表其组件仍在物理场景；UE5.5 的原生静态缓存路径未覆盖这三种失效。
+// 【设计取舍】静止/拥堵时省掉的是重复地面查询，不是停掉 CMC、碰撞或战斗决策。
+// 复用引擎已有地面缓存，只补基座失效判断；动态地面、离开基座等情况仍由原生规则重新检测。
 void UfpstrueEnemyMovementComponent::FindFloor(const FVector& CapsuleLocation, FFindFloorResult& OutFloorResult,
 	bool bCanUseCachedLocation, const FHitResult* DownwardSweepResult) const
 {
@@ -68,6 +70,7 @@ UfpstrueEnemyHealthBarComponent::FViewCache::FViewCache()
 	CleanupHandle = FWorldDelegates::OnWorldCleanup.AddRaw(this, &FViewCache::OnWorldCleanup);
 }
 
+// 缓存退出时解除其唯一原生委托，不等待下一个 World 清理事件。
 UfpstrueEnemyHealthBarComponent::FViewCache::~FViewCache() { FWorldDelegates::OnWorldCleanup.Remove(CleanupHandle); }
 
 void UfpstrueEnemyHealthBarComponent::FViewCache::OnWorldCleanup(UWorld* World, bool, bool) { Worlds.Remove(World); }
@@ -585,7 +588,9 @@ void AfpstrueEnemyCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME(AfpstrueEnemyCharacter, NetworkPresentation);
 }
 
-// 六个原生盒体采用统一近远规则；本地偏移从角色胶囊尺寸生成，不采样任何骨骼或客户端相机。
+// 【设计取舍】活体用六个根节点盒体换取免逐骨骼碰撞更新，代价是四肢轮廓不随动画精确变形。
+// 近远保持同一套权威几何，避免按观看距离改变可命中区域；偏移由胶囊尺寸生成，不采样相机。
+// 原 PhysicsAsset 仍供死亡布娃娃恢复；攻击 Socket/RootMotion 的必要姿态不能因简化命中体而省略。
 void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 {
 	bUseSimpleHitProxies = bSimpleMode;
@@ -614,6 +619,7 @@ void AfpstrueEnemyCharacter::ConfigureHitProxies(bool bSimpleMode)
 	if (CharacterMesh->IsPhysicsStateCreated()) CharacterMesh->DestroyPhysicsState();
 	const float HalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 	const float Radius = GetCapsuleComponent()->GetUnscaledCapsuleRadius();
+	// 配置组件局部几何；形状由角色根节点驱动，不新增逐帧骨骼采样。
 	const auto ConfigurePart = [](UBoxComponent* Part, const FVector& Offset, const FVector& HalfExtents)
 	{
 		Part->SetRelativeLocation(Offset);
@@ -808,16 +814,6 @@ AfpstrueCharacter* AfpstrueEnemyCharacter::GetCombatTarget() const
 
 // ==================== 战斗接口与动画优先级桥接 ====================
 
-// 兼容旧蓝图符号并转交诊断；无播放身份的通知不能直接结束当前攻击。
-void AfpstrueEnemyCharacter::HandleAttackFinishedNotify()
-{
-	// 保留反射符号帮助旧资产给出迁移诊断；无身份的动画回调不再猜测当前攻击。
-	if (CombatComponent != nullptr)
-	{
-		CombatComponent->HandleAttackFinishedNotify();
-	}
-}
-
 // 攻击开始前退出共享姿态并重算组件设置；攻击结束后根据当前事实恢复分级与共享资格。
 void AfpstrueEnemyCharacter::SetAttackAnimationPriority(bool bHighPriority)
 {
@@ -909,7 +905,7 @@ void AfpstrueEnemyCharacter::HandleDamageResolved(float DamageAmount, AActor* Da
 	SuspendAnimationSharing();
 	ApplyAnimationAndRenderPolicy();
 	ApplyNetworkReplicationPolicy();
-	if (HasAuthority() && GetNetMode() != NM_Standalone) ForceNetUpdate();
+	// 生命组件已为这次实际扣血请求复制更新；这里仅应用战斗档位，不重复调度同一血量变化。
 	// 根据最近伤害方向给 CharacterMovement 添加轻量受击冲量。
 	//活着时通过 CharacterMovement 施加水平冲量，不直接切换物理模拟，保持导航移动仍可继续。
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
@@ -923,7 +919,8 @@ void AfpstrueEnemyCharacter::HandleDamageResolved(float DamageAmount, AActor* Da
 		}
 	}
 	OnEnemyDamaged(DamageAmount, DamageCauser, InstigatedBy);
-	if (HasAuthority() && GetNetMode() != NM_Standalone) MulticastHitReaction(DamageAmount);
+	// 致死命中由持久死亡快照驱动尸体表现，不再额外发送会被死亡分支丢弃的瞬时受击。
+	if (HasAuthority() && GetNetMode() != NM_Standalone && !IsDead()) MulticastHitReaction(DamageAmount);
 }
 
 // 受击保护到期后重新合成动画设置和共享资格，不永久保留全速动画。
@@ -1068,8 +1065,9 @@ void AfpstrueEnemyCharacter::RegisterWithSignificanceManager()
 		return;
 	}
 
-	// 评分回调只返回距离数值；组件写入放在 Sequential 后处理，而不是评分回调中。
-	// ★【重要边界】[线程交接] 主线程先冻结位置；插件同步等待并行评分结束，回调不查询可变的 Actor/Health 状态。
+	// 【设计取舍】交给插件并行的是冻结位置的距离评分，不是 Actor/Health 查询或组件修改。
+	// Update 等待本轮评分完成后才顺序应用，因而无需自建跨帧锁；并行不意味着没有同步等待成本。
+	// 主线程准备快照、Sequential 后处理写组件，不能把此处扩展成 Worker 直接执行玩法。
 	Manager->RegisterObject(
 		this, TEXT("Enemy"),
 		[](USignificanceManager::FManagedObjectInfo* ObjectInfo, const FTransform& Viewpoint)
@@ -1558,8 +1556,9 @@ void AfpstrueEnemyCharacter::GetRenderBudgetEligibility(bool& bOutShadow, bool& 
 // 只有低渲染档、非战斗保护且不模拟物理的存活敌人可复用共享姿态。
 bool AfpstrueEnemyCharacter::CanUseAnimationSharing() const
 {
-	// 只有低渲染档、非战斗保护、非死亡且未模拟物理的敌人才可成为 Follower；攻击/布娃娃必须使用独立姿态。
-	// 联网权威端保留独立的攻击姿态、RootMotion与武器Socket；Simple活体命中虽已独立，不能因此共享玩法动作。
+	// 【设计取舍】共享只复用低风险移动/待机姿态；攻击、受击、死亡的独立播放与通知不能被 Leader 覆盖。
+	// 联网权威端完全不借共享姿态驱动攻击 Socket/RootMotion，故客户端共享收益不能直接当作服务器收益。
+	// Simple 命中体虽与骨骼解耦，仍不代表权威玩法动作可以共享或停更。
 	if ((HasAuthority() && GetNetMode() != NM_Standalone) || IsDead() || !bHasRenderSignificancePolicy || bDisableAnimationOptimizationsForBenchmark ||
 		RenderSignificanceTier == EFPEnemyRenderSignificanceTier::Full ||
 		RequiresGameplayAnimationProtection(GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0f,

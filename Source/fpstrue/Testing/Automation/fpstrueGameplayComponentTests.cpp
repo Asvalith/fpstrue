@@ -1,6 +1,18 @@
 #include "Testing/Automation/fpstrueTestObservers.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "UObject/Class.h"
+
+// 观察真实包装入口，不手工调用伤害处理器，也不跳过服务器生命结算。
+void AfpstrueDamagePresentationTestCharacter::ProcessEvent(UFunction* Function, void* Parameters)
+{
+	if (Function != nullptr)
+	{
+		if (Function->GetFName() == TEXT("ClientReceiveDamage")) ++OwnerDamageFeedbackRequests;
+		else if (Function->GetFName() == TEXT("MulticastPresentHit")) ++NativeHitRequests;
+	}
+	Super::ProcessEvent(Function, Parameters);
+}
 
 // 这些测试验证生命事务与通知顺序；不以无渲染测试世界代替受击、布娃娃或 GPU 画面验收。
 // 在伤害通知内提交两项后续修改，检查组件能否在当前事务通知完后按顺序执行。
@@ -30,10 +42,15 @@ void UfpstrueHealthMutationTestObserver::OnHealth(float Value)
 	}
 }
 
-// 只记录死亡次数，避免接收者本身改变被测死亡结算行为。
+// 可在死亡通知中请求回满，检查它是否仍排在当前事务之后。
 void UfpstrueHealthMutationTestObserver::OnDeath()
 {
 	++Deaths;
+	if (bResetDuringDeath && Health.IsValid())
+	{
+		bResetDuringDeath = false;
+		Health->ResetHealth();
+	}
 }
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -109,6 +126,14 @@ bool FFpstrueHealthMutationTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Exactly one death per life session"), Observer->Deaths, 2);
 	UGameplayStatics::ApplyDamage(Owner, 20.0f, nullptr, nullptr, nullptr);
 	TestEqual(TEXT("Dead actors do not repeat death"), Observer->Deaths, 2);
+
+	Health->ResetHealth();
+	Observer->HealthSnapshots.Reset();
+	Observer->bResetDuringDeath = true;
+	UGameplayStatics::ApplyDamage(Owner, 100.0f, nullptr, nullptr, nullptr);
+	TestEqual(TEXT("Reset from death does not duplicate the death edge"), Observer->Deaths, 3);
+	TestTrue(TEXT("Death callback reset runs after the lethal snapshot"), Observer->HealthSnapshots == TArray<float>({0.0f, 100.0f}));
+	TestEqual(TEXT("Death callback reset restores health data"), Health->GetHealth(), 100.0f);
 	return true;
 }
 
@@ -148,6 +173,22 @@ bool FFpstrueHealthTerminationTest::RunTest(const FString& Parameters)
 	Observer->bAlternateMaximumDuringHealthChange = false;
 	UGameplayStatics::ApplyDamage(Owner, 10.0f, nullptr, nullptr, nullptr);
 	TestEqual(TEXT("A later independent damage request still works"), Health->GetHealth(), 90.0f);
+
+	// EndPlay 要丢弃已排入的重置，并终止本次尚未发出的伤害、血量和死亡通知。
+	const int32 SnapshotsBeforeEndPlay = Observer->HealthSnapshots.Num();
+	bool bDestroyedDuringDamage = false;
+	const FDelegateHandle EndPlayHandle = Health->OnDamageResolved.AddLambda(
+		[&](float, AActor*, AController*, const FFPDamageContext&)
+		{
+			Health->ResetHealth();
+			bDestroyedDuringDamage = Owner->Destroy();
+		});
+	UGameplayStatics::ApplyDamage(Owner, 100.0f, nullptr, nullptr, nullptr);
+	Health->OnDamageResolved.Remove(EndPlayHandle);
+	TestTrue(TEXT("The damage callback can end the owner lifecycle"), bDestroyedDuringDamage);
+	TestEqual(TEXT("EndPlay stops remaining health notifications"), Observer->HealthSnapshots.Num(), SnapshotsBeforeEndPlay);
+	TestEqual(TEXT("EndPlay stops the pending death notification"), Observer->Deaths, 0);
+	TestEqual(TEXT("Queued reset does not run after EndPlay"), Health->GetHealth(), 0.0f);
 	return true;
 }
 

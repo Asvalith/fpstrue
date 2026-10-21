@@ -49,6 +49,13 @@
 #include "UnrealClient.h"
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 
+/*
+ * 联机装配链：GameInstance 发起旅行 -> Controller 握手 -> GameMode 恢复/生成 Pawn -> 本地等待复制就绪。
+ * GameMode 独占重生、重连保留表和 PvE 登记；PlayerState/GameState 复制计分与对局事实；HUD 只订阅显示。
+ * 所有连接状态、Timer 和 RPC 处理都在 Game Thread；这里不执行 AI 决策、伤害计算或 Worker 动画求值。
+ * 服务端保留的是真实 Pawn/PlayerState，不是客户端上传的快照；客户端缓存仅保存地址和不透明票据。
+ */
+
 namespace
 {
 constexpr int32 MaxRejoinSlots = 16;
@@ -74,6 +81,7 @@ void ReleaseNetworkPlayerWeapon(AActor* Weapon, AfpstrueCharacter* ExpectedPawn,
 	Weapon->Destroy();
 }
 
+// 为恢复日志读取引擎网络身份；仅服务器可以分配 GUID，客户端只查询已知映射。
 uint64 GetResumeNetGuid(const AActor* Actor)
 {
 	UNetDriver* Driver = IsValid(Actor) ? Actor->GetNetDriver() : nullptr;
@@ -82,6 +90,7 @@ uint64 GetResumeNetGuid(const AActor* Actor)
 		: Driver->GuidCache->GetNetGUID(Actor)).ObjectId;
 }
 
+// 只校验票据编码格式；持有权、有效期和是否已占用仍由服务器保留表判断。
 bool IsResumeToken(const FString& Token)
 {
 	if (Token.Len() != 64) return false;
@@ -89,6 +98,7 @@ bool IsResumeToken(const FString& Token)
 	return true;
 }
 
+// 使用平台安全随机源生成 256 位不透明票据；随机源失败时返回空串，不生成可预测替代品。
 FString GenerateResumeToken()
 {
 	const TUniquePtr<FEncryptionContext> Crypto = IPlatformCrypto::Get().CreateContext();
@@ -154,6 +164,7 @@ void UfpstruePvpIngameWidget::RefreshControls()
 	if (MatchHintText != nullptr) MatchHintText->SetText(NSLOCTEXT("fpstrue", "PvpSurvivalHint", "联机生存：抵御敌人，玩家之间可互相伤害"));
 }
 
+// 检查原布局约定的控件是否全部接通，供 HUD 选择 UMG 或 Canvas 回退。
 bool UfpstruePvpIngameWidget::HasAuthoredControls() const
 {
 	return HealthBar != nullptr && MagazineText != nullptr && ReserveText != nullptr && WeaponNameText != nullptr
@@ -179,6 +190,7 @@ void UfpstruePvpIngameWidget::NativeConstruct()
 	}
 }
 
+// 保留原生绘制，并记下实际画出的快照版本；不在绘制回调内更新玩法数值。
 int32 UfpstruePvpIngameWidget::NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
 	const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId,
 	const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
@@ -189,16 +201,16 @@ int32 UfpstruePvpIngameWidget::NativePaint(const FPaintArgs& Args, const FGeomet
 	return Result;
 }
 
+// 当前快照至少真实绘制过一次才算恢复；允许 Slate 复用未变化的绘制缓存。
 bool UfpstruePvpIngameWidget::HasPaintedSnapshot() const
 {
-	// Slate 可以复用未变化的绘制缓存，不要求静止界面每帧重画；新快照必须至少真正绘制一次。
 	return IsInViewport() && IsVisible() && HasAuthoredControls() && LastPaintFrame > 0
 		&& LastPaintedSnapshotRevision == SnapshotRevision;
 }
 
+// 选择原 HUD 的联网布局副本，不改动单机界面资产。
 AfpstruePvpHUD::AfpstruePvpHUD()
 {
-	// 联机复制件保留原布局；原 ingame 及其单机 GameMode/倒计时链完全不改。
 	IngameWidgetClass = FSoftObjectPath(TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C"));
 }
 
@@ -213,6 +225,7 @@ void AfpstruePvpHUD::PostInitializeComponents()
 	}
 }
 
+// 占有或 OnRep_Pawn 变化统一转到重新绑定入口。
 void AfpstruePvpHUD::HandlePossessedPawnChanged(APawn*, APawn* NewPawn)
 {
 	BindPawn(Cast<AfpstrueCharacter>(NewPawn));
@@ -238,6 +251,7 @@ bool AfpstruePvpHUD::EnsureIngameWidget()
 	return false;
 }
 
+// 把 HUD 已缓存的生命、装备和弹药一次推给 UMG，不再次查询世界。
 void AfpstruePvpHUD::RefreshIngameSnapshot()
 {
 	if (IngameWidget != nullptr)
@@ -347,27 +361,31 @@ void AfpstruePvpHUD::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-// 秘密只经过所属 Controller 的可靠 RPC，不放进引擎会记录的 Travel URL、昵称或公共配置。
+// 由服务器邀请拥有者提交票据；票据只走所属 Controller 的 RPC，不进入 Travel URL 或日志。
 void AfpstruePvpPlayerController::ClientBeginConnectionHandshake_Implementation()
 {
 	if (auto* Instance = Cast<UfpstrueMultiplayerGameInstance>(GetGameInstance())) Instance->BeginConnectionHandshake(this);
 }
 
+// 将拥有者提交的票据交给 GameMode 唯一验证入口；RPC 本身不恢复对象。
 void AfpstruePvpPlayerController::ServerSubmitConnectionToken_Implementation(const FString& Token)
 {
 	if (auto* Mode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>()) Mode->CompleteConnectionHandshake(this, Token);
 }
 
+// 接收服务器轮换后的票据和身份，继续由 GameInstance 等待复制状态就绪。
 void AfpstruePvpPlayerController::ClientConnectionAccepted_Implementation(const FString& Token, int32 InResumeId, bool bRestored)
 {
 	if (auto* Instance = Cast<UfpstrueMultiplayerGameInstance>(GetGameInstance())) Instance->AcceptConnectionToken(this, Token, InResumeId, bRestored);
 }
 
+// 将服务器拒绝原因交给本地连接流程，决定重试或返回本地世界。
 void AfpstruePvpPlayerController::ClientConnectionRejected_Implementation(const FString& Reason)
 {
 	if (auto* Instance = Cast<UfpstrueMultiplayerGameInstance>(GetGameInstance())) Instance->RejectConnection(Reason);
 }
 
+// 仅开发验收保存服务器规划的有界路线；输入驱动器随后仍通过正常移动输入执行。
 void AfpstruePvpPlayerController::ClientNormalVisualRoute_Implementation(const TArray<FVector>& Points)
 {
 #if !UE_BUILD_SHIPPING
@@ -437,12 +455,14 @@ void AfpstruePvpPlayerController::ServerRequestNormalVisualEnemyRoute_Implementa
 #endif
 }
 
+// 主动离场先取消恢复资格，再通知拥有者离开；后续 PawnLeavingGame 不再保留角色。
 void AfpstruePvpPlayerController::ServerLeavePvp_Implementation()
 {
 	bIntentionalLeave = true;
 	ClientConnectionRejected(TEXT("manual_leave"));
 }
 
+// 在引擎销毁 Pawn 前选择保留或释放装备；Logout 只负责余下的控制器登记清理。
 void AfpstruePvpPlayerController::PawnLeavingGame()
 {
 	if (auto* Mode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
@@ -455,7 +475,7 @@ void AfpstruePvpPlayerController::PawnLeavingGame()
 	Super::PawnLeavingGame();
 }
 
-// 只采样本控制器的往返；响应序号必须匹配本机保存的发送记录，不能直接采信网络回传的本地时间。
+// 客户端进入 Playing 后启动本控制器的时钟采样；显式开发参数才启动验收观察 Timer。
 void AfpstruePvpPlayerController::BeginPlayingState()
 {
 	Super::BeginPlayingState();
@@ -475,6 +495,7 @@ void AfpstruePvpPlayerController::BeginPlayingState()
 	}
 }
 
+// 保存本机单调发送时间并请求服务器时间；丢失样本到期淘汰，未完成请求数量有上限。
 void AfpstruePvpPlayerController::RequestClockSample()
 {
 	if (!IsLocalController() || GetNetMode() != NM_Client) return;
@@ -486,6 +507,7 @@ void AfpstruePvpPlayerController::RequestClockSample()
 	ServerRequestClockSample(ClockSequence);
 }
 
+// 限流后回传当前服务器世界时间与原序号，不接收客户端自报的发送时间。
 void AfpstruePvpPlayerController::ServerRequestClockSample_Implementation(uint32 Sequence)
 {
 	const double Now = GetWorld()->GetTimeSeconds();
@@ -494,6 +516,7 @@ void AfpstruePvpPlayerController::ServerRequestClockSample_Implementation(uint32
 	ClientReceiveClockSample(Sequence, Now);
 }
 
+// 用本地保存的发送记录估计 RTT、时钟偏移和不确定度；迟到或严重排队样本不拉偏现有估计。
 void AfpstruePvpPlayerController::ClientReceiveClockSample_Implementation(uint32 Sequence, double ServerTime)
 {
 	double SentAt = 0.0;
@@ -518,6 +541,7 @@ void AfpstruePvpPlayerController::ClientReceiveClockSample_Implementation(uint32
 #endif
 }
 
+// 服务端自身时间始终可用；客户端样本超过五秒未刷新就不再用于射击时间估计。
 bool AfpstruePvpPlayerController::HasServerTimeSample() const
 {
 	return HasAuthority() || (LastClockSampleLocal >= 0.0 && FPlatformTime::Seconds() - LastClockSampleLocal <= 5.0);
@@ -529,6 +553,7 @@ double AfpstruePvpPlayerController::GetEstimatedServerTime() const
 	return HasServerTimeSample() ? FPlatformTime::Seconds() + ServerClockOffset : 0.0;
 }
 
+// 返回射击时间校验所需的估计误差；失去新鲜样本时按一秒的不确定度处理。
 double AfpstruePvpPlayerController::GetClockUncertaintySeconds() const
 {
 	return HasAuthority() ? 0.0 : (HasServerTimeSample() ? ClockUncertainty : 1.0);
@@ -627,6 +652,7 @@ void AfpstruePvpPlayerController::HandleVisualScreenshotProcessed()
 }
 #endif
 
+// 控制器退出时停止时钟与验收采样，解除截图回调，不让旧世界继续产生样本。
 void AfpstruePvpPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(ClockSampleTimer);
@@ -650,6 +676,7 @@ void AfpstruePvpPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME(AfpstruePvpPlayerState, bDisconnected);
 }
 
+// 服务器提交离线保留标记并尽快复制；成绩继续保存在同一个 PlayerState。
 void AfpstruePvpPlayerState::SetRetainedForReconnect(bool bRetained)
 {
 	if (!HasAuthority()) return;
@@ -657,6 +684,7 @@ void AfpstruePvpPlayerState::SetRetainedForReconnect(bool bRetained)
 	ForceNetUpdate();
 }
 
+// 离线保留时阻止引擎销毁 PlayerState；普通离场仍采用父类清理。
 void AfpstruePvpPlayerState::OnDeactivated()
 {
 	if (bDisconnected) { SetOwner(nullptr); return; }
@@ -680,7 +708,6 @@ void AfpstruePvpPlayerState::AddDeath()
 	ForceNetUpdate();
 }
 
-// 复制全局对局状态和死亡总数，玩家列表沿用GameStateBase的PlayerArray。
 // GameState 在服务端与客户端都有实例，组件只运行本端策略，不复制本地相机或预算结果。
 AfpstruePvpGameState::AfpstruePvpGameState()
 {
@@ -752,6 +779,7 @@ bool AfpstruePvpGameMode::IsCombatParticipant(const AfpstrueCharacter* Target) c
 	return (IsValid(Player) && Player->GetPawn() == Target) || IsRetainedDisconnectedPawn(Target);
 }
 
+// 为有效战斗目标复用或创建一个围攻管理器；目标选择与单敌人决策不在此执行。
 AfpstrueSurroundManager* AfpstruePvpGameMode::GetOrCreateSurroundManager(AfpstrueCharacter* Target)
 {
 	if (!IsCombatParticipant(Target)) return nullptr;
@@ -764,6 +792,7 @@ AfpstrueSurroundManager* AfpstruePvpGameMode::GetOrCreateSurroundManager(Afpstru
 	return Manager;
 }
 
+// 按权威敌人登记表统计仍有效且存活的对象，不把延迟销毁的尸体计入生成缺口。
 int32 AfpstruePvpGameMode::GetAliveEnemyCount() const
 {
 	int32 Count = 0;
@@ -945,6 +974,7 @@ AfpstrueEnemyCharacter* AfpstruePvpGameMode::SpawnPveEnemy(AfpstrueCharacter* Ne
 	return nullptr;
 }
 
+// 只登记已启动行为树的存活敌人，并连接生命周期和开发验收观察；不替 AI 指定战斗目标。
 void AfpstruePvpGameMode::RegisterPveEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	const auto* Controller = IsValid(Enemy) ? Cast<AfpstrueEnemyAIController>(Enemy->GetController()) : nullptr;
@@ -968,6 +998,7 @@ void AfpstruePvpGameMode::RegisterPveEnemy(AfpstrueEnemyCharacter* Enemy)
 	}
 }
 
+// 死亡后延迟补充人口并限制尸体寿命；保留登记到 EndPlay，以便统一解除订阅。
 void AfpstruePvpGameMode::HandlePveEnemyDied(AfpstrueEnemyCharacter* Enemy)
 {
 	if (bEndingPvp || !HasAuthority() || !IsValid(Enemy)) return;
@@ -982,6 +1013,7 @@ void AfpstruePvpGameMode::HandlePveEnemyDied(AfpstrueEnemyCharacter* Enemy)
 #endif
 }
 
+// 敌人真正离场时移出登记并解除死亡、离场及伤害观察。
 void AfpstruePvpGameMode::HandlePveEnemyEndPlay(AActor* Actor, EEndPlayReason::Type)
 {
 	AfpstrueEnemyCharacter* Enemy = Cast<AfpstrueEnemyCharacter>(Actor);
@@ -992,6 +1024,7 @@ void AfpstruePvpGameMode::HandlePveEnemyEndPlay(AActor* Actor, EEndPlayReason::T
 	if (auto* Health = Enemy->FindComponentByClass<UfpstrueHealthComponent>()) Health->OnDamageResolved.RemoveAll(this);
 }
 
+// 仅开发烟测观察真实伤害结果，推进敌人反击与离线受伤门禁；Shipping 不执行验收逻辑。
 void AfpstruePvpGameMode::HandlePvePlayerDamaged(TWeakObjectPtr<AfpstrueCharacter> Player, float Damage,
 	AActor* DamageCauser, AController*, const FFPDamageContext&)
 {
@@ -1019,6 +1052,7 @@ void AfpstruePvpGameMode::HandlePvePlayerDamaged(TWeakObjectPtr<AfpstrueCharacte
 #endif
 }
 
+// 停止人口补充和 AI，解除伤害观察并归还每个目标的围攻资源；不在这里销毁全部敌人。
 void AfpstruePvpGameMode::StopPve()
 {
 	GetWorldTimerManager().ClearTimer(PvePopulationTimer);
@@ -1036,6 +1070,7 @@ void AfpstruePvpGameMode::StopPve()
 	for (const auto& Entry : Managers) if (auto* Manager = Entry.Value.Get()) { Manager->ResetManager(); Manager->Destroy(); }
 }
 
+// 原 PvP 门禁通过后，显式烟测才开放敌人阶段；普通玩法与 Shipping 不采用这条控制链。
 void AfpstruePvpGameMode::StartPveSmoke(AfpstruePvpPlayerController* Requester)
 {
 #if !UE_BUILD_SHIPPING
@@ -1078,6 +1113,7 @@ void AfpstruePvpGameMode::SendNormalVisualRoutes()
 }
 #endif
 
+// 将开发验收的阶段请求转交服务器 GameMode，不直接生成敌人。
 void AfpstruePvpPlayerController::ServerBeginPveSmoke_Implementation()
 {
 #if !UE_BUILD_SHIPPING
@@ -1085,6 +1121,7 @@ void AfpstruePvpPlayerController::ServerBeginPveSmoke_Implementation()
 #endif
 }
 
+// 服务器确认敌人真实命中后，才允许本地烟测驱动器反击。
 void AfpstruePvpPlayerController::ClientAllowPveSmokeCounterattack_Implementation()
 {
 #if !UE_BUILD_SHIPPING
@@ -1178,6 +1215,7 @@ void AfpstruePvpGameMode::BeginPlay()
 }
 
 #if !UE_BUILD_SHIPPING
+// 观察服务器真实位移是否越过验收阈值，不修改角色位置或移动参数。
 void AfpstruePvpGameMode::SampleSmokeMovement()
 {
 	for (auto It = SmokeSpawnOrigins.CreateIterator(); It; ++It)
@@ -1226,6 +1264,7 @@ void AfpstruePvpGameMode::RestartPlayer(AController* NewPlayer)
 	Super::RestartPlayer(NewPlayer);
 }
 
+// 出生失败采用有界 Timer 重试；耗尽次数则明确拒绝连接，不把缺少 Pawn 当作就绪。
 void AfpstruePvpGameMode::FailedToRestartPlayer(AController* NewPlayer)
 {
 	Super::FailedToRestartPlayer(NewPlayer);
@@ -1469,7 +1508,7 @@ void AfpstruePvpGameMode::ReleasePlayerWeapon(APlayerController* Player)
 	if (CurrentWeapon != RecordedActor) ReleaseNetworkPlayerWeapon(CurrentWeapon, Pawn, Player);
 }
 
-// 新连接先完成持有者握手，随后才创建新 Pawn 或绑定保留 Pawn；不能先发满血新角色再偷偷覆盖它。
+// 在引擎预登录检查后限制本局连接和待握手容量；此时不接纳或验证恢复票据。
 void AfpstruePvpGameMode::PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
 {
 	Super::PreLogin(Options, Address, UniqueId, ErrorMessage);
@@ -1477,6 +1516,7 @@ void AfpstruePvpGameMode::PreLogin(const FString& Options, const FString& Addres
 		ErrorMessage = TEXT("connection_capacity_reached");
 }
 
+// 先登记五秒握手期限，握手完成后才恢复或生成 Pawn；监听主机的本地玩家直接进入同一入口。
 void AfpstruePvpGameMode::HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer)
 {
 	auto* Player = Cast<AfpstruePvpPlayerController>(NewPlayer);
@@ -1488,7 +1528,9 @@ void AfpstruePvpGameMode::HandleStartingNewPlayer_Implementation(APlayerControll
 	else Player->ClientBeginConnectionHandshake();
 }
 
-// 认证凭证仅证明持有本服务器发出的随机票据；不使用客户端昵称、PlayerId 或自报健康值。
+// 【设计取舍】恢复服务器保留的 Pawn/PlayerState，不接纳客户端上传血量、弹药或成绩；离线仍可受伤，死亡则重生。
+// 先消费旧票据、占用槽位并轮换票据，再 Possess/通知，防止并发或重入重复认领同一身份。
+// 票据只证明会话持有权，不证明客户端状态可信；保留表和超时释放的资源成本由服务器承担。
 void AfpstruePvpGameMode::CompleteConnectionHandshake(AfpstruePvpPlayerController* Player, const FString& Token)
 {
 	if (!HasAuthority() || bEndingPvp || !IsValid(Player) || Player->bConnectionHandshakeComplete) return;
@@ -1632,6 +1674,7 @@ bool AfpstruePvpGameMode::PreserveDisconnectedPlayer(AfpstruePvpPlayerController
 	return true;
 }
 
+// 判断 Pawn 是否仍属于未过期的离线保留槽，供 AI 候选资格与离线死亡结算复用。
 bool AfpstruePvpGameMode::IsRetainedDisconnectedPawn(const AfpstrueCharacter* Pawn) const
 {
 	if (Pawn == nullptr) return false;
@@ -1640,6 +1683,7 @@ bool AfpstruePvpGameMode::IsRetainedDisconnectedPawn(const AfpstrueCharacter* Pa
 	return false;
 }
 
+// 为没有 Controller 的保留 Pawn 结算一次死亡；返回 true 表示已由离线槽接管，无需普通重生路径。
 bool AfpstruePvpGameMode::HandleRetainedPawnEliminated(AfpstrueCharacter* Pawn, AController* Killer)
 {
 	if (bEndingPvp || !HasAuthority() || !IsValid(Pawn)) return false;
@@ -1658,6 +1702,7 @@ bool AfpstruePvpGameMode::HandleRetainedPawnEliminated(AfpstrueCharacter* Pawn, 
 	return false;
 }
 
+// 到期先移出握手/保留表再销毁对象；清理回调不能继续认领已经过期的恢复身份。
 void AfpstruePvpGameMode::SweepRejoinSlots()
 {
 	const double Now = GetWorld()->GetTimeSeconds();
@@ -1679,6 +1724,7 @@ void AfpstruePvpGameMode::SweepRejoinSlots()
 	}
 }
 
+// 对局退出时撤销握手与清扫 Timer，回收离线保留对象；在线玩家仍走正常离场清理。
 void AfpstruePvpGameMode::ClearRejoinSlots()
 {
 	GetWorldTimerManager().ClearTimer(RejoinCleanupTimer);
@@ -1761,6 +1807,7 @@ void UfpstrueMultiplayerGameInstance::HostPvp()
 	UGameplayStatics::OpenLevel(this, FName(*Map), true, TEXT("listen?game=/Script/fpstrue.fpstruePvpGameMode"));
 }
 
+// 只让显式回环基线接管启动 Browse；普通入口仍走引擎启动流程，诊断失败不静默回退。
 void UfpstrueMultiplayerGameInstance::StartGameInstance()
 {
 	const EFPPvpBaselineBootstrap Bootstrap = StartPvpBaselineClient(this);
@@ -1769,8 +1816,7 @@ void UfpstrueMultiplayerGameInstance::StartGameInstance()
 		Super::StartGameInstance();
 		return;
 	}
-	// Match the native startup lifecycle after Browse succeeds or becomes pending.
-	// Rejected diagnostics must neither broadcast successful startup nor fall back.
+	// 仅已成功发起的 Browse 广播启动完成；拒绝的诊断不发布成功事件。
 	if (Bootstrap == EFPPvpBaselineBootstrap::Started) BroadcastOnStart();
 }
 
@@ -1794,6 +1840,7 @@ void UfpstrueMultiplayerGameInstance::Init()
 	ConnectionTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &ThisClass::TickConnection), 0.1f);
 }
 
+// 终止当前连接操作并解除跨世界委托/Ticker；不在退出期间启动重连。
 void UfpstrueMultiplayerGameInstance::Shutdown()
 {
 	++OperationRevision;
@@ -1807,11 +1854,10 @@ void UfpstrueMultiplayerGameInstance::Shutdown()
 	Super::Shutdown();
 }
 
+// 本地连接状态的统一提交入口；UI 通过 GetConnectionState 查询，不保留未订阅的广播。
 void UfpstrueMultiplayerGameInstance::SetConnectionState(EFPConnectionState State)
 {
-	if (ConnectionState == State) return;
 	ConnectionState = State;
-	OnConnectionStateChanged.Broadcast(State);
 }
 
 // 缓存只含服务器地址和 bearer 票据，位于每用户目录；测试 UserDir 的 owner-only 权限由启动脚本建立。
@@ -1828,6 +1874,7 @@ void UfpstrueMultiplayerGameInstance::SaveResumeCache()
 		UE_LOG(LogTemp, Warning, TEXT("Resume cache could not be saved; reconnect is available only while this process remains alive."));
 }
 
+// 读取尺寸、版本、格式及本地到期时间合格的缓存；真正恢复资格仍由服务器验证。
 void UfpstrueMultiplayerGameInstance::LoadResumeCache()
 {
 	if (ResumeCacheFile.IsEmpty() || IFileManager::Get().FileSize(*ResumeCacheFile) > 4096) return;
@@ -1841,6 +1888,7 @@ void UfpstrueMultiplayerGameInstance::LoadResumeCache()
 	ResumeToken = Lines[2];
 }
 
+// 主动离场或不可恢复拒绝时清除内存票据和本地缓存；不会修改服务器游戏状态。
 void UfpstrueMultiplayerGameInstance::ClearResumeCache()
 {
 	ResumeToken.Reset();
@@ -1893,6 +1941,7 @@ void UfpstrueMultiplayerGameInstance::JoinPvp(const FString& Address)
 	StartClientTravel(Revision);
 }
 
+// 仅当前操作发起连接旅行并设置期限；状态广播返回后复核，避免 UI 取消后继续旅行。
 void UfpstrueMultiplayerGameInstance::StartClientTravel(uint32 Revision)
 {
 	if (Revision != OperationRevision || !bAutoReconnect || ServerAddress.IsEmpty()) return;
@@ -1906,6 +1955,7 @@ void UfpstrueMultiplayerGameInstance::StartClientTravel(uint32 Revision)
 	if (Revision == OperationRevision && ConnectionState == EFPConnectionState::Connecting) Player->ClientTravel(ServerAddress, TRAVEL_Absolute);
 }
 
+// 记录当前 Controller/NetDriver 并进入 WaitingReady；只向同地址服务器提交缓存票据。
 void UfpstrueMultiplayerGameInstance::BeginConnectionHandshake(AfpstruePvpPlayerController* Player)
 {
 	if (!IsValid(Player) || !Player->IsLocalController() || Player->GetWorld() != GetWorld()) return;
@@ -1926,6 +1976,7 @@ void UfpstrueMultiplayerGameInstance::BeginConnectionHandshake(AfpstruePvpPlayer
 		Player->ServerSubmitConnectionToken(ResumeServerAddress.Equals(ServerAddress, ESearchCase::IgnoreCase) ? ResumeToken : FString());
 }
 
+// 只接纳当前握手的应答并保存新票据；收到 ACK 不等于 Pawn、成绩和能力已经复制完成。
 void UfpstrueMultiplayerGameInstance::AcceptConnectionToken(AfpstruePvpPlayerController* Player, const FString& Token, int32 InResumeId, bool bRestored)
 {
 	if (!IsValid(Player) || !Player->IsLocalController() || Player->GetWorld() != GetWorld() || !IsResumeToken(Token)
@@ -1963,7 +2014,8 @@ bool UfpstrueMultiplayerGameInstance::IsPawnStateReady(const AfpstrueCharacter* 
 		&& ASC->FindAbilitySpecFromClass(UfpstrueSprintAbility::StaticClass()) != nullptr;
 }
 
-// BeginPlayingState 只说明控制器进入 Playing；属性集、成绩与时钟仍须分别到达，不能称全世界原子快照。
+// 【设计取舍】Login/Accepted 只证明身份接纳；Ready 还等本端 Pawn、ASC、PlayerState 关联和时钟，避免绑定半就绪对象。
+// 这会增加必要等待，但不保证 GPU 画面、所有 AI 或全世界同时恢复；完整画面验收另有显式流程。
 bool UfpstrueMultiplayerGameInstance::TickConnection(float)
 {
 	const double Now = FPlatformTime::Seconds();
@@ -2006,6 +2058,7 @@ bool UfpstrueMultiplayerGameInstance::TickConnection(float)
 	return true;
 }
 
+// 按所属 GameInstance 的世界与待连接 NetDriver 归属过滤引擎全局失败事件，避免跨 PIE 实例串扰。
 bool UfpstrueMultiplayerGameInstance::OwnsNetworkFailure(UWorld* World, UNetDriver* Driver) const
 {
 	if (GEngine == nullptr) return false;
@@ -2019,6 +2072,7 @@ bool UfpstrueMultiplayerGameInstance::OwnsNetworkFailure(UWorld* World, UNetDriv
 	return false;
 }
 
+// 仅当前实例活动连接的网络失败进入重试流程；无关世界和已终止操作忽略。
 void UfpstrueMultiplayerGameInstance::HandleNetworkFailure(UWorld* World, UNetDriver* Driver, ENetworkFailure::Type, const FString&)
 {
 	if (!OwnsNetworkFailure(World, Driver) || (ConnectionState != EFPConnectionState::Connected
@@ -2027,6 +2081,7 @@ void UfpstrueMultiplayerGameInstance::HandleNetworkFailure(UWorld* World, UNetDr
 	HandleConnectionFailure();
 }
 
+// 当前连接加载地图失败时复用连接失败处理，不接管普通世界旅行错误。
 void UfpstrueMultiplayerGameInstance::HandleTravelFailure(UWorld* World, ETravelFailure::Type, const FString&)
 {
 	if (ConnectionState != EFPConnectionState::Connecting && ConnectionState != EFPConnectionState::WaitingReady) return;
@@ -2035,6 +2090,7 @@ void UfpstrueMultiplayerGameInstance::HandleTravelFailure(UWorld* World, ETravel
 	HandleConnectionFailure();
 }
 
+// 最多安排三次指数退避；先返回本地世界，Ticker 等待旅行结束后再启动下一次连接。
 void UfpstrueMultiplayerGameInstance::HandleConnectionFailure()
 {
 	ConnectingController.Reset();
@@ -2051,6 +2107,7 @@ void UfpstrueMultiplayerGameInstance::HandleConnectionFailure()
 	ReturnToLocalWorld();
 }
 
+// 取消尚未完成的连接并打开本地空 GameMode；重连进度保留在跨世界 GameInstance。
 void UfpstrueMultiplayerGameInstance::ReturnToLocalWorld()
 {
 	UWorld* World = GetWorld();
@@ -2063,6 +2120,7 @@ void UfpstrueMultiplayerGameInstance::ReturnToLocalWorld()
 	UGameplayStatics::OpenLevel(this, FName(*Map), true, TEXT("game=/Script/Engine.GameModeBase"));
 }
 
+// 本实例本地世界加载完成后解除旅行标记；离场流程至此回到 Idle。
 void UfpstrueMultiplayerGameInstance::HandlePostLoadMap(UWorld* World)
 {
 	if (World == nullptr || World->GetGameInstance() != this || World->GetNetMode() != NM_Standalone) return;
@@ -2071,6 +2129,7 @@ void UfpstrueMultiplayerGameInstance::HandlePostLoadMap(UWorld* World)
 	if (ConnectionState == EFPConnectionState::Leaving) SetConnectionState(EFPConnectionState::Idle);
 }
 
+// 活跃槽暂不可恢复时保留票据重试；其余拒绝清票据并结束自动重连，主动退出只返回本地。
 void UfpstrueMultiplayerGameInstance::RejectConnection(const FString& Reason)
 {
 	if (Reason == TEXT("manual_leave")) { ReturnToLocalWorld(); return; }
@@ -2083,11 +2142,13 @@ void UfpstrueMultiplayerGameInstance::RejectConnection(const FString& Reason)
 	ReturnToLocalWorld();
 }
 
+// 控制台取消与主动离场共用同一清理链，不另建取消状态。
 void UfpstrueMultiplayerGameInstance::CancelPvpConnection()
 {
 	LeavePvp();
 }
 
+// 使旧重试失效并清票据，再通知服务器主动退出；三秒未完成则由 Ticker 返回本地世界。
 void UfpstrueMultiplayerGameInstance::LeavePvp()
 {
 	++OperationRevision;
@@ -2100,6 +2161,7 @@ void UfpstrueMultiplayerGameInstance::LeavePvp()
 	else ReturnToLocalWorld();
 }
 
+// 仅在空闲或失败时重用上次地址重新连接，沿用 JoinPvp 的地址校验与操作初始化。
 void UfpstrueMultiplayerGameInstance::RetryPvpConnection()
 {
 	if (ConnectionState == EFPConnectionState::Failed || ConnectionState == EFPConnectionState::Idle) JoinPvp(ServerAddress);

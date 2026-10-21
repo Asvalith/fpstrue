@@ -1,5 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+// 玩家脚部 IK 回归：独立地面夹具 → 真实动画求值 → 足底几何采样 → 离地/死亡复位。
+// 不启用敌人 IK，也不把临时测试地面或手动推进姿态称为性能、联机或画面验收。
+
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Characters/Shared/fpstrueFootIK.h"
@@ -29,6 +32,7 @@ namespace
 constexpr const TCHAR* PlayerClassPath = TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter.BP_TemplateCharacter_C");
 constexpr const TCHAR* EnemyClassPath = TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP.enemy_BP_C");
 
+// 创建无额外玩法的临时世界，将初始化失败转为当前自动化用例的错误。
 bool BeginFootWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test)
 {
 	if (Fixture.CreateTestWorld(EWorldType::Game))
@@ -56,6 +60,7 @@ UBoxComponent* SpawnFootFloor(UWorld& World, const FVector& Extent = FVector(200
 	return Floor;
 }
 
+// 加载实际角色资产并关闭自动移动/网格 Tick，让夹具显式控制每次动画步进。
 ACharacter* SpawnFootCharacter(UWorld& World, bool bEnemy, const FVector& Location, FAutomationTestBase& Test)
 {
 	UClass* Class = bEnemy ? LoadClass<AfpstrueEnemyCharacter>(nullptr, EnemyClassPath)
@@ -76,6 +81,7 @@ ACharacter* SpawnFootCharacter(UWorld& World, bool bEnemy, const FVector& Locati
 	return Character;
 }
 
+// 先推进世界，再执行一次角色动画与骨骼刷新，供断言读取最终姿态。
 bool StepFootPose(FTestWorldWrapper& Fixture, ACharacter& Character, FAutomationTestBase& Test, float Delta = 1.0f / 60.0f)
 {
 	if (!Fixture.TickTestWorld(Delta)) { Fixture.ForwardErrorMessages(&Test); return false; }
@@ -157,6 +163,7 @@ bool ReadFootSoles(ACharacter& Character, const FVector& FloorPoint, const FVect
 	return true;
 }
 
+// 以当前 Socket 世界位置量取两段腿长；返回值仅供检测 IK 是否过度拉伸。
 FVector LegLengths(const USkeletalMeshComponent& Mesh, const TCHAR* Side)
 {
 	const FVector Thigh = Mesh.GetSocketLocation(FName(FString(TEXT("thigh_")) + Side));
@@ -171,6 +178,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFootIKAssetBindingsTest,
 	"fpstrue.Multiplayer.Animation.FootIK.AssetBindingsAndOwnerIsolation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 核对真实蓝图 IK 绑定、实例归属和并行门禁，确保敌人不误用玩家世界查询后处理。
 bool FFpstrueFootIKAssetBindingsTest::RunTest(const FString&)
 {
 	// UE会先读取CanRunParallelWork，再为首帧补TickAnimation/PreUpdate。
@@ -266,6 +274,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueFootIKResetTest,
 	"fpstrue.Multiplayer.Animation.FootIK.AirDeathAndReset",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 在独立平地/斜面上采样实际蒙皮足底，验证贴地、倾斜和腿长约束。
 bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 {
 	{
@@ -569,6 +578,7 @@ bool FFpstrueFootIKGroundPoseTest::RunTest(const FString&)
 	return true;
 }
 
+// 验证离地、死亡及实例重置后清除旧贴地状态，不把上一支撑面的缓存带入新状态。
 bool FFpstrueFootIKResetTest::RunTest(const FString&)
 {
 	{

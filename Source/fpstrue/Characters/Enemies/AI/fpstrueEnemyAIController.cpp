@@ -176,8 +176,6 @@ bool AfpstrueEnemyAIController::IsBehaviorReady() const
 // 解除占有前停掉决策和攻击、归还群体资源，再释放本次 Pawn 的强引用。
 void AfpstrueEnemyAIController::OnUnPossess()
 {
-	// 先停树和导航并归还群体资源，再清空引用，防止下一次 Possess 消费旧目标。
-	// StopAI 已统一清空目标、决策与移动缓存，不在解除占有时重复维护第二份清理。
 	StopAI();
 	ActiveBehaviorTree = nullptr;
 	ControlledEnemy = nullptr;
@@ -189,7 +187,6 @@ void AfpstrueEnemyAIController::OnUnPossess()
 // 世界退出复用 StopAI 清理，并释放行为树模板引用。
 void AfpstrueEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 退出世界前停止行为树并归还群体资源；Pawn 自身销毁和关卡切换都走同一清理路径。
 	StopAI();
 	ActiveBehaviorTree = nullptr;
 	Super::EndPlay(EndPlayReason);
@@ -318,11 +315,13 @@ void AfpstrueEnemyAIController::NotifyCombatTargetUnavailable(AfpstrueCharacter*
 	SelectPerceivedTarget();
 }
 
+// 当前目标的死亡通知统一转为目标失效处理，不另建一条战斗停止链。
 void AfpstrueEnemyAIController::HandleCombatTargetDied(AfpstrueCharacter* DeadTarget)
 {
 	NotifyCombatTargetUnavailable(DeadTarget);
 }
 
+// 目标未经过死亡就直接离场时，同样撤销追击与其所属的群体资源。
 void AfpstrueEnemyAIController::HandleCombatTargetEndPlay(AActor* EndingTarget, EEndPlayReason::Type)
 {
 	NotifyCombatTargetUnavailable(Cast<AfpstrueCharacter>(EndingTarget));
@@ -981,6 +980,8 @@ void AfpstrueEnemyAIController::RecordMoveFailure(const FMoveGoalKey& Goal)
 }
 
 // 先复用路径或到位缓存，再查失败退避与全局预算；只对真正需要刷新的目标提交独立 MoveTo。
+// 【设计取舍】共享的是目标规划与提交预算，不是让多名敌人共用一条路径；各自仍走原生 PathFollowing。
+// 拒绝新请求时保留旧路径，挤离槽位/路径失效后再重寻路，避免把拥堵优化做成冻结战斗单位。
 AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal(
 	const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority)
 {
@@ -1232,7 +1233,7 @@ void AfpstrueEnemyAIController::ApplyRotationPolicy(EFPEnemyAIState NewState, bo
 void AfpstrueEnemyAIController::StopAI()
 {
 	if (CommandPhase == ECommandPhase::Stopping || CommandPhase == ECommandPhase::Stopped) return;
-	// ★【重要边界】[生命周期] 停止时先禁止新命令，再停感知、行为树、移动和攻击，最后清目标、黑板与槽位。
+	// StopLogic/StopMovement/ResetCombat 都可能同步回调；先关门，旧调用栈就不能注入新上下文。
 	CommandPhase = ECommandPhase::Stopping;
 	bInvestigatingNoise = false;
 	LastAcceptedNoiseTime = -TNumericLimits<double>::Max();
@@ -1254,8 +1255,7 @@ void AfpstrueEnemyAIController::StopAI()
 	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), false);
 	GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), false);
 	GetPerceptionComponent()->ForgetAll();
-	// 先停行为树，再停止导航和清理资源；否则下一次 BT 唤醒可能重新发起 MoveTo。
-	// 敌人死亡、解除占有和对局结束都走同一收口，确保路径、行为树、槽位和攻击名额不会只清理一部分。
+	// 先停生产命令的行为树，再取消正在执行的移动和攻击。
 	if (BrainComponent != nullptr)
 	{
 		BrainComponent->StopLogic(TEXT("Enemy stopped"));

@@ -10,6 +10,12 @@
 #include "GameFramework/Controller.h"
 #include "Engine/PackageMapClient.h"
 
+// Character 提交按下/松开 -> GAS 能力持有标签与任务 -> WeaponComponent 执行逐发或换弹事务。
+// 能力不另存弹药、伤害或动画时钟；只在可能调用外部监听者的边界保护当前激活身份。
+// 【设计取舍】InstancedPerActor 复用能力对象；外部同步回调可结束并重启它，所以保留 ActivationRevision。
+// IsActive 只能说明“当前有激活”，不能证明仍是旧调用那轮；版本只跨回调核对，不是多线程锁。
+
+// UE PackageMap 处理角色引用，剩余字段按固定协议往返；返回映射结果，bOutSuccess 报告字段序列化错误。
 bool FGameplayAbilityTargetData_FPShot::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess)
 {
 	UObject* Avatar = Request.Avatar.Get();
@@ -29,7 +35,7 @@ UfpstrueFireAbility::UfpstrueFireAbility()
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 	bRetriggerInstancedAbility = false;
 	bReplicateInputDirectly = false;
-	// 正常松开由可靠输入事件结束；强取消仍只接受服务器规则，不接受客户端伪造取消旧队列。
+	// 正常松开走输入释放事件；强取消由服务器裁决。
 	bServerRespectsRemoteAbilityCancellation = false;
 	SetAssetTags(FGameplayTagContainer(FpstrueGameplayTags::Ability_Fire));
 	ActivationOwnedTags.AddTag(FpstrueGameplayTags::State_Firing);
@@ -37,7 +43,6 @@ UfpstrueFireAbility::UfpstrueFireAbility()
 	ActivationBlockedTags.AddTag(FpstrueGameplayTags::State_Reloading);
 }
 
-// 这里只查询，不启动射击；服务器在能力激活时仍会再次执行相同校验。
 bool UfpstrueFireAbility::CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 	const FGameplayTagContainer* SourceTags, const FGameplayTagContainer* TargetTags, FGameplayTagContainer* OptionalRelevantTags) const
 {
@@ -54,7 +59,6 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 	if (!IsActive()) return;
 	const uint32 RequestedActivation = ++ActivationRevision;
 	bEnding = false;
-	bInputReleased = false;
 	AfpstrueCharacter* Character = ActorInfo != nullptr ? Cast<AfpstrueCharacter>(ActorInfo->AvatarActor.Get()) : nullptr;
 	UfpstrueWeaponComponent* Weapon = Character != nullptr ? Character->GetEquippedWeaponComponent() : nullptr;
 	UAbilitySystemComponent* ASC = ActorInfo != nullptr ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
@@ -64,7 +68,7 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 		return;
 	}
 	const bool bCommitted = CommitAbility(Handle, ActorInfo, ActivationInfo);
-	// Commit 会同步广播能力提交，监听者可取消并重启本实例；旧栈不能绑定新能力的武器或任务。
+	// CommitAbility -> K2_CommitExecute / NotifyAbilityCommit，同步监听者可结束或重启能力。
 	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
 	if (!bCommitted || !IsValid(Weapon) || !Weapon->CanExecuteShot())
 	{
@@ -75,25 +79,24 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 	UAbilityTask_WaitInputRelease* ReleaseTask = UAbilityTask_WaitInputRelease::WaitInputRelease(this, true);
 	ReleaseTask->OnRelease.AddDynamic(this, &ThisClass::HandleInputReleased);
 	ReleaseTask->ReadyForActivation();
-	// ★【异步边界】按钮可能已松开，任务激活即可同步结束；不能再启动一轮旧射击。
+	// ReadyForActivation 会立即处理已松开的输入；返回时能力可能已经结束。
 	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
 	const FPredictionKey ActivationKey = ActivationInfo.GetActivationPredictionKey();
+	Weapon->BeginAbilityFire(ActivationKey.Current);
 	if (!ActorInfo->IsLocallyControlled())
 	{
-		Weapon->BeginAbilityFire(ActivationKey.Current);
 		// 先挂委托再消费缓存，覆盖 TargetData 比服务端能力激活更早到达的情况。
 		ShotDataHandle = ASC->AbilityTargetDataSetDelegate(Handle, ActivationKey).AddUObject(this, &ThisClass::HandleShotData);
 		ASC->CallReplicatedTargetDataDelegatesIfSet(Handle, ActivationKey);
-		if (ActivationRevision == RequestedActivation && IsActive() && AimTimeoutTask == nullptr)
+		if (ActivationRevision == RequestedActivation && IsActive() && ShotDataTimeoutTask == nullptr)
 		{
-			AimTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 3.0f);
-			AimTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleAimTimeout);
-			AimTimeoutTask->ReadyForActivation();
+			ShotDataTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 3.0f);
+			ShotDataTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleShotDataTimeout);
+			ShotDataTimeoutTask->ReadyForActivation();
 		}
 		return;
 	}
 	// 初始预测键只标识本轮 GA；联网拥有者每发发送独立 ShotId，单机保留原始直接结算。
-	Weapon->BeginAbilityFire(ActivationKey.Current);
 	Pulse();
 }
 
@@ -109,10 +112,10 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 		ASC->ConsumeClientReplicatedTargetData(Handle, ActivationInfo.GetActivationPredictionKey());
 	}
 	ShotDataHandle.Reset();
-	if (AimTimeoutTask != nullptr)
+	if (ShotDataTimeoutTask != nullptr)
 	{
-		AimTimeoutTask->EndTask();
-		AimTimeoutTask = nullptr;
+		ShotDataTimeoutTask->EndTask();
+		ShotDataTimeoutTask = nullptr;
 	}
 	UfpstrueWeaponComponent* Weapon = ActiveWeapon.Get();
 	ActiveWeapon.Reset();
@@ -129,14 +132,14 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 // 松开只结束本次能力，释放事件已由 WaitInputRelease 同步给服务器。
 void UfpstrueFireAbility::HandleInputReleased(float)
 {
-	bInputReleased = true;
+	// EndAbility 先阻止旧调用栈并移除 TargetData 订阅，不再维护第二份“已松开”状态。
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 }
 
-// 能力直接生成每发输入，结束由 EndAbility 的活动状态保护；武器 Timer 只消费已准入网络事实，不生成连射输入或反向管理 GA。
+// 能力任务生成连射输入；武器 Timer 仅消费已准入的网络请求。
 void UfpstrueFireAbility::Pulse()
 {
-	if (!IsActive() || bEnding || bInputReleased) return;
+	if (!IsActive() || bEnding) return;
 	const uint32 RequestedActivation = ActivationRevision;
 	UfpstrueWeaponComponent* Weapon = ActiveWeapon.Get();
 	if (!IsValid(Weapon) || !Weapon->CanExecuteShot())
@@ -178,7 +181,7 @@ void UfpstrueFireAbility::Pulse()
 				Delay = 60.0f / Weapon->GetWeaponSettings().RoundsPerMinute;
 			}
 		}
-		// ★【回调重入】扣弹、命中或表现通知可以取消并重启同一个能力实例，旧 Pulse 不得接着排下一发。
+		// Fire / PresentPredictedShot 会广播伤害或表现事件，返回后才能安排下一发。
 		if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
 		Delay = FMath::Max(Delay, Weapon->GetNextShotDelay());
 	}
@@ -215,20 +218,14 @@ void UfpstrueFireAbility::HandleShotData(const FGameplayAbilityTargetDataHandle&
 		return;
 	}
 	const FFPShotRequest Request = Shot->Request;
-	// 同一可靠通道中排在松开之后的数据不能再准入；只排空松开之前已接受的输入。
-	if (bInputReleased)
-	{
-		Weapon->RejectNetworkShot(Request, EFPShotResult::Cancelled);
-		return;
-	}
 	const EFPShotResult Result = Weapon->AcceptShotRequest(Request);
 	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
 	if (Result == EFPShotResult::Accepted || Result == EFPShotResult::Queued)
 	{
-		if (AimTimeoutTask != nullptr) AimTimeoutTask->EndTask();
-		AimTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 1.0f);
-		AimTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleAimTimeout);
-		AimTimeoutTask->ReadyForActivation();
+		if (ShotDataTimeoutTask != nullptr) ShotDataTimeoutTask->EndTask();
+		ShotDataTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 1.0f);
+		ShotDataTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleShotDataTimeout);
+		ShotDataTimeoutTask->ReadyForActivation();
 	}
 	if ((Result == EFPShotResult::Accepted || Result == EFPShotResult::NoAmmo) && Weapon->GetCurrentAmmo() == 0)
 	{
@@ -238,7 +235,7 @@ void UfpstrueFireAbility::HandleShotData(const FGameplayAbilityTargetDataHandle&
 }
 
 // 没有有效逐发输入的激活不能长期占据 Firing；超时取消也会解除目标数据订阅。
-void UfpstrueFireAbility::HandleAimTimeout()
+void UfpstrueFireAbility::HandleShotDataTimeout()
 {
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, true);
 }
@@ -259,7 +256,6 @@ UfpstrueReloadAbility::UfpstrueReloadAbility()
 	CancelAbilitiesWithTag.AddTag(FpstrueGameplayTags::Ability_Sprint);
 }
 
-// 激活资格不改变弹药或事务，客户端与服务器各自检查可见的当前状态。
 bool UfpstrueReloadAbility::CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 	const FGameplayTagContainer* SourceTags, const FGameplayTagContainer* TargetTags, FGameplayTagContainer* OptionalRelevantTags) const
 {
@@ -295,11 +291,10 @@ void UfpstrueReloadAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, c
 	}
 	ActiveWeapon = Weapon;
 	if (!HasAuthority(&ActivationInfo)) return; // 客户端只接收服务器动作标签，不伪造 ReloadId 或补弹。
-	// ServerInitiated 的拥有者只接收服务器能力生命周期；这里不再创建本地预测换弹事务。
 	// 原生能力通知先于蓝图观察事件，让旧 GA 先释放标签，观察者随后才能合法重启换弹。
 	ReloadEndedHandle = Weapon->OnAbilityReloadEnded.AddUObject(this, &ThisClass::HandleReloadEnded);
 	const bool bAccepted = Weapon->BeginAbilityReload(ActiveReloadId);
-	// ★【回调重入】请求内部可能已经结束，随后监听者又开启另一轮；旧栈不能检查或结束新能力。
+	// BeginAbilityReload 广播播放请求，监听者可能同步完成、取消或重启换弹。
 	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
 	if (!bAccepted || ActiveReloadId == INDEX_NONE) EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
 }
@@ -351,7 +346,6 @@ UfpstrueAimAbility::UfpstrueAimAbility()
 	CancelAbilitiesWithTag.AddTag(FpstrueGameplayTags::Ability_Sprint);
 }
 
-// 标签负责动作冲突，装备与生命周期仍由当前角色的真实关系判断。
 bool UfpstrueAimAbility::CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 	const FGameplayTagContainer* SourceTags, const FGameplayTagContainer* TargetTags, FGameplayTagContainer* OptionalRelevantTags) const
 {
@@ -376,7 +370,7 @@ void UfpstrueAimAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, cons
 	}
 	const bool bCommitted = CommitAbility(Handle, ActorInfo, ActivationInfo);
 	if (ActivationRevision != RequestedActivation || !IsActive()) return;
-	// PreActivate 取消旧能力和 Commit 都可能触发外部回调，使用当前装备资格而非激活前的判断。
+	// Commit 回调之后重查当前装备；PreActivate 已经处理过冲突能力取消。
 	if (!bCommitted || !IsValid(Character)
 		|| !IsValid(Weapon) || Character->GetEquippedWeaponComponent() != Weapon || !Weapon->CanExecuteShot())
 	{
@@ -419,7 +413,6 @@ UfpstrueSprintAbility::UfpstrueSprintAbility()
 	ActivationBlockedTags.AddTag(FpstrueGameplayTags::State_Aiming);
 }
 
-// 徒手也允许冲刺；是否与其他动作冲突由上述标签规则统一决定。
 bool UfpstrueSprintAbility::CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 	const FGameplayTagContainer* SourceTags, const FGameplayTagContainer* TargetTags, FGameplayTagContainer* OptionalRelevantTags) const
 {

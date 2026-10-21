@@ -61,7 +61,7 @@ $RequiredAutomationTests = @(
     'fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation'
     'fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry'
     'fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage'
-    'fpstrue.Gameplay.Boundaries.Weapon.LegacyCallbacksFailClosed'
+    'fpstrue.Gameplay.Boundaries.Weapon.StaleTransactionCallbacksIgnored'
     'fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry'
     'fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership'
     'fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime'

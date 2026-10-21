@@ -1,5 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+// 采集入口：命令行配置 → 等待真实人口与视角就绪 → 预热 → 记录 → 校验写盘 → 退出。
+// 单机 Runner、多端 CSV/Trace Profile、跨构建 Baseline 各自持有采集状态，不接管正式玩法。
+// World wall-time、OS 线程 CPU、引擎 unit 与网络计数分别输出，不能相加当成整帧耗时。
+
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
 #include "Async/Future.h"
 #include "Animation/AnimInstance.h"
@@ -15,9 +19,11 @@
 #include "Game/fpstrueGameMode.h"
 #include "Game/fpstrueMultiplayer.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
+#include "ChartCreation.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/BoxComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Components/InputComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/World.h"
@@ -27,6 +33,7 @@
 #include "Engine/PendingNetGame.h"
 #include "Engine/NetConnection.h"
 #include "Engine/NetDriver.h"
+#include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -220,17 +227,20 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 	FVector ViewLocation = FVector::ZeroVector;
 	FRotator ViewRotation = FRotator::ZeroRotator;
 
+	// Profile 的最终所有者消失时解除 World 采样订阅；异步写盘由采集租约继续持有。
 	~FPvpPerformanceProfile()
 	{
 		FWorldDelegates::OnWorldTickStart.Remove(WorldTickStartHandle);
 		FWorldDelegates::OnWorldTickEnd.Remove(WorldTickEndHandle);
 	}
 
+	// 仅为当前 World 的有效采集帧记录 Tick 起点，不包含引擎外层节拍等待。
 	void BeginWorldTick(UWorld* TickWorld, ELevelTick, float)
 	{
 		if (TickWorld == World.Get() && bCapturing && !bFlushing) WorldTickAt = FPlatformTime::Seconds();
 	}
 
+	// 将配对的 World Tick wall-time 写入 CSV；其他 World 或缺失起点不产生样本。
 	void EndWorldTick(UWorld* TickWorld, ELevelTick, float)
 	{
 		if (TickWorld != World.Get() || WorldTickAt == 0.0) return;
@@ -240,6 +250,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		WorldTickAt = 0.0;
 	}
 
+	// 统一绝对路径与分隔符，用于采集文件归属比较；非法父目录折叠返回空串。
 	static FString Canonical(FString Path)
 	{
 		Path = FPaths::ConvertRelativePathToFull(Path);
@@ -248,6 +259,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		return Path;
 	}
 
+	// 只接受显式采集根目录下的子路径，不允许盘根、根目录本身或越界写入。
 	static bool IsProfilePath(const FString& Path)
 	{
 		FString RequestedRoot;
@@ -259,6 +271,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		return !Path.IsEmpty() && !Path.Equals(Root, ESearchCase::IgnoreCase) && FPaths::IsUnderDirectory(Path, Root);
 	}
 
+	// 可选 UI 实验负载：服务器定时扣血并杀死固定批次，始终调用真实生命事务。
 	void ApplyHealthWorkload()
 	{
 		if (!bHealthAndDeath || Role != TEXT("Server") || !bCapturing || bDeathBatchApplied) return;
@@ -297,6 +310,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		}
 	}
 
+	// 首次记录失败原因并转入异步收尾；不在出错点直接抛弃尚未写完的产物。
 	void Fail(const TCHAR* Reason)
 	{
 		if (!bFailed) UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=%s Reason=%s"), *Role, Reason);
@@ -305,6 +319,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		bFlushing = true;
 	}
 
+	// 读取外部原子替换的控制文件；短暂不可读留给下一次 Tick，非法命令进入失败收尾。
 	bool ReadControl(FString& Command)
 	{
 		const int64 Bytes = IFileManager::Get().FileSize(*ControlPath);
@@ -333,6 +348,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		return true;
 	}
 
+	// 核对人口、血条与本地视角；Out 参数区分尚未就绪的镜头和真正的无效场景。
 	bool SampleWorld(bool& bWaitingForLocalView)
 	{
 		bWaitingForLocalView = false;
@@ -461,6 +477,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		return true;
 	}
 
+	// 用实际输出路径确认 CSV 仍属于本轮，避免停止其他采集者接管的新会话。
 	bool OwnsCsv() const
 	{
 #if CSV_PROFILER
@@ -470,6 +487,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 #endif
 	}
 
+	// 独占申请 CSV/可选 Trace，并建立跨 World 生命周期的写盘租约；不覆盖旧文件。
 	void BeginCapture()
 	{
 #if CSV_PROFILER
@@ -539,6 +557,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 #endif
 	}
 
+	// 只停止自己持有的 CSV/Trace；排队中的 CSV 启动改为启动后立即收尾。
 	void StopOwnedResources()
 	{
 #if CSV_PROFILER
@@ -566,6 +585,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		}
 	}
 
+	// 等待落盘、验证产物并等待外部 EXIT；返回 true 保留 Ticker，false 表示已请求退出。
 	bool PollFlush()
 	{
 		StopOwnedResources();
@@ -628,6 +648,7 @@ struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
 		return false;
 	}
 
+	// 推进多端 Profile 的就绪、预热、采集和收尾阶段，拒绝人口变化及控制命令倒退。
 	bool Tick(float)
 	{
 		if (FPlatformTime::Seconds() - StartedAt >= 300.0) Fail(TEXT("Watchdog300Seconds"));
@@ -721,9 +742,37 @@ TRACE_DECLARE_INT_COUNTER(FpBaselineGTUser, TEXT("Fpstrue/Baseline/GTUser100nsCu
 TRACE_DECLARE_INT_COUNTER(FpBaselineGTKernel, TEXT("Fpstrue/Baseline/GTKernel100nsCumulative"));
 TRACE_DECLARE_FLOAT_COUNTER(FpBaselineWorldCpu, TEXT("Fpstrue/Baseline/WorldGameThreadCpuMs"));
 TRACE_DECLARE_INT_COUNTER(FpBaselineWorldCpuValid, TEXT("Fpstrue/Baseline/WorldGameThreadCpuValid"));
+// 复用引擎跨构建的性能消费者；不启用 Shipping 中已裁掉的 Trace/CSV 宏。
+// 与原 frames.csv 分开记录：这些 unit 值可能来自前一渲染管线帧，不是 OS 执行时间。
+struct FPvpBaselineUnits : IPerformanceDataConsumer
+{
+	struct FSample
+	{
+		uint64 Frame = 0, Qpc = 0;
+		double Elapsed = 0;
+		FFrameData Data;
+	};
+	static constexpr int32 MaxSamples = 262144;
+	TArray<FSample> Samples;
+	double CaptureAt = 0;
+	bool bCollect = false, bOverflowed = false;
+	// 引擎注册消费者时预留存储；正式采样仍由 bCollect 在 START 边界开启。
+	virtual void StartCharting() override { Samples.Reserve(8192); }
+	// 引擎停止回调不决定本轮产物归属，实际注销和写盘由 Baseline 管理。
+	virtual void StopCharting() override {}
+	// 保存有界的原生 unit 样本及回调帧号；溢出标记失败，不丢尾部后伪造完整覆盖。
+	virtual void ProcessFrame(const FFrameData& Data) override
+	{
+		if (!bCollect) return;
+		if (Samples.Num() >= MaxSamples) { bOverflowed = true; return; }
+		Samples.Add({GFrameCounter, FPlatformTime::Cycles64(), FPlatformTime::Seconds() - CaptureAt, Data});
+	}
+};
 // Shared instrumentation, not a Shipping cheat/RPC surface. It observes a local
 // World and frame boundaries; only the disposable Editor DS prepares test HP and
-// relevancy once. Engine stat-unit counters are deliberately not imitated.
+// relevancy once. Diagnostic unit counters come from the native engine consumer.
+// 【设计取舍】正式基线与带采集开销的诊断分开：前者回答是否变快，后者解释时间花在哪里。
+// 同帧号只证明样本关联；不同线程可重叠、嵌套 scope 可重复包含，不能直接相加当整帧耗时。
 struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 {
 	struct FThreadCpuSample
@@ -779,6 +828,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	TArray<FFrameCpu> CpuFrames;
 	// 逐帧节拍字段仅随独立诊断启用；不扩充历史 schema-2 frames.csv 或普通基线热路径。
 	TArray<FFramePacing> PacingFrames;
+	TSharedPtr<FPvpBaselineUnits> UnitConsumer;
+	TWeakObjectPtr<UEngine> UnitEngine;
 	FString Role, ControlPath, Directory, Phase = TEXT("STARTING"), Reason, ViewPolicy = TEXT("Player");
 	FString EnemyReplication = TEXT("Tiered");
 	FString AnimationStartSnapshot = TEXT("null");
@@ -813,6 +864,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 
 	// ★ 诊断边界：只在显式开关下直接读取当前 GT 的 OS 累计计时，不使用 UE 的缓存 CPU 百分比。
 	// 100ns 是 FILETIME 单位而非逐帧精度；保留原值与有符号差值，不把量化零值/跨边界突增 clamp 掉。
+	// 【设计取舍】wall 减线程 CPU 只能说明该线程未执行，不能区分等依赖、节拍休眠或就绪未获调度。
+	// 精确归因仍需对齐线程身份与调度记录；GT 等 Worker 完成也不代表整机没有执行工作。
 	FThreadCpuSample ReadGameThreadCpu()
 	{
 		FThreadCpuSample Sample;
@@ -832,6 +885,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return Sample;
 	}
 
+	// 只对同一有效线程的累计计数做有符号差分；负差保留给报告诊断，不静默钳零。
 	static bool CpuDifference(const FThreadCpuSample& Begin, const FThreadCpuSample& End, int64& User, int64& Kernel)
 	{
 		if (!Begin.bValid || !End.bValid || Begin.ThreadId != End.ThreadId) return false;
@@ -840,19 +894,23 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return true;
 	}
 
+	// 输出用户态或内核态原始累计计数；缺失样本写空字段而非零耗时。
 	static FString CpuRaw(const FThreadCpuSample& Sample, bool bUser)
 	{
 		return Sample.bValid ? FString::Printf(TEXT("%llu"), bUser ? Sample.User100ns : Sample.Kernel100ns) : FString();
 	}
+	// 格式化可用的有符号 CPU 差值，保留缺失与真实零的区别。
 	static FString CpuDelta(bool bValid, int64 Value)
 	{
 		return bValid ? FString::Printf(TEXT("%lld"), Value) : FString();
 	}
+	// 将 FILETIME 的 100ns 用户态/内核态差值换算成 ms；无效时使用调用者指定占位。
 	static FString CpuMs(bool bValid, int64 User, int64 Kernel, const TCHAR* Missing = TEXT(""))
 	{
 		return bValid ? FString::Printf(TEXT("%.9f"), double(User + Kernel) * 0.0001) : FString(Missing);
 	}
 
+	// 同时写帧号、QPC、比例和线程身份，供离线校准 START/STOP 与 Trace/ETL 时间轴。
 	FTraceAnchor MarkCaptureBoundary(const TCHAR* Boundary) const
 	{
 		const FTraceAnchor Anchor{GFrameCounter, FPlatformTime::Cycles64(), FPlatformTime::GetSecondsPerCycle64(), FPlatformTLS::GetCurrentThreadId()};
@@ -864,13 +922,24 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return Anchor;
 	}
 
+	// 停止 unit 收集并解除所有采样委托；不触碰外部调度录制器。
 	~FPvpBaselineCapture()
 	{
+		StopUnitConsumer();
 		FWorldDelegates::OnWorldTickStart.Remove(StartHandle);
 		FWorldDelegates::OnWorldTickEnd.Remove(EndHandle);
 		FCoreDelegates::OnEndFrame.Remove(FrameHandle);
 	}
 
+	// 先关闭收集，再向仍有效的 Engine 注销消费者；已收集样本保留用于写盘。
+	void StopUnitConsumer()
+	{
+		if (UnitConsumer.IsValid()) UnitConsumer->bCollect = false;
+		if (UnitEngine.IsValid() && UnitConsumer.IsValid()) UnitEngine->RemovePerformanceDataConsumer(UnitConsumer);
+		UnitEngine.Reset();
+	}
+
+	// 去掉参数外引号并规范化绝对路径，供 Baseline 产物和允许目录核对。
 	static FString Canonical(FString Path)
 	{
 		Path.TrimQuotesInline();
@@ -879,6 +948,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return FPaths::CollapseRelativeDirectories(Path) ? Path : FString();
 	}
 
+	// 对路径、对象名等文本做 JSON 字符串转义，不把日志文本直接拼成结构字段。
 	static FString Quote(FString Text)
 	{
 		Text.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
@@ -889,6 +959,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return TEXT("\"") + Text + TEXT("\"");
 	}
 
+	// 在 GT 只读实际节拍和安全可查询的限速值，不执行限速等待或推进引擎节拍状态。
 	FFramePacing ReadFramePacing() const
 	{
 		check(IsInGameThread());
@@ -920,6 +991,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return Sample;
 	}
 
+	// 输出限速配置与实际读回快照；配置值、重读结果和真正等待时间不混为一谈。
 	FString BuildPacingSnapshot() const
 	{
 		const FFramePacing Sample = ReadFramePacing();
@@ -958,7 +1030,9 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		int32 MeshCollisionEnabled = 0, MeshPhysicsStates = 0, ValidMeshBodyInstances = 0, ConstraintEntries = 0;
 		int32 HitProxyComponents = 0, QueryEnabledHitProxies = 0, HitProxyPhysicsStates = 0;
 		int32 HitProxyBodySetups = 0, InvalidHitProxyBodySetups = 0, BoxHitElements = 0, ConvexHitElements = 0, OtherHitElements = 0;
-		int32 UnexpectedHitProxyComponents = 0, MinHitBoxesPerEnemy = MAX_int32, MaxHitBoxesPerEnemy = 0, AlwaysCheckFloorEnemies = 0;
+		int32 BoxComponents = 0, ConvexMeshComponents = 0, UnexpectedHitProxyComponents = 0;
+		int32 MinHitBoxesPerEnemy = MAX_int32, MaxHitBoxesPerEnemy = 0, AlwaysCheckFloorEnemies = 0;
+		TSet<const UStaticMesh*> SharedHullAssets;
 		int32 GameplayTiers[3] = {}, RenderTiers[3] = {}, VisibilityOptions[5] = {};
 		int32 GameplayReasonSampled = 0, GameplayDistanceValid = 0;
 		int32 FullByDistance = 0, FullByAttack = 0, FullByMeleeRange = 0, FullReasonUnknown = 0;
@@ -1021,33 +1095,41 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				*Leader, Boolean(Enemy->IsAttacking()), Boolean(Enemy->RequiresFullAuthorityPose()),
 				Boolean(DetailMesh != nullptr && DetailMesh->IsComponentTickEnabled()), DetailMesh != nullptr ? DetailMesh->GetNumLODs() : 0,
 				Enemy->GetAppliedMinimumLOD(), DetailMesh != nullptr ? DetailMesh->GetPredictedLODLevel() : INDEX_NONE);
-			// 只统计带标签的原生盒体；残留的网格/其他代理单独报错，不能冒充六个盒体。
-			// 只读已存在的 BodySetup，不为客户端观测创建原本不需要的查询几何。
+			// 同一观察器服务旧凸包/新盒体 A/B；按实际组件分类，不以启动参数猜几何。
+			// 原生盒只读 ShapeBodySetup；静态网格只读资产现有 BodySetup，不触发 Cook。
 			int32 EnemyHitBoxes = 0;
 			TInlineComponentArray<UPrimitiveComponent*> Shapes;
 			Enemy->GetComponents(Shapes);
 			for (const UPrimitiveComponent* Component : Shapes)
 			{
 				if (!Component->ComponentHasTag(TEXT("EnemyHitProxy"))) continue;
-				const UBoxComponent* Shape = Cast<UBoxComponent>(Component);
-				if (Shape == nullptr)
+				const UBoxComponent* Box = Cast<UBoxComponent>(Component);
+				const UStaticMeshComponent* Hull = Cast<UStaticMeshComponent>(Component);
+				if (Box == nullptr && Hull == nullptr)
 				{
 					++UnexpectedHitProxyComponents;
 					continue;
 				}
 				++EnemyHitBoxes;
 				++HitProxyComponents;
-				const ECollisionEnabled::Type Collision = Shape->GetCollisionEnabled();
+				BoxComponents += Box != nullptr ? 1 : 0;
+				ConvexMeshComponents += Hull != nullptr ? 1 : 0;
+				const ECollisionEnabled::Type Collision = Component->GetCollisionEnabled();
 				QueryEnabledHitProxies += Collision == ECollisionEnabled::QueryOnly || Collision == ECollisionEnabled::QueryAndPhysics ? 1 : 0;
-				HitProxyPhysicsStates += Shape->IsPhysicsStateCreated() ? 1 : 0;
-				if (const UBodySetup* Body = Shape->ShapeBodySetup)
+				HitProxyPhysicsStates += Component->IsPhysicsStateCreated() ? 1 : 0;
+				const UStaticMesh* HullAsset = Hull != nullptr ? Hull->GetStaticMesh() : nullptr;
+				if (HullAsset != nullptr) SharedHullAssets.Add(HullAsset);
+				const UBodySetup* Body = Box != nullptr ? Box->ShapeBodySetup.Get() : HullAsset != nullptr ? HullAsset->GetBodySetup() : nullptr;
+				if (Body != nullptr)
 				{
 					++HitProxyBodySetups;
 					BoxHitElements += Body->AggGeom.BoxElems.Num();
 					ConvexHitElements += Body->AggGeom.ConvexElems.Num();
 					OtherHitElements += Body->AggGeom.GetElementCount() - Body->AggGeom.BoxElems.Num() - Body->AggGeom.ConvexElems.Num();
-					InvalidHitProxyBodySetups += Body->AggGeom.BoxElems.Num() != 1 || Body->AggGeom.GetElementCount() != 1 ? 1 : 0;
+					InvalidHitProxyBodySetups += (Box != nullptr ? Body->AggGeom.BoxElems.Num() != 1 : Body->AggGeom.ConvexElems.Num() != 1)
+						|| Body->AggGeom.GetElementCount() != 1 ? 1 : 0;
 				}
+				else if (Hull != nullptr || Component->IsPhysicsStateCreated()) ++InvalidHitProxyBodySetups;
 			}
 			MinHitBoxesPerEnemy = FMath::Min(MinHitBoxesPerEnemy, EnemyHitBoxes);
 			MaxHitBoxesPerEnemy = FMath::Max(MaxHitBoxesPerEnemy, EnemyHitBoxes);
@@ -1093,8 +1175,11 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		Json += FString::Printf(TEXT("},\"mesh\":{\"count\":%d,\"tickEnabled\":%d,\"everyFrameTick\":%d,\"uroEnabled\":%d,\"leaderPoseFollowers\":%d,\"postProcessDisabled\":%d,\"collisionEnabled\":%d,\"physicsStatesCreated\":%d,\"validBodyInstances\":%d,\"constraintInstanceEntries\":%d,\"gameplayTiers\":[%d,%d,%d],\"renderTiers\":[%d,%d,%d],\"visibilityOptionsByEnum\":[%d,%d,%d,%d,%d]},"),
 			Meshes, MeshTickEnabled, EveryFrameMeshTicks, URO, LeaderFollowers, PostDisabled, MeshCollisionEnabled, MeshPhysicsStates, ValidMeshBodyInstances, ConstraintEntries,
 			GameplayTiers[0], GameplayTiers[1], GameplayTiers[2], RenderTiers[0], RenderTiers[1], RenderTiers[2], VisibilityOptions[0], VisibilityOptions[1], VisibilityOptions[2], VisibilityOptions[3], VisibilityOptions[4]);
-		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"movement\":{\"alwaysCheckFloorEnemies\":%d},\"hitProxyComponents\":{\"schemaVersion\":2,\"geometry\":\"NativeBox\",\"count\":%d,\"minPerEnemy\":%d,\"maxPerEnemy\":%d,\"unexpectedTaggedComponents\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d,\"bodySetupsPresent\":%d,\"invalidBodySetups\":%d,\"boxElements\":%d,\"convexElements\":%d,\"otherElements\":%d},\"physicsAssetConfiguration\":["),
+		const TCHAR* HitGeometry = BoxComponents > 0 && ConvexMeshComponents == 0 && UnexpectedHitProxyComponents == 0 ? TEXT("NativeBox")
+			: ConvexMeshComponents > 0 && BoxComponents == 0 && UnexpectedHitProxyComponents == 0 ? TEXT("SharedConvex") : TEXT("MixedOrMissing");
+		Json += FString::Printf(TEXT("\"instances\":{\"main\":%d,\"mainMultithreadedFlag\":%d,\"mainCanRunParallelWork\":%d,\"mainRootMotionFromEverything\":%d,\"postProcess\":%d,\"postCanRunParallelWork\":%d},\"movement\":{\"alwaysCheckFloorEnemies\":%d},\"hitProxyComponents\":{\"schemaVersion\":3,\"geometry\":\"%s\",\"nativeBoxComponents\":%d,\"staticMeshComponents\":%d,\"uniqueHullAssets\":%d,\"count\":%d,\"minPerEnemy\":%d,\"maxPerEnemy\":%d,\"unexpectedTaggedComponents\":%d,\"queryEnabled\":%d,\"physicsStatesCreated\":%d,\"bodySetupsPresent\":%d,\"invalidBodySetups\":%d,\"boxElements\":%d,\"convexElements\":%d,\"otherElements\":%d},\"physicsAssetConfiguration\":["),
 			MainInstances, MainMultithreaded, MainCanParallel, MainRootMotionEverything, PostInstances, PostCanParallel, AlwaysCheckFloorEnemies,
+			HitGeometry, BoxComponents, ConvexMeshComponents, SharedHullAssets.Num(),
 			HitProxyComponents, Alive > 0 ? MinHitBoxesPerEnemy : 0, MaxHitBoxesPerEnemy, UnexpectedHitProxyComponents,
 			QueryEnabledHitProxies, HitProxyPhysicsStates, HitProxyBodySetups, InvalidHitProxyBodySetups, BoxHitElements, ConvexHitElements, OtherHitElements);
 		TArray<const UPhysicsAsset*> Assets;
@@ -1167,6 +1252,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return true;
 	}
 
+	// 在 START/STOP 读取稳定父连接的累计计数；连接身份和计数异常使本轮无效。
 	bool ReadNetworkBoundary(FNetworkBoundary& Boundary)
 	{
 		TArray<UNetConnection*> Connections;
@@ -1188,6 +1274,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return true;
 	}
 
+	// 配对起止连接并输出字节/包速率；不合并重连计数，也不声称是每 Actor 或网卡流量。
 	bool BuildNetworkJson(FString& Json)
 	{
 		const double Duration = NetworkStop.Seconds - NetworkStart.Seconds;
@@ -1229,6 +1316,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return true;
 	}
 
+	// 用编译宏报告真实构建配置，不根据启动参数或文件名猜测 Shipping。
 	static const TCHAR* Configuration()
 	{
 #if UE_BUILD_SHIPPING
@@ -1252,6 +1340,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			IFileManager::Get().Move(*Path, *Temporary, true, false, false, true);
 	}
 
+	// 为状态文件和最终报告生成同一份角色、阶段、视角及样本数量元数据。
 	FString CommonJson() const
 	{
 		const double Duration = CaptureAt > 0 ? (StopAt > 0 ? StopAt : FPlatformTime::Seconds()) - CaptureAt : 0;
@@ -1263,6 +1352,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			*Quote(EnemyReplication));
 	}
 
+	// 原子发布角色阶段；状态文件写失败时退出，不能让父脚本等待一份失真的状态。
 	bool Publish(const TCHAR* NewPhase)
 	{
 		Phase = NewPhase;
@@ -1275,18 +1365,21 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return true;
 	}
 
+	// 保留首个失败原因，封存失败边界并停止收集，以非零退出码拒收该轮。
 	bool Fail(const TCHAR* Failure)
 	{
 		if (!bFailed) Reason = Failure;
 		bFailed = true;
 		if (bCapturing) CaptureStopAnchor = MarkCaptureBoundary(TEXT("FAILED"));
 		bCapturing = false;
+		StopUnitConsumer();
 		StopAt = FPlatformTime::Seconds();
 		Publish(TEXT("FAILED"));
 		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineFailed"));
 		return false;
 	}
 
+	// 为当前采样 World 记录 wall/线程 CPU 起点，不计入其他 World 的工作。
 	void BeginWorld(UWorld* InWorld, ELevelTick, float)
 	{
 		if (bCapturing && InWorld == World.Get())
@@ -1296,6 +1389,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		}
 	}
 
+	// 配对 World 结束样本并记录帧身份，供 EndFrame 判断 wall/CPU 是否属于同一帧。
 	void EndWorld(UWorld* InWorld, ELevelTick, float)
 	{
 		if (bCapturing && InWorld == World.Get() && WorldStartAt > 0)
@@ -1321,6 +1415,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		}
 	}
 
+	// 保存连续完整帧间隔，并关联同帧 World、CPU 和节拍样本；不把无效配对补成零。
 	void EndFrame()
 	{
 		if (!bCapturing) return;
@@ -1342,6 +1437,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		PreviousEndCpu = EndCpu;
 	}
 
+	// 非阻塞读取 WAIT/START/STOP/EXIT；文件短暂被占用时下轮重试，持续故障判失败。
 	bool ReadControl(FString& Command)
 	{
 		const int64 Bytes = IFileManager::Get().FileSize(*ControlPath);
@@ -1526,9 +1622,85 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return true;
 	}
 
+	// 写独立 units.csv 并按回调帧核对覆盖；不可用/未启用计时项在 JSON 中保留 null。
+	bool WriteUnitArtifacts(FString& Json)
+	{
+		Json = FString::Printf(TEXT("{\"schemaVersion\":1,\"enabled\":%s"), bCpuAccounting ? TEXT("true") : TEXT("false"));
+		if (!bCpuAccounting) { Json += TEXT("}"); return true; }
+		if (!UnitConsumer.IsValid() || UnitConsumer->bOverflowed) return Fail(TEXT("NativeUnitConsumerMissingOrOverflowed"));
+		const IConsoleVariable* TickFlushCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("net.ReportGameTickFlushTime"));
+		// Shipping 默认不启用该原生计时器；不把 disabled 状态下的静态 0 当作网络零成本。
+		const bool bTickFlushTimer = STATS || (TickFlushCVar != nullptr && TickFlushCVar->GetInt() != 0);
+		using FData = IPerformanceDataConsumer::FFrameData;
+		struct FMetric { const TCHAR* Name; double FData::* Value; bool bRenderedOnly; bool bZeroIsMissing; };
+		const FMetric Metrics[] = {
+			{TEXT("GameThreadMs"), &FData::GameThreadTimeSeconds, true, true},
+			{TEXT("RenderThreadMs"), &FData::RenderThreadTimeSeconds, true, true},
+			{TEXT("RHIThreadMs"), &FData::RHIThreadTimeSeconds, true, true},
+			{TEXT("GPUFrameMs"), &FData::GPUTimeSeconds, true, true},
+			{TEXT("IdleMs"), &FData::IdleSeconds, false, false},
+			{TEXT("IdleOvershootMs"), &FData::IdleOvershootSeconds, false, false},
+			{TEXT("GameDriverTickFlushMs"), &FData::GameDriverTickFlushTimeSeconds, false, false},
+			{TEXT("DemoDriverTickFlushMs"), &FData::DemoDriverTickFlushTimeSeconds, false, false},
+			{TEXT("FlushAsyncLoadingMs"), &FData::FlushAsyncLoadingTime, false, false}};
+		int32 Finite[UE_ARRAY_COUNT(Metrics)] = {}, Positive[UE_ARRAY_COUNT(Metrics)] = {}, Zero[UE_ARRAY_COUNT(Metrics)] = {};
+		double Totals[UE_ARRAY_COUNT(Metrics)] = {};
+		TSet<uint64> RecordedFrames, SeenFrames;
+		for (const FFrame& Frame : Frames) RecordedFrames.Add(Frame.Frame);
+		FString Csv(TEXT("Frame,Qpc,ElapsedSeconds,RecordedFrameMatch,NativeDeltaSeconds,NativeTrueDeltaSeconds"));
+		for (const FMetric& Metric : Metrics) Csv += FString(TEXT(",")) + Metric.Name;
+		Csv += TEXT(",FlushAsyncLoadingCount,SyncLoadCount,NumAsyncPackages,NativeBinThisFrame\n");
+		int32 Matched = 0, Duplicates = 0;
+		for (const FPvpBaselineUnits::FSample& Sample : UnitConsumer->Samples)
+		{
+			const bool bMatched = RecordedFrames.Contains(Sample.Frame);
+			const bool bDuplicate = SeenFrames.Contains(Sample.Frame);
+			SeenFrames.Add(Sample.Frame);
+			Duplicates += bDuplicate ? 1 : 0;
+			Matched += bMatched && !bDuplicate ? 1 : 0;
+			const FData& Data = Sample.Data;
+			Csv += FString::Printf(TEXT("%llu,%llu,%.9f,%d,%s,%s"), Sample.Frame, Sample.Qpc, Sample.Elapsed, bMatched ? 1 : 0,
+				FMath::IsFinite(Data.DeltaSeconds) ? *FString::Printf(TEXT("%.9f"), Data.DeltaSeconds) : TEXT(""),
+				FMath::IsFinite(Data.TrueDeltaSeconds) ? *FString::Printf(TEXT("%.9f"), Data.TrueDeltaSeconds) : TEXT(""));
+			for (int32 Index = 0; Index < UE_ARRAY_COUNT(Metrics); ++Index)
+			{
+				const double Value = Data.*(Metrics[Index].Value) * 1000.0;
+				const bool bFinite = FMath::IsFinite(Value) && Value >= 0;
+				Csv += TEXT(",") + (bFinite ? FString::Printf(TEXT("%.9f"), Value) : FString());
+				if (bMatched && !bDuplicate && bFinite)
+				{
+					++Finite[Index]; Totals[Index] += Value;
+					Positive[Index] += Value > 0 ? 1 : 0;
+					Zero[Index] += Value == 0 ? 1 : 0;
+				}
+			}
+			Csv += FString::Printf(TEXT(",%u,%u,%d,%d\n"), Data.FlushAsyncLoadingCount, Data.SyncLoadCount, Data.NumAsyncPackages, Data.bBinThisFrame ? 1 : 0);
+		}
+		if (!SaveAtomic(TEXT(".units.csv"), Csv)) return Fail(TEXT("NativeUnitArtifactWriteFailed"));
+		const bool bCoverage = Matched == Frames.Num() && Matched > 0 && Duplicates == 0;
+		Json += FString::Printf(TEXT(",\"valid\":%s,\"recordedFrames\":%d,\"sourceSamples\":%d,\"matchedSamples\":%d,\"missingFrames\":%d,\"extraSamples\":%d,\"duplicateFrameSamples\":%d,\"tickFlushTimerEnabled\":%s,\"tickFlushReportCvar\":%s,\"metrics\":{"),
+			bCoverage ? TEXT("true") : TEXT("false"), Frames.Num(), UnitConsumer->Samples.Num(), Matched, Frames.Num() - Matched,
+			UnitConsumer->Samples.Num() - Matched - Duplicates, Duplicates, bTickFlushTimer ? TEXT("true") : TEXT("false"),
+			TickFlushCVar != nullptr ? *FString::FromInt(TickFlushCVar->GetInt()) : TEXT("null"));
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Metrics); ++Index)
+		{
+			if (Index > 0) Json += TEXT(",");
+			const bool bApplicable = (!Metrics[Index].bRenderedOnly || (bRendered && !GUsingNullRHI))
+				&& (Index != 6 || bTickFlushTimer);
+			const bool bComplete = bCoverage && bApplicable && Finite[Index] == Matched && (!Metrics[Index].bZeroIsMissing || Positive[Index] == Matched);
+			Json += Quote(Metrics[Index].Name) + FString::Printf(TEXT(":{\"applicable\":%s,\"complete\":%s,\"finiteSamples\":%d,\"positiveSamples\":%d,\"zeroSamples\":%d,\"invalidSamples\":%d,\"zeroMayMeanUnavailable\":%s,\"meanMs\":%s}"),
+				bApplicable ? TEXT("true") : TEXT("false"), bComplete ? TEXT("true") : TEXT("false"), Finite[Index], Positive[Index], Zero[Index], Matched - Finite[Index],
+				Metrics[Index].bZeroIsMissing ? TEXT("true") : TEXT("false"), bComplete ? *FString::Printf(TEXT("%.9f"), Totals[Index] / Matched) : TEXT("null"));
+		}
+		Json += TEXT("},\"source\":\"UEngine::AddPerformanceDataConsumer / IPerformanceDataConsumer::FFrameData\",\"interpretation\":\"Bounded diagnostic-only native unit samples. CSV preserves raw finite zero values; zero GT/RT/RHI/GPU does not establish zero cost and suppresses its mean. NullRHI unit timings are not applicable. Idle, TickFlush and loading zero can be a measured zero. Global Frame matches the consumer callback, not exact execution or GPU frame identity: renderer counters can lag or repeat across pipeline frames. Unit times are engine wall/idle-derived counters, not GetThreadTimes execution CPU or OS Ready/Blocked states; GPU timing can be inferred/platform dependent. No sum across threads or parent/child modules is a frame-time total. NativeBinThisFrame is retained but never used to discard samples.\"}");
+		return true;
+	}
+
+	// STOP 后封存边界、计数和逐帧产物，校验采样时长及完整性后才发布 FLUSHED。
 	bool Flush()
 	{
 		bCapturing = false;
+		StopUnitConsumer();
 		StopAt = FPlatformTime::Seconds();
 		CaptureStopAnchor = MarkCaptureBoundary(TEXT("STOP"));
 		if (!ReadNetworkBoundary(NetworkStop)) return false;
@@ -1539,6 +1711,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueBaseline_FlushArtifacts);
 		if (Frames.Num() < 100 || StopAt - CaptureAt < 59.8 || StopAt - CaptureAt > 75)
 			return Fail(TEXT("CaptureDurationOrSamplesInvalid"));
+		FString UnitJson;
+		if (!WriteUnitArtifacts(UnitJson)) return false;
 		FString Csv(TEXT("Frame,ElapsedSeconds,FrameEndIntervalMs,WorldTickWallMs,WorldTickValid,CpuAccountingEnabled,GTEndCpuValid,GTEndThreadId,GTEndCpuQueryError,GTPreviousEndUser100ns,GTPreviousEndKernel100ns,GTEndUser100ns,GTEndKernel100ns,GTFrameCpuValid,GTFrameUser100nsDelta,GTFrameKernel100nsDelta,GTFrameCpuMs,GTWorldCpuValid,GTWorldBeginUser100ns,GTWorldBeginKernel100ns,GTWorldEndUser100ns,GTWorldEndKernel100ns,GTWorldUser100nsDelta,GTWorldKernel100nsDelta,GTWorldCpuMs\n"));
 		Csv.Reserve(Frames.Num() * (bCpuAccounting ? 400 : 165));
 		int32 CpuValidFrames = 0, CpuValidWorlds = 0, NegativeFrameCpuDeltas = 0, NegativeWorldCpuDeltas = 0;
@@ -1595,6 +1769,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		Phase = TEXT("FLUSHED");
 		FString Json = TEXT("{") + CommonJson();
 		Json += TEXT(",\"networkConnections\":") + NetworkJson;
+		Json += TEXT(",\"nativeUnits\":") + UnitJson;
 		Json += TEXT(",\"animationDiagnostics\":{\"start\":") + AnimationStartSnapshot + TEXT(",\"stop\":") + AnimationStopSnapshot + TEXT("}");
 		Json += TEXT(",\"pacingDiagnostics\":{\"start\":") + PacingStartSnapshot + TEXT(",\"stop\":") + PacingStopSnapshot
 			+ TEXT(",\"perFrameDiagnostic\":") + (bCpuAccounting ? TEXT("true") : TEXT("false"))
@@ -1656,6 +1831,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		return Publish(TEXT("FLUSHED"));
 	}
 
+	// 按外部控制推进 Baseline，采样期低频核对人口和连接身份，FLUSHED 后仅等待退出。
 	bool Tick(float)
 	{
 		const double Now = FPlatformTime::Seconds();
@@ -1683,6 +1859,14 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		if (Phase != TEXT("STARTING") && (!bWorldReady || !bCountsReady)) return Fail(TEXT("WorldPopulationOrViewChanged"));
 		if (Phase == TEXT("STARTING") && bWorldReady && bCountsReady)
 		{
+			if (bCpuAccounting)
+			{
+				if (GEngine == nullptr) return Fail(TEXT("NativeUnitEngineUnavailable"));
+				UnitConsumer = MakeShared<FPvpBaselineUnits>();
+				UnitEngine = GEngine;
+				// 首个原生 consumer 会重置 GPU 统计；在既有 20s 预热前注册，不将这个启动扰动塞进采集窗口。
+				GEngine->AddPerformanceDataConsumer(UnitConsumer);
+			}
 			// 反向消融只在显式基线 DS、完整 160 人口就绪后应用一次，发生在预热前。
 			// 默认不写此属性；不在生成过程中或采集循环每帧覆盖真实 CMC 配置。
 			if (Role == TEXT("Server") && bContinuousFloorChecks && !bContinuousFloorChecksPrepared)
@@ -1716,6 +1900,12 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			LastWorldFrame = MAX_uint64;
 			PreviousEndCpu = WorldBeginCpu = LastWorldBeginCpu = LastWorldEndCpu = {};
 			bCapturing = true;
+			if (bCpuAccounting)
+			{
+				if (!UnitEngine.IsValid() || !UnitConsumer.IsValid()) return Fail(TEXT("NativeUnitEngineUnavailable"));
+				UnitConsumer->CaptureAt = CaptureAt;
+				UnitConsumer->bCollect = true;
+			}
 			CaptureStartAnchor = MarkCaptureBoundary(TEXT("START"));
 			return Publish(TEXT("CAPTURING"));
 		}
@@ -1740,6 +1930,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	}
 };
 
+// 显式 Baseline 开关才建立一次进程级采集器；参数非法仍消费本次请求并退出，不回退普通游戏。
 bool StartPvpBaselineIfRequested(UWorld* World)
 {
 	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpBaseline"))) return false;
@@ -1776,7 +1967,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	}
 	// Fresh output is mandatory; a previous successful file cannot satisfy a new
 	// failed run. The parent creates a new case directory and WAIT file first.
-	for (const TCHAR* Suffix : {TEXT(".status.json"), TEXT(".frames.csv"), TEXT(".summary.json"), TEXT(".pacing.csv")})
+	for (const TCHAR* Suffix : {TEXT(".status.json"), TEXT(".frames.csv"), TEXT(".summary.json"), TEXT(".pacing.csv"), TEXT(".units.csv")})
 		if (IFileManager::Get().FileExists(*FPaths::Combine(Capture->Directory, Capture->Role + Suffix)))
 		{
 			FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineOutputAlreadyExists"));
@@ -1799,6 +1990,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 }
 }
 
+// 为测试客户端执行受限本机连接；仅允许已约定角色/端口，正常加入与重连仍走正式协议。
 EFPPvpBaselineBootstrap StartPvpBaselineClient(UGameInstance* Instance)
 {
 	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpBaseline")) || IsRunningDedicatedServer())
@@ -1843,6 +2035,7 @@ EFPPvpBaselineBootstrap StartPvpBaselineClient(UGameInstance* Instance)
 	return EFPPvpBaselineBootstrap::Started;
 }
 
+// GameState 的采集分流入口：优先 Baseline，否则仅在非 Shipping 构建接受旧 Profile 请求。
 void StartPvpPerformanceProfile(UWorld* World)
 {
 	if (StartPvpBaselineIfRequested(World)) return;

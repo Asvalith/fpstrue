@@ -45,6 +45,9 @@
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
+// 阅读顺序：动画事实消费 -> CMC/SavedMove 模式上下文 -> 权威命中历史 -> Character 生命周期/输入/装备/死亡。
+// Character 只协调已有状态所有者：GAS 管动作，武器管弹药与换弹，AttributeSet 管生命；动画不反向授权玩法。
+
 // ==================== 共用玩家动画表现 ====================
 
 UfpstruePlayerAnimInstance::UfpstruePlayerAnimInstance()
@@ -253,6 +256,7 @@ void UfpstruePlayerAnimInstance::NativePostEvaluateAnimation()
 	UKismetMaterialLibrary::SetScalarParameterValue(this, ViewmodelFOVCollection, TEXT("Field Of View"), FOV);
 }
 
+// 依据本角色瞄准状态播放单发蒙太奇；只负责表现，不扣弹或重新提交命中。
 void UfpstruePlayerAnimInstance::PresentFire()
 {
 	const AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(TryGetPawnOwner());
@@ -271,6 +275,7 @@ void UfpstruePlayerAnimInstance::PresentFire()
 #endif
 }
 
+// 选择普通/空仓蒙太奇并匹配事务时长；播放实例仍登记到武器的同一 ReloadId。
 void UfpstruePlayerAnimInstance::PresentReload(int32 ReloadId, bool bWasEmpty)
 {
 	UfpstrueWeaponComponent* Weapon = AnimationWeapon.Get();
@@ -278,7 +283,7 @@ void UfpstruePlayerAnimInstance::PresentReload(int32 ReloadId, bool bWasEmpty)
 	if (Weapon == nullptr || Montage == nullptr) return;
 	const float Duration = Weapon->GetReloadDuration();
 	const float PlayRate = Duration > KINDA_SMALL_NUMBER ? Montage->GetPlayLength() / Duration : 1.0f;
-	// 统一播放身份、结束和取消仍由武器事务管理；本实例既不 CommitReload，也不结束 GAS。
+	// 统一播放身份、结束和取消仍由武器事务管理；本实例不提交弹药，也不结束 GAS。
 	if (Weapon->PlayReloadMontage(ReloadId, GetSkelMeshComponent(), Montage, PlayRate))
 	{
 #if !UE_BUILD_SHIPPING
@@ -382,8 +387,10 @@ namespace
 	class FNetworkPredictionData_Client_fpstrue final : public FNetworkPredictionData_Client_Character
 	{
 	public:
+		// 保留 CMC 原生预测缓存初始化，只替换本项目移动记录的分配类型。
 		explicit FNetworkPredictionData_Client_fpstrue(const UCharacterMovementComponent& Movement)
 			: FNetworkPredictionData_Client_Character(Movement) {}
+		// 每条历史移动创建带两个动作模式位的记录，仍交给原生合并/ACK/重放流程。
 		virtual FSavedMovePtr AllocateNewMove() override { return MakeShared<FSavedMove_fpstrueCharacter>(); }
 	};
 }
@@ -508,6 +515,10 @@ bool UfpstrueCharacterMovementComponent::ClientUpdatePositionAfterServerUpdate()
 }
 
 // ==================== 权威身体历史与纯查询命中 ====================
+
+// 形状样本在骨骼最终刷新后最多 60 Hz 写入固定环；传送、死亡或拓扑变化断代。
+// 【设计取舍】只回查 PvP 玩家历史几何，不暂移真实 Pawn/Chaos，避免伤害回调看到回滚中的世界。
+// 环境遮挡仍查当前碰撞，动态掩体历史未被重建；这是有界命中补偿，不是全世界回滚。
 
 void AfpstrueCharacter::ResetHitHistory(bool bReleaseMemory)
 {
@@ -934,7 +945,6 @@ void AfpstrueCharacter::PreInitializeComponents()
 // 订阅生命事件并推送初始快照，再按当前装备显示手臂、应用基础移动速度。
 void AfpstrueCharacter::BeginPlay()
 {
-	//开始游戏时基函数调用
 	Super::BeginPlay();
 	if (UsesTemplatePresentation()) UfpstrueFootIKAnimInstance::Install(this);
 	if (GetNetMode() == NM_DedicatedServer)
@@ -971,7 +981,7 @@ void AfpstrueCharacter::BeginPlay()
 		HandleHealthChanged(HealthComponent->GetHealth());
 	}
 
-	//**开局没有捡到枪的时候先隐藏mesh1P
+	// 本地手臂与远端身体使用不同投影；最终可见性由下方当前装备关系决定。
 	if (bUseRARPresentation && GetNetMode() != NM_DedicatedServer)
 	{
 		// 只创建各 Mesh 自己的动态材质；第三人称不能套第一人称的屏幕投影变形。
@@ -999,6 +1009,8 @@ void AfpstrueCharacter::BeginPlay()
 		GetMesh()->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		GetMesh()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 		GetMesh()->SetCollisionResponseToChannel(FpstrueCollisionChannels::WeaponTrace, ECR_Block);
+		// 【设计取舍】视模投影和隐藏只服务本地镜头；第三人称身体同时服务观察与权威命中，不能拿视模替代。
+		// 专服关闭第一人称 Tick，但身体仍付出必要的骨骼刷新/历史采样成本，不能套用客户端不可见剔除。
 		GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 		// 不能把客户端不可见裁剪/URO 的旧姿态当作服务器当前命中形状。
 		if (HasAuthority()) GetMesh()->bEnableUpdateRateOptimizations = false;
@@ -1103,7 +1115,6 @@ void AfpstrueCharacter::OnRep_EquippedWeapon()
 	if (EquippedWeaponComponent != nullptr)
 	{
 		EquippedWeaponComponent->RefreshNetworkEquipment();
-		if (IsLocallyControlled() && !IsDead()) OnWeaponEquipped(EquippedWeaponComponent);
 	}
 }
 
@@ -1202,13 +1213,12 @@ void AfpstrueCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		HealthComponent->OnDamageReceived.RemoveDynamic(this, &AfpstrueCharacter::HandleDamageReceived);
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueCharacter::HandleDeath);
 	}
-	//最后调用基类
 	Super::EndPlay(EndPlayReason);
 }
 
 // ==================== 控制器切换与输入绑定 ====================
 
-//玩家控制变更（游戏开始、角色切换）
+// 控制权移交：归还旧视角限制/输入 -> 取消旧持续动作 -> 刷新 ASC ActorInfo -> 安装新本地输入映射。
 void AfpstrueCharacter::NotifyControllerChanged()
 {
 	// 放弃控制权时释放本角色的视角范围，不把最后一次站立限角遗留给旁观相机。
@@ -1231,7 +1241,6 @@ void AfpstrueCharacter::NotifyControllerChanged()
 	StopJumping();
 	RefreshMovementAbilityState();
 	RemoveInputMappingContexts();
-	//执行基类
 	Super::NotifyControllerChanged();
 	// ASC 的本地控制器信息随占有迁移刷新，不能一直使用组件 BeginPlay 时的空控制器。
 	if (HealthComponent != nullptr) HealthComponent->InitAbilityActorInfo(this, this);
@@ -1313,7 +1322,7 @@ void AfpstrueCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	// 切换型输入：SprintAction 每次按下切换一次，不在松开时自动停止。
 	BindInput(SprintAction, TEXT("SprintAction"), ETriggerEvent::Started, &AfpstrueCharacter::ToggleSprint);
 
-	// 单次命令：换弹只提交请求，完成时机由武器状态和动画 Notify 决定。
+	// 单次命令：换弹只提交能力请求；单机由身份化动画/显式完成，联网由服务器计时完成。
 	BindInput(ReloadAction, TEXT("ReloadAction"), ETriggerEvent::Started, &AfpstrueCharacter::RequestWeaponReload);
 }
 
@@ -1346,13 +1355,10 @@ void AfpstrueCharacter::RemoveInputMappingContexts()
 // 接收连续移动轴并提交前后、左右方向输入，实际位移与碰撞由 CharacterMovement 处理。
 void AfpstrueCharacter::Move(const FInputActionValue& Value)
 {
-	// 将 Enhanced Input 的二维值映射到角色本地前向和右向，实际位移由 CharacterMovement 完成。
-	//获得向量
 	const FVector2D MovementVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr && CanAcceptGameplayInput())
 	{
-		// 有Controller，交给移动组件移动;
 		//X:左右，Y:前后
 		AddMovementInput(GetActorForwardVector(), MovementVector.Y);
 		AddMovementInput(GetActorRightVector(), MovementVector.X);
@@ -1362,13 +1368,10 @@ void AfpstrueCharacter::Move(const FInputActionValue& Value)
 // 将连续视角输入交给控制器；无控制权、死亡或退出期间不改变控制旋转。
 void AfpstrueCharacter::Look(const FInputActionValue& Value)
 {
-	// 将二维视角输入写入 Controller 的 Yaw/Pitch，角色与相机最终读取控制旋转。
-	//获得向量
 	const FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr && CanAcceptGameplayInput())
 	{
-		//有Controller，交给修改旋转;
 		//X：摇头  Y：点头
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
@@ -1378,7 +1381,6 @@ void AfpstrueCharacter::Look(const FInputActionValue& Value)
 // 按键切换冲刺能力；互斥由能力标签检查，角色经唯一速度入口应用结果。
 void AfpstrueCharacter::ToggleSprint()
 {
-	// 死亡、换弹和瞄准期间不能切换冲刺；生命周期和换弹统一重置移动修饰状态。
 	// 互斥条件在 GA 中集中声明；角色只把切换输入转成激活或取消当前能力。
 	if (HealthComponent == nullptr || !CanAcceptGameplayInput() || (!HasAuthority() && !IsLocallyControlled())) return;
 	// 用当前能力是否激活决定本次按键是取消还是请求冲刺，不另写冲刺状态。
@@ -1396,38 +1398,28 @@ void AfpstrueCharacter::ToggleSprint()
 // 提交瞄准按下；能力验证装备并取消冲刺，状态成立后才通知蓝图。
 void AfpstrueCharacter::StartAim()
 {
-	// 检查本角色是否接受输入，动作状态冲突交给能力标签处理。
 	// 角色只检查输入归属；装备资格和动作互斥由 Aim GA 判断。
 	if (HealthComponent == nullptr || !CanAcceptGameplayInput() || (!HasAuthority() && !IsLocallyControlled())) return;
 
-	// 将瞄准前置条件交给 Aim 能力校验。
-	// ★【重要边界】[状态提交] 先更新瞄准、冲刺和步速，再调用蓝图表现；蓝图只能观察已成立的互斥结果。
-	// 状态提交由 GAS 完成，GA 激活或结束后再刷新以上显示与步速。
 	HealthComponent->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Aim));
 }
 
 // 幂等退出瞄准并重算步速；蓝图通知只在真实状态变化时发送。
 void AfpstrueCharacter::StopAim()
 {
-	// 无条件提交松开；是否实际结束瞄准由能力判断，只有真实变化时才通知蓝图并恢复速度。
-	// 当前瞄准状态保存在 GAS 标签中。
-	// 松开不受新的激活资格限制。
-	// 已激活的瞄准能力收到释放后结束。
-	// 松开由 WaitInputRelease 同步到服务器，能力结束统一移除标签并刷新表现。
+	// 松开不再检查激活资格；WaitInputRelease 同步释放，GAS 结束后统一派生姿态与步速。
 	if (HealthComponent != nullptr)
 		HealthComponent->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Aim));
 }
 
 // ==================== 武器输入与装备关系 ====================
 
-// 武器交互
 // 这里是输入边界：Character 不直接扣弹、射线检测或改变动作标签，只向 ASC 提交能力输入。
 void AfpstrueCharacter::StartWeaponFire()
 {
 	// 与换弹入口一致：Character 只转发能力输入，装备资格和动作互斥由 GA 校验。
 	if (HealthComponent != nullptr && CanAcceptGameplayInput() && (HasAuthority() || IsLocallyControlled()))
 	{
-		// 转入 Fire 能力。
 		HealthComponent->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Fire));
 	}
 }
@@ -1438,7 +1430,6 @@ void AfpstrueCharacter::StopWeaponFire()
 	// 松开输入、死亡、换 Controller 和 EndPlay 都可安全调用，由 GAS 幂等处理输入释放。
 	if (HealthComponent != nullptr)
 	{
-		// 转入 Fire 能力的输入释放任务。
 		HealthComponent->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Fire));
 	}
 }
@@ -1490,7 +1481,6 @@ void AfpstrueCharacter::ApplyMovementSpeed()
 		Movement->SetMovementIntent(bIsAiming, bIsSprinting);
 }
 
-//装备枪支，可见性设置
 // 装备成功后由 WeaponComponent 回调本函数；这里仅登记关系并广播，避免角色与武器各维护一份弹药状态。
 void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* WeaponComponent)
 {
@@ -1503,15 +1493,9 @@ void AfpstrueCharacter::SetEquippedWeaponComponent(UfpstrueWeaponComponent* Weap
 	ForceNetUpdate();
 	Mesh1P->SetHiddenInGame(false, true);
 	OnEquippedWeaponChanged.Broadcast(WeaponComponent);
-	// ★【重要边界】[回调重入] 装备变化的监听者可能立即卸枪或结束角色；只有关系仍成立才发送装备完成表现。
-	// 广播可同步卸下或结束角色生命周期；旧装备请求不能再发送“装备完成”表现。
-	if (!bEndingPlay && !IsDead() && EquippedWeaponComponent == WeaponComponent)
-	{
-		if (GetNetMode() == NM_Standalone || IsLocallyControlled()) OnWeaponEquipped(WeaponComponent);
-	}
 }
 
-//清除枪支、禁止开火、可见性设置
+// 只转交仍匹配的装备执行完整卸下；不能绕过武器取消/清理而直接清角色槽位。
 void AfpstrueCharacter::ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent)
 {
 	if (EquippedWeaponComponent == nullptr || EquippedWeaponComponent != WeaponComponent)
@@ -1537,21 +1521,23 @@ void AfpstrueCharacter::ReleaseEquippedWeaponComponent(const UfpstrueWeaponCompo
 
 // ==================== 生命与伤害事件 ====================
 
-// 生命与伤害
-//生命组件内部事件转发给Character的蓝图表现层，用于UI和动画的更新
 // HealthComponent 是生命值唯一写入者，Character 只做 C++ Gameplay -> 蓝图表现层的事件桥接。
 void AfpstrueCharacter::HandleHealthChanged(float NewHealth)
 {
 	if (GetNetMode() == NM_Standalone || IsLocallyControlled()) OnPlayerHealthChanged(NewHealth);
 }
 
-// 将已结算的受击事实转给蓝图表现，不在这里再次扣血。
+// Health 只报告权威端实际扣除的正伤害；这里记录计分来源并分发表现，不再次结算。
 void AfpstrueCharacter::HandleDamageReceived(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
-	if (HasAuthority()) LastDamageInstigator = InstigatedBy;
-	if (HasAuthority() && UsesNativePresentation() && DamageAmount > 0.0f && !IsDead()) MulticastPresentHit();
+	if (!HasAuthority()) return;
+	LastDamageInstigator = InstigatedBy;
+	if (UsesNativePresentation() && !IsDead()) MulticastPresentHit();
 	if (GetNetMode() == NM_Standalone) OnPlayerDamaged(DamageAmount, DamageCauser, InstigatedBy);
-	else if (HasAuthority()) ClientReceiveDamage(DamageAmount, DamageCauser, InstigatedBy);
+	// 【设计取舍】GAS 数值复制负责持久生命事实；此 RPC 只是可丢弃的镜头/音效反馈，不占可靠重传队列。
+	// 仅实际脚本覆盖才发送，避免原生角色空转同步；不按素材类型封死子类合法的蓝图表现。
+	else if (GetClass()->IsFunctionImplementedInScript(GET_FUNCTION_NAME_CHECKED(AfpstrueCharacter, OnPlayerDamaged)))
+		ClientReceiveDamage(DamageAmount, DamageCauser, InstigatedBy);
 }
 
 // 每个视角只消费服务器已发生的受击事实；无可靠积压，不给晚加入者重放历史受击。
@@ -1561,7 +1547,7 @@ void AfpstrueCharacter::MulticastPresentHit_Implementation()
 		if (UfpstruePlayerAnimInstance* Animation = Cast<UfpstruePlayerAnimInstance>(PresentationMesh->GetAnimInstance())) Animation->PresentHit();
 }
 
-// 这只是服务器已结算伤害的表现通知，不重放 ApplyDamage，也不改变复制生命值。
+// 拥有者在本地播放旧蓝图镜头/音效；丢包不补播，不重放 ApplyDamage 或改变复制生命值。
 void AfpstrueCharacter::ClientReceiveDamage_Implementation(float DamageAmount, AActor* DamageCauser, AController* InstigatedBy)
 {
 	if (IsLocallyControlled()) OnPlayerDamaged(DamageAmount, DamageCauser, InstigatedBy);
@@ -1576,8 +1562,7 @@ void AfpstrueCharacter::HandleDeath()
 		return;
 	}
 
-	// ★【重要边界】[生命周期] 先锁存死亡，再停止武器和移动；最后通知对局与蓝图，防止表现回调重新启动玩法。
-	// 先锁存角色侧死亡处理，再撤销瞄准；蓝图回调不会重新进入同一死亡链。
+	// 先锁存角色侧死亡处理，再清理输入和装备；清理回调不能重复进入同一死亡链。
 	bDeathEffectsApplied = true;
 	const FVector DeathVelocity = GetVelocity();
 	ResetHitHistory();
@@ -1590,7 +1575,7 @@ void AfpstrueCharacter::HandleDeath()
 		bNetworkSmokeInjectingMove = false;
 	}
 #endif
-	if (HealthComponent != nullptr) HealthComponent->CancelAllAbilities();
+	// Health 在提交死亡事实（含客户端初始死亡快照）时已取消能力；这里仅消费结果。
 	RefreshMovementAbilityState();
 
 	if (EquippedWeaponComponent != nullptr)
@@ -1986,27 +1971,23 @@ void AfpstrueCharacter::RunPvpSmokeStep()
 // 从生命组件读取死亡事实，角色不维护另一份可变血量或死亡判定。
 bool AfpstrueCharacter::IsDead() const
 {
-	// 玩家不保存第二份死亡状态，始终读取可复用 HealthComponent 的唯一事实。
 	return HealthComponent != nullptr && HealthComponent->IsDead();
 }
 
 // 为 HUD 和其他模块提供当前血量的只读快照；没有组件时返回零。
 float AfpstrueCharacter::GetCurrentHealth() const
 {
-	// 为蓝图和其他模块提供空安全只读查询，不允许外部直接修改 HealthComponent 内部数值。
 	return HealthComponent != nullptr ? HealthComponent->GetHealth() : 0.0f;
 }
 
 // 读取生命组件的最大血量，角色不复制或改写该配置。
 float AfpstrueCharacter::GetMaxHealth() const
 {
-	// 最大生命值同样通过组件只读接口暴露，保持生命数据所有权集中。
 	return HealthComponent != nullptr ? HealthComponent->GetMaxHealth() : 0.0f;
 }
 
 // 复用组件的归一化结果，HUD 不必自行计算比例或处理除零。
 float AfpstrueCharacter::GetHealthNormalized() const
 {
-	// 返回组件计算后的 0~1 比例，HUD 无需自行重复处理除零和范围钳制。
 	return HealthComponent != nullptr ? HealthComponent->GetHealthNormalized() : 0.0f;
 }

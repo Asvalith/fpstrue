@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include <limits>
 #include "Game/fpstrueMultiplayer.h"
 #include "Game/fpstrueGameMode.h"
 #include "GameMapsSettings.h"
@@ -96,6 +97,7 @@
 // 进程内只固定 Actor 的角色与收到的反射快照，验证权限/提交边界；不替代多进程连接、丢包或 RPC 传输验收。
 namespace
 {
+// 按用例选择 GameMode 和 AI 系统，建立进程内测试世界；不在这里创建真实网络连接。
 bool BeginMultiplayerUnitWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test, bool bCreateAI = false, UClass* ModeClass = nullptr)
 {
 	if (Fixture.CreateTestWorld(EWorldType::Game))
@@ -108,6 +110,7 @@ bool BeginMultiplayerUnitWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& 
 	return false;
 }
 
+// 只读汇总席位、朝向、距离和寻路到达条件，帮助失败断言定位真正阻止攻击的环节。
 FString DescribeEnemyAttackGate(AfpstrueEnemyCharacter& Enemy, AfpstrueEnemyAIController& Controller,
 	const FFPEnemyTacticalAssignment& Assignment, float AcceptanceRadius)
 {
@@ -124,6 +127,7 @@ FString DescribeEnemyAttackGate(AfpstrueEnemyCharacter& Enemy, AfpstrueEnemyAICo
 		*Enemy.GetNavAgentLocation().ToCompactString(), *Assignment.Goal.ToCompactString());
 }
 
+// 为无角色接口的临时 Actor 注册真实生命 ASC，复用生产伤害与属性提交路径。
 UfpstrueHealthComponent* AddMultiplayerTestHealth(AActor& Owner)
 {
 	UfpstrueHealthComponent* Health = NewObject<UfpstrueHealthComponent>(&Owner);
@@ -256,17 +260,12 @@ AfpstrueCharacter* SpawnMultiplayerHistoryTarget(UWorld& World, FAutomationTestB
 	return Target;
 }
 
-FFPReplicatedHealthSnapshot* ReadMultiplayerHealthSnapshot(UfpstrueHealthComponent& Health, FAutomationTestBase& Test)
-{
-	const FStructProperty* Property = FindFProperty<FStructProperty>(Health.GetClass(), TEXT("HealthSnapshot"));
-	if (!Test.TestNotNull(TEXT("Health retains its reflected compatibility snapshot"), Property)) return nullptr;
-	if (!Test.TestTrue(TEXT("Health snapshot has the declared struct type"), Property->Struct == FFPReplicatedHealthSnapshot::StaticStruct())) return nullptr;
-	Test.TestFalse(TEXT("Compatibility health snapshot is not a second replicated health store"), Property->HasAnyPropertyFlags(CPF_Net));
-	return Property->ContainerPtrToValuePtr<FFPReplicatedHealthSnapshot>(&Health);
-}
+// 覆盖两属性不同通知顺序和单属性变化，不把它们伪装成已完成真实网络传输。
+enum class EHealthAttributeNotifications : uint8 { MaximumFirst, HealthFirst, HealthOnly, MaximumOnly };
 
-// 回放属性复制实际调用的两个 RepNotify 与批次结束入口；不写旧镜像、不伪装网络传输已被测过。
-bool ReceiveMultiplayerHealthAttributes(UfpstrueHealthComponent& Health, FAutomationTestBase& Test, float CurrentHealth, float MaxHealth)
+// 回放真实属性 RepNotify 与批次结束入口；组件本地读接口只由生产消费函数更新。
+bool ReceiveMultiplayerHealthAttributes(UfpstrueHealthComponent& Health, FAutomationTestBase& Test, float CurrentHealth, float MaxHealth,
+	EHealthAttributeNotifications Notifications = EHealthAttributeNotifications::MaximumFirst)
 {
 	UfpstrueHealthAttributeSet* Attributes = const_cast<UfpstrueHealthAttributeSet*>(Health.GetHealthAttributeSet());
 	// 客户端不自行生成权威属性集；这里显式模拟 ASC 已经接收到服务器的属性子对象。
@@ -295,8 +294,16 @@ bool ReceiveMultiplayerHealthAttributes(UfpstrueHealthComponent& Health, FAutoma
 	HealthData->SetCurrentValue(CurrentHealth);
 	MaximumData->SetBaseValue(MaxHealth);
 	MaximumData->SetCurrentValue(MaxHealth);
-	Attributes->ProcessEvent(MaximumRepNotify, &PreviousMaximum);
-	Attributes->ProcessEvent(HealthRepNotify, &PreviousHealth);
+	if (Notifications == EHealthAttributeNotifications::HealthFirst)
+	{
+		Attributes->ProcessEvent(HealthRepNotify, &PreviousHealth);
+		Attributes->ProcessEvent(MaximumRepNotify, &PreviousMaximum);
+	}
+	else
+	{
+		if (Notifications != EHealthAttributeNotifications::HealthOnly) Attributes->ProcessEvent(MaximumRepNotify, &PreviousMaximum);
+		if (Notifications != EHealthAttributeNotifications::MaximumOnly) Attributes->ProcessEvent(HealthRepNotify, &PreviousHealth);
+	}
 	Attributes->PostRepNotifies();
 	return true;
 }
@@ -314,32 +321,47 @@ bool FFpstrueMultiplayerHealthAuthorityTest::RunTest(const FString& Parameters)
 	AActor* Owner = Fixture.GetTestWorld()->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Health authority owner"), Owner)) return false;
 	UfpstrueHealthComponent* Health = AddMultiplayerTestHealth(*Owner);
-	FFPReplicatedHealthSnapshot* Snapshot = ReadMultiplayerHealthSnapshot(*Health, *this);
-	if (Snapshot == nullptr) return false;
 	TestTrue(TEXT("Standalone owner retains authority"), Owner->HasAuthority());
 	TestTrue(TEXT("Health component replicates by default"), Health->GetIsReplicated());
 	const UfpstrueHealthAttributeSet* Attributes = Health->GetHealthAttributeSet();
 	if (!TestNotNull(TEXT("Authoritative health is backed by GAS attributes"), Attributes)) return false;
-	TestTrue(TEXT("Default initial health still produces a versioned snapshot"), Snapshot->Revision > 0);
+	TestEqual(TEXT("Initial local health reads the actual GAS value"), Health->GetHealth(), Attributes->GetHealth());
+	TestEqual(TEXT("Initial local maximum reads the actual GAS value"), Health->GetMaxHealth(), Attributes->GetMaxHealth());
+	int32 AppliedEffects = 0;
+	const FDelegateHandle EffectObserver = Health->OnGameplayEffectAppliedDelegateToSelf.AddLambda(
+		[&](UAbilitySystemComponent*, const FGameplayEffectSpec&, FActiveGameplayEffectHandle) { ++AppliedEffects; });
+	Health->ResetHealth();
+	Health->SetMaxHealthAndReset(100.0f);
+	TestEqual(TEXT("Built-in no-op resets do not apply an effect"), AppliedEffects, 0);
+	FGameplayEffectSpecHandle UnchangedExternal = Health->MakeOutgoingSpec(UfpstrueHealthResetEffect::StaticClass(), 1.0f, Health->MakeEffectContext());
+	if (!TestTrue(TEXT("Unchanged external effect has a real GAS spec"), UnchangedExternal.IsValid())) return false;
+	UnchangedExternal.Data->SetSetByCallerMagnitude(FpstrueGameplayTags::Data_MaxHealth, 100.0f);
+	UnchangedExternal.Data->SetSetByCallerMagnitude(FpstrueGameplayTags::Data_Health, 100.0f);
+	Health->ApplyGameplayEffectSpecToSelf(*UnchangedExternal.Data.Get());
+	TestEqual(TEXT("An external effect still executes its application callbacks when health is unchanged"), AppliedEffects, 1);
 	Health->SetMaxHealthAndReset(200.0f);
+	TestEqual(TEXT("A changed maximum applies one additional real reset effect"), AppliedEffects, 2);
+	Health->OnGameplayEffectAppliedDelegateToSelf.Remove(EffectObserver);
 	TestEqual(TEXT("Authoritative maximum reset remains operational"), Health->GetHealth(), 200.0f);
 	TestEqual(TEXT("Maximum reset is committed to the actual GAS attribute"), Attributes->GetMaxHealth(), 200.0f);
 	TestEqual(TEXT("Health reset is committed to the actual GAS attribute"), Attributes->GetHealth(), 200.0f);
-	TestEqual(TEXT("Maximum is mirrored for existing local consumers"), Snapshot->MaxHealth, 200.0f);
+	TestEqual(TEXT("Maximum is available to existing local consumers"), Health->GetMaxHealth(), 200.0f);
+	TStrongObjectPtr<UfpstrueHealthMutationTestObserver> HealthObserver(NewObject<UfpstrueHealthMutationTestObserver>());
+	Health->OnHealthChanged.AddDynamic(HealthObserver.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
 	int32 ResolvedDamageEvents = 0;
 	const FDelegateHandle Observer = Health->OnDamageResolved.AddLambda(
 		[&](float AppliedDamage, AActor*, AController*, const FFPDamageContext&)
 		{
 			++ResolvedDamageEvents;
-			TestEqual(TEXT("Damage observer sees the already committed health snapshot"), Snapshot->CurrentHealth, Health->GetHealth());
-			TestEqual(TEXT("Damage observer sees the already committed maximum snapshot"), Snapshot->MaxHealth, Health->GetMaxHealth());
+			TestEqual(TEXT("Damage observer sees the already committed GAS health"), Attributes->GetHealth(), Health->GetHealth());
+			TestEqual(TEXT("Damage observer sees the already committed GAS maximum"), Attributes->GetMaxHealth(), Health->GetMaxHealth());
 			TestEqual(TEXT("Real standalone damage resolves once"), AppliedDamage, 25.0f);
 		});
 	UGameplayStatics::ApplyDamage(Owner, 25.0f, nullptr, nullptr, nullptr);
 	TestEqual(TEXT("Standalone damage still follows the production damage chain"), Health->GetHealth(), 175.0f);
 	TestEqual(TEXT("Production damage modifies the actual GAS health attribute"), Attributes->GetHealth(), 175.0f);
 	TestEqual(TEXT("Authoritative damage broadcasts its committed fact once"), ResolvedDamageEvents, 1);
-	const uint32 AuthorityRevision = Snapshot->Revision;
+	TestTrue(TEXT("Authoritative damage publishes one committed health change"), HealthObserver->HealthSnapshots == TArray<float>({175.0f}));
 	Owner->SetRole(ROLE_SimulatedProxy);
 	TestFalse(TEXT("The owner now has a genuine non-authority role"), Owner->HasAuthority());
 	UGameplayStatics::ApplyDamage(Owner, 10.0f, nullptr, nullptr, nullptr);
@@ -349,9 +371,25 @@ bool FFpstrueMultiplayerHealthAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A non-authority owner cannot change maximum health"), Health->GetMaxHealth(), 200.0f);
 	TestEqual(TEXT("Rejected client writes leave the actual GAS health unchanged"), Attributes->GetHealth(), 175.0f);
 	TestEqual(TEXT("Rejected client writes leave the actual GAS maximum unchanged"), Attributes->GetMaxHealth(), 200.0f);
-	TestEqual(TEXT("Rejected mutations cannot advance replicated health state"), Snapshot->Revision, AuthorityRevision);
+	TestTrue(TEXT("Rejected client writes publish no additional health notification"), HealthObserver->HealthSnapshots == TArray<float>({175.0f}));
 	TestEqual(TEXT("Rejected client damage does not publish a damage fact"), ResolvedDamageEvents, 1);
 	Health->OnDamageResolved.Remove(Observer);
+	Health->OnHealthChanged.RemoveDynamic(HealthObserver.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
+
+	// 只观察真正受伤链中的 RPC 分派次数，不把无网络测试世界当作 UDP 传输验收。
+	AfpstrueDamagePresentationTestCharacter* FeedbackPawn = Fixture.GetTestWorld()->SpawnActor<AfpstrueDamagePresentationTestCharacter>();
+	const FBoolProperty* NativePresentation = FindFProperty<FBoolProperty>(AfpstrueCharacter::StaticClass(), TEXT("bUseTemplatePresentation"));
+	if (!TestNotNull(TEXT("Native damage feedback fixture"), FeedbackPawn) || !TestNotNull(TEXT("Native presentation configuration"), NativePresentation)) return false;
+	NativePresentation->SetPropertyValue_InContainer(FeedbackPawn, true);
+	TestFalse(TEXT("Native fixture has no legacy damage script to notify"), FeedbackPawn->GetClass()->IsFunctionImplementedInScript(TEXT("OnPlayerDamaged")));
+	{
+		TGuardValue<FString> ListenMode(Fixture.GetTestWorld()->NextURL, TEXT("?listen"));
+		if (!TestTrue(TEXT("Damage feedback fixture reaches the real network branch"), FeedbackPawn->GetNetMode() != NM_Standalone)) return false;
+		UGameplayStatics::ApplyDamage(FeedbackPawn, 25.0f, nullptr, nullptr, nullptr);
+	}
+	TestEqual(TEXT("Authoritative damage still deducts health exactly once"), FeedbackPawn->GetCurrentHealth(), 75.0f);
+	TestEqual(TEXT("Native body hit feedback still dispatches once"), FeedbackPawn->NativeHitRequests, 1);
+	TestEqual(TEXT("No owner damage RPC is dispatched without a Blueprint consumer"), FeedbackPawn->OwnerDamageFeedbackRequests, 0);
 	return true;
 }
 
@@ -360,7 +398,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerHealthSnapshotTest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 // 只回放真实 RepNotify 入口；客户端收到初始/死亡/回满快照时通知本地消费者，不伪造伤害来源。
-// GAS 版本的“快照”由属性复制批次提供；旧结构体不再独立复制或充当客户端写入入口。
+// 接收状态由属性复制批次提供，不保留第二份快照或客户端写入入口。
 bool FFpstrueMultiplayerHealthSnapshotTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -369,7 +407,6 @@ bool FFpstrueMultiplayerHealthSnapshotTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Snapshot receiver owner"), Owner)) return false;
 	Owner->SetRole(ROLE_SimulatedProxy);
 	UfpstrueHealthComponent* Health = AddMultiplayerTestHealth(*Owner);
-	if (ReadMultiplayerHealthSnapshot(*Health, *this) == nullptr) return false;
 	TStrongObjectPtr<UfpstrueHealthMutationTestObserver> Observer(NewObject<UfpstrueHealthMutationTestObserver>());
 	Observer->Health = Health;
 	Observer->bAlwaysResetDuringHealthChange = true;
@@ -379,11 +416,18 @@ bool FFpstrueMultiplayerHealthSnapshotTest::RunTest(const FString& Parameters)
 	const FDelegateHandle DamageObserver = Health->OnDamageResolved.AddLambda(
 		[&](float, AActor*, AController*, const FFPDamageContext&) { ++DamageEvents; });
 	TestFalse(TEXT("Default client data does not start dead"), Health->IsDead());
-	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 40.0f, 200.0f)) return false;
-	TestEqual(TEXT("Initial snapshot updates current health"), Health->GetHealth(), 40.0f);
-	TestEqual(TEXT("Initial snapshot updates its maximum in the same callback"), Health->GetMaxHealth(), 200.0f);
-	TestTrue(TEXT("Initial health notification carries the committed received value"), Observer->HealthSnapshots == TArray<float>({40.0f}));
-	TestEqual(TEXT("A living initial snapshot does not broadcast death"), Observer->Deaths, 0);
+	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 100.0f, 100.0f)) return false;
+	TestTrue(TEXT("A first receive matching defaults still publishes initial health"), Observer->HealthSnapshots == TArray<float>({100.0f}));
+	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 100.0f, 100.0f)) return false;
+	TestEqual(TEXT("A repeated equal receive does not publish another local change"), Observer->HealthSnapshots.Num(), 1);
+	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 100.0f, 200.0f, EHealthAttributeNotifications::MaximumOnly)) return false;
+	TestEqual(TEXT("A maximum-only receive updates the local maximum"), Health->GetMaxHealth(), 200.0f);
+	TestTrue(TEXT("A maximum-only change also refreshes health consumers once"), Observer->HealthSnapshots == TArray<float>({100.0f, 100.0f}));
+	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 40.0f, 200.0f, EHealthAttributeNotifications::HealthOnly)) return false;
+	TestEqual(TEXT("A health-only receive updates current health"), Health->GetHealth(), 40.0f);
+	TestEqual(TEXT("A health-only receive preserves the received maximum"), Health->GetMaxHealth(), 200.0f);
+	TestTrue(TEXT("A health-only change publishes its committed value once"), Observer->HealthSnapshots == TArray<float>({100.0f, 100.0f, 40.0f}));
+	TestEqual(TEXT("Living attribute receives do not broadcast death"), Observer->Deaths, 0);
 	// 借现有反射观察者在 HealthChanged 内触发独立权威探针，直接检查此刻数值已提交而 Death 尚未通知。
 	AActor* NotificationProbeOwner = Fixture.GetTestWorld()->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Health notification order probe"), NotificationProbeOwner)) return false;
@@ -399,16 +443,17 @@ bool FFpstrueMultiplayerHealthSnapshotTest::RunTest(const FString& Parameters)
 		});
 	Observer->Health = NotificationProbe;
 	Observer->bDamageDuringHealthChange = true;
-	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 0.0f, 250.0f)) return false;
+	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 0.0f, 250.0f, EHealthAttributeNotifications::HealthFirst)) return false;
 	NotificationProbe->OnDamageResolved.Remove(OrderObserver);
 	Observer->Health = Health;
 	TestEqual(TEXT("The real HealthChanged callback executed the ordering probe once"), HealthOrderProbes, 1);
 	TestTrue(TEXT("Received zero health is the local death fact"), Health->IsDead());
 	TestEqual(TEXT("Death snapshot updates maximum before consumers query it"), Health->GetMaxHealth(), 250.0f);
-	TestTrue(TEXT("Death also publishes the zero-health snapshot"), Observer->HealthSnapshots == TArray<float>({40.0f, 0.0f}));
+	TestTrue(TEXT("Reversed attribute notification order publishes one committed death value"), Observer->HealthSnapshots == TArray<float>({100.0f, 100.0f, 40.0f, 0.0f}));
 	TestEqual(TEXT("First received death broadcasts once"), Observer->Deaths, 1);
 	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 0.0f, 250.0f)) return false;
 	TestEqual(TEXT("Repeated dead snapshots cannot repeat the death edge"), Observer->Deaths, 1);
+	TestEqual(TEXT("Repeated dead attributes do not duplicate health notifications"), Observer->HealthSnapshots.Num(), 4);
 	if (!ReceiveMultiplayerHealthAttributes(*Health, *this, 250.0f, 250.0f)) return false;
 	TestFalse(TEXT("An authoritative reset snapshot restores life data"), Health->IsDead());
 	TestEqual(TEXT("A reset does not invent another death edge"), Observer->Deaths, 1);
@@ -423,7 +468,6 @@ bool FFpstrueMultiplayerHealthSnapshotTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Late client snapshot owner"), LateOwner)) return false;
 	LateOwner->SetRole(ROLE_SimulatedProxy);
 	UfpstrueHealthComponent* LateHealth = AddMultiplayerTestHealth(*LateOwner);
-	if (ReadMultiplayerHealthSnapshot(*LateHealth, *this) == nullptr) return false;
 	TStrongObjectPtr<UfpstrueHealthMutationTestObserver> LateObserver(NewObject<UfpstrueHealthMutationTestObserver>());
 	LateObserver->Health = LateHealth;
 	LateHealth->OnHealthChanged.AddDynamic(LateObserver.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
@@ -433,6 +477,7 @@ bool FFpstrueMultiplayerHealthSnapshotTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("An initially dead snapshot publishes one local death edge"), LateObserver->Deaths, 1);
 	if (!ReceiveMultiplayerHealthAttributes(*LateHealth, *this, 0.0f, 175.0f)) return false;
 	TestEqual(TEXT("Repeating an initial dead snapshot cannot repeat death"), LateObserver->Deaths, 1);
+	TestEqual(TEXT("Repeating initial dead attributes does not repeat health notification"), LateObserver->HealthSnapshots.Num(), 1);
 	LateHealth->OnHealthChanged.RemoveDynamic(LateObserver.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
 	LateHealth->OnDeath.RemoveDynamic(LateObserver.Get(), &UfpstrueHealthMutationTestObserver::OnDeath);
 	return true;
@@ -626,14 +671,18 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Rejected client commands cannot publish a new network revision"), State->Revision, uint32(11));
 	const UFunction* DamagePresentation = Player->FindFunction(TEXT("ClientReceiveDamage"));
 	if (!TestNotNull(TEXT("Owner damage feedback has a reflected RPC entry"), DamagePresentation)) return false;
-	TestTrue(TEXT("Owner damage feedback is a reliable client RPC"), DamagePresentation->HasAllFunctionFlags(FUNC_Net | FUNC_NetClient | FUNC_NetReliable));
+	TestTrue(TEXT("Owner damage feedback is a client RPC"), DamagePresentation->HasAllFunctionFlags(FUNC_Net | FUNC_NetClient));
+	TestFalse(TEXT("Transient damage feedback does not build a reliable retransmission backlog"), DamagePresentation->HasAnyFunctionFlags(FUNC_NetReliable));
 	TestFalse(TEXT("Damage feedback is not an additional server damage request"), DamagePresentation->HasAnyFunctionFlags(FUNC_NetServer));
 	UfpstrueHealthComponent* PlayerHealth = Player->FindComponentByClass<UfpstrueHealthComponent>();
 	if (!TestNotNull(TEXT("Damage presentation retains the real player health component"), PlayerHealth)) return false;
-	FFPReplicatedHealthSnapshot* PlayerSnapshot = ReadMultiplayerHealthSnapshot(*PlayerHealth, *this);
-	if (PlayerSnapshot == nullptr) return false;
+	const UfpstrueHealthAttributeSet* PlayerAttributes = PlayerHealth->GetHealthAttributeSet();
+	if (!TestNotNull(TEXT("Damage presentation retains the real GAS attributes"), PlayerAttributes)) return false;
 	const float HealthBeforeFeedback = PlayerHealth->GetHealth();
-	const uint32 HealthRevisionBeforeFeedback = PlayerSnapshot->Revision;
+	const float AttributeHealthBeforeFeedback = PlayerAttributes->GetHealth();
+	const float AttributeMaximumBeforeFeedback = PlayerAttributes->GetMaxHealth();
+	TStrongObjectPtr<UfpstrueHealthMutationTestObserver> FeedbackHealthObserver(NewObject<UfpstrueHealthMutationTestObserver>());
+	PlayerHealth->OnHealthChanged.AddDynamic(FeedbackHealthObserver.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
 	int32 FeedbackDamageFacts = 0;
 	const FDelegateHandle FeedbackObserver = PlayerHealth->OnDamageResolved.AddLambda(
 		[&](float, AActor*, AController*, const FFPDamageContext&) { ++FeedbackDamageFacts; });
@@ -641,9 +690,12 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Damage-feedback fixture reaches the locally controlled presentation branch"), Player->IsLocallyControlled());
 	Player->ClientReceiveDamage_Implementation(25.0f, Target, Controller);
 	TestEqual(TEXT("Received damage feedback cannot deduct health a second time"), PlayerHealth->GetHealth(), HealthBeforeFeedback);
-	TestEqual(TEXT("Received damage feedback cannot publish a new health revision"), PlayerSnapshot->Revision, HealthRevisionBeforeFeedback);
+	TestEqual(TEXT("Received damage feedback cannot modify GAS health"), PlayerAttributes->GetHealth(), AttributeHealthBeforeFeedback);
+	TestEqual(TEXT("Received damage feedback cannot modify GAS maximum"), PlayerAttributes->GetMaxHealth(), AttributeMaximumBeforeFeedback);
+	TestTrue(TEXT("Received damage feedback cannot publish a health change"), FeedbackHealthObserver->HealthSnapshots.IsEmpty());
 	TestEqual(TEXT("Received damage feedback cannot manufacture an authoritative damage fact"), FeedbackDamageFacts, 0);
 	PlayerHealth->OnDamageResolved.Remove(FeedbackObserver);
+	PlayerHealth->OnHealthChanged.RemoveDynamic(FeedbackHealthObserver.Get(), &UfpstrueHealthMutationTestObserver::OnHealth);
 	// 同一夹具恢复服务端权限，验证死亡取消当前能力，而不是只把 UI 或武器镜像标成不可用。
 	Pickup->SetRole(ROLE_Authority);
 	Player->SetRole(ROLE_Authority);
@@ -869,6 +921,8 @@ bool FFpstrueMultiplayerHitHistoryTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Historical head query uses a skeletal body rather than the movement capsule"),
 		Target->TraceHistoricalHit(FirstTime, FVector(0.0f, 0.0f, 90.0f), FVector(1000.0f, 0.0f, 90.0f), Hit));
 	TestEqual(TEXT("Historical head query preserves the actual bone identity"), Hit.BoneName, FName(TEXT("head")));
+	TestTrue(TEXT("Historical hit carries its original start for native network serialization"), FVector(Hit.TraceStart).Equals(FVector(0.0f, 0.0f, 90.0f), 0.001f));
+	TestTrue(TEXT("Historical hit carries its original end without a duplicate RPC vector"), FVector(Hit.TraceEnd).Equals(FVector(1000.0f, 0.0f, 90.0f), 0.001f));
 	TestTrue(TEXT("Historical body query finds the torso shape"),
 		Target->TraceHistoricalHit(FirstTime, FVector(0.0f, 0.0f, 30.0f), FVector(1000.0f, 0.0f, 30.0f), Hit));
 	TestEqual(TEXT("Historical body query does not manufacture a head hit"), Hit.BoneName, FName(TEXT("spine_03")));
@@ -1041,10 +1095,27 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	FFPShotRequest WrongAvatar = MakeRequest(7, BodyPoint);
 	WrongAvatar.Avatar = Target;
 	TestTrue(TEXT("A shot cannot name a different shooter avatar"), Weapon->AcceptShotRequest(WrongAvatar) == EFPShotResult::InvalidIdentity);
+	FFPShotRequest MalformedIdentity = MakeRequest(0, BodyPoint);
+	TestTrue(TEXT("Zero ShotId is rejected before admission"), Weapon->AcceptShotRequest(MalformedIdentity) == EFPShotResult::InvalidIdentity);
+	MalformedIdentity.ShotId = static_cast<uint32>(MAX_int32) + 1u;
+	TestTrue(TEXT("ShotId beyond the execution range is rejected"), Weapon->AcceptShotRequest(MalformedIdentity) == EFPShotResult::InvalidIdentity);
+	MalformedIdentity = MakeRequest(8, BodyPoint);
+	MalformedIdentity.FireSession = 0;
+	TestTrue(TEXT("Zero fire session cannot be admitted"), Weapon->AcceptShotRequest(MalformedIdentity) == EFPShotResult::InvalidIdentity);
+	MalformedIdentity.FireSession = 1;
+	MalformedIdentity.EquipmentGeneration = 0;
+	TestTrue(TEXT("Zero equipment generation cannot be admitted"), Weapon->AcceptShotRequest(MalformedIdentity) == EFPShotResult::InvalidIdentity);
+	uint32 MalformedTimeId = 8;
+	for (const double Time : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()})
+	{
+		FFPShotRequest MalformedTime = MakeRequest(MalformedTimeId++, BodyPoint);
+		MalformedTime.ServerFireTime = Time;
+		TestTrue(TEXT("Non-finite fire time cannot enter the execution queue"), Weapon->AcceptShotRequest(MalformedTime) == EFPShotResult::InvalidTime);
+	}
 	TestEqual(TEXT("Invalid time, direction and identity cannot subtract ammo"), Weapon->GetCurrentAmmo(), AmmoAfterValidShots);
 	TestEqual(TEXT("Rejected malformed requests cannot damage the target"), Target->GetCurrentHealth(), 160.0f);
 	// 即使武器 Actor 复用，重新装备仍是新的代际；旧请求不能借用刚绑定的新关系。
-	FFPShotRequest BeforeReequip = MakeRequest(8, BodyPoint);
+	FFPShotRequest BeforeReequip = MakeRequest(11, BodyPoint);
 	const uint32 OldGeneration = BeforeReequip.EquipmentGeneration;
 	Weapon->EndAbilityFire();
 	Weapon->DetachWeapon();
@@ -1054,7 +1125,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Re-equipping advances the authoritative equipment generation"), Weapon->EquipmentRevision != OldGeneration);
 	TestTrue(TEXT("A delayed pre-equip request is rejected by generation"), Weapon->AcceptShotRequest(BeforeReequip) == EFPShotResult::InvalidIdentity);
 	TestEqual(TEXT("A stale equipment request cannot spend the surviving magazine"), Weapon->GetCurrentAmmo(), AmmoAfterValidShots);
-	FFPShotRequest BeforeDeath = MakeRequest(9, BodyPoint);
+	FFPShotRequest BeforeDeath = MakeRequest(12, BodyPoint);
 	UGameplayStatics::ApplyDamage(Player, 1000.0f, Controller, Target, nullptr);
 	TestTrue(TEXT("The shooter enters its real authoritative death lifecycle"), Player->IsDead());
 	TestTrue(TEXT("A delayed request after death cannot execute"), Weapon->AcceptShotRequest(BeforeDeath) == EFPShotResult::InvalidContext);
@@ -3008,6 +3079,10 @@ bool FFpstrueMultiplayerBodyAnimationDefaultsTest::RunTest(const FString&)
 	UClass* OriginalClass = LoadClass<AfpstrueCharacter>(nullptr,
 		TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter.BP_FirstPersonCharacter_C"));
 	if (!TestNotNull(TEXT("Original first-person Blueprint remains available"), OriginalClass)) return false;
+	TestTrue(TEXT("The original single-player damage script remains a valid feedback consumer"),
+		OriginalClass->IsFunctionImplementedInScript(TEXT("OnPlayerDamaged")));
+	TestFalse(TEXT("Current multiplayer Blueprint does not request unused legacy damage feedback"),
+		PawnClass->IsFunctionImplementedInScript(TEXT("OnPlayerDamaged")));
 	const AfpstrueCharacter* OriginalDefaults = OriginalClass->GetDefaultObject<AfpstrueCharacter>();
 	for (const TCHAR* Name : {TEXT("DefaultMappingContext"), TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"),
 		TEXT("FireAction"), TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
@@ -3185,7 +3260,10 @@ bool FFpstrueMultiplayerRemoteLocomotionAnimationTest::RunTest(const FString&)
 		&& FVector::Dist(RemoteWeapon->GetComponentLocation(), Body->GetSocketLocation(TEXT("SOCKET_Weapon"))) < 0.1f);
 	RemoteWeapon->SetRelativeScale3D(FVector::OneVector);
 	TestTrue(TEXT("A remote player never displays another pair of first-person arms"), Character->GetMesh1P()->bHiddenInGame);
-	RemoteWeapon->MulticastShot_Implementation(FVector::ZeroVector, FVector(1000.0f, 0.0f, 0.0f), FHitResult(), 1, 1, 1, 1);
+	FHitResult RemoteShot;
+	RemoteShot.TraceStart = FVector::ZeroVector;
+	RemoteShot.TraceEnd = FVector(1000.0f, 0.0f, 0.0f);
+	RemoteWeapon->MulticastShot_Implementation(RemoteShot, 1, 1, 1);
 	TestTrue(TEXT("The first received shot starts the remote body action without a preceding animation update"),
 		Animation->Montage_IsPlaying(Animation->FireMontage));
 	const UAnimInstance* RemoteArms = Character->GetMesh1P()->GetAnimInstance();

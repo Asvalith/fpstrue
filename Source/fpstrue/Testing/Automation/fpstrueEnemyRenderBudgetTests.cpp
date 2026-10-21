@@ -500,6 +500,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerSignificanceCoordinatorTest,
 	"fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 用真实协调器验证服务器考虑全部参与者，并覆盖开始、停止和参与者离场的注册关系。
 bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -716,6 +717,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerClientPerformanceTest,
 	"fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证客户端仅应用本地动画/渲染预算，远端移动状态读取复制速度而不启动权威 AI。
 bool FFpstrueMultiplayerClientPerformanceTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -924,6 +926,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerAuthorityPoseTest,
 	"fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证权威端必要姿态更新不被客户端渲染档位、共享姿态或不可见策略关闭。
 bool FFpstrueMultiplayerAuthorityPoseTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;

@@ -62,6 +62,11 @@ struct FfpstrueSurroundSlot
  *
  * 只保存跨敌人资源，不接管单敌人的行为树决策。敌人使用弱引用参与槽位和预算；玩家位置及NavMesh投影集中缓存，
  * AIController 通过窄接口申请/释放资源，避免各敌人独立维护互相冲突的群体状态。
+ * 服务器 Game Thread 主链：注入目标 → EQS 发布共享布局 → FIFO 授席 → Controller 执行 → 释放并补位。
+ * 席位是长期接近资格，ActiveAttackers 是单次出手名额；二者都不由黑板或客户端反向授予。
+ * 【设计取舍】FIFO 解决有效等待者的席位晋升顺序，空间槽位解决站哪里；不是一张队列表包办攻击。
+ * 内圈持有者仍须另取并发攻击名额，死亡/退出/超时归还后补位；候场者仍感知、受伤，不冻结 AI。
+ * 玩家位置只作资源规划快照，Controller 必须先有感知资格才能使用，不能因管理器知情就隔墙追踪。
  */
 UCLASS()
 class FPSTRUE_API AfpstrueSurroundManager : public AActor
@@ -76,20 +81,23 @@ public:
 	void SetTargetCharacter(AfpstrueCharacter* NewTargetCharacter);
 	// AI 停止追击或销毁时归还其包围槽。
 	void ReleaseSurroundSlot(AfpstrueEnemyCharacter* Enemy);
-	// AIController 请求并发攻击名额，避免所有敌人同时出手。
+	// CombatComponent 在攻击最终提交前申请并发出手名额；长期内圈席位本身不等于正在攻击。
 	bool TryAcquireAttackPermission(AfpstrueEnemyCharacter* Enemy);
-	// 攻击结束、死亡或退出时归还攻击名额。
+	// CombatComponent 完成/中断攻击时归还本次出手名额，不释放长期包围席位。
 	void ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy);
 	// AIController 提交 MoveTo 前消费 World 共用帧预算；多个玩家的 Manager 不会各增加一份额度。
 	bool TryConsumeMoveRequestBudget(bool bCombatPriority);
 	// 单次入队，重复决策只读本次分配；无席位时返回稳定外围目标，不退回玩家中心。
 	bool GetOrRequestTacticalAssignment(AfpstrueEnemyCharacter* Enemy, FFPEnemyTacticalAssignment& OutAssignment);
+	// 校验真实内圈占用；Revision 为 0 时只查当前资格，否则还要求同一授予代际。
 	bool HasInnerSlot(AfpstrueEnemyCharacter* Enemy, uint64 Revision = 0) const;
 	// 终点和原生 NavMesh 路径分别校验；外围单位绕圈接近，被动入圈时只允许向外恢复。
 	bool ResolveTacticalMoveGoal(AfpstrueEnemyCharacter* Enemy, const FFPEnemyTacticalAssignment& Assignment, FVector& OutGoal) const;
+	// 检查路径剩余各段不穿越内圈；已在圈内的无资格单位只能向外恢复。
 	bool IsTacticalPathAllowed(AfpstrueEnemyCharacter* Enemy, const FNavigationPath& Path, uint32 FirstPoint = 0) const;
 	// 单位到不了自己的位置时退回候场，保留身份与短退避，防止立即抢回同一坏路径。
 	void ReportTacticalMoveFailure(AfpstrueEnemyCharacter* Enemy, uint64 Revision);
+	// 汇总容量、占用、队列与累计授予/回收数，不改变运行中的分配。
 	FFPEnemyTacticalDebugSnapshot GetTacticalDebugSnapshot() const;
 	// 远距离追击读取共享玩家位置，避免每个 AI 重复采样目标。
 	bool GetSharedTargetSnapshot(FVector& OutLocation) const;
@@ -187,10 +195,9 @@ private:
 	friend class FFpstrueMultiplayerPveBudgetTest;
 	// 根据内外环配置创建稳定槽位布局。
 	void BuildSlots();
-	// Timer 回调：按阈值刷新共享目标位置。
-	// 更新缓存位置，并同步重建全部槽位的 NavMesh 投影。
+	// Timer 回调：按阈值刷新共享目标位置，并按需请求新的槽位缓存。
 	void UpdateSharedTargetSnapshot(bool bForce);
-	// 批量把原始槽位和接近点投影到 NavMesh。
+	// EQS 批量投影和筛选槽位、内圈接近点；身份校验通过后才发布。
 	void RebuildProjectedSlotCache();
 	// 只发布属于当前目标和本轮查询的完整缓存；EQS 回调在游戏线程执行。
 	void HandleApproachQueryFinished(TSharedPtr<FEnvQueryResult> Result, uint32 Revision, FVector QueryTarget);
@@ -198,20 +205,26 @@ private:
 	void HandleCoverQueryFinished(TSharedPtr<FEnvQueryResult> Result, TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, uint32 Revision);
 	// 移除失效敌人的槽位和攻击名额，防止弱引用表膨胀。
 	void CleanupInvalidEntries();
+	// 在指定环的可用空位中找二维最近槽位；没有候选时返回 INDEX_NONE，不抢占已有占用。
 	int32 FindBestFreeSlot(const FVector& EnemyLocation, int32 RingIndex) const;
+	// 先完成补位再通知；无有效目标时仍派发已有的释放通知。
 	void PumpTacticalQueue();
+	// 提交双向占用映射、授予代际和进度起点，再登记待通知者；由 Pump 保证输入有效。
 	void AssignSlot(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, int32 SlotIndex);
+	// 撤销参与身份、队列、席位和出手名额；只登记通知，不在移除中递归补位。
 	void RemoveParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy);
+	// 保留参与者但撤销当前资格，以新顺序排到队尾并设置短退避。
 	void RequeueParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy);
+	// 移出待通知集合后通知 Controller，回调新增的变更留给下一次派发。
 	void NotifyTacticalChanges();
+	// 读取当前授予或稳定候场点；布局过期、占用不匹配时返回失败，不偷偷重分配。
 	bool BuildAssignment(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, FFPEnemyTacticalAssignment& OutAssignment) const;
+	// 用目标环半径加当前敌人胶囊半径构造禁止穿越的边界。
 	float GetInnerBoundary(AfpstrueEnemyCharacter* Enemy) const;
-	// 根据玩家位置、槽位角度和半径计算未投影位置。
-	// 此生成规则集中在 EQS Generator，不再保留第二个手写选点实现。
 	// 调试模式下绘制已投影槽位，并以颜色区分是否占用。
 	void DrawDebugSlots();
 
-	// 语法复习：跨 Actor 的长期引用需要进入反射系统；Transient 表明缓存不会被序列化到资产或存档。
+	// 每个 Manager 只服务一个目标；敌人的参与关系使用弱引用，不持有敌人生命周期。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueCharacter> TargetCharacter;
 
@@ -223,9 +236,7 @@ private:
 	double NavigationCacheTime = 0.0;
 	FVector PublishedTargetLocation = FVector::ZeroVector;
 
-	// 语法复习：TArray 适合连续遍历；TMap 保存“敌人到槽位”的映射；TSet 只表达唯一攻击者集合。
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
-	// 语法复习：弱指针作为键时可能留下失效键，因此 CleanupInvalidEntries 必须负责清理。
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
 	struct FTacticalParticipant

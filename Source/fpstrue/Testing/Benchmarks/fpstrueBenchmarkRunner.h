@@ -25,6 +25,7 @@ FPSTRUE_API void StartPvpPerformanceProfile(UWorld* World);
 // explicit diagnostic bootstrap accepts only a local baseline peer; it neither
 // exposes arbitrary travel nor changes the normal JoinPvp/reconnect protocol.
 enum class EFPPvpBaselineBootstrap : uint8 { NotRequested, Started, Rejected };
+// 返回是否启动或拒绝了本机基线连接；未请求时不改正式 GameInstance 的连接流程。
 FPSTRUE_API EFPPvpBaselineBootstrap StartPvpBaselineClient(UGameInstance* Instance);
 
 // Copyright Epic Games, Inc. All Rights Reserved.
@@ -82,6 +83,8 @@ enum class EFPBenchmarkResult : uint8
  * 一进程一次的性能采集：排队开局 -> 场景准备 -> 预热 -> 确认启动 -> 采集 -> 验盘。
  * 准备/预热依赖 World Timer；Profiler 推进与超时使用 CoreTicker，世界暂停不能阻塞清理。
  * 写盘超时进入 Quarantined，只判业务失败，不放弃仍可能迟到启动的进程级 CSV 租约。
+ * 【设计取舍】失败结果可以立即封存，但共享 Profiler 的所有权必须等实际回收，不能把超时当已停止。
+ * 因此保留短期隔离清理状态，而不让下一轮覆盖旧采集或把残留文件当成功产物。
  */
 UCLASS(ClassGroup = (Performance))
 class FPSTRUE_API UfpstrueBenchmarkRunner : public UActorComponent

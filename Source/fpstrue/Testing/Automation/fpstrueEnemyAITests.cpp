@@ -1450,7 +1450,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	Combat->DestroyComponent();
 	TestFalse(TEXT("Component EndPlay ends its attack"), Combat->IsAttacking());
 	TestTrue(TEXT("Component EndPlay releases its living owner's permit"), Surround->TryAcquireAttackPermission(Probe));
-	Combat->HandleAttackFinishedNotify();
+	Combat->HandleAttackFinishedNotify(Enemy->GetMesh(), FAnimNotifyEventReference());
 	TestFalse(TEXT("A finish callback after EndPlay cannot revive the transaction"), Combat->IsAttacking());
 	Surround->ReleaseAttackPermission(Probe);
 	Enemy->SetAnimationSharingCoordinator(nullptr);
@@ -1777,6 +1777,13 @@ bool FFpstrueSurroundTacticalQueueTest::RunTest(const FString& Parameters)
 	Manager->ReportTacticalMoveFailure(Fourth, D.Revision);
 	TestFalse(TEXT("Current unreachable report revokes its old inner identity"), Manager->HasInnerSlot(Fourth, D.Revision));
 	TestTrue(TEXT("Unreachable recovery gives the next request a chance"), Manager->HasInnerSlot(Third));
+	// 目标离场后不再补位，但释放事件仍须在同一次调用里排空，不能依赖下一轮 Timer。
+	Target->Destroy();
+	const uint64 GrantsBeforeTargetLoss = Manager->TacticalGrantCount;
+	Manager->ReleaseSurroundSlot(Third);
+	TestFalse(TEXT("Release removes the participant after target departure"), Manager->Participants.Contains(Third));
+	TestTrue(TEXT("Target departure cannot strand a pending release notification"), Manager->PendingTacticalNotifications.IsEmpty());
+	TestEqual(TEXT("Target departure prevents new grants"), Manager->TacticalGrantCount, GrantsBeforeTargetLoss);
 	Manager->SetTargetCharacter(nullptr);
 	const FFPEnemyTacticalDebugSnapshot Empty = Manager->GetTacticalDebugSnapshot();
 	TestEqual(TEXT("Target reset removes every queue request"), Empty.QueuedEnemies, 0);
@@ -1857,6 +1864,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorStartupTest,
 	"fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+// 验证无效行为树拒绝激活、上下文不能复活失败实例，以及 StopAI 重复调用不会重复释放资源。
 bool FFPEnemyBehaviorStartupTest::RunTest(const FString& Parameters)
 {
 	FTestWorldWrapper Fixture;
@@ -2487,8 +2495,8 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	Window->BranchingPointNotifyEnd(OldBranch);
 	TestTrue(TEXT("Old queued and branching notifications cannot close B"), Combat->AttackPhase == EFPEnemyAttackPhase::Active);
 	TestFalse(TEXT("A different mesh cannot supply the current attack identity"), Combat->IsAttackNotifyCurrent(Target->GetMesh(), CurrentNotify));
-	Combat->HandleAttackFinishedNotify();
-	TestTrue(TEXT("Deprecated identity-free completion fails closed"), Combat->IsAttacking());
+	Finished->Notify(Mesh, Attack, FAnimNotifyEventReference());
+	TestTrue(TEXT("Native completion without playback identity cannot finish B"), Combat->IsAttacking());
 	Finished->Notify(Mesh, Attack, CurrentNotify);
 	TestFalse(TEXT("Current native completion finishes B"), Combat->IsAttacking());
 	Combat->LastAttackTime -= Combat->AttackInterval;

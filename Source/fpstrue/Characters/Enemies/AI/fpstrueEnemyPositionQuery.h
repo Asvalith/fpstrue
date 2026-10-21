@@ -11,12 +11,17 @@
 
 class UEnvQuery;
 
+/**
+ * 位置查询适配层：SurroundManager 提交位置快照，原生 EQS 分片生成、投影并过滤候选。
+ * 本模块只返回带槽位身份的候选，不授予席位、不启动移动；最终占用与结果时效由 Manager 裁决。
+ */
 // 每个 World 只有两份不可变参数化图；UPROPERTY 真正持有到 World 退出，不依赖请求 Actor 存活或无界全局强表。
 UCLASS()
 class UfpstrueEnemyPositionQueryTemplates : public UWorldSubsystem
 {
 	GENERATED_BODY()
 public:
+	// 惰性创建并持有 Attack/Cover 中指定的一份模板；请求的运行状态不写回模板。
 	UEnvQuery* GetTemplate(bool bCover);
 private:
 	UPROPERTY(Transient) TObjectPtr<UEnvQuery> AttackTemplate;
@@ -43,11 +48,17 @@ class FPSTRUE_API UfpstrueEnvQueryItemType_Position : public UEnvQueryItemType_P
 public:
 	typedef FFPEnemyQueryPoint FValueType;
 
+	// 扩大原生 Point 的存储尺寸，使导航数据与业务槽位身份一起保留。
 	UfpstrueEnvQueryItemType_Position(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	// 从 EQS 原始项缓冲区按值读取完整候选。
 	static FFPEnemyQueryPoint GetValue(const uint8* RawData);
+	// 将完整候选写回 EQS 项缓冲区，供后续测试读取。
 	static void SetValue(uint8* RawData, const FFPEnemyQueryPoint& Value);
+	// 向 EQS 的位置查询接口提供候选世界坐标。
 	virtual FVector GetItemLocation(const uint8* RawData) const override;
+	// 向导航测试提供投影后位置及其 NavRef。
 	virtual FNavLocation GetItemNavLocation(const uint8* RawData) const override;
+	// 只替换导航结果，保留槽位编号、候选种类和偏移偏好。
 	virtual void SetItemNavLocation(uint8* RawData, const FNavLocation& Value) const override;
 };
 
@@ -64,7 +75,9 @@ class FPSTRUE_API UfpstrueEnvQueryGenerator_Positions : public UEnvQueryGenerato
 	GENERATED_BODY()
 
 public:
+	// 注册扩展候选类型及测试自动排序选项。
 	UfpstrueEnvQueryGenerator_Positions(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	// 消费请求快照构造有界双环；位置参数不完整时不产生候选。
 	virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
 
 	// 仅作未传 Cover 参数时的模板默认值；每轮位置和配置都从 QueryInstance 读取。
@@ -79,7 +92,9 @@ class FPSTRUE_API UfpstrueEnvQueryTest_Position : public UEnvQueryTest
 	GENERATED_BODY()
 
 public:
+	// 配置原生 EQS 的中等成本过滤与线性评分规则。
 	UfpstrueEnvQueryTest_Position(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	// 依次检查导航、站立空间与环境遮挡；无导航或快照时让候选全部失败。
 	virtual void RunTest(FEnvQueryInstance& QueryInstance) const override;
 
 	UPROPERTY()

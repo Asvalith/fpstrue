@@ -10,7 +10,10 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 
-// 绑定调用者指定的有效播放；重复绑定只能命中原身份，不能覆盖另一轮动作。
+// 播放身份与启动配置工具；调用方保持动作状态，工具只解析明确身份或读取配置，不发网络消息。
+
+// 【设计取舍】同步绑定只查调用者明确指定资产的活动实例；异步 Notify/结束回调只认已保存的实例 ID。
+// 同资产重播产生新 ID，不能在旧回调里重新查询“当前 Montage”，把它冒领为新一轮播放。
 FAnimMontageInstance* FFPActionPlayback::TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage)
 {
 	// 先确认资源和当前活动实例，再决定复用已有绑定还是首次记录身份。
@@ -154,7 +157,6 @@ FFPRuntimeOptions::FFPRuntimeOptions()
 // 把本进程显式启动参数投影到渲染策略；未设置项和资产中已禁用的功能保持原样。
 void FFPRuntimeOptions::ApplyEnemySignificanceOverrides(FFPEnemyRenderSignificancePolicy& InOutPolicy) const
 {
-	// 未出现在命令行中的字段保持蓝图或 C++ 默认值，避免测试配置污染正式配置。
 	// ★【重要边界】[配置契约] 启动诊断只覆盖本进程显式参数，不写回资产/INI；关闭碰撞、移动或攻击的消融结果不能当正式玩法收益。
 	ApplyOptionalValue(FrustumWeight, InOutPolicy.FrustumWeight);
 	ApplyOptionalValue(ScreenCoverageWeight, InOutPolicy.ScreenCoverageWeight);

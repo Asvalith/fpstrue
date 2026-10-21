@@ -62,6 +62,7 @@ public:
 	void OnTacticalAssignmentChanged(AfpstrueSurroundManager* Source);
 	// 攻击提交的实时准入检查；黑板仅是镜像，真实归属仍向 Manager 校验。
 	bool IsTacticalAttackPositionReady(bool bRequireFacing = true) const;
+	// 返回最近接收的席位代际；Combat 捕获它，防止旧攻击沿用重新授予的同一席位。
 	uint64 GetTacticalAssignmentRevision() const { return TacticalAssignment.Revision; }
 	// 主动离开/恢复期限结束可立即撤销目标；死亡和 EndPlay 也会通过绑定进入同一清理。
 	void NotifyCombatTargetUnavailable(AfpstrueCharacter* UnavailableTarget);
@@ -76,11 +77,7 @@ public:
 	// Gameplay Significance 调整决策间隔，远处敌人减少 CPU 更新频率。
 	void SetSignificanceDecisionMultiplier(float NewMultiplier);
 
-	// BT 采样节点的唯一入口，一轮距离和范围计算结果写入 Blackboard。
-	// 单轮采样：解析引用、计算快照和下轮间隔。
-	// 校验并解析敌人、目标和管理器，再汇总距离与攻击/追击范围，供本轮决策复用。
-	// 返回是否有有效目标；失败时清空采样，清理与停路统一由 Idle 叶子处理。
-	// 合并后，有效性随快照写入 Blackboard，不再通过独立函数返回。
+	// BT 每轮采样目标、距离与范围，发布黑板结果并更新下轮间隔；无效目标交给 Idle 叶子清理。
 	void RefreshBehaviorDecision(UBlackboardComponent& DecisionBlackboard);
 	// BT 叶子节点执行桥；不在 Controller 中再次选择高层行为。
 	bool ExecuteBehaviorAction(EFPEnemyBehaviorAction Action);
@@ -102,6 +99,7 @@ public:
 
 	// PathFollowing 失败时安排退避；成功到位后的朝向由下一次决策结合到达检测更新。
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
+	// 提交前再次校验战术路径边界；未经许可的路径不交给原生 PathFollowing。
 	virtual FAIRequestID RequestMove(const FAIMoveRequest& MoveRequest, FNavPathSharedPtr Path) override;
 	// 外部统一停止 AI；敌人死亡和 GameMode 结束都会调用。
 	void StopAI();
@@ -194,6 +192,7 @@ private:
 	friend class FFpstrueEnemyCombatLifecycleTest;
 	friend class FFPEnemyTacticalExecutionTest;
 	friend class FFPEnemyBehaviorStartupTest;
+	// 仅 Accepting 接收命令；换目标和停止期间关闭入口。Stopped 可显式重启，但必须有成功启动过的树。
 	enum class ECommandPhase : uint8 { Uninitialized, Stopped, Accepting, ChangingContext, Stopping };
 	enum class EMoveGoalResult : uint8
 	{
@@ -226,7 +225,7 @@ private:
 		double RetryAfter = 0.0;
 	};
 
-	// 启动唯一决策驱动；默认树和外部树不能与旧 Timer/FSM 并行运行。
+	// 启动唯一行为树；失败会清空 ActiveBehaviorTree 并关闭命令入口。
 	bool StartBehaviorLogic();
 	// 消息只排队唤醒当前等待节点，不从感知回调中重入行为树。
 	void RequestBehaviorDecision();
@@ -239,14 +238,19 @@ private:
 	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
 	// 到位、不可达、过期统一结束声音调查；保留注入身份以便单机 Sight 日后重新发现。
 	void FinishNoiseInvestigation(bool bApplyCooldown = true);
+	// 玩家死亡统一撤销该目标及其资源关系。
 	UFUNCTION() void HandleCombatTargetDied(AfpstrueCharacter* DeadTarget);
+	// 目标未经死亡直接退出世界时，仍走同一不可用通知链。
 	UFUNCTION() void HandleCombatTargetEndPlay(AActor* EndingTarget, EEndPlayReason::Type EndPlayReason);
 
 	// 只由新增扣血触发一轮撤退；持续低血不会在每轮采样重新申请掩体。
 	UFUNCTION()
 	void HandleEnemyHealthChanged(float NewHealth);
+	// 读取当前生命比例是否达到撤退阈值；不在查询中触发撤退。
 	bool IsBelowRetreatThreshold() const;
+	// 推进一次撤退：申请/等待掩体、移动、短暂停留；失败或超时统一结束。
 	bool HandleRetreat();
+	// 清除撤退请求并归还掩体，可选进入冷却；不自动重启一次新撤退。
 	void FinishRetreat(bool bApplyCooldown = true);
 
 	// 根据状态、距离和 Significance 返回下一次决策间隔。
@@ -274,14 +278,12 @@ private:
 	// Chase 行进时面向路径，到位后面向目标；到位不是新攻击事务，不新增一份 AI 状态。
 	void ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget = false, bool bIdleSearch = false);
 
-	// 公共清理：由停止入口和叶子按需调用，不重复维护移动缓存和群体资源。
 	// 仅在确实移动时调用 StopMovement；攻击可保留已经提交的目标缓存。
 	void StopMovementIfNeeded(bool bPreserveMoveGoal = false);
 	// 归还当前敌人在 SurroundManager 中占用的槽位。
 	void ReleaseSurroundSlot();
 
-	// 语法复习：Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
-	// 让 GC 识别引用，并由 OnUnPossess 主动清空，不依赖 C++ 析构函数处理 Gameplay 状态。
+	// Possess 建立上下文，StopAI 撤销业务，OnUnPossess 释放引用。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;
 

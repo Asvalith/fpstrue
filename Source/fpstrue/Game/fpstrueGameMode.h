@@ -15,8 +15,6 @@ class UfpstrueBenchmarkRunner;
 class UfpstrueEnemyAnimationSharingCoordinator;
 class UfpstrueEnemySignificanceCoordinator;
 
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 // 单波敌人类型与数量配置，由 GameMode 的生成队列读取。
 USTRUCT(BlueprintType)
 struct FfpstrueWaveConfig
@@ -34,6 +32,8 @@ struct FfpstrueWaveConfig
 /**
  * 策划可复用的波次配置。指定资产后，它完整接管波次与对局时长，不混用 GameMode 旧默认值。
  * 每波未指定敌人类时只回退到本资产的 DefaultEnemyClass；空 Waves 或缺失敌人类会使开局失败。
+ * 【设计取舍】资产共享配置，不保存当前波次、剩余时间和存活集合；这些运行态归各局 GameMode。
+ * 本波规则由 GetWaveConfig 按值读取，修改资产不会自动同步客户端，不把配置资产当运行状态协议。
  */
 UCLASS(BlueprintType)
 class FPSTRUE_API UfpstrueWaveConfiguration : public UDataAsset
@@ -139,7 +139,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Game|AI")
 	TSubclassOf<AfpstrueSurroundManager> SurroundManagerClass;
 
-	// 语法复习：Transient 表示纯运行时引用，不参与存档或默认对象序列化；TObjectPtr 让 GC 能追踪引用。
 	// 本局敌人共用的围攻管理器实例；可编辑的是上面的类配置，不是此运行时实例。
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Game|AI")
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
@@ -193,7 +192,7 @@ protected:
 private:
 	// ==================== 受控协作者 ====================
 
-	// 语法复习：friend 不产生继承或生命周期关系，只让少量协调组件读取本类的私有性能状态。
+	// 少量协调器与边界测试读取对局状态，不因此获得敌人或计时器的所有权。
 	friend class UfpstrueBenchmarkRunner;
 	friend class UfpstrueEnemySignificanceCoordinator;
 	friend class FFpstrueGameModeStartupTest;
@@ -260,8 +259,7 @@ private:
 
 	// ==================== 运行时引用与状态 ====================
 
-	// 语法复习：这些数组由 GameplayStatics 的 TArray<AActor*>& 接口直接填充，因此保留裸指针元素；
-	// UPROPERTY 仍会让 GC 扫描数组，Transient 则明确它们只在本局运行时有效。
+	// 开局一次收集并复用出生点；反射引用只在本局有效，不为每次生成重新遍历世界。
 	UPROPERTY(Transient)
 	TArray<AActor*> SpawnPoints;
 
@@ -285,7 +283,6 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Performance|Animation Sharing")
 	TObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> EnemyAnimationSharingCoordinator;
 
-	// 语法复习：TSet 保证敌人唯一；弱指针键不会阻止 Actor 销毁，失效项由注销流程清理。
 	// 幂等注销由 Remove 的返回值保证，弱引用仅表示注册表不拥有敌人。
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> RegisteredEnemies;
 
