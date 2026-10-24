@@ -8,6 +8,8 @@
 
 // 仅保存可调数值，不包含当前弹药、动作阶段、Timer 或播放身份。
 // 每件武器首次装备时复制一次；共享资产不是所有武器共享的运行状态。
+// 【设计取舍】实例快照保证进行中的射速/换弹规则稳定，代价是运行时编辑共享资产不会热改已装备武器。
+// 切换另一套配置应使用相应武器实例，不能把共享 DataAsset 当成可写的弹药或动作状态容器。
 USTRUCT(BlueprintType)
 struct FPSTRUE_API FFPWeaponSettings
 {
@@ -19,7 +21,7 @@ struct FPSTRUE_API FFPWeaponSettings
 	FName GripSocketName = TEXT("GripPoint");
 
 	// Fire
-	// 每分钟射击数；用于自动射击 Timer 和单发提交节流，保证两条路径使用同一射速。
+	// 每分钟射击数；能力生成连射输入与武器消费已准入队列使用同一单发间隔。
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "1.0"))
 	float RoundsPerMinute = 600.0f;
 
@@ -96,26 +98,35 @@ struct FPSTRUE_API FFPWeaponSettings
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Recoil", meta = (ClampMin = "0.0"))
 	float MaxAccumulatedRecoilYaw = 2.0f;
 
-	// Reload Recovery
-	// 预计动画时长只用于兜底截止点：max(普通/空仓时长, FailSafeDuration) + GracePeriod。
-	// 正常装填由有身份的 Notify 提交，播放结束解除锁；超时只失败收尾，不伪造动画成功。
+	// Visual Recoil
+	// 纯表现参数：在 CameraManager 最终画面叠加，不改变命中散布、控制方向或动画资产。
+	// Scale 设为 0 可关闭；ADS 仅缩放本层，和控制后坐力的 AimRecoilMultiplier 独立。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float VisualRecoilScale = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AimVisualRecoilMultiplier = 0.6f;
+	// 角度单位为度，不受 Controller 的 legacy 输入倍率影响；Yaw/Roll 逐发交替方向。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "-5.0", ClampMax = "5.0"))
+	FRotator VisualRecoilRotation = FRotator(0.8, 0.15, 0.35);
+	// 很小的视野脉冲营造透视冲击，不添加畸变材质或修改后处理资产。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float VisualRecoilFOV = 0.35f;
+	// 前 15% 时间快速冲出，其余时间平滑回正；每次射击重触发，而非无限叠加。
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.04", ClampMax = "0.5", Units = "s"))
+	float VisualRecoilDuration = 0.12f;
+
+	// 权威装弹时长；所有运行模式与无动画角色共用，表现素材不修改这份规则。
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float ReloadDuration = 0.8f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float EmptyReloadDuration = 1.2f;
-
-	// 兜底等待时间的下限；比预计动画长时优先使用此值，避免提前结束正常动画。
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
-	float ReloadFailSafeDuration = 5.0f;
-	// 额外加在兜底截止点上的宽限时间；不是 CommitReload 后另起的倒计时。
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.0"))
-	float ReloadCompletionGracePeriod = 0.1f;
 
 	// 编辑器 Clamp 不能约束脚本/代码赋值；装备前与资产验证共用同一套检查。
 	// 非法整组拒绝，不静默混入默认字段或修改设计数值。
 	bool Validate(FString& OutError) const;
 };
 
+// 设计者编辑的共享数值资产：首次装备校验并复制到武器实例，不保存弹药、动作或播放身份。
 UCLASS(BlueprintType)
 class FPSTRUE_API UfpstrueWeaponConfig : public UDataAsset
 {
@@ -126,6 +137,7 @@ public:
 	FFPWeaponSettings Settings;
 
 #if WITH_EDITOR
+	// 编辑器资产检查复用运行时的整组数值校验，将失败原因反馈到资产验证面板。
 	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;
 #endif
 };

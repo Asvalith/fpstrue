@@ -1,0 +1,642 @@
+{
+  "schema_version": 1,
+  "artifact": "allowlisted-automation-summary",
+  "project": "fps",
+  "source_commit": "fb1b7a3022842f84dac975f3e5293ba0a901d3d0",
+  "source_tree_sha1": "d45dbdf8b88887c006adc971bf0785138af5f544",
+  "source_report": {
+    "path": "Saved/Refactor_20261024/Automation_R3/index.json",
+    "sha256": "cffc2edae642f0a73ff73bcdad907d43e9529153b61bc16ca088a82bf6b6006e"
+  },
+  "reported_date": "2026.10.24-03.18.22",
+  "summary": {
+    "succeeded": 86,
+    "succeededWithWarnings": 13,
+    "failed": 0,
+    "notRun": 0,
+    "inProcess": 0
+  },
+  "tests": [
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.AssetGraphAndBindings.DefaultProjectAssets",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.AssetSafety",
+      "state": "Success",
+      "warnings": 6,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.BlackboardKeyCache",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.DefaultStructure",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.LowHealthRetreatLifecycle",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.RuntimeLifecycle",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.EQS.AsyncParametersAndMissingNavigation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.EQS.TemplateAndItemIdentity",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.EQS.TwoOwnersInflightGcAndRecreate",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Movement.NativeStationaryFloorCache",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Perception.AuthoritativeGunshotInvestigation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Perception.MultiplayerIdleSearchAndStop",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Perception.SightOcclusionAndFacing",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Surround.AttackWaitingQueue",
+      "state": "Success",
+      "warnings": 2,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Surround.CacheAndSlotOwnership",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Surround.ParticipationAndGoalAvailability",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Surround.TacticalBoundaryAndAssignments",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.AI.Surround.TacticalQueueAndRecovery",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.FacingTolerance",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.RotationConfig",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.GAS.CommitCancellationAndSameSpecRestart",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.RemainingCooldownAndShotFact",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ShotPresentationIdentityOnReentry",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.StaleTransactionCallbacksIgnored",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Combat.AttackProtectionAndCleanup",
+      "state": "Success",
+      "warnings": 1,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Combat.ConfigurationSource",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Combat.ExplicitPlaybackAndStopReentry",
+      "state": "Success",
+      "warnings": 1,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Combat.ProjectBlueprintPlaybackIntegration",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Health.NotificationTermination",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Health.QueuedEnemyHitContext",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Health.ReentrantMutationOrder",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.PulseAndScaling",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.RetriggerAndStepSize",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.ViewIsolation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.FootIK.AirDeathAndReset",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.FootIK.AssetBindingsAndOwnerIsolation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.FootIK.GroundAndSlopePose",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.BodyDefaultsAndViewSeparation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.RARAbilityPresentationAndCancel",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.RARAssetsAndMontageBindings",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.RARReceivedReloadProgress",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.RemoteVelocityWithoutAcceleration",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.TemplateAssetsGripAndOriginalHud",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Animation.TemplateDeathWeaponPhysicsAndLateReplication",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.EnemyUI.DedicatedServerHasNoPresentation",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.EnemyUI.WorldModesAndEventRedraw",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.EnemyUI.WorldViewReturnAndSmoothedAnchor",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.EnemyUI.WorldViewSnapshotCache",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.GAS.ExternalHealthEffectsAndReentry",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Health.AuthorityAndGASAttributeCommit",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Health.ReplicatedAttributeNotifications",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Hitscan.HistoryGeometryTimeAndLifecycle",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Lifecycle.BoundedSpawnRecovery",
+      "state": "Success",
+      "warnings": 4,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Lifecycle.SingleModeEnemyRegistrationAndSpawn",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Movement.SavedModesReplayAndAuthority",
+      "state": "Success",
+      "warnings": 1,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.PvPvE.ClientSnapshotIsPresentationOnly",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.PvPvE.EnemyHealthBarAnchorAndHealth",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.PvPvE.ServerCombatAndSingleCommit",
+      "state": "Success",
+      "warnings": 1,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.PvPvE.SimpleHitProxyLifecycle",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.PvPvE.TargetDeathDestroyAndResourceRelease",
+      "state": "Success",
+      "warnings": 2,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.PvPvE.WorldSharedNavigationBudget",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Reconnect.CancelInvalidatesOldTravelAndRetry",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Reconnect.HudRebindAndCurrentSnapshot",
+      "state": "Success",
+      "warnings": 2,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Reconnect.ServerRetentionAndSingleUseClaim",
+      "state": "Success",
+      "warnings": 2,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState",
+      "state": "Success",
+      "warnings": 1,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle",
+      "state": "Success",
+      "warnings": 5,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.AnimationSharing.StopAndSwapLifecycle",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.Significance.GameplayTierReasonSnapshot",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.Significance.RenderBudgetRetentionOrder",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.Significance.RenderPriorityOrder",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.Significance.RenderScoringSnapshotEquivalence",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.Significance.RenderTopKSelection",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Performance.Significance.ScopedCombatProtection",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Rendering.EnemyBudget.IndependentBudgetRetention",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Rendering.EnemyBudget.MeshOwnershipAndDeath",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle",
+      "state": "Success",
+      "warnings": 4,
+      "errors": 0
+    },
+    {
+      "fullTestPath": "fpstrue.Rendering.EnemyBudget.TierHysteresis",
+      "state": "Success",
+      "warnings": 0,
+      "errors": 0
+    }
+  ],
+  "builds": [
+    {
+      "configuration": "Development",
+      "result": "up-to-date",
+      "source": {
+        "path": "Saved/FinalInterview_20261024/Build_Development.log",
+        "sha256": "93479eb580b148fb7f007fb27e6b6a74812546fbcff83eb70ffa8b8c378a189b"
+      }
+    },
+    {
+      "configuration": "Shipping",
+      "result": "up-to-date",
+      "source": {
+        "path": "Saved/FinalInterview_20261024/Build_Shipping.log",
+        "sha256": "f7fa4bb7f4f4946076a372a325a6bb09ee994783168a46e4f1a9bd840809ff1b"
+      }
+    }
+  ],
+  "boundary": "Executed in the full, licensed-asset development environment. This source-only main checkout was not independently run. Build marker is an incremental check, not a fresh build or packaged runtime test.",
+  "omitted": [
+    "device/account identifiers",
+    "tokens",
+    "local absolute paths",
+    "commands",
+    "event details",
+    "raw logs"
+  ]
+}

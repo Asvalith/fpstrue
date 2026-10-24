@@ -413,3 +413,11 @@ Docs/*CHECKLIST*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Keep the interview snapshot free of local reports, traces and private notes.
+*.utrace
+*.ucache
+*.etl
+.codex/
+.agents/
+PROJECT_HISTORY.md

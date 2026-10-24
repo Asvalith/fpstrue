@@ -1,11 +1,9 @@
 # 历史实验入口（冻结）
 
-本目录集中历史 `Run*.ps1`、对应 `Summarize*.ps1` 与固定数据分析脚本，保留原参数、注释、执行方式和输出格式，用于核对历史实验；不作为新的测试入口。部分脚本使用旧地图、硬编码机器路径或离屏渲染，不能直接与当前基线混用。旧报告对应的 CSV、Trace 与统计口径保留不变。
+本目录保存冻结的历史启动、汇总和固定 CSV 分析脚本，只用于核对旧实验。部分入口依赖已移除的单机 GameMode、AutoBenchmark 或旧地图，不能对当前构建直接运行；历史报告对应的 CSV、Trace、配置和统计口径保持原样。
 
-当前统一使用 `Tools/Performance/RunRenderCostMatrix.ps1`：
+`RunRenderCostMatrix.ps1` 已从 `Tools/Performance/` 移入本目录并显式拒绝启动，避免删除单机 Runner 后静默生成无效实验。复现旧结果应使用对应历史版本，不在当前多人代码中恢复兼容分支。
 
-- `Tools/Performance/ExperimentProfiles/*.json`：人数、预热、时长、地图和实验组选项。
-- `Tools/Performance/ExperimentProfiles/RenderCostCases.psd1`：共用采集设置、实验 CVar 与对应验收条件。
-- `Source/fpstrue/Testing/Benchmarks/`：采集配置与生命周期；运行时诊断参数及埋点声明位于 `Source/fpstrue/Runtime/`。
+当前固定 160 AI 的联网采集入口为 `Tools/Performance/RunGroupAIBaseline.ps1`，保留 Editor/Shipping 客户端、独立服务器、真实人口与消费者门禁、采样身份及结果。`Testing/Benchmarks/fpstrueBenchmarkRunner.*` 仍承载网络 Profile/Baseline，不再包含单机 UActorComponent。本轮入口整理未重跑性能，不将旧结果移称新构建成绩。
 
-新增实验不要复制历史脚本。先在配置表中登记实验条件，再由统一入口采集；新增玩法消融若需要不同验收条件，应明确实现该条件，不能套用渲染实验的正常战斗校验。
+`Tools/Performance/ExperimentProfiles` 与历史汇总脚本继续用于理解旧实验条件，不作为当前启动推荐。新增网络实验沿用现有联网入口并明确自己的单因素、场景和验收口径，不复制历史脚本或混合不同构建的数据。

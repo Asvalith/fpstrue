@@ -6,15 +6,46 @@
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Components/ActorComponent.h"
-#include "Characters/Shared/fpstrueActionPlayback.h"
+#include "Engine/DataAsset.h"
+#include "Runtime/fpstrueRuntime.h"
 #include "fpstrueEnemyCombatComponent.generated.h"
 
 class AfpstrueEnemyCharacter;
 class AfpstrueCharacter;
 class AfpstrueSurroundManager;
 class UAnimMontage;
-class UfpstrueEnemyCombatConfig;
 struct FAnimMontageInstance;
+
+/** 可复用的敌人近战参数；赋给 CombatComponent 后，整组参数覆盖其旧蓝图默认值。 */
+UCLASS(BlueprintType)
+class FPSTRUE_API UfpstrueEnemyCombatConfig : public UDataAsset
+{
+	GENERATED_BODY()
+
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat", meta = (ClampMin = "0.0"))
+	float AttackRange = 230.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat", meta = (ClampMin = "0.0"))
+	float AttackDamage = 10.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat", meta = (ClampMin = "0.0"))
+	float AttackInterval = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Animation", meta = (ClampMin = "0.0"))
+	float AttackAnimationDuration = 1.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Animation", meta = (ClampMin = "0.1"))
+	float AttackFailSafeDuration = 5.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Animation", meta = (ClampMin = "0.0"))
+	float AttackCompletionGracePeriod = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace")
+	FName WeaponTraceStartSocketName = TEXT("weapontop");
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace")
+	FName WeaponTraceEndSocketName = TEXT("weaponend");
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace", meta = (ClampMin = "1.0"))
+	float WeaponTraceRadius = 8.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Weapon Trace", meta = (ClampMin = "2", ClampMax = "8"))
+	int32 WeaponTraceSampleCount = 4;
+};
 
 // 伤害窗口属于事务中的一个阶段，不能独立于攻击事务存在。
 enum class EFPEnemyAttackPhase : uint8
@@ -30,6 +61,8 @@ enum class EFPEnemyAttackPhase : uint8
  *
  * AIController 只请求开始攻击；AnimNotifyState 只报告动画窗口；本组件统一决定能否攻击、何时造成伤害、
  * 如何处理中断/重复 Notify，并向开始时捕获的 SurroundManager 归还攻击名额。
+ * 服务器 Game Thread 主链：资格复核 → 取得出手许可 → 建立事务 → 绑定播放 → 窗口 Sweep → 完成/中断归还。
+ * 客户端仅消费 EnemyCharacter 复制的播放快照，不从本地动画通知提交伤害。
  */
 UCLASS(ClassGroup = (Combat))
 class FPSTRUE_API UfpstrueEnemyCombatComponent : public UActorComponent
@@ -67,8 +100,7 @@ public:
 	void UpdateAttackWindow();
 	// 只关闭伤害窗口；采样值不再使用，下次 Begin 会重新建立。
 	void EndAttackWindow();
-	// 只保留旧资产符号用于迁移诊断；没有身份的异步通知不能结束当前攻击。
-	void HandleAttackFinishedNotify();
+	// 只有通知携带的 Mesh 和 Montage 实例属于当前攻击时，才允许完成本次事务。
 	void HandleAttackFinishedNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference);
 	// 原生 Notify 使用动画携带的播放实例身份；不从当前事务倒填旧回调的身份。
 	bool IsAttackNotifyCurrent(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference) const;
@@ -128,11 +160,11 @@ protected:
 
 private:
 	friend class FFpstrueEnemyCombatLifecycleTest;
+	friend class FFpstrueSurroundAttackQueueTest;
 	friend class FFpstrueEnemyCombatStateConfigTest;
 	friend class FFpstrueEnemyAttackPlaybackTest;
 	friend class FFpstrueEnemyAttackAssetIntegrationTest;
-	// 只在 BeginPlay 选一次参数来源，热路径继续读取原有字段。
-	void ApplyCombatConfiguration();
+	friend class FFpstrueMultiplayerPveAuthorityTest;
 	// 返回强类型 Owner，供内部战斗逻辑使用。
 	AfpstrueEnemyCharacter* GetEnemy() const;
 	// 从骨骼 Socket 读取本帧武器根部和尖端位置。
@@ -149,7 +181,7 @@ private:
 	void BindAttackPlaybackCompletion(FAnimMontageInstance& Instance);
 	// 未绑定时使用配置兜底，绑定后覆盖实际剩余播放时间；始终只保留一个有限的一次性 Timer。
 	void ScheduleAttackFailSafe(const FAnimMontageInstance* Playback = nullptr);
-	// 完成攻击并通知 AI 释放攻击名额。
+	// 正常完成先提交冷却，再由 ResetCombat 归还出手名额；不重新排长期席位。
 	void FinishAttack();
 
 	// 攻击事务状态集中在组件中，EnemyCharacter 不再并行维护窗口、命中集合和结束计时器。
@@ -160,10 +192,11 @@ private:
 	uint32 AttackSequence = 0;
 	TWeakObjectPtr<AfpstrueCharacter> AttackTarget;
 	TWeakObjectPtr<AfpstrueSurroundManager> AttackPermissionSource;
+	// 与本次挥砍一起捕获；重新获得同一个席位也不能复活旧伤害窗口。
+	uint64 AttackTacticalRevision = 0;
 	FFPActionPlayback AttackPlayback;
 	bool bEndingPlay = false;
 	bool bStartingPlayback = false;
-	bool bReportedLegacyFinish = false;
 	bool bDisableAttackSweepForBenchmark = false;
 	FVector PreviousWeaponBase = FVector::ZeroVector;
 	FVector PreviousWeaponTip = FVector::ZeroVector;
@@ -177,8 +210,10 @@ class FPSTRUE_API UfpstrueAnimNotify_AttackFinished : public UAnimNotify
 	GENERATED_BODY()
 
 public:
+	// 普通队列通知将原始播放上下文交给战斗组件校验，不用当前动作反推旧通知身份。
 	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
 		const FAnimNotifyEventReference& EventReference) override;
+	// 分支点通知补齐 Montage 实例上下文，再复用同一结束通知入口。
 	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& Payload) override;
 };
 
@@ -203,6 +238,8 @@ public:
 
 	// UE 5.5 默认 BranchingPoint 桥不会填 Montage 上下文，因此在这里保留原 Payload 的播放身份。
 	virtual void BranchingPointNotifyBegin(FBranchingPointNotifyPayload& Payload) override;
+	// 分支点更新保留原播放身份和步长，交给普通窗口 Tick 的同一校验路径。
 	virtual void BranchingPointNotifyTick(FBranchingPointNotifyPayload& Payload, float FrameDeltaTime) override;
+	// 分支点结束保留原播放身份，只关闭对应攻击的伤害窗口。
 	virtual void BranchingPointNotifyEnd(FBranchingPointNotifyPayload& Payload) override;
 };

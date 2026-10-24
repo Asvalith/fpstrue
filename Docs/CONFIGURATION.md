@@ -1,39 +1,44 @@
 # 配置入口：玩法资产、蓝图默认值与实验预设
 
-波次、敌人近战和武器数值使用小型 Data Asset，其他角色参数与动画表现保留蓝图入口；JSON 只管理性能实验。`DefaultGame.ini` 提供项目级动画素材默认值，`DefaultEngine.ini` 保存引擎与渲染默认参数。项目玩法配置在既有组件生命周期中读取，不逐帧访问磁盘。
+项目只维护多人 PvPvE 规则，唯一玩法 GameMode 为 `AfpstruePvpGameMode`。默认游戏和 Dedicated Server 均指向该原生类；关卡覆盖与旧蓝图接线仍须经过实际资产迁移验证，类重定向不等于蓝图节点自动修复。敌人近战和武器数值使用小型 Data Asset，其他角色参数与动画表现保留原蓝图入口；JSON 只管理性能实验。配置在既有生命周期读取，不逐帧访问磁盘。没有通用配置管理器或运行时热更新。
+
+旧单机波次、倒计时胜负与 `UfpstrueBenchmarkRunner` 组件入口不再属于当前玩法；历史报告保留原场景与构建口径，不移称当前多人验收。迁移范围见[唯一多人入口与迁移边界](MULTIPLAYER_MODE.md)。
 
 ## 玩法资产：整组选择一个配置来源
+
+### EQS 与低血撤退
+
+包围与接近点参数仍在 `SurroundManager` 的蓝图默认值：内外环数量、半径、接近半径、目标刷新间隔和缓存期限。EQS 模板在运行时只创建一次，候选生成与环境筛选集中在 `AI/fpstrueEnemyPositionQuery.h/.cpp`；每次请求传入位置快照，不读取隐藏玩家的实时位置。`MinPositionSpacing` 限制已发布接近点及掩体之间的距离；`MaxPendingCoverQueries` 默认 4，`MaxCoverQueriesPerFrame` 默认 1。`DefaultGame.ini` 的 `EnvQueryManager` 将 EQS 测试时间片设为 0.5 ms；这是候选之间的预算，不是每次导航调用的硬性耗时上限。
+
+Controller 蓝图的 `AI|Retreat` 管理低血比例（默认 0.30）、撤退总期限（6 秒）、到位停留（1.5 秒）、重复触发冷却（8 秒）和决策间隔（0.25 秒）。生命值通知只唤醒现有行为树，不新增 Tick。首次/等待掩体保留紧急频率，取得移动目标后的维护乘以已有 Significance 倍率，同时不超过撤退期限。没有回血系统；持续低血不反复触发查询，只有冷却后的新伤害可以开启下一轮撤退。
 
 建立或迁移项目资产时，使用以下对应关系：
 
 | 配置类型 | 配置资产路径 | 绑定位置 |
 |---|---|---|
-| `UfpstrueWaveConfiguration` | `/Game/Config/DA_FPMatchWaves` | `/Game/FirstPerson/Blueprints/gamemode/fpstruegamemode` 的 `WaveConfiguration` |
 | `UfpstrueEnemyCombatConfig` | `/Game/Config/DA_FPEnemyCombat` | `/Game/FirstPerson/Blueprints/enemy/enemy_BP` 的 CombatComponent → `CombatConfiguration` |
 | `UfpstrueWeaponConfig` | `/Game/Config/DA_FPWeapon_RU74` | `/Game/FirstPerson/Blueprints/weapon/BP_Weapon` 的 `TP_Weapon` 组件 → `WeaponConfiguration` |
 
-- **波次资产**接管默认敌人类、显式波次数组、波次间隔和对局时长。每波未指定敌人类时，只回退到同一资产的默认类；空波次或缺失所需敌人类会使开局失败，不会偷偷读取旧蓝图补齐。
 - **近战资产**集中攻击距离、伤害、间隔、动画结束保护与刀刃采样参数。CombatComponent 在 `BeginPlay` 整组复制到运行时参数，不在每次攻击时读资产。攻击是否正在进行、当前窗口、已命中对象等仍是各敌人独立状态。
-- 波次、近战的资产引用未指定时，继续使用现有蓝图字段，保留旧资产兼容性；一旦指定，就在资产中修改相应参数，不再同时修改旧字段。出生点、角色转速、群体槽位与渲染预算不属于这两份资产。
+- 近战资产未指定时使用现有蓝图字段；指定后在资产中修改，不再同时修改旧字段。出生点、角色转速、群体槽位与渲染预算不属于近战配置。多人敌人口目标与补充间隔由 `AfpstruePvpGameMode` 的 PvE 配置管理，不再读取单机波次资产。
 - 迁移时先复制当前实际蓝图值，再绑定资产；保存后重开对局检查生效值。仅新增 C++ 配置类型并不等于已完成资产迁移，必须核对实际关卡使用的 GameMode、敌人蓝图及绑定引用。
 
-本地关卡已通过 `Tools/Gameplay/MigrateGameplayConfiguration.py` 完成复制与绑定，保留原波次数量 `[5, 7, 9]`、90 秒对局时长和全部近战参数。迁移前的两个蓝图备份位于 `Saved/Backups/GameplayConfigurationMigration/`；`Saved/Logs/MigrateGameplayConfiguration.log` 记录保存结果。新开关卡的日志会输出实际配置资产路径，便于确认改的是当前生效的配置。Content 仍不随源码仓库分发，其他环境应在具备对应蓝图后运行迁移脚本。
+历史 `MigrateGameplayConfiguration.py` 曾同时迁移三波 `[5, 7, 9]`、90 秒单机规则和近战配置。该记录不是当前多人配置入口，不重新运行旧脚本恢复已移除的玩法。迁移前备份与日志继续保留，完整工程仍需同步当前 Content/LFS 资产。
 
-### 武器：配置共享，运行状态独立
+### 武器：数值在资产，动作和弹药在实例
 
-`WeaponConfiguration` 是武器数值的唯一可编辑入口，资产的 `Settings` 包含挂点、射速、射线距离/冲量、普通与关键部位伤害、关键骨骼、弹匣/初始备弹、散布、后坐力和换弹兜底，共 25 项。组件不再保留另一套同名可编辑数值；手臂/枪械 Montage、音效与特效仍由蓝图选择。
+打开 `/Game/Config/DA_FPWeapon_RU74`，在 `Settings` 中按分类编辑挂点、射速、射线距离/冲量、普通与关键部位伤害、关键骨骼、弹匣/初始备弹、散布、控制后坐力、视觉后坐力和换弹兜底。新增武器时复制这个资产，再在对应武器蓝图组件上指定 `WeaponConfiguration`；不需要修改 C++ 或增加配置管理器。
 
-- 首次装备先校验完整参数，只有成功挂接后才保存实例快照并初始化弹药。编辑器资产验证与运行时装备共用合法性检查，拒绝非有限数、越界数值等；装备失败不会发布装备关系或初始化弹药。
-- 装备后的射击、散布、后坐力与换弹读取实例快照。调参后重新开始对局或生成新武器生效；同一武器卸下再装备保留快照与剩余弹药，不重新补满。
-- 多件武器可以引用同一资产，但当前弹药、动作状态、换弹编号、播放身份、提交标记和 Timer 始终由各自组件维护。修改共享资产不会中途改变已装备武器的事务。
-- 未绑定资产的原生组件使用 `FFPWeaponSettings` 的完整默认值。项目的真实蓝图回归额外检查配置绑定，避免遗漏引用后意外使用默认值。
-- `ReloadDuration` / `EmptyReloadDuration` 提供兜底计时依据；正常装填仍由带身份的 Notify 提交，超时只解除动作锁，不补弹。
+- `BP_Weapon` 已绑定该资产，原有 25 项组件数值字段已移除，不存在“资产与蓝图旧数值谁优先”的双入口。原生未绑定组件使用 `FFPWeaponSettings` 的完整默认值；真实资产测试检查 BP 绑定，防止意外落回默认值。
+- 首次成功装备时校验并复制整组参数。编辑器“验证资产”和运行时装备共用合法性检查，拒绝非有限数、越界数值等；装备失败不发布装备关系或初始化弹药。没有读取磁盘的逐帧路径。
+- 装备后读取该实例的数值快照；修改共享资产不会中途改变射速、弹匣容量或正在进行的换弹。调参后重新开始对局或生成新武器以生效。卸下再装备同一件武器保留快照与剩余弹药，不补满。
+- 弹药、换弹编号、播放身份、已提交标记与表现 Timer 属于武器实例，动作标签和连射任务属于角色 ASC 与 GA。多个武器可以引用同一资产，但不共享这些运行状态。
+- `VisualRecoil` 只叠加最终镜头画面，不写入控制方向或命中射线所用的 Camera 组件，也不修改动画。`VisualRecoilScale` 控制整体强度（0 为关闭），`AimVisualRecoilMultiplier` 控制瞄准倍率；`VisualRecoilRotation` 是以度为单位的 Pitch/Yaw/Roll 峰值，`VisualRecoilFOV` 是短促视野脉冲，`VisualRecoilDuration` 是回正总时长。每发重触发同一个 Shake，死亡、卸下或失去控制时仅清理武器自身的效果。旧配置资产加载时使用这五个新增字段的结构体默认值，无需重新迁移或重接蓝图。
+- `ReloadDuration` / `EmptyReloadDuration` 决定多人服务器装填时长；客户端动画通知不能直接补弹。手臂/枪械 Montage、音效和特效仍在蓝图选择。
 
-**从公开源码创建配置：** 编译后在 Content Browser 新建 Data Asset，类型选择 `fpstrueWeaponConfig`，例如保存为 `/Game/Config/DA_FPWeapon_RU74`；编辑 `Settings`，再到武器蓝图组件的 `WeaponConfiguration` 指定该资产。新增武器可复制配置资产并重新绑定。二进制配置和蓝图不随本展示分支分发，应在拥有资源使用权限的工程中创建或配置。
+迁移原样保留蓝图实际数值（600 发/分钟、30 发弹匣、90 发备弹等）。原包与 25 项完整导出位于 `Saved/Backups/WeaponConfigurationMigration/`。`Tools/Gameplay/MigrateWeaponConfiguration.py` 分为旧模块 `Export`、新模块 `Migrate`、新进程 `Verify` 三种模式；原备份和已存在配置禁止覆盖。**当前项目已迁移，日常调参直接编辑资产，不重跑迁移。** 旧版本升级必须先在删除旧属性前导出，并同时交付新配置资产、已绑定蓝图和新代码；仅更新源码不会替旧包迁移数值。
 
-**升级已有武器：** `Tools/Gameplay/MigrateWeaponConfiguration.py` 提供 `Export → Migrate → Verify` 三阶段迁移。必须在旧模块的组件属性仍存在时先运行 `Export` 保存原值与备份，更新模块后再 `Migrate` 创建配置并绑定，最后在新进程中 `Verify` 逐项核对。仅替换源码不能自动恢复旧蓝图数值；新配置资产、绑定蓝图和代码需要一起交付。脚本拒绝覆盖原备份和已有配置，已迁移工程日常直接编辑资产，不重跑迁移。
-
-完整开发环境的 `BP_Weapon` 已绑定上述 RU74 配置，25 项读回值与迁移前一致，包括 600 发/分钟、30 发弹匣和 90 发备弹。配置合法性、独立快照、重新装备与真实蓝图普通/空仓换弹均纳入 43 项功能回归，汇总见[验证记录](Testing/VALIDATION.md)。
+迁移验证：新进程逐项读回 25 项数值与原导出一致；Development Editor / Game 均编译通过，43 项自动化测试通过（0 失败、0 未运行）。其中新增配置合法性、独立快照与重新装备回归，真实 `BP_Weapon` 测试同时验证配置绑定及普通/空仓 Montage 换弹。报告在 `Saved/Automation/WeaponConfiguration/`，日志在 `Saved/Logs/WeaponConfig*.log`；NullRHI 功能回归不代替画面验收或完整打包测试。
 
 ## 其余玩法参数：继续在蓝图中编辑
 
@@ -53,12 +58,13 @@ AI 使用 `/Game/FirstPerson/AI/BP_FPEnemyAIController`，其 `BehaviorTreeAsset
 
 AI 决策间隔、路径刷新距离、槽位和预算继续在所属蓝图/组件中编辑，不复制到实验 JSON。运行时状态（当前弹药、攻击者集合、换弹提交标记等）不作为默认配置开放。
 
-### 动画播放接线
+### 动画播放：明确编号，不读取“当前动作”替代旧回调身份
 
-- 武器蓝图从 `OnWeaponReloadPlaybackRequested(ReloadId, bWasEmptyReload)` 选择普通/空仓 Montage，将事件中的编号传给手臂和枪械各自的 `PlayReloadMontage`。装填由原生 `ReloadCommit` Notify 提交，播放实例结束回调收尾。
-- 敌人蓝图从 `OnAttackPlaybackRequested(AttackId)` 调用 Combat 的 `PlayAttackMontageForAttack`。攻击窗口由原生 AnimNotifyState 驱动；受击动画不调用攻击完成入口。
-- 异步回调保存发起时的动作编号；无参数 `CommitReload`、`FinishReload`、`HandleAttackFinishedNotify` 是拒绝执行的弃用接口。`OnWeaponReloadStarted` 和 `OnAttackStarted` 只用于状态观察。
-- 本展示分支提供 C++ 契约与测试代码；在有资源使用权限的工程中按上述入口连接对应蓝图。全套真实资产回归要求项目 Mesh、Montage、AnimBP 和蓝图均齐备。
+- `BP_Weapon` 的 reload 图由 `OnWeaponReloadPlaybackRequested` 进入，将该事件的 `ReloadId` 传给手臂和枪械两次 `PlayReloadMontage`。普通/空仓的原素材选择保留；装填继续由原生 `ReloadCommit` Notify 提交，原生实例结束回调收尾。
+- `enemy_BP` 的攻击图由 `OnAttackPlaybackRequested` 进入，将 `AttackId` 和选中的 Montage 传给 Combat 的 `PlayAttackMontageForAttack`。受击动画不再调用无参数攻击完成接口。
+- 无参数 `CommitReload`、`FinishReload`、`HandleAttackFinishedNotify` 的旧资产迁移已完成，现已删除这些无调用占位接口。没有消费者的 `OnWeaponReloadStarted` / `OnAttackStarted` 也不再保留。自定义异步回调必须保存发起时的编号，原生 Notify 则校验实际播放实例。
+- 一次性迁移已经完成，迁移与图审计 Commandlet 已从 Source 删除；原资产及工具源码备份保留在 `Saved/Backups/ActionPlaybackMigration/`，不属于正常玩法构建内容。
+- 两个目标蓝图均为 Git LFS 跟踪资产，代码与资产应一起交付；只有 Source 归档的环境必须同步已迁移资产，只更新 DLL 不会自动重接旧蓝图。自动化中的两个真实资产测试不允许用缺失资产跳过来冒充通过。
 
 ### 渲染预算的作用范围
 
@@ -79,7 +85,7 @@ IdleAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Misc/EnemyWarrior_Id
 MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarrior_Running_Forward_InP.EnemyWarrior_Running_Forward_InP
 ```
 
-这里只是现有软引用属性的**构造默认值**。GameMode 蓝图中 EnemyAnimationSharingCoordinator 组件的 IdleAnimation / MovingAnimation 仍可覆盖，不覆盖时使用项目默认值。更换具体敌人素材，优先在组件属性中选择资源，便于编辑器验证引用。
+这里只是现有软引用属性的**构造默认值**。多人 GameState 装配 EnemyAnimationSharingCoordinator；组件的 IdleAnimation / MovingAnimation 可覆盖项目默认值。更换敌人素材时核对实际 GameState 组件引用，不再编辑已退出的单机 GameMode 组件。
 
 - 修改 INI 后重启编辑器，保证类默认对象重新初始化；修改蓝图后保存并重新开始游戏。
 - 不每帧读磁盘，也不承诺游戏中改文件立即生效。
@@ -89,45 +95,21 @@ MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarr
 
 引擎渲染默认值另由 [DefaultEngine.ini](../Config/DefaultEngine.ini) 的 `[ConsoleVariables]` 管理，当前包含查询缓冲 `r.NumBufferedOcclusionQueries=2`、反射下采样 `r.Lumen.Reflections.DownsampleFactor=2` 和 TSR 历史缓冲 `r.TSR.History.ScreenPercentage=150`。实验案例可在测试进程中显式覆盖并读回校验，不修改玩法配置资产。
 
-## 性能实验：统一入口与集中配置
+## 性能实验：多人基线与历史记录分开
 
-统一采集入口是 `Tools/Performance/RunRenderCostMatrix.ps1`。`Tools/Performance/ExperimentProfiles/RenderCostCases.psd1` 保存公共默认值、采集设置及实验 CVar，并由同一份定义生成启动命令和读回检查；JSON 选择地图、人数、轮次和实验组。`scene-acceptance.json` 对应烘焙地图的 0/160 敌人、20 秒预热和 180 秒采集。
+当前固定 160 AI、Editor/Shipping 客户端对照入口为 `Tools/Performance/RunGroupAIBaseline.ps1`。服务端身份、地图、画质、人数、预热与采样窗口按每轮清单核对，不能把 Editor DS 自动称为 Shipping Server。
 
-运行时策略覆盖集中在 `Runtime/fpstrueRuntimeOptions`，业务埋点声明位于 `Runtime/fpstruePerformanceStats.h`；`Testing/Benchmarks` 管理采集阶段、CSV/Trace 资源和结果校验。历史实验脚本保留在 `Tools/LegacyPerformance/`，用于复核旧数据。
+- 网络世界由 GameState 调用 `StartPvpPerformanceProfile`，优先进入 `PvpBaseline`，旧网络 `PvpProfile` 仅在非 Shipping 下接受显式请求。
+- `Testing/Benchmarks/fpstrueBenchmarkRunner.*` 仍保留网络 Profile/Baseline、CSV/Trace 与线程/物理/网络消费者验证，不再包含依赖旧单机 GameMode 的采集组件。
+- 正式玩法开关仍由 `Runtime/fpstrueRuntime.*` 统一解析；采集参数不写回蓝图或玩法 DataAsset。
+- `Tools/Performance/ExperimentProfiles`、`RunRenderCostMatrix`、`AutoBenchmark`、`scene-acceptance.json` 记录旧单机实验口径，不作为当前运行命令。保留原始数据与报告，复现须使用对应历史版本。
+- 场景资源转换工具属于离线资产工作，不是性能采集入口；未经单因素对照，不把转换本身写成收益。
 
-`Tools/Performance/ExperimentProfiles/baseline160.json` 保存 160 敌人、3 轮、15 秒预热、30 秒采集的常规 Baseline 方案。它不代表已通过性能验收，也不改变项目默认画质；ScreenPercentage 为 null，表示不额外覆盖内部渲染比例。
-
-优先级固定为：**显式命令行参数 > JSON 中的值 > 配置表 Defaults**。JSON 只接受已有实验字段，不接受任意控制台命令、程序路径或输出目录。
-
-下面在项目根目录的 PowerShell 中执行。先只检查配置，不启动 UE：
-
-换机器运行时，通过 `-ProjectRoot "<项目目录>" -EditorPath "<UE5.5目录>\Engine\Binaries\Win64\UnrealEditor.exe"` 指定本机路径；这两个参数不放入 JSON 实验预设。
-
-```powershell
-.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\baseline160.json -ValidateOnly
-```
-
-确认生效值后，才执行正式实验（会启动 UE，应先保存并关闭已有编辑器）：
-
-```powershell
-.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\baseline160.json -RunName Baseline160_NewRun
-```
-
-临时改变采集时长不必编辑脚本：
-
-```powershell
-.\Tools\Performance\RunRenderCostMatrix.ps1 -ConfigFile .\Tools\Performance\ExperimentProfiles\baseline160.json -DurationSeconds 60 -ValidateOnly
-```
-
-原有不带 ConfigFile 的调用方式仍然有效。实际运行的 environment.json 记录最终参数、参数来源和输入 JSON 的 SHA256；原来的隔离检查、生成校验和验收失败标记不放宽。
-
-地图指纹跟随实际选择的 Map，不再固定记录默认地图。JSON 使用 `/Game/...` 包路径；命令行还兼容 `.对象名` 和 `?travel` 后缀，计算指纹时取对应的 `.umap` 文件。ValidateOnly 只检查配置，不要求本机存在地图；正式运行会先检查地图文件是否存在，再创建实验记录。
-
-空实验组选项以及 NaN/Infinity 参数会在启动前被拒绝，JSON 与命令行覆盖后的参数均受检查。
+只认本轮身份匹配、门禁有效的实测结果。网络参数是模拟注入条件，不是实测 RTT；World wall-time、OS on-core CPU、引擎 unit 和带宽各自解释，不相加为总帧时间。
 
 ## 验证与边界
 
 - C++ Automation 在临时世界检查启动顺序、事件重入、配置来源和玩法边界，不修改实际地图；真实资产绑定及导航生成另用编辑器读取和地图烟测核对。
-- `Tools/Performance/TestRenderCostConfig.ps1` 验证默认值不变、覆盖优先级、非法输入拒绝和只读试运行；不启动 UE。
+- 历史 `TestRenderCostConfig.ps1` 的配置检查不启动 UE，也不能证明已退出的单机入口还能运行。
 - 这次是配置迁移，不是性能优化实验。历史 CSV/Trace 保留，不用这次编译后的二进制冒充旧基线构建。
 - 包围槽位、Timer、动画共享 Setup 等仍按现有生命周期初始化；需要热更新时再单独设计，当前通过重开游戏生效。

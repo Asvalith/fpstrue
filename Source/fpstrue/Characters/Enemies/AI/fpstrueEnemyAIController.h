@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "AIController.h"
+#include "BehaviorTree/BlackboardData.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "fpstrueEnemyAIController.generated.h"
 
 class AfpstrueCharacter;
@@ -11,6 +13,8 @@ class AfpstrueEnemyCharacter;
 class AfpstrueSurroundManager;
 class UBehaviorTree;
 class UBlackboardComponent;
+class UfpstrueHealthComponent;
+struct FAIStimulus;
 enum class EFPEnemyBehaviorAction : uint8;
 
 // 当前行为的只读表现状态；行为选择由 BehaviorTree 拥有，Animation Sharing 只读消费。
@@ -44,9 +48,29 @@ public:
 	virtual void OnUnPossess() override;
 	// 世界退出时停止行为树并清理管理器引用。
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	// 只将项目玩家视为敌对目标，其他 Actor 不参与本敌人的视觉目标查询。
+	virtual ETeamAttitude::Type GetTeamAttitudeTowards(const AActor& Other) const override;
+	// 视觉观察点使用 Pawn 视点及真实朝向；没有 Pawn 时使用引擎默认实现。
+	virtual void GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const override;
+	// CharacterMovement 原生旋转查询；巡视资格失效时立即返回当前朝向，暂停 BT 也不会继续转动。
+	virtual FRotator GetDesiredRotation() const override;
 
-	// 由 GameMode 注入玩家目标和全局包围管理器，避免每个 AI 自行查找。
+	// 感知选中玩家后切换其专属管理器；撤销上下文不重启已停止的行为树。
 	void InitializeCombatContext(AfpstrueCharacter* NewTargetCharacter, AfpstrueSurroundManager* NewSurroundManager);
+	// 同步启动结果，供生成入口验收；无需等待首轮行为树采样。
+	bool IsBehaviorReady() const;
+	// 资格改变只撤销旧移动归属并唤醒采样，不在管理器回调中同步启动攻击。
+	void OnTacticalAssignmentChanged(AfpstrueSurroundManager* Source);
+	// 攻击提交的实时准入检查；黑板仅是镜像，真实归属仍向 Manager 校验。
+	bool IsTacticalAttackPositionReady(bool bRequireFacing = true) const;
+	// 返回最近接收的席位代际；Combat 捕获它，防止旧攻击沿用重新授予的同一席位。
+	uint64 GetTacticalAssignmentRevision() const { return TacticalAssignment.Revision; }
+	// 主动离开/恢复期限结束可立即撤销目标；死亡和 EndPlay 也会通过绑定进入同一清理。
+	void NotifyCombatTargetUnavailable(AfpstrueCharacter* UnavailableTarget);
+	// 仅从服务器已接受的真实开火事务调用；一次事件交给原生 Hearing 分发，不逐敌人同步查询/寻路。
+	// 事件坐标由服务器提供，客户端预测、拒绝的射击与纯表现重播不得调用。
+	static bool ReportAuthoritativeGunshot(AfpstrueCharacter* Source, const FVector& NoiseLocation,
+		float Loudness = 1.0f, float MaxRange = 4500.0f);
 
 	// Benchmark 消融入口：单独关闭 PathFollowingComponent Tick。
 	void ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick);
@@ -54,29 +78,37 @@ public:
 	// Gameplay Significance 调整决策间隔，远处敌人减少 CPU 更新频率。
 	void SetSignificanceDecisionMultiplier(float NewMultiplier);
 
-	// BT 采样节点的唯一入口，一轮距离和范围计算结果写入 Blackboard。
+	// BT 每轮维护上下文、筛选距离并申请战术资源，再发布黑板与间隔；准备阶段可同步通知，不是纯读。
 	void RefreshBehaviorDecision(UBlackboardComponent& DecisionBlackboard);
 	// BT 叶子节点执行桥；不在 Controller 中再次选择高层行为。
 	bool ExecuteBehaviorAction(EFPEnemyBehaviorAction Action);
+	// 返回上轮采样确定的等待时间，首次启动时则为随机错峰延迟。
 	float GetBehaviorDecisionDelay() const { return NextBehaviorDecisionDelay; }
 
 	// 战斗目标只由 Controller 持有，EnemyCharacter 通过只读接口使用，避免双份状态漂移。
-	AfpstrueCharacter* GetTargetCharacter() const { return TargetCharacter; }
+	AfpstrueCharacter* GetTargetCharacter() const
+	{
+		// 撤退期间禁止外部战斗入口启动替代攻击；寻掩体只消费单独捕获的位置快照。
+		return AcceptsCombatCommands() && !bRetreatActive && bTargetVisible && IsTargetUsable(TargetCharacter) ? TargetCharacter.Get() : nullptr;
+	}
 	// 攻击开始时捕获许可来源，结束时不再从可能已变化的 Controller 上反查。
 	AfpstrueSurroundManager* GetSurroundManager() const { return SurroundManager; }
 	// Animation Sharing 等只读消费者通过这里获取当前表现状态。
 	EFPEnemyAIState GetAIState() const { return AIState; }
 	// 停止/换目标先关闭命令入口，Montage 停止回调不能在清理过程中重启攻击。
-	bool AcceptsCombatCommands() const { return CommandPhase == ECommandPhase::Accepting; }
+	bool AcceptsCombatCommands() const { return HasAuthority() && GetNetMode() != NM_Client && CommandPhase == ECommandPhase::Accepting; }
 
 	// PathFollowing 失败时安排退避；成功到位后的朝向由下一次决策结合到达检测更新。
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
+	// 提交前再次校验战术路径边界；未经许可的路径不交给原生 PathFollowing。
+	virtual FAIRequestID RequestMove(const FAIMoveRequest& MoveRequest, FNavPathSharedPtr Path) override;
 	// 外部统一停止 AI；敌人死亡和 GameMode 结束都会调用。
 	void StopAI();
-	// 攻击结束或 AI 停止时归还 SurroundManager 的攻击名额。
-	void ReleaseAttackPermission();
 
 protected:
+	// 只缓存实际黑板资产的 KeyID，不缓存业务值；兼容资产复用保持同一组解析结果。
+	virtual bool InitializeBlackboard(UBlackboardComponent& BlackboardComp, UBlackboardData& BlackboardAsset) override;
+
 	// 可替换为策划配置的行为树；未配置时使用原生默认树。自定义树需要同名 Blackboard 键。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Behavior Tree")
 	TObjectPtr<UBehaviorTree> BehaviorTreeAsset;
@@ -97,6 +129,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.05"))
 	float IdleDecisionInterval = 1.0f;
 
+	// 多人未发现目标时随既有 Idle 决策原地巡视；0 关闭，不读取未感知玩家的位置，也不新增 Tick/Timer。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0", ClampMax = "90.0", Units = "deg/s"))
+	float IdleSearchYawSpeed = 30.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Decision", meta = (ClampMin = "0.0"))
 	float FarDecisionDistance = 3000.0f;
 
@@ -107,10 +143,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
 	float MoveAcceptanceRadius = 75.0f;
 
-	// 共享目标追击的接受距离 = Max(MoveAcceptanceRadius, 基础攻击范围 * 此倍率)。
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float PursuitAcceptanceRangeMultiplier = 0.8f;
-
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.0"))
 	float CombatMoveAcceptanceRadius = 15.0f;
 
@@ -120,10 +152,55 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI", meta = (ClampMin = "0.1"))
 	float FailedMoveRetryDelay = 0.5f;
 
+	// 丢失视觉后只追最后已知位置；期限由决策采样检查，不新增搜索 Tick 或 Timer。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0"))
+	float TargetMemorySeconds = 5.0f;
+
+	// 枪声只能授予有界的位置调查，不能授予可见目标/攻击资格；同一轮连续开火不延长硬期限。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.1"))
+	float NoiseInvestigationSeconds = 4.0f;
+
+	// 短时间内只合并记忆，不反复唤醒树；路径仍复用统一去重、失败退避及群体请求预算。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.1"))
+	float NoiseMergeInterval = 0.5f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.0"))
+	float NoiseMergeDistance = 150.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Perception", meta = (ClampMin = "0.1"))
+	float NoiseInvestigationCooldown = 1.5f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LowHealthRetreatThreshold = 0.3f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.1"))
+	float RetreatTimeLimit = 6.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.0"))
+	float RetreatHoldSeconds = 1.5f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.1"))
+	float RetreatCooldown = 8.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Retreat", meta = (ClampMin = "0.05"))
+	float RetreatDecisionInterval = 0.25f;
+
 private:
 	friend class FFPEnemyBehaviorTreeLifecycleTest;
 	friend class FFPEnemyMoveRequestOwnershipTest;
-	enum class ECommandPhase : uint8 { Stopped, Accepting, ChangingContext, Stopping };
+	friend class FFpstrueSurroundCacheLifecycleTest;
+	friend class FFpstrueEnemyLowHealthRetreatTest;
+	friend class FFpstrueMultiplayerPveAuthorityTest;
+	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
+	friend class FFPEnemyIdleSearchSightTest;
+	friend class FFPEnemyHearingInvestigationTest;
+	friend class FFpstrueEnemyCombatLifecycleTest;
+	friend class FFpstrueSurroundAttackQueueTest;
+	friend class FFPEnemyTacticalExecutionTest;
+	friend class FFPEnemyBehaviorStartupTest;
+	friend class FFPEnemyBlackboardKeyCacheTest;
+	// 仅 Accepting 接收命令；换目标和停止期间关闭入口，目标回调不能复活 Stopped。
+	enum class ECommandPhase : uint8 { Uninitialized, Stopped, Accepting, ChangingContext, Stopping };
 	enum class EMoveGoalResult : uint8
 	{
 		Moving,
@@ -139,6 +216,18 @@ private:
 		bool bInAttackRange = false;
 		bool bInChaseRange = false;
 	};
+	struct FDecisionBlackboardKeys
+	{
+		FBlackboard::FKey TargetActor = FBlackboard::InvalidKey;
+		FBlackboard::FKey HasTarget = FBlackboard::InvalidKey;
+		FBlackboard::FKey Attacking = FBlackboard::InvalidKey;
+		FBlackboard::FKey InAttackRange = FBlackboard::InvalidKey;
+		FBlackboard::FKey InChaseRange = FBlackboard::InvalidKey;
+		FBlackboard::FKey Retreating = FBlackboard::InvalidKey;
+		FBlackboard::FKey TacticalRole = FBlackboard::InvalidKey;
+		FBlackboard::FKey TacticalGoal = FBlackboard::InvalidKey;
+		FBlackboard::FKey HasInnerSlot = FBlackboard::InvalidKey;
+	};
 	// 投影/部分路径等固定语义由调用点统一设置；可变语义参与请求去重。
 	struct FMoveGoalKey
 	{
@@ -146,6 +235,7 @@ private:
 		float AcceptanceRadius = 0.0f;
 		TWeakObjectPtr<UClass> NavigationFilter;
 		bool bCombatPriority = false;
+		// 位置在刷新容差内且接受半径、导航过滤器和优先级一致，才属于同一移动请求。
 		bool Matches(const FMoveGoalKey& Other, float DistanceTolerance) const;
 	};
 	struct FMoveFailure
@@ -154,16 +244,43 @@ private:
 		double RetryAfter = 0.0;
 	};
 
-	// 启动唯一决策驱动；默认树和外部树不能与旧 Timer/FSM 并行运行。
-	void StartBehaviorLogic();
+	// 启动唯一行为树；失败会清空 ActiveBehaviorTree 并关闭命令入口。
+	bool StartBehaviorLogic();
+	// 切换黑板资产时重解析；同资产复用不重复名称查找，旧七键 schema 没有战术镜像。
+	bool CacheDecisionBlackboardKeys(UBlackboardComponent& BlackboardComp);
+	// 单轮准备阶段：处理记忆到期、目标切换和 Manager 解析；外部回调使受控上下文失效时中止本轮。
+	bool PrepareBehaviorDecisionContext();
+	// 可见且在追击范围内时申请/读取唯一战术身份；同步通知之后重新确认目标及 Manager 归属。
+	bool RefreshTacticalAssignment();
+	// 消息只排队唤醒当前等待节点，不从感知回调中重入行为树。
+	void RequestBehaviorDecision();
+	// 接收玩家视觉刺激，稳定保留当前可见目标。
+	UFUNCTION()
+	void HandleTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus);
+	// 只在需要换目标时遍历感知组件已有的可见玩家缓存，不逐敌人扫描整个世界。
+	void SelectPerceivedTarget();
+	// 只读取事件携带的位置；不能通过声源 Actor 或其 SurroundManager 读取隐藏玩家的实时位置。
+	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
+	// 到位、不可达、过期统一结束声音调查，之后仍可由真实 Sight 重新发现。
+	void FinishNoiseInvestigation(bool bApplyCooldown = true);
+	// 玩家死亡统一撤销该目标及其资源关系。
+	UFUNCTION() void HandleCombatTargetDied(AfpstrueCharacter* DeadTarget);
+	// 目标未经死亡直接退出世界时，仍走同一不可用通知链。
+	UFUNCTION() void HandleCombatTargetEndPlay(AActor* EndingTarget, EEndPlayReason::Type EndPlayReason);
 
-	// 单轮采样：解析引用、计算快照和下轮间隔。
-	// 校验并解析敌人、目标和管理器，再汇总距离与攻击/追击范围，供本轮决策复用。
-	// 返回是否有有效目标；失败时清空采样，清理与停路统一由 Idle 叶子处理。
-	bool BuildDecisionContext();
+	// 只由新增扣血触发一轮撤退；持续低血不会在每轮采样重新申请掩体。
+	UFUNCTION()
+	void HandleEnemyHealthChanged(float NewHealth);
+	// 读取当前生命比例是否达到撤退阈值；不在查询中触发撤退。
+	bool IsBelowRetreatThreshold() const;
+	// 推进一次撤退：申请/等待掩体、移动、短暂停留；失败或超时统一结束。
+	bool HandleRetreat();
+	// 清除撤退请求并归还掩体，可选进入冷却；不自动重启一次新撤退。
+	void FinishRetreat(bool bApplyCooldown = true);
+
 	// 根据状态、距离和 Significance 返回下一次决策间隔。
 	float GetNextDecisionInterval(const FDecisionContext& Context) const;
-	// 返回共享包围管理器，供槽位和预算逻辑使用。
+	// 只向唯一 GameMode 取得当前玩家的专属管理器，不查找全局替代实例。
 	AfpstrueSurroundManager* ResolveSurroundManager() const;
 	// 判断目标是否有效、存活且可作为当前战斗对象。
 	bool IsTargetUsable(const AfpstrueCharacter* Target) const;
@@ -171,12 +288,11 @@ private:
 	// 叶子实现：不在这里重新建立一套高层行为优先级。
 	// 尝试获取攻击位或包围槽，并向共享位置移动。
 	bool HandleSurroundMovement();
-	// 没有专属槽位时，使用共享目标快照进行低成本追击。
-	void HandleSharedPursuit();
 
 	// 移动与朝向：沿路径行进，到位后再面向目标。
 	// 复用有效路径/到位缓存；需要刷新时先预算校验，再提交显式 MoveTo 请求并缓存投影结果。
 	EMoveGoalResult MoveToGoal(const FVector& GoalLocation, float AcceptanceRadius, bool bCombatPriority);
+	// 按包围或追击分别记录失败目标和重试时间，避免一个后备行为覆盖另一个行为的退避。
 	void RecordMoveFailure(const FMoveGoalKey& Goal);
 	// 停止路径及地面残余移动，再切换到目标朝向；返回角色是否已转入攻击角度容差。
 	bool FaceTargetAtRest();
@@ -185,21 +301,42 @@ private:
 	// 修改唯一 AI 状态，供决策和动画共享读取。
 	void SetAIState(EFPEnemyAIState NewState);
 	// Chase 行进时面向路径，到位后面向目标；到位不是新攻击事务，不新增一份 AI 状态。
-	void ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget = false);
+	void ApplyRotationPolicy(EFPEnemyAIState NewState, bool bAtRestFacingTarget = false, bool bIdleSearch = false);
 
-	// 公共清理：由停止入口和叶子按需调用，不重复维护移动缓存和群体资源。
-	// 仅在确实移动时调用 StopMovement；攻击可保留已经提交的目标缓存。
+	// 仅在确实移动时调用 StopMovement；可保留目标缓存，但不清失败退避（仅换上下文/整体停止时清）。
 	void StopMovementIfNeeded(bool bPreserveMoveGoal = false);
 	// 归还当前敌人在 SurroundManager 中占用的槽位。
 	void ReleaseSurroundSlot();
 
-	// Controller 在 Possess 期间保存稳定的运行时上下文；UPROPERTY(Transient) + TObjectPtr
-	// 让 GC 识别引用，并由 OnUnPossess 主动清空，不依赖 C++ 析构函数处理 Gameplay 状态。
+	// Possess 建立上下文，StopAI 撤销业务，OnUnPossess 释放引用。
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueEnemyCharacter> ControlledEnemy;
 
 	UPROPERTY(Transient)
+	TObjectPtr<UfpstrueHealthComponent> EnemyHealthComponent;
+
+	float LastObservedHealth = 0.0f;
+	bool bRetreatRequested = false;
+	bool bRetreatActive = false;
+	bool bHasRetreatGoal = false;
+	FVector RetreatThreatLocation = FVector::ZeroVector;
+	FVector RetreatGoalLocation = FVector::ZeroVector;
+	double RetreatEndTime = 0.0;
+	double RetreatHoldUntil = 0.0;
+	double NextRetreatAllowedTime = 0.0;
+
+	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueCharacter> TargetCharacter;
+
+	// 玩家引用是候选身份，不代表知道其位置；丢失时不再读取真实 Transform 或共享目标快照。
+	FVector LastKnownTargetLocation = FVector::ZeroVector;
+	double TargetForgetTime = 0.0;
+	bool bTargetVisible = false;
+	bool bIdleSearchActive = false;
+	float IdleSearchSavedYawRate = 0.0f;
+	bool bInvestigatingNoise = false;
+	double LastAcceptedNoiseTime = -TNumericLimits<double>::Max();
+	double NextNoiseInvestigationTime = 0.0;
 
 	UPROPERTY(Transient)
 	TObjectPtr<AfpstrueSurroundManager> SurroundManager;
@@ -207,9 +344,12 @@ private:
 	// 持有原生默认树，防止世界内共享模板被 GC；每个 Controller 的运行状态仍相互独立。
 	UPROPERTY(Transient)
 	TObjectPtr<UBehaviorTree> ActiveBehaviorTree;
+	TWeakObjectPtr<UBlackboardData> CachedDecisionBlackboardAsset;
+	FDecisionBlackboardKeys DecisionKeys;
+	FFPEnemyTacticalAssignment TacticalAssignment;
 
 	EFPEnemyAIState AIState = EFPEnemyAIState::Idle;
-	ECommandPhase CommandPhase = ECommandPhase::Stopped;
+	ECommandPhase CommandPhase = ECommandPhase::Uninitialized;
 	// 原始业务目标只用于请求去重；实际导航目标用于到达检查，避免导航投影偏移造成反复重寻路。
 	FMoveGoalKey LastMoveGoal;
 	FVector LastResolvedMoveGoal = FVector::ZeroVector;

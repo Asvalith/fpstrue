@@ -1,23 +1,17 @@
-# 功能与配置验证
+# 当前验证与证据（2026-10-24）
 
-| 检查 | 结果 |
-| --- | --- |
-| Development Editor 编译 | 通过 |
-| Development Game 编译 | 通过 |
-| UE Automation `fpstrue.` | 43 项通过，0 失败、0 未运行 |
-| 无警告 / 带警告 | 26 / 17；警告包含测试夹具与故障注入场景 |
-| 性能配置脚本 | 56 项通过 |
+当前 Source 来源 fb1b7a3，测试在完整授权资产环境运行；main 只展示同一源码与摘录，没有独立进行运行验收。
 
-自动化覆盖武器配置合法性、实例快照与重新装备、换弹及攻击播放身份、重复与迟到回调、死亡与离场清理、生命值事件重入、行为树契约、移动请求归属、Top-K、动画共享和采集资源释放。逐项名称及状态见[结果摘要](automation-summary.json)。
+| 检查 | 原环境结果 | 证据 |
+| --- | --- | --- |
+| Editor / Shipping 原生编译 | 成功；最后增量检查 up to date | [构建摘要](automation-20261024.json) |
+| 完整 UE Automation | 99/99，86 clean、13 warned，0 failed/notRun | 同上，逐项名称/状态/告警数 |
+| 正常联网与恢复 | 通过 | [原门禁摘录](network-20261024.json) |
+| 严格弱网 | 未通过零意外拒绝门禁，重连未进入 | 同上，保留失败 |
+| 160 AI 线程/模块 | 单轮 Editor Trace 诊断，有有效帧对齐 | [诊断摘录](160ai-20261024.json) |
 
-## 运行方式
+公开 JSON 保存原报告 SHA-256，不包含原始日志、启动命令、机器身份或恢复票据。警告没有归零；缺失指标仍为未知/不适用，不填成0。旧 [43项摘要](automation-history-43.json) 仅作历史，不与当前计数相加。
 
-配置检查：
+可离线检查交付工具和测试注册关系：`Tools/Networking/BuildPvpDelivery.ps1 -SelfTest`，不启动 UE，不等于游戏测试通过。完整 `fpstrue.` Automation、蓝图集成与联网/渲染测试需先恢复资源，见 [依赖](../ASSET_REQUIREMENTS.md)。
 
-```powershell
-.\Tools\Performance\TestRenderCostConfig.ps1
-```
-
-功能测试在具备项目 Mesh、Montage、AnimBP 和蓝图的开发环境中运行，通过 Session Frontend → Automation 执行 `fpstrue.`；命令行入口见根目录 README。真实资产测试直接验证蓝图接线和动画播放。
-
-NullRHI 验证逻辑与组件属性；实景性能测试使用 CSV Profiler 与 Unreal Insights，结果见[性能实验报告](../Performance/EXPERIMENT_LOG.md)。
+历史 [性能实验](../Performance/EXPERIMENT_LOG.md) 与本次不同构建/负载，不把其百分比拼成当前整帧提升。
