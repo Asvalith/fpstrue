@@ -4,7 +4,6 @@
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Game/fpstrueGameMode.h"
 #include "Game/fpstrueMultiplayer.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -121,48 +120,6 @@ UfpstrueEnemySignificanceCoordinator::UfpstrueEnemySignificanceCoordinator()
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
-// 从 GameMode 取得配置和敌人集合，首次启动先应用诊断覆盖并校验，再建立集中采样 Timer。
-void UfpstrueEnemySignificanceCoordinator::Start(AfpstrueGameMode* InGameMode)
-{
-	// GameMode 只提供策略配置和敌人注册表；本组件拥有校验、集中更新、Top-K 选择及预算应用流程。
-	bMultiplayerMode = false;
-	GameMode = InGameMode;
-	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
-	if (OwnerGameMode == nullptr)
-	{
-		return;
-	}
-
-	const FFPRuntimeOptions& BenchmarkConfig = FFPRuntimeOptions::Get();
-	if (!OwnerGameMode->bEnableEnemySignificance || BenchmarkConfig.bDisableEnemySignificance)
-	{
-		return;
-	}
-
-	if (!bPolicyInitialized)
-	{
-		FFPEnemyRenderSignificancePolicy& Policy = OwnerGameMode->EnemyRenderSignificancePolicy;
-		BenchmarkConfig.ApplyEnemySignificanceOverrides(Policy);
-		SanitizePolicy(Policy);
-		bPolicyInitialized = true;
-		UE_LOG(LogTemp, Display,
-			   TEXT("Enemy render significance: weights[F=%.2f S=%.2f R=%.2f D=%.2f] thresholds[full=%.2f/%.2f reduced=%.2f/%.2f] "
-					"budgets[full=%d shadow=%d rt=%d] features[tier=%d lod=%d anim=%d shadow=%d rt=%d]"),
-			   Policy.FrustumWeight, Policy.ScreenCoverageWeight, Policy.RecentFrustumWeight, Policy.DistanceWeight,
-			   Policy.FullEnterThreshold, Policy.FullExitThreshold, Policy.ReducedEnterThreshold, Policy.ReducedExitThreshold,
-			   Policy.MaxFullRenderEnemies, Policy.MaxShadowCastingEnemies, Policy.MaxRayTracingEnemies,
-			   Policy.bEnableRenderTiering ? 1 : 0, Policy.bEnableSkeletalLOD ? 1 : 0, Policy.bEnableAnimationTickTiering ? 1 : 0,
-			   Policy.bEnableShadowBudget ? 1 : 0, Policy.bEnableRayTracingBudget ? 1 : 0);
-	}
-	ActiveRenderPolicy = OwnerGameMode->EnemyRenderSignificancePolicy;
-	AnimationSharingCoordinator = OwnerGameMode->EnemyAnimationSharingCoordinator;
-	bRunning = true;
-
-	// 固定频率集中更新，避免每个敌人在 Tick 中各自评分、排序和争抢预算
-	// 首轮采样错开开局创建峰值；启动正确性由 GameMode 的初始化顺序保证，而不是依赖此延迟。
-	GetWorld()->GetTimerManager().SetTimer(UpdateTimerHandle, this, &UfpstrueEnemySignificanceCoordinator::Update,
-										   FMath::Max(OwnerGameMode->EnemySignificanceUpdateInterval, 0.1f), true, 0.1f);
-}
 
 // 同一套集中管线在各端独立运行；GameState 只提供生命周期，不要求客户端拥有 GameMode 或 AIController。
 void UfpstrueEnemySignificanceCoordinator::StartMultiplayer(UfpstrueEnemyAnimationSharingCoordinator* InSharingCoordinator)
@@ -171,8 +128,6 @@ void UfpstrueEnemySignificanceCoordinator::StartMultiplayer(UfpstrueEnemyAnimati
 	{
 		return;
 	}
-	GameMode.Reset();
-	bMultiplayerMode = true;
 	AnimationSharingCoordinator = InSharingCoordinator;
 	ActiveRenderPolicy = MultiplayerRenderPolicy;
 	FFPRuntimeOptions::Get().ApplyEnemySignificanceOverrides(ActiveRenderPolicy);
@@ -206,7 +161,7 @@ void UfpstrueEnemySignificanceCoordinator::Stop()
 // 关卡或组件退出时清除本组件拥有的采样 Timer，然后交给引擎完成退出。
 void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 组件退出前复用 Stop，保证关卡切换时 Timer 不再访问旧 GameMode。
+	// 组件退出前复用 Stop，保证关卡切换时 Timer 不再访问旧 World。
 	Stop();
 	Super::EndPlay(EndPlayReason);
 }
@@ -214,7 +169,7 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 // ==================== 集中更新管线 ====================
 /*
 	 * 单轮固定阶段：
-	 * 0. 检查运行上下文（单机使用 GameMode 注册表，多人发现本 World 副本）；
+	 * 0. 检查运行上下文，统一发现本 World 的敌人副本；
 	 * 1. 收齐存活敌人并采样一次近战保护，借给本轮 Gameplay、Render 和 Sharing 使用；
 	 * 2. Gameplay：权威端用有效玩家 Transform 更新评分；专服到此结束，客户端不执行此阶段；
 	 * 3. 从 PlayerCameraManager 创建唯一 Render ViewContext，填充样本并用纯数值 Top-K 分配名额；
@@ -223,46 +178,28 @@ void UfpstrueEnemySignificanceCoordinator::EndPlay(const EEndPlayReason::Type En
 	 */
 
 // 【设计取舍】集中一轮发现、位置/近战采样与相机派生值复用，省重复读取，不承诺消除 O(N) 遍历。
-// 单机复用登记表，多人保留 World 类型迭代以覆盖晚复制/脚本生成；不是每个 AI 再搜索全部玩家。
+// 使用 World 类型迭代覆盖晚复制/脚本生成；不是每个 AI 再搜索全部玩家。
 // 两端只共享状态事实：服务器 Gameplay 档位不看镜头，客户端 Render 评分与预算不回传授权。
 void UfpstrueEnemySignificanceCoordinator::Update()
 {
 
-	AfpstrueGameMode* OwnerGameMode = GameMode.Get();
 	// 候选非空意味着上一轮仍在同步应用；拒绝重入，避免重置被 Enemy 借用的候选地址。
-	if (!bRunning || (!bMultiplayerMode && OwnerGameMode == nullptr) || !CandidateBuffer.IsEmpty())
+	if (!bRunning || !CandidateBuffer.IsEmpty())
 	{
 		return;
 	}
 
-	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueGameMode_UpdateEnemySignificance);
+	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemySignificanceCoordinator_Update);
 	CSV_SCOPED_TIMING_STAT(fpstrueSignificance, UpdateTime);
-	if (!bMultiplayerMode && !IsValid(OwnerGameMode->PlayerCharacter))
-	{
-		return;
-	}
 
 	TArray<FEnemyRenderCandidate>& Candidates = CandidateBuffer;
 	Candidates.Reset();
 	// 类型迭代只发现本 World 已存在的敌人；晚复制、相关性重建和重连无需额外维护一份客户端注册表。
 	// 多人 GameMode 的 PveEnemies 是人口管理登记，并未覆盖任意脚本/流送后的生成，不能直接代替全部敌人发现。
-	if (bMultiplayerMode)
+	for (TActorIterator<AfpstrueEnemyCharacter> It(GetWorld()); It; ++It)
 	{
-		for (TActorIterator<AfpstrueEnemyCharacter> It(GetWorld()); It; ++It)
-		{
-			if (It->IsDead()) continue;
-			Candidates.AddDefaulted_GetRef().Enemy = *It;
-		}
-	}
-	else
-	{
-		OwnerGameMode->PruneInvalidEnemyRegistrations();
-		Candidates.Reserve(OwnerGameMode->RegisteredEnemies.Num());
-		for (const TWeakObjectPtr<AfpstrueEnemyCharacter>& EnemyPtr : OwnerGameMode->RegisteredEnemies)
-		{
-			AfpstrueEnemyCharacter* Enemy = EnemyPtr.Get();
-			if (IsValid(Enemy) && !Enemy->IsDead()) Candidates.AddDefaulted_GetRef().Enemy = Enemy;
-		}
+		if (It->IsDead()) continue;
+		Candidates.AddDefaulted_GetRef().Enemy = *It;
 	}
 	// 先收齐候选再借出地址，之后不扩容；同轮 Gameplay、Render 和 Sharing 只采样一次近战遮挡。
 	for (FEnemyRenderCandidate& Candidate : Candidates)
@@ -291,13 +228,9 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		// Wall scope 包括插件可能执行的并行评分与同步等待，不冒充纯 on-core 时间。
 		TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemySignificance_GameplayUpdate);
 		TArray<FTransform, TInlineAllocator<8>> GameplayViewpoints;
-		if (bMultiplayerMode)
-		{
-			if (const AfpstruePvpGameMode* MultiplayerMode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
-				for (TActorIterator<AfpstrueCharacter> It(GetWorld()); It; ++It)
-					if (MultiplayerMode->IsCombatParticipant(*It)) GameplayViewpoints.Add(It->GetActorTransform());
-		}
-		else GameplayViewpoints.Add(OwnerGameMode->PlayerCharacter->GetActorTransform());
+		if (const AfpstruePvpGameMode* MultiplayerMode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
+			for (TActorIterator<AfpstrueCharacter> It(GetWorld()); It; ++It)
+				if (MultiplayerMode->IsCombatParticipant(*It)) GameplayViewpoints.Add(It->GetActorTransform());
 		LastGameplayViewpointCount = GameplayViewpoints.Num();
 		if (USignificanceManager* Manager = USignificanceManager::Get(GetWorld()))
 		{
@@ -305,7 +238,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 			Manager->Update(MakeArrayView(GameplayViewpoints));
 		}
 	}
-	if (bMultiplayerMode && !Candidates.IsEmpty() && !bReportedPopulatedUpdate)
+	if (!Candidates.IsEmpty() && !bReportedPopulatedUpdate)
 	{
 		bReportedPopulatedUpdate = true;
 		UE_LOG(LogTemp, Display, TEXT("PVP_PERFORMANCE POPULATED NetMode=%d Enemies=%d GameplayViews=%d Render=%d"),
@@ -315,15 +248,14 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	if (GetNetMode() == NM_DedicatedServer) return;
 
 	// 多人客户端没有服务器 GameMode 配置和 AIController；共享池只在首次发现兼容敌人后创建一次。
-	if (bMultiplayerMode && !GetOwner()->HasAuthority() && !Candidates.IsEmpty() && !bSharingStartAttempted)
+	if (!GetOwner()->HasAuthority() && !Candidates.IsEmpty() && !bSharingStartAttempted)
 	{
 		bSharingStartAttempted = true;
 		if (UfpstrueEnemyAnimationSharingCoordinator* Sharing = AnimationSharingCoordinator.Get())
 			Sharing->Start(Candidates[0].Enemy->GetClass());
 	}
-	if (bMultiplayerMode)
-		for (FEnemyRenderCandidate& Candidate : Candidates)
-			Candidate.Enemy->SetAnimationSharingCoordinator(GetOwner()->HasAuthority() ? nullptr : AnimationSharingCoordinator.Get());
+	for (FEnemyRenderCandidate& Candidate : Candidates)
+		Candidate.Enemy->SetAnimationSharingCoordinator(GetOwner()->HasAuthority() ? nullptr : AnimationSharingCoordinator.Get());
 
 	APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0);
 	if (PlayerController == nullptr || !PlayerController->IsLocalController())
@@ -371,13 +303,13 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	// ★【重要边界】[线程交接] 预算选择完成后在当前游戏线程统一写回组件；候选裸指针只用于本轮同步处理，不作为 Worker 或跨轮数据。
 	ApplyAndRecordCandidates(FullBudgetDowngradeCount, ShadowBudgetRejectedCount, RayTracingBudgetRejectedCount);
 	++RenderUpdateSerial;
-	if (bMultiplayerMode && !Candidates.IsEmpty() && !bReportedRenderUpdate)
+	if (!Candidates.IsEmpty() && !bReportedRenderUpdate)
 	{
 		bReportedRenderUpdate = true;
 		UE_LOG(LogTemp, Display, TEXT("PVP_PERFORMANCE RENDER_APPLIED NetMode=%d Enemies=%d GameplayViews=%d"),
 			static_cast<int32>(GetNetMode()), Candidates.Num(), LastGameplayViewpointCount);
 	}
-	if (bMultiplayerMode && !bReportedSharingFollowers && AnimationSharingCoordinator.IsValid() &&
+	if (!bReportedSharingFollowers && AnimationSharingCoordinator.IsValid() &&
 		AnimationSharingCoordinator->GetRegisteredEnemyCount() > 0)
 	{
 		bReportedSharingFollowers = true;

@@ -967,9 +967,11 @@ AfpstrueEnemyCharacter* AfpstruePvpGameMode::SpawnPveEnemy(AfpstrueCharacter* Ne
 		if (Enemy->GetController() == nullptr) Enemy->SpawnDefaultController();
 		if (!IsValid(Enemy)) continue;
 		const auto* Controller = Cast<AfpstrueEnemyAIController>(Enemy->GetController());
-		if (IsValid(Enemy) && !Enemy->IsDead() && Controller != nullptr && Controller->IsBehaviorReady()) return Enemy;
+		// Spawn/Possess 可同步停止玩法；不能把旧调用栈生成的敌人重新登记进已结束的世界。
+		if (!bEndingPvp && IsValid(Enemy) && !Enemy->IsDead() && Controller != nullptr && Controller->IsBehaviorReady()) return Enemy;
 		if (AController* InvalidController = Enemy->GetController()) InvalidController->Destroy();
 		Enemy->Destroy();
+		if (bEndingPvp) return nullptr;
 	}
 	return nullptr;
 }
@@ -978,7 +980,7 @@ AfpstrueEnemyCharacter* AfpstruePvpGameMode::SpawnPveEnemy(AfpstrueCharacter* Ne
 void AfpstruePvpGameMode::RegisterPveEnemy(AfpstrueEnemyCharacter* Enemy)
 {
 	const auto* Controller = IsValid(Enemy) ? Cast<AfpstrueEnemyAIController>(Enemy->GetController()) : nullptr;
-	if (!HasAuthority() || Controller == nullptr || !Controller->IsBehaviorReady() || Enemy->IsDead() || PveEnemies.Contains(Enemy)) return;
+	if (bEndingPvp || !HasAuthority() || Controller == nullptr || !Controller->IsBehaviorReady() || Enemy->IsDead() || PveEnemies.Contains(Enemy)) return;
 	PveEnemies.Add(Enemy);
 	Enemy->OnEnemyDeathReported.AddUniqueDynamic(this, &ThisClass::HandlePveEnemyDied);
 	Enemy->OnEndPlay.AddUniqueDynamic(this, &ThisClass::HandlePveEnemyEndPlay);
@@ -1154,12 +1156,12 @@ AfpstruePvpGameMode::AfpstruePvpGameMode()
 void AfpstruePvpGameMode::BeginPlay()
 {
 	Super::BeginPlay();
-	// 仅正常联机替换关卡里的旧素材拾取物；不改原地图、单机资产或出生装备规则。
+	// 唯一玩法入口：本地预览和真实服务器均采用同一套拾取、PvE 与重生规则。
 	bool bNormalPlay = true;
 #if !UE_BUILD_SHIPPING
 	bNormalPlay = !bSmokeTest;
 #endif
-	if (HasAuthority() && GetNetMode() != NM_Standalone && bNormalPlay && DefaultWeaponClass != nullptr)
+	if (HasAuthority() && bNormalPlay && DefaultWeaponClass != nullptr)
 	{
 		const auto IsUnheldLegacyPickup = [](AActor* Actor)
 		{
@@ -1798,13 +1800,23 @@ FString UfpstrueMultiplayerGameInstance::ResolvePvpMapPackage() const
 // 只接纳包路径作为地图，URL中的PvP模式和监听选项由本入口固定生成。
 void UfpstrueMultiplayerGameInstance::HostPvp()
 {
+	if (ConnectionState != EFPConnectionState::Idle && ConnectionState != EFPConnectionState::Failed) return;
 	const FString Map = ResolvePvpMapPackage();
 	if (GetWorld() == nullptr || !FPackageName::IsValidLongPackageName(Map))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("HostPvp requires a valid game map package, got %s."), *Map);
 		return;
 	}
-	UGameplayStatics::OpenLevel(this, FName(*Map), true, TEXT("listen?game=/Script/fpstrue.fpstruePvpGameMode"));
+	// 主机是新会话，不继承上一次直连的重试、凭证或接纳结果。
+	const uint32 Revision = ++OperationRevision;
+	bAutoReconnect = false;
+	ConnectingController.Reset();
+	AttemptNetDriver.Reset();
+	ClearResumeCache();
+	LastConnectionError.Reset();
+	SetConnectionState(EFPConnectionState::Idle);
+	if (Revision == OperationRevision && ConnectionState == EFPConnectionState::Idle)
+		UGameplayStatics::OpenLevel(this, FName(*Map), true, TEXT("listen?game=/Script/fpstrue.fpstruePvpGameMode"));
 }
 
 // 只让显式回环基线接管启动 Browse；普通入口仍走引擎启动流程，诊断失败不静默回退。
@@ -1893,6 +1905,7 @@ void UfpstrueMultiplayerGameInstance::ClearResumeCache()
 {
 	ResumeToken.Reset();
 	ResumeServerAddress.Reset();
+	ResumeId = INDEX_NONE;
 	if (!ResumeCacheFile.IsEmpty())
 	{
 		IFileManager::Get().Delete(*ResumeCacheFile, false, true, true);
@@ -1949,6 +1962,7 @@ void UfpstrueMultiplayerGameInstance::StartClientTravel(uint32 Revision)
 	if (Player == nullptr) { LastConnectionError = TEXT("Local player is not ready."); SetConnectionState(EFPConnectionState::Failed); return; }
 	ConnectingController.Reset();
 	AttemptNetDriver.Reset();
+	ResumeId = INDEX_NONE; // 缓存票据可用于申请恢复，但不能证明本次连接已经接纳。
 	bReturningToLocalWorld = false;
 	AttemptDeadline = FPlatformTime::Seconds() + 20.0;
 	SetConnectionState(EFPConnectionState::Connecting);
@@ -1960,6 +1974,7 @@ void UfpstrueMultiplayerGameInstance::BeginConnectionHandshake(AfpstruePvpPlayer
 {
 	if (!IsValid(Player) || !Player->IsLocalController() || Player->GetWorld() != GetWorld()) return;
 	if (ConnectionState == EFPConnectionState::Leaving) { Player->ServerLeavePvp(); return; }
+	if (ConnectingController == Player && (ConnectionState == EFPConnectionState::WaitingReady || ConnectionState == EFPConnectionState::Connected)) return;
 	if (ConnectionState == EFPConnectionState::Idle || ConnectionState == EFPConnectionState::Failed)
 	{
 		ServerAddress = GetWorld()->URL.Host.ToLower() + FString::Printf(TEXT(":%d"), GetWorld()->URL.Port);
@@ -1969,6 +1984,7 @@ void UfpstrueMultiplayerGameInstance::BeginConnectionHandshake(AfpstruePvpPlayer
 	}
 	ConnectingController = Player;
 	AttemptNetDriver = GetWorld()->GetNetDriver();
+	ResumeId = INDEX_NONE; // 只有当前 Controller 的 AcceptConnectionToken 才发布本次身份。
 	AttemptDeadline = FPlatformTime::Seconds() + 20.0;
 	const uint32 HandshakeRevision = OperationRevision;
 	SetConnectionState(EFPConnectionState::WaitingReady);
@@ -2039,7 +2055,7 @@ bool UfpstrueMultiplayerGameInstance::TickConnection(float)
 	auto* State = Player != nullptr ? Player->GetPlayerState<AfpstruePvpPlayerState>() : nullptr;
 	auto* Weapon = Pawn != nullptr ? Pawn->GetEquippedWeaponComponent() : nullptr;
 	const bool bSpectatorReady = State != nullptr && State->IsOnlyASpectator();
-	if (ConnectionState != EFPConnectionState::WaitingReady || ResumeToken.IsEmpty() || State == nullptr
+	if (ConnectionState != EFPConnectionState::WaitingReady || ResumeToken.IsEmpty() || ResumeId == INDEX_NONE || State == nullptr
 		|| (!bSpectatorReady && !IsPawnStateReady(Pawn, State)) || State->GetPlayerId() != ResumeId
 		|| GetWorld()->GetGameState() == nullptr || (!bSpectatorReady && !Player->HasServerTimeSample())) return true;
 	RetryCount = 0;

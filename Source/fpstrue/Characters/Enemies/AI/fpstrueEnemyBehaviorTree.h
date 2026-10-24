@@ -86,13 +86,13 @@ protected:
 	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
 };
 
-/** 标准 Blackboard bool 条件的原生构建入口；编辑器中仍可直接编辑 Blackboard 条件。 */
+/** Blackboard Bool/Object 的 Set/NotSet 条件；对象键只表示本轮可见目标，不授予攻击许可。 */
 UCLASS()
 class FPSTRUE_API UfpstrueBTDecorator_DecisionFlag : public UBTDecorator_Blackboard
 {
 	GENERATED_BODY()
 public:
-	// 设置黑板布尔条件及期望值，禁用等待期间基于旧快照的分支中止。
+	// 设置黑板 Set/NotSet 条件，禁用等待期间基于旧快照的分支中止。
 	void Configure(FName KeyName, bool bExpectedValue);
 	// 默认树迁移前比较条件及可编辑属性；用户改过任一规则即拒绝自动覆盖。
 	bool HasSameCondition(const UfpstrueBTDecorator_DecisionFlag& Other) const;
@@ -107,7 +107,7 @@ public:
 	// 拒绝覆盖已有树/图，不修改既有 Blackboard；日后策划编辑不会被重建抹掉。
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Behavior Tree")
 	static bool PopulateDefaultTree(UBehaviorTree* Tree, UBlackboardData* Blackboard);
-	// 仅升级未编辑的旧默认结构；新默认结构重复调用不改变节点或图。
+	// 严格匹配旧默认/已知错挂模板后分组并修正；自定义树拒绝，新分层树重复调用不改节点或图。
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Behavior Tree")
 	static bool UpgradeDefaultTreeForRetreat(UBehaviorTree* Tree, UBlackboardData* Blackboard);
 };

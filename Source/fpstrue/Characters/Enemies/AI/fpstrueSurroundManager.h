@@ -8,6 +8,7 @@
 
 class AfpstrueCharacter;
 class AfpstrueEnemyCharacter;
+class AfpstrueEnemyAIController;
 class UEnvQuery;
 struct FEnvQueryResult;
 struct FNavigationPath;
@@ -23,6 +24,9 @@ struct FFPEnemyTacticalAssignment
 	EFPEnemyTacticalRole Role = EFPEnemyTacticalRole::Waiting;
 	FVector Goal = FVector::ZeroVector;
 	uint64 Revision = 0;
+	// Role/Revision 表示席位身份；共享导航缓存暂不可用时仍保留身份，但不能消费 Goal。
+	// 有目标缓存不代表这名敌人的独立路径一定可达，实际路径仍由 Controller 校验。
+	bool bHasGoal = false;
 };
 
 struct FFPEnemyTacticalDebugSnapshot
@@ -35,6 +39,7 @@ struct FFPEnemyTacticalDebugSnapshot
 	int32 OccupiedOuterSlots = 0;
 	int32 QueuedEnemies = 0;
 	int32 ActiveAttackers = 0;
+	int32 QueuedAttackers = 0;
 	uint64 GrantCount = 0;
 	uint64 ReleaseCount = 0;
 	uint64 TimeoutCount = 0;
@@ -87,7 +92,7 @@ public:
 	void ReleaseAttackPermission(AfpstrueEnemyCharacter* Enemy);
 	// AIController 提交 MoveTo 前消费 World 共用帧预算；多个玩家的 Manager 不会各增加一份额度。
 	bool TryConsumeMoveRequestBudget(bool bCombatPriority);
-	// 单次入队，重复决策只读本次分配；无席位时返回稳定外围目标，不退回玩家中心。
+	// true 表示请求已登记，目标是否可用另看 bHasGoal；空间参与不受攻击候补容量限制。
 	bool GetOrRequestTacticalAssignment(AfpstrueEnemyCharacter* Enemy, FFPEnemyTacticalAssignment& OutAssignment);
 	// 校验真实内圈占用；Revision 为 0 时只查当前资格，否则还要求同一授予代际。
 	bool HasInnerSlot(AfpstrueEnemyCharacter* Enemy, uint64 Revision = 0) const;
@@ -138,6 +143,7 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Budget")
 	bool bEnableActiveAttackerBudget = true;
 
+	// 独立于内圈容量。默认二者均为 8，正常流程不会因本预算排队；并发低于内圈时才发生出手竞争。
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Surround|Budget", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 MaxActiveAttackers = 8;
 
@@ -190,6 +196,17 @@ private:
 	friend class FFpstrueSurroundCacheLifecycleTest;
 	friend class FFpstrueSurroundTacticalQueueTest;
 	friend class FFpstrueSurroundTacticalBoundaryTest;
+	friend class FFpstrueSurroundAdmissionTest;
+	friend class FFpstrueSurroundAttackQueueTest;
+	friend class FFPEnemyBehaviorTreeLifecycleTest;
+	friend class FFPEnemyMoveRequestOwnershipTest;
+	friend class FFpstrueEnemyAttackPlaybackTest;
+	friend class FFpstrueEnemyAttackAssetIntegrationTest;
+	friend class FFpstrueFacingToleranceTest;
+	friend class FFpstrueEnemySignificanceCombatSampleTest;
+	friend class FFpstrueEnemyGameplayTierReasonSnapshotTest;
+	friend class FFpstrueEnemyReplicationTieringTest;
+	friend class FFpstrueMultiplayerAuthorityPoseTest;
 	friend class FFpstrueEnemyCombatLifecycleTest;
 	friend class FFpstrueEnemyLowHealthRetreatTest;
 	friend class FFpstrueMultiplayerPveBudgetTest;
@@ -217,8 +234,12 @@ private:
 	void RequeueParticipant(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy);
 	// 移出待通知集合后通知 Controller，回调新增的变更留给下一次派发。
 	void NotifyTacticalChanges();
-	// 读取当前授予或稳定候场点；布局过期、占用不匹配时返回失败，不偷偷重分配。
+	// 返回身份是否仍登记；布局过期只使 bHasGoal=false，不将真实内圈资格伪装成 Waiting。
 	bool BuildAssignment(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy, FFPEnemyTacticalAssignment& OutAssignment) const;
+	// 只做身份、目标、事务和冷却检查；有许可空位时才另外复核实际距离/朝向/LOS。
+	AfpstrueEnemyAIController* GetWaitingAttackerController(TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy) const;
+	// 只唤醒有效队首的既有 BT；不在归还许可的回调中授予名额或同步开始攻击。
+	void WakeNextWaitingAttacker();
 	// 用目标环半径加当前敌人胶囊半径构造禁止穿越的边界。
 	float GetInnerBoundary(AfpstrueEnemyCharacter* Enemy) const;
 	// 调试模式下绘制已投影槽位，并以颜色区分是否占用。
@@ -239,6 +260,10 @@ private:
 	TArray<FfpstrueSurroundSlot> SurroundSlots;
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, int32> EnemyToSlot;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> ActiveAttackers;
+	// 固定 8 个单次攻击候补，不含 ActiveAttackers；不是空间槽数或参战 AI 总量上限。
+	// InlineAllocator 只决定内联存储，入队仍显式检查硬上限；满员者保留站位/候场目标和正常决策。
+	static constexpr int32 MaxWaitingAttackers = 8;
+	TArray<TWeakObjectPtr<AfpstrueEnemyCharacter>, TInlineAllocator<MaxWaitingAttackers>> WaitingAttackers;
 	struct FTacticalParticipant
 	{
 		uint64 RequestSequence = 0;
@@ -255,7 +280,8 @@ private:
 	};
 	// Participants 是唯一请求身份账本；FIFO 不再配一张重复的去重集合。
 	TMap<TWeakObjectPtr<AfpstrueEnemyCharacter>, FTacticalParticipant> Participants;
-	TArray<FTacticalRequest> WaitingQueue;
+	// 长期内圈晋升顺序，可包含外圈持有者；不与上面的单次攻击候补混用。
+	TArray<FTacticalRequest> SlotWaitingQueue;
 	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> PendingTacticalNotifications;
 	uint64 NextRequestSequence = 0;
 	uint64 NextAssignmentRevision = 0;

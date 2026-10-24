@@ -21,7 +21,7 @@ param(
     [switch]$SelfTest,
     [string]$ValidateAutomationReport = '',
     [ValidateRange(1, 65534)][int]$Port = 7797,
-    [ValidateRange(1, 10000)][int]$MinimumTests = 101,
+    [ValidateRange(1, 10000)][int]$MinimumTests = 99,
     [ValidateRange(1, 16)][int]$MaxParallelActions = 4,
     [ValidateRange(1, 2000)][int]$MinimumDeliveryFreeGB = 50
 )
@@ -36,6 +36,7 @@ $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $RequiredAutomationTests = @(
     'fpstrue.AI.BehaviorTree.AssetGraphAndBindings.DefaultProjectAssets'
     'fpstrue.AI.BehaviorTree.AssetSafety'
+    'fpstrue.AI.BehaviorTree.BlackboardKeyCache'
     'fpstrue.AI.BehaviorTree.DefaultStructure'
     'fpstrue.AI.BehaviorTree.LowHealthRetreatLifecycle'
     'fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff'
@@ -49,6 +50,8 @@ $RequiredAutomationTests = @(
     'fpstrue.AI.Perception.AuthoritativeGunshotInvestigation'
     'fpstrue.AI.Perception.SightOcclusionAndFacing'
     'fpstrue.AI.Surround.CacheAndSlotOwnership'
+    'fpstrue.AI.Surround.ParticipationAndGoalAvailability'
+    'fpstrue.AI.Surround.AttackWaitingQueue'
     'fpstrue.AI.Surround.TacticalQueueAndRecovery'
     'fpstrue.AI.Surround.TacticalBoundaryAndAssignments'
     'fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig'
@@ -75,9 +78,6 @@ $RequiredAutomationTests = @(
     'fpstrue.Gameplay.Combat.ConfigurationSource'
     'fpstrue.Gameplay.Combat.ExplicitPlaybackAndStopReentry'
     'fpstrue.Gameplay.Combat.ProjectBlueprintPlaybackIntegration'
-    'fpstrue.Gameplay.GameMode.ParticipantDeparture'
-    'fpstrue.Gameplay.GameMode.StartupReentryAndCleanup'
-    'fpstrue.Gameplay.GameMode.WaveConfigurationAuthority'
     'fpstrue.Gameplay.Health.NotificationTermination'
     'fpstrue.Gameplay.Health.QueuedEnemyHitContext'
     'fpstrue.Gameplay.Health.ReentrantMutationOrder'
@@ -104,6 +104,7 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Hitscan.HistoryGeometryTimeAndLifecycle'
     'fpstrue.Multiplayer.Lifecycle.BoundedSpawnRecovery'
     'fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired'
+    'fpstrue.Multiplayer.Lifecycle.SingleModeEnemyRegistrationAndSpawn'
     'fpstrue.Multiplayer.Movement.SavedModesReplayAndAuthority'
     'fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget'
     'fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState'
@@ -119,12 +120,9 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Reconnect.HudRebindAndCurrentSnapshot'
     'fpstrue.Multiplayer.Reconnect.ServerRetentionAndSingleUseClaim'
     'fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState'
+    'fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder'
     'fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle'
     'fpstrue.Performance.AnimationSharing.StopAndSwapLifecycle'
-    'fpstrue.Performance.Benchmark.CancellationAndOwnership'
-    'fpstrue.Performance.Benchmark.LateCsvStartAfterCleanupTimeout'
-    'fpstrue.Performance.Benchmark.PauseWatchdogAndExitContract'
-    'fpstrue.Performance.Benchmark.SampleValidation'
     'fpstrue.Performance.Significance.RenderPriorityOrder'
     'fpstrue.Performance.Significance.GameplayTierReasonSnapshot'
     'fpstrue.Performance.Significance.RenderBudgetRetentionOrder'

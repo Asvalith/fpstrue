@@ -94,6 +94,8 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
+#include "Game/fpstrueMultiplayer.h"
 #include "Weapons/fpstrueCombatAbilities.h"
 #include "AIController.h"
 #include "Animation/AnimNotifyQueue.h"
@@ -118,6 +120,8 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "Perception/AISense_Sight.h"
 #include "ReferenceSkeleton.h"
 #include "Tests/AutomationCommon.h"
+#include "TimerManager.h"
+#include "UObject/UnrealType.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectIterator.h"
 #include <limits>
@@ -146,8 +150,8 @@ public:
 	// 保留自动化断言接收者，由夹具负责测试世界的创建、推进和退出。
 	explicit FGameplayWorld(FAutomationTestBase& InTest) : Test(InTest) {}
 
-	// 创建临时 Game 世界并使用空 GameMode/真实 AI 系统，不启动项目的波次玩法。
-	bool Initialize()
+	// 只有 AI 场景使用真实多人资格；其余武器边界仍隔离项目玩法。
+	bool Initialize(UClass* GameModeClass = AGameModeBase::StaticClass())
 	{
 		if (!Test.TestNotNull(TEXT("An engine is available for the temporary world"), GEngine))
 		{
@@ -160,14 +164,22 @@ public:
 		}
 
 		// The wrapper starts a GameMode to dispatch component/actor BeginPlay.
-		// Select the native base so project defaults cannot spawn a real match.
-		GetWorld()->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+		GetWorld()->GetWorldSettings()->DefaultGameMode = GameModeClass;
 		// FTestWorldWrapper 默认不创建 AI 系统；真实行为树/Blackboard 需要它。
 		GetWorld()->CreateAISystem();
 		if (!Wrapper.BeginPlayInTestWorld())
 		{
 			Wrapper.ForwardErrorMessages(&Test);
 			return false;
+		}
+		if (AfpstruePvpGameMode* Mode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
+		{
+			GetWorld()->GetTimerManager().ClearAllTimersForObject(Mode);
+			if (AfpstruePvpGameState* State = GetWorld()->GetGameState<AfpstruePvpGameState>())
+			{
+				if (auto* Coordinator = State->FindComponentByClass<UfpstrueEnemySignificanceCoordinator>()) Coordinator->Stop();
+				if (auto* Sharing = State->FindComponentByClass<UfpstrueEnemyAnimationSharingCoordinator>()) Sharing->Stop();
+			}
 		}
 		return true;
 	}
@@ -238,6 +250,19 @@ struct FEnemyFacingFixture
 		{
 			return false;
 		}
+		for (const FName Name : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+			TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+		{
+			FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(Target->GetClass(), Name);
+			if (!Test.TestNotNull(TEXT("Facing target has the required input property"), Property)) return false;
+			Property->SetObjectPropertyValue_InContainer(Target, NewObject<UInputAction>(Target));
+		}
+		APlayerController* PlayerController = Fixture.Spawn<APlayerController>();
+		if (PlayerController == nullptr) return false;
+		PlayerController->Possess(Target);
+		AfpstruePvpGameMode* Mode = Fixture.GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>();
+		if (!Test.TestNotNull(TEXT("Facing fixture uses the gameplay mode"), Mode) ||
+			!Test.TestTrue(TEXT("Facing target is a real combat participant"), Mode->IsCombatParticipant(Target))) return false;
 
 		const FTransform EnemyTransform(FRotator(0.0f, ActorYaw, 0.0f), FVector::ZeroVector);
 		Enemy = Fixture.GetWorld()->SpawnActorDeferred<AfpstrueEnemyCharacter>(
@@ -259,7 +284,6 @@ struct FEnemyFacingFixture
 			return false;
 		}
 		Controller->Possess(Enemy);
-		Controller->InitializeCombatContext(Target, nullptr);
 		if (!ReportVisibleEnemyTarget(Controller, Target, Test)) return false;
 		// Possess restarts Character movement; set the ground-mode fixture afterwards.
 		Movement->SetMovementMode(MOVE_Walking);
@@ -357,9 +381,9 @@ bool FFpstrueWeaponConfigValidationTest::RunTest(const FString& Parameters)
 	Settings = {}; Settings.RecoilRecoverySpeed = std::numeric_limits<float>::infinity(); Reject(Settings);
 	Settings = {}; Settings.HipFireSpreadAngle = 46.0f; Reject(Settings);
 	Settings = {}; Settings.AimRecoilMultiplier = 1.1f; Reject(Settings);
-	Settings = {}; Settings.ReloadFailSafeDuration = -1.0f; Reject(Settings);
+	Settings = {}; Settings.ReloadDuration = -1.0f; Reject(Settings);
 	Settings = {}; Settings.CriticalHitBones.Add(NAME_None); Reject(Settings);
-	Settings = {}; Settings.ReloadDuration = MAX_flt; Settings.ReloadCompletionGracePeriod = MAX_flt; Reject(Settings);
+	Settings = {}; Settings.EmptyReloadDuration = std::numeric_limits<float>::infinity(); Reject(Settings);
 	Settings = {}; Settings.CriticalHitBones.Reset();
 	TestTrue(TEXT("Weapons without critical-hit bones are allowed"), Settings.Validate(Error));
 	Settings = FFPWeaponSettings();
@@ -395,8 +419,6 @@ bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
 	Config->Settings.LineTraceDamage = 17.0f;
 	Config->Settings.ReloadDuration = 0.2f;
 	Config->Settings.EmptyReloadDuration = 0.3f;
-	Config->Settings.ReloadFailSafeDuration = 0.4f;
-	Config->Settings.ReloadCompletionGracePeriod = 0.0f;
 	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this, Config.Get());
 	if (Weapon == nullptr) return false;
 	TestEqual(TEXT("Asset controls initial magazine"), Weapon->GetCurrentAmmo(), 4);
@@ -412,17 +434,19 @@ bool FFpstrueWeaponConfigSnapshotTest::RunTest(const FString& Parameters)
 	if (Other == nullptr) return false;
 	TestEqual(TEXT("A newly equipped weapon sees updated tuning"), Other->GetMagazineSize(), 12);
 	TestEqual(TEXT("A second instance does not consume first instance ammo"), Weapon->GetCurrentAmmo(), 4);
-	// 不发动画通知时只能超时解锁，不能凭超时补弹；随后重装备仍保留原快照和弹药。
+	// 权威时钟采用首次装备快照；动画不参与装填，重装备也不会重新初始化弹药。
 	TestTrue(TEXT("Configured reload starts"), Weapon->RequestReload());
-	if (!World.Advance(0.2f)) return false;
-	TestTrue(TEXT("Configured timeout does not finish early"), Weapon->IsReloading());
-	if (!World.Advance(0.25f)) return false;
-	TestFalse(TEXT("Configured timeout releases the action"), Weapon->IsReloading());
-	TestEqual(TEXT("Timeout cannot invent the animation commit"), Weapon->GetCurrentAmmo(), 4);
+	if (!World.Advance(0.1f)) return false;
+	TestTrue(TEXT("The configured authority clock does not finish early"), Weapon->IsReloading());
+	if (!World.Advance(0.15f)) return false;
+	TestFalse(TEXT("The configured authority clock releases the action"), Weapon->IsReloading());
+	TestEqual(TEXT("Authority timing fills the snapshotted magazine"), Weapon->GetCurrentAmmo(), 5);
+	TestEqual(TEXT("Authority timing consumes the missing round once"), Weapon->GetReserveAmmo(), 9);
 	AfpstrueCharacter* Player = Cast<AfpstrueCharacter>(Weapon->GetAttachParent()->GetOwner());
 	Weapon->DetachWeapon();
 	if (!TestTrue(TEXT("The same weapon re-equips"), Weapon->AttachWeapon(Player))) return false;
-	TestEqual(TEXT("Re-equipping does not refill the magazine"), Weapon->GetCurrentAmmo(), 4);
+	TestEqual(TEXT("Re-equipping preserves the already completed magazine"), Weapon->GetCurrentAmmo(), 5);
+	TestEqual(TEXT("Re-equipping cannot replenish the consumed reserve"), Weapon->GetReserveAmmo(), 9);
 	TestEqual(TEXT("Re-equipping does not replace its configuration snapshot"), Weapon->GetMagazineSize(), 5);
 	Weapon->DetachWeapon();
 	// A fresh instance must fail before changing the player/equipment relationship.
@@ -454,10 +478,26 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 	using namespace FpstrueGameplayBoundaryTests;
 	FGameplayWorld World(*this);
 	FEnemyFacingFixture Facing;
-	if (!World.Initialize() || !Facing.Initialize(World, *this, 16.0f, FVector(200.0f, 0.0f, 0.0f)))
+	if (!World.Initialize(AfpstruePvpGameMode::StaticClass()) || !Facing.Initialize(World, *this, 16.0f, FVector(200.0f, 0.0f, 0.0f)))
 	{
 		return false;
 	}
+	// 只固定无 NavMesh 临时世界的导航输入；席位身份仍经真实 Manager 授予。
+	const auto PrepareLease = [this](FEnemyFacingFixture& Fixture)
+	{
+		AfpstrueSurroundManager* Manager = Fixture.Controller->GetSurroundManager();
+		if (!TestNotNull(TEXT("Perceived player owns a real manager"), Manager)) return false;
+		Manager->GetWorldTimerManager().ClearAllTimersForObject(Manager);
+		Manager->ApproachQueryId = INDEX_NONE;
+		++Manager->PositionQueryRevision;
+		Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+		Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+		Manager->SurroundSlots[0].ProjectedApproachLocation = Fixture.Enemy->GetActorLocation();
+		Fixture.Controller->RefreshBehaviorDecision(*Fixture.Controller->GetBlackboardComponent());
+		return TestTrue(TEXT("Facing enemy obtains a real inner lease"), Manager->HasInnerSlot(Fixture.Enemy,
+			Fixture.Controller->GetTacticalAssignmentRevision()));
+	};
+	if (!PrepareLease(Facing)) return false;
 
 	// Simulate residual ground motion while PathFollowing is already idle.
 	Facing.Movement->Velocity = FVector(100.0f, 0.0f, 0.0f);
@@ -490,7 +530,7 @@ bool FFpstrueFacingToleranceTest::RunTest(const FString& Parameters)
 	FEnemyFacingFixture WrappedFacing;
 	// Input geometry straddles +/-180; the product must treat this as a two-degree turn.
 	const FVector TargetLocation = FRotator(0.0f, -179.0f, 0.0f).Vector() * 200.0f;
-	if (!WrappedFacing.Initialize(World, *this, 179.0f, TargetLocation) || !World.Advance(0.35f))
+	if (!WrappedFacing.Initialize(World, *this, 179.0f, TargetLocation) || !PrepareLease(WrappedFacing) || !World.Advance(0.35f))
 	{
 		return false;
 	}
@@ -828,11 +868,10 @@ bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 	Weapon->CancelReloadForTransaction(ReloadA);
 	TestEqual(TEXT("A delayed finish/cancel cannot terminate B"), Weapon->GetActiveReloadId(), ReloadB);
 
-	// A queue callback without a bound playback must fail closed, not borrow the current reload ID.
-	FAnimNotifyEventReference UnboundNotify;
-	UnboundNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(12345);
-	TestFalse(TEXT("An unbound Montage notify cannot commit the current transaction"),
-		Weapon->CommitReloadFromNotify(Weapon, UnboundNotify));
+	TestNull(TEXT("Blueprint cannot submit ammunition through a second authority entry"),
+		Weapon->GetClass()->FindFunctionByName(TEXT("CommitReloadForTransaction")));
+	TestNull(TEXT("Blueprint cannot finish gameplay from a visual completion"),
+		Weapon->GetClass()->FindFunctionByName(TEXT("FinishReloadForTransaction")));
 	TestEqual(TEXT("Rejected old callbacks preserve the magazine"), Weapon->GetCurrentAmmo(), AmmoBefore);
 	Weapon->FinishReloadForTransaction(ReloadB);
 	TestEqual(TEXT("A current finish reports Completed"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
@@ -841,14 +880,15 @@ bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 
 	Weapon->StartFire();
 	Weapon->StopFire();
-	// 缺少装弹通知的保护结束必须报告 TimedOut，而不是假装动画成功并补发装弹。
-	TestTrue(TEXT("A missing-notify reload starts"), Weapon->RequestReload());
-	const int32 AmmoBeforeTimeout = Weapon->GetCurrentAmmo();
-	if (!World.Advance(5.2f)) return false;
-	TestFalse(TEXT("Fallback closes the reload"), Weapon->IsReloading());
-	TestEqual(TEXT("The fallback is reported as TimedOut, not Completed"), Observer->LastReloadEndReason, EFPReloadEndReason::TimedOut);
-	TestFalse(TEXT("The timeout reports missing commit instead of claiming animation success"), Observer->bLastReloadCommitted);
-	TestEqual(TEXT("Timeout cannot invent the missing ammo commit"), Weapon->GetCurrentAmmo(), AmmoBeforeTimeout);
+	// 没有动画也使用唯一权威时钟，预览不能保留另一套 Notify 装弹规则。
+	TestTrue(TEXT("A presentation-free reload starts"), Weapon->RequestReload());
+	const int32 ReserveBeforeTimer = Weapon->GetReserveAmmo();
+	if (!World.Advance(Weapon->GetReloadDuration() + 0.1f)) return false;
+	TestFalse(TEXT("The authority timer closes the reload"), Weapon->IsReloading());
+	TestEqual(TEXT("The authority timer reports Completed"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
+	TestTrue(TEXT("A timer completion reports its single commit"), Observer->bLastReloadCommitted);
+	TestEqual(TEXT("The timer fills the magazine"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
+	TestEqual(TEXT("The timer consumes exactly the missing round"), Weapon->GetReserveAmmo(), ReserveBeforeTimer - 1);
 	return true;
 }
 
@@ -1149,30 +1189,13 @@ bool FFpstrueReloadMontageIdentityTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("The unrelated same-mesh playback exists"), UnrelatedInstance)) return false;
 	TestFalse(TEXT("An unrelated playback cannot overwrite the reload's explicit binding"),
 		Weapon->BindReloadMontage(Weapon->GetActiveReloadId(), Arms, Unrelated));
-	FAnimNotifyEventReference UnrelatedNotify(nullptr, Unrelated);
-	UnrelatedNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(UnrelatedInstance->GetInstanceID());
-	TestFalse(TEXT("The unrelated playback cannot commit ammunition"), Weapon->CommitReloadFromNotify(Arms, UnrelatedNotify));
-	TStrongObjectPtr<UfpstrueAnimNotify_ReloadCommit> Notify(NewObject<UfpstrueAnimNotify_ReloadCommit>());
-	TestEqual(TEXT("Reload notify keeps its serialized class identity after source consolidation"),
-		Notify->GetClass()->GetPathName(), FString(TEXT("/Script/fpstrue.fpstrueAnimNotify_ReloadCommit")));
-	// 排队 Notify 与 Branching Point 统一走实例身份校验，当前播放的重复通知仍最多提交一次。
-	FAnimNotifyEventReference OldNotify(nullptr, Montage);
-	OldNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(PlaybackA);
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
-	Notify->Notify(Arms, Montage, OldNotify);
-	TestEqual(TEXT("A queued notify from A cannot load B"), Weapon->GetCurrentAmmo(), AmmoBefore);
-	FBranchingPointNotifyPayload OldBranch(Arms, Montage, nullptr, PlaybackA);
-	Notify->BranchingPointNotify(OldBranch);
-	TestEqual(TEXT("A branching-point notify from A cannot load B either"), Weapon->GetCurrentAmmo(), AmmoBefore);
-	FAnimNotifyEventReference CurrentNotify(nullptr, Montage);
-	CurrentNotify.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(PlaybackB);
-	Notify->Notify(Arms, Montage, CurrentNotify);
-	TestEqual(TEXT("The explicitly bound current playback commits ammunition"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
-	const int32 ReserveAfter = Weapon->GetReserveAmmo();
-	FBranchingPointNotifyPayload CurrentBranch(Arms, Montage, nullptr, PlaybackB);
-	Notify->BranchingPointNotify(CurrentBranch);
-	TestEqual(TEXT("Duplicate queued/branching-point routes still commit once"), Weapon->GetReserveAmmo(), ReserveAfter);
+	const int32 ReserveBefore = Weapon->GetReserveAmmo();
+	TestNull(TEXT("The old visual commit class has been removed"),
+		FindObject<UClass>(nullptr, TEXT("/Script/fpstrue.fpstrueAnimNotify_ReloadCommit")));
+	TestEqual(TEXT("Binding and replacing visual playbacks never loads ammunition"), Weapon->GetCurrentAmmo(), AmmoBefore);
 	Weapon->FinishReloadForTransaction(Weapon->GetActiveReloadId());
+	TestEqual(TEXT("Authority completion loads the missing round exactly once"), Weapon->GetReserveAmmo(), ReserveBefore - 1);
 	TestTrue(TEXT("Ending reload preserves unrelated playback on the same mesh"), UnrelatedInstance->IsActive());
 	return true;
 }
@@ -1225,12 +1248,15 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
 	TestTrue(TEXT("Reload accepts a presentation request"), Weapon->RequestReload());
 	TestFalse(TEXT("Missing presentation asset fails immediately"), Weapon->PlayReloadMontage(Weapon->GetActiveReloadId(), Weapon, nullptr));
-	TestFalse(TEXT("Playback failure releases the action lock"), Weapon->IsReloading());
-	TestEqual(TEXT("Playback failure has an explicit reason"), Observer->LastReloadEndReason, EFPReloadEndReason::PlaybackFailed);
-	TestFalse(TEXT("Playback failure never pretends to commit ammo"), Observer->bLastReloadCommitted);
+	TestTrue(TEXT("Playback failure leaves the authority transaction running"), Weapon->IsReloading());
+	TestEqual(TEXT("Playback failure cannot report a gameplay end"), Observer->ReloadEndCount, 0);
 	TestEqual(TEXT("Playback failure leaves ammunition unchanged"), Weapon->GetCurrentAmmo(), AmmoBefore);
 	if (!World.Advance(5.2f)) return false;
-	TestEqual(TEXT("No fallback succeeds after playback failure"), Observer->ReloadEndCount, 1);
+	TestEqual(TEXT("The authority timer completes despite missing presentation"), Observer->ReloadEndCount, 1);
+	TestEqual(TEXT("The timer reports Completed, not animation success"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
+	TestEqual(TEXT("The authority timer filled the magazine once"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
+	Weapon->StartFire();
+	Weapon->StopFire();
 
 	// 用真实原生动画实例重试播放，分别检查取消与自然结束的弹药和动作结果。
 	USkeletalMeshComponent* Arms = CastChecked<USkeletalMeshComponent>(Weapon->GetAttachParent());
@@ -1247,7 +1273,7 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Explicit playback has an instance"), Instance)) return false;
 	Weapon->CancelReload();
 	TestFalse(TEXT("Cancellation stops the exact owned playback"), Instance->IsActive());
-	TestEqual(TEXT("Cancellation before notify does not load ammunition"), Weapon->GetCurrentAmmo(), AmmoBefore);
+	TestEqual(TEXT("Cancellation before authority completion does not load ammunition"), Weapon->GetCurrentAmmo(), AmmoBefore);
 	TestTrue(TEXT("A subsequent reload gets a clean playback"), Weapon->RequestReload());
 	TestTrue(TEXT("The same resource can play in the new transaction"), Weapon->PlayReloadMontage(Weapon->GetActiveReloadId(), Arms, Montage));
 	FAnimMontageInstance* CompletedInstance = Anim->GetActiveInstanceForMontage(Montage);
@@ -1255,10 +1281,14 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 	// Drive the public engine instance timing; Advance executes its real Terminate/end-delegate path.
 	for (int32 Index = 0; Index < 20 && Weapon->IsReloading(); ++Index)
 	{
-		CompletedInstance->UpdateWeight(0.1f);
-		CompletedInstance->Advance(0.1f, nullptr, false);
+		FAnimMontageInstance* Playing = Anim->GetActiveInstanceForMontage(Montage);
+		if (!Playing) break;
+		Playing->UpdateWeight(0.1f);
+		Playing->Advance(0.1f, nullptr, false);
 	}
-	TestFalse(TEXT("Native playback completion releases the action without Blueprint Finish"), Weapon->IsReloading());
+	TestTrue(TEXT("Native playback completion cannot finish the authority transaction"), Weapon->IsReloading());
+	if (!World.Advance(Weapon->GetReloadDuration() + 0.1f)) return false;
+	TestFalse(TEXT("The authority clock completes after presentation has ended"), Weapon->IsReloading());
 	TestEqual(TEXT("A successful current playback reports Completed"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
 	TestEqual(TEXT("Successful explicit playback fills ammunition"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
 	return true;
@@ -1340,8 +1370,8 @@ bool FFpstrueWeaponAssetReloadTest::RunTest(const FString& Parameters)
 		const float Limit = FMath::Max(ArmsMontage->GetPlayLength(), WeaponMontage->GetPlayLength()) + 1.0f;
 		for (int32 Step = 0; Step < FMath::CeilToInt(Limit / 0.01f) && Weapon->IsReloading(); ++Step)
 			if (!World.AdvanceSingleFrame(0.01f)) return false;
-		TestFalse(TEXT("Real Montage completion clears Reloading without legacy Blueprint callbacks"), Weapon->IsReloading());
-		TestTrue(TEXT("The real asset Notify commits while its bound weapon Montage is active"), Observer->bAmmoChangedWhileMontageActive);
+		TestFalse(TEXT("Authority timing clears Reloading without legacy Blueprint callbacks"), Weapon->IsReloading());
+		TestTrue(TEXT("The authority clock commits while the paired visual is active"), Observer->bAmmoChangedWhileMontageActive);
 		TestEqual(TEXT("Real playback reports Completed, not timeout recovery"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
 		TestEqual(TEXT("The paired playbacks emit exactly one transaction end"), Observer->ReloadEndCount, EndCountBefore + 1);
 		TestEqual(TEXT("The real asset reload fills the magazine"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
@@ -1576,8 +1606,7 @@ bool FFpstrueAbilityCommitReentryTest::RunTest(const FString& Parameters)
 			TestFalse(Label + TEXT("cleanup clears aim presentation"), Player->IsAiming());
 			TestEqual(Label + TEXT("cleanup restores movement speed"), Player->GetCharacterMovement()->MaxWalkSpeed, IdleSpeed);
 			const int32 SettledAmmo = Weapon->GetCurrentAmmo();
-			const float SettleTime = bReload ? FMath::Max(Weapon->GetWeaponSettings().ReloadFailSafeDuration,
-				Weapon->GetWeaponSettings().EmptyReloadDuration) + Weapon->GetWeaponSettings().ReloadCompletionGracePeriod + 0.1f : 0.3f;
+			const float SettleTime = bReload ? Weapon->GetWeaponSettings().EmptyReloadDuration + 0.1f : 0.3f;
 			if (!World.Advance(SettleTime)) return false;
 			TestEqual(Label + TEXT("advancing real timers cannot execute a ghost shot or reload"), Weapon->GetCurrentAmmo(), SettledAmmo);
 			TestFalse(Label + TEXT("advancing real timers cannot reactivate the old action"), Spec->IsActive());

@@ -1,0 +1,3185 @@
+{
+  "Server": {
+    "frames": 1865,
+    "seconds": 61.879328,
+    "mean_frame_ms": 33.15996456300268,
+    "p95_ms": 35.9971,
+    "p99_ms": 37.688401,
+    "game_thread_cpu_ms": 12.164879357,
+    "native": {
+      "GameThreadMs": {
+        "applicable": false,
+        "complete": false,
+        "finiteSamples": 1865,
+        "positiveSamples": 0,
+        "zeroSamples": 1865,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": null
+      },
+      "RenderThreadMs": {
+        "applicable": false,
+        "complete": false,
+        "finiteSamples": 1865,
+        "positiveSamples": 0,
+        "zeroSamples": 1865,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": null
+      },
+      "RHIThreadMs": {
+        "applicable": false,
+        "complete": false,
+        "finiteSamples": 1865,
+        "positiveSamples": 0,
+        "zeroSamples": 1865,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": null
+      },
+      "GPUFrameMs": {
+        "applicable": false,
+        "complete": false,
+        "finiteSamples": 1865,
+        "positiveSamples": 0,
+        "zeroSamples": 1865,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": null
+      },
+      "IdleMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 1865,
+        "positiveSamples": 1865,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 20.699364598
+      },
+      "IdleOvershootMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 1865,
+        "positiveSamples": 625,
+        "zeroSamples": 1240,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.072513653
+      },
+      "GameDriverTickFlushMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 1865,
+        "positiveSamples": 1865,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 2.368306065
+      },
+      "DemoDriverTickFlushMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 1865,
+        "positiveSamples": 0,
+        "zeroSamples": 1865,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.0
+      },
+      "FlushAsyncLoadingMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 1865,
+        "positiveSamples": 0,
+        "zeroSamples": 1865,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.0
+      }
+    },
+    "threads": {
+      "GT": {
+        "roots": [
+          {
+            "id": 4041,
+            "name": "FEngineLoop::Tick",
+            "depth": 0,
+            "path": [
+              "FEngineLoop::Tick"
+            ],
+            "count": 1866,
+            "incl_ms": 33.15927420911528,
+            "excl_ms": 0.006808026058981233
+          }
+        ],
+        "top_inclusive": [
+          {
+            "name": "FEngineLoop::Tick",
+            "count": 1866,
+            "incl_ms": 33.15927420911528,
+            "excl_ms": 0.006808026058981233
+          },
+          {
+            "name": "Frame",
+            "count": 1865,
+            "incl_ms": 33.13391056300268,
+            "excl_ms": 0.005527560321715817
+          },
+          {
+            "name": "FrameTime",
+            "count": 3730,
+            "incl_ms": 33.10774739946381,
+            "excl_ms": 0.07023394101876676
+          },
+          {
+            "name": "STAT_FEngineLoop_UpdateTimeAndHandleMaxTickRate",
+            "count": 1865,
+            "incl_ms": 20.71346761394102,
+            "excl_ms": 0.01447710455764075
+          },
+          {
+            "name": "Game thread tick wait time",
+            "count": 1865,
+            "incl_ms": 20.698990509383382,
+            "excl_ms": 0.0006684182305630028
+          },
+          {
+            "name": "Game thread idle time",
+            "count": 1865,
+            "incl_ms": 20.698322091152814,
+            "excl_ms": 20.698322091152814
+          },
+          {
+            "name": "GameEngine Tick",
+            "count": 1865,
+            "incl_ms": 12.046530026809652,
+            "excl_ms": 0.04737211796246649
+          },
+          {
+            "name": "UWorld_Tick",
+            "count": 1865,
+            "incl_ms": 11.945608793565683,
+            "excl_ms": 0.004733512064343164
+          },
+          {
+            "name": "WorldTick",
+            "count": 1865,
+            "incl_ms": 11.94087528150134,
+            "excl_ms": 0.01834300268096515
+          },
+          {
+            "name": "World Tick Time",
+            "count": 1865,
+            "incl_ms": 11.918946219839142,
+            "excl_ms": 0.02104739946380697
+          },
+          {
+            "name": "Tick Time",
+            "count": 7460,
+            "incl_ms": 8.460046434316354,
+            "excl_ms": 0.02511764075067024
+          },
+          {
+            "name": "ReleaseTickGroup Block",
+            "count": 13055,
+            "incl_ms": 8.287777158176997,
+            "excl_ms": 0.0009092761394638068
+          },
+          {
+            "name": "TickCompletionEvents",
+            "count": 9325,
+            "incl_ms": 8.286867882037534,
+            "excl_ms": 0.011223753351206435
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "count": 13055,
+            "incl_ms": 8.270733565683647,
+            "excl_ms": 0.5536744772117963
+          },
+          {
+            "name": "FActorComponentTickFunction::ExecuteTick",
+            "count": 1002517,
+            "incl_ms": 5.526044128686327,
+            "excl_ms": 0.06092546916890079
+          },
+          {
+            "name": "TG_PrePhysics",
+            "count": 1865,
+            "incl_ms": 5.524409061662198,
+            "excl_ms": 0.002259249329758713
+          },
+          {
+            "name": "CharMoveComp",
+            "count": 302087,
+            "incl_ms": 3.2618860053619305,
+            "excl_ms": 0.03906032171581769
+          },
+          {
+            "name": "UCharacterMovementComponent_TickComponent",
+            "count": 302087,
+            "incl_ms": 3.222825683646113,
+            "excl_ms": 0.015899892761394103
+          },
+          {
+            "name": "Char Movement Total",
+            "count": 302087,
+            "incl_ms": 3.206925790884718,
+            "excl_ms": 0.01469538873994638
+          },
+          {
+            "name": "Char Tick",
+            "count": 302087,
+            "incl_ms": 3.192230402144772,
+            "excl_ms": 0.12235286863270776
+          },
+          {
+            "name": "Char NonSimulated Time",
+            "count": 302087,
+            "incl_ms": 2.9880415013404824,
+            "excl_ms": 0.08729865951742628
+          },
+          {
+            "name": "Char PerformMovement",
+            "count": 304304,
+            "incl_ms": 2.967056997319035,
+            "excl_ms": 0.29963978552278825
+          },
+          {
+            "name": "NetBroadcastTickTime",
+            "count": 1865,
+            "incl_ms": 2.3739981233243963,
+            "excl_ms": 0.0001572117962466488
+          },
+          {
+            "name": "Net Broadcast Tick Time",
+            "count": 1865,
+            "incl_ms": 2.3738409115281502,
+            "excl_ms": 0.0037341018766756033
+          },
+          {
+            "name": "NetDriver TickFlush",
+            "count": 1865,
+            "incl_ms": 2.3701068096514746,
+            "excl_ms": 0.0016401608579088471
+          },
+          {
+            "name": "GameNetDriver",
+            "count": 1865,
+            "incl_ms": 2.3684666487935653,
+            "excl_ms": 0.024657962466487937
+          },
+          {
+            "name": "ServerReplicateActors Time",
+            "count": 1865,
+            "incl_ms": 2.2150751742627346,
+            "excl_ms": 0.03406847184986595
+          },
+          {
+            "name": "Process Prioritized Actors Time",
+            "count": 3730,
+            "incl_ms": 1.982195710455764,
+            "excl_ms": 0.11828686327077748
+          },
+          {
+            "name": "CharacterMesh0",
+            "count": 489764,
+            "incl_ms": 1.964697855227882,
+            "excl_ms": 0.08118932975871314
+          },
+          {
+            "name": "EndScopedMovementUpdate Time",
+            "count": 310251,
+            "incl_ms": 1.9028522252010722,
+            "excl_ms": 0.08380214477211796
+          },
+          {
+            "name": "Replicate Actor Time",
+            "count": 313455,
+            "incl_ms": 1.8639088471849867,
+            "excl_ms": 0.033050026809651474
+          },
+          {
+            "name": "fpstrueEnemyCharacter",
+            "count": 294222,
+            "incl_ms": 1.7304792493297585,
+            "excl_ms": 0.506553726541555
+          },
+          {
+            "name": "USkinnedMeshComponent_TickComponent",
+            "count": 302087,
+            "incl_ms": 1.6499119571045575,
+            "excl_ms": 0.01463721179624665
+          },
+          {
+            "name": "SkinnedMeshComp Tick",
+            "count": 302087,
+            "incl_ms": 1.635274745308311,
+            "excl_ms": 0.12995710455764076
+          },
+          {
+            "name": "AnimGameThreadTime",
+            "count": 324650,
+            "incl_ms": 1.5909840750670243,
+            "excl_ms": 0.014805308310991956
+          },
+          {
+            "name": "UpdateChildTransforms",
+            "count": 403160,
+            "incl_ms": 1.5392234316348528,
+            "excl_ms": 0.2121749597849866
+          },
+          {
+            "name": "TG_StartPhysics",
+            "count": 1865,
+            "incl_ms": 1.3908230563002681,
+            "excl_ms": 0.002116943699731904
+          },
+          {
+            "name": "UpdateComponentToWorld",
+            "count": 1758272,
+            "incl_ms": 1.3885956032171638,
+            "excl_ms": 0.10533619302949437
+          },
+          {
+            "name": "FStartPhysicsTickFunction_ExecuteTick",
+            "count": 1865,
+            "incl_ms": 1.3749788739946383,
+            "excl_ms": 0.0010178016085790886
+          },
+          {
+            "name": "[Scene] - StartFrame",
+            "count": 3730,
+            "incl_ms": 1.373961072386059,
+            "excl_ms": 0.011647292225201073
+          },
+          {
+            "name": "Physics Tick",
+            "count": 5595,
+            "incl_ms": 1.2682561930294904,
+            "excl_ms": 0.016131957104557643
+          },
+          {
+            "name": "RefreshBoneTransforms",
+            "count": 20346,
+            "incl_ms": 1.1511581233243968,
+            "excl_ms": 0.024466809651474533
+          },
+          {
+            "name": "Phys SetBodyTransform",
+            "count": 1313739,
+            "incl_ms": 1.038710402144772,
+            "excl_ms": 1.038710402144772
+          },
+          {
+            "name": "SK_Mannequin_UE4_WithWeapon",
+            "count": 298357,
+            "incl_ms": 0.9699720643431636,
+            "excl_ms": 0.10469329758713138
+          },
+          {
+            "name": "STAT_USkeletalMeshComponent_RefreshBoneTransforms_GamethreadEval",
+            "count": 20346,
+            "incl_ms": 0.8857193029490615,
+            "excl_ms": 0.007072225201072386
+          }
+        ],
+        "top_exclusive": [
+          {
+            "name": "Game thread idle time",
+            "count": 1865,
+            "incl_ms": 20.698322091152814,
+            "excl_ms": 20.698322091152814
+          },
+          {
+            "name": "Phys SetBodyTransform",
+            "count": 1313739,
+            "incl_ms": 1.038710402144772,
+            "excl_ms": 1.038710402144772
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "count": 13055,
+            "incl_ms": 8.270733565683647,
+            "excl_ms": 0.5536744772117963
+          },
+          {
+            "name": "fpstrueEnemyCharacter",
+            "count": 294222,
+            "incl_ms": 1.7304792493297585,
+            "excl_ms": 0.506553726541555
+          },
+          {
+            "name": "STAT_ProcessSinglePushedData_Internal",
+            "count": 1865,
+            "incl_ms": 0.30754069705093834,
+            "excl_ms": 0.30754069705093834
+          },
+          {
+            "name": "ParallelFor",
+            "count": 15366,
+            "incl_ms": 0.30804916890080425,
+            "excl_ms": 0.3075235924933137
+          },
+          {
+            "name": "Process Single Particle Proxies",
+            "count": 5595,
+            "incl_ms": 0.45504412868632704,
+            "excl_ms": 0.3041289544235925
+          },
+          {
+            "name": "Char PerformMovement",
+            "count": 304304,
+            "incl_ms": 2.967056997319035,
+            "excl_ms": 0.29963978552278825
+          },
+          {
+            "name": "Dynamic Property Compare Time",
+            "count": 462393,
+            "incl_ms": 0.2744508310991957,
+            "excl_ms": 0.2744508310991957
+          },
+          {
+            "name": "FpstrueFootIKRecovery",
+            "count": 156660,
+            "incl_ms": 0.2606946380697051,
+            "excl_ms": 0.23793243967828417
+          },
+          {
+            "name": "Queue Ticks",
+            "count": 1865,
+            "incl_ms": 0.22695898123324398,
+            "excl_ms": 0.22695898123324398
+          },
+          {
+            "name": "BufferPhysicsResults",
+            "count": 1865,
+            "incl_ms": 0.27373924932975874,
+            "excl_ms": 0.22674375335120642
+          },
+          {
+            "name": "CreateExternalAccelerationStructure",
+            "count": 1865,
+            "incl_ms": 0.22357919571045576,
+            "excl_ms": 0.22357919571045576
+          },
+          {
+            "name": "UpdateChildTransforms",
+            "count": 403160,
+            "incl_ms": 1.5392234316348528,
+            "excl_ms": 0.2121749597849866
+          },
+          {
+            "name": "Dynamic Property Rep Time",
+            "count": 919053,
+            "incl_ms": 0.21808906166273456,
+            "excl_ms": 0.19031024128739946
+          },
+          {
+            "name": "FPhysScene_Chaos::OnSyncBodies-FSingleParticlePhysicsProxy",
+            "count": 1502339,
+            "incl_ms": 0.15091517426273457,
+            "excl_ms": 0.15091517426273457
+          },
+          {
+            "name": "ComputeFloorDist",
+            "count": 57387,
+            "incl_ms": 0.17055281501340483,
+            "excl_ms": 0.1509086327077748
+          },
+          {
+            "name": "Custom Delta Property Rep Time",
+            "count": 302848,
+            "incl_ms": 0.36938134048257365,
+            "excl_ms": 0.1459075067024129
+          },
+          {
+            "name": "IpConnection Socket SendTo",
+            "count": 4885,
+            "incl_ms": 0.14375254691689007,
+            "excl_ms": 0.14375254691689007
+          },
+          {
+            "name": "Char PhysWalking",
+            "count": 304304,
+            "incl_ms": 0.6692257908847186,
+            "excl_ms": 0.14221538873994638
+          },
+          {
+            "name": "Consider Actors Time",
+            "count": 1865,
+            "incl_ms": 0.13812530831099196,
+            "excl_ms": 0.13812530831099196
+          },
+          {
+            "name": "SwapAccelerationStructures",
+            "count": 932,
+            "incl_ms": 0.1378701340482574,
+            "excl_ms": 0.1378701340482574
+          },
+          {
+            "name": "NetSerializeItemDelta Time",
+            "count": 605695,
+            "incl_ms": 0.22347383378016086,
+            "excl_ms": 0.13623184986595174
+          },
+          {
+            "name": "SkinnedMeshComp Tick",
+            "count": 302087,
+            "incl_ms": 1.635274745308311,
+            "excl_ms": 0.12995710455764076
+          },
+          {
+            "name": "Anim Tick Time",
+            "count": 304304,
+            "incl_ms": 0.42502064343163537,
+            "excl_ms": 0.12578396782841822
+          },
+          {
+            "name": "Char Tick",
+            "count": 302087,
+            "incl_ms": 3.192230402144772,
+            "excl_ms": 0.12235286863270776
+          },
+          {
+            "name": "fpstrueHealthAttributeSet",
+            "count": 299972,
+            "incl_ms": 0.22077613941018767,
+            "excl_ms": 0.12162246648793565
+          },
+          {
+            "name": "HealthComponent",
+            "count": 299972,
+            "incl_ms": 0.6278246648793566,
+            "excl_ms": 0.12027624664879358
+          },
+          {
+            "name": "Process Prioritized Actors Time",
+            "count": 3730,
+            "incl_ms": 1.982195710455764,
+            "excl_ms": 0.11828686327077748
+          },
+          {
+            "name": "Component CalcBounds",
+            "count": 1728692,
+            "incl_ms": 0.17945356568364507,
+            "excl_ms": 0.11539184986595068
+          },
+          {
+            "name": "MoveComponent(Primitive) Time",
+            "count": 237700,
+            "incl_ms": 0.27479914209115286,
+            "excl_ms": 0.1080033780160858
+          },
+          {
+            "name": "Overall AI Time",
+            "count": 94801,
+            "incl_ms": 0.5013723860589813,
+            "excl_ms": 0.10610825737265416
+          },
+          {
+            "name": "UpdateComponentToWorld",
+            "count": 1758272,
+            "incl_ms": 1.3885956032171638,
+            "excl_ms": 0.10533619302949437
+          },
+          {
+            "name": "SK_Mannequin_UE4_WithWeapon",
+            "count": 298357,
+            "incl_ms": 0.9699720643431636,
+            "excl_ms": 0.10469329758713138
+          },
+          {
+            "name": "STAT_DispatchTickGroup",
+            "count": 13055,
+            "incl_ms": 0.10167989276139411,
+            "excl_ms": 0.10167989276139411
+          },
+          {
+            "name": "ComputeIntermediateSpatialAcceleration",
+            "count": 1865,
+            "incl_ms": 0.24652380697050935,
+            "excl_ms": 0.10061222520107238
+          },
+          {
+            "name": "enemy_anim_C",
+            "count": 314973,
+            "incl_ms": 0.22639565683646112,
+            "excl_ms": 0.10050932975871313
+          },
+          {
+            "name": "FPBDRigidsEvolutionGBF::KinematicTargets",
+            "count": 1865,
+            "incl_ms": 0.2788787131367293,
+            "excl_ms": 0.0998633780160858
+          },
+          {
+            "name": "PathFollowingComponent",
+            "count": 298400,
+            "incl_ms": 0.09783764075067024,
+            "excl_ms": 0.09783764075067024
+          },
+          {
+            "name": "MoveComponent",
+            "count": 51761,
+            "incl_ms": 0.08983565683646114,
+            "excl_ms": 0.08956101876675603
+          }
+        ],
+        "selected_modules": [
+          {
+            "name": "NetDriver TickFlush",
+            "incl_ms": 2.3701068096514746,
+            "excl_ms": 0.0016401608579088471,
+            "count": 1865
+          },
+          {
+            "name": "FpstrueEQS_PublishApproach",
+            "incl_ms": 0.0005767828418230562,
+            "excl_ms": 0.0005767828418230562,
+            "count": 102
+          },
+          {
+            "name": "FpstrueEQS_ValidatePositions",
+            "incl_ms": 0.01030809651474531,
+            "excl_ms": 0.0027282037533512063,
+            "count": 102
+          },
+          {
+            "name": "FpstrueEQS_GeneratePositions",
+            "incl_ms": 0.0007058981233243968,
+            "excl_ms": 0.0007058981233243968,
+            "count": 102
+          },
+          {
+            "name": "FpstrueEnemySignificanceCoordinator_Update",
+            "incl_ms": 0.02834026809651475,
+            "excl_ms": 0.015239302949061662,
+            "count": 247
+          },
+          {
+            "name": "FpstrueEnemySignificance_GameplayUpdate",
+            "incl_ms": 0.008487184986595175,
+            "excl_ms": 0.0014339410187667562,
+            "count": 247
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "incl_ms": 8.270733565683647,
+            "excl_ms": 0.5536744772117963,
+            "count": 13055
+          },
+          {
+            "name": "Calc SkelMesh Bounds",
+            "incl_ms": 0.06406171581769438,
+            "excl_ms": 0.06406171581769438,
+            "count": 211753
+          },
+          {
+            "name": "FpstrueEnemyAI_ExecuteBehaviorAction",
+            "incl_ms": 0.09330268096514746,
+            "excl_ms": 0.001625790883699732,
+            "count": 18833
+          },
+          {
+            "name": "FpstrueEnemyAI_SubmitMoveTo",
+            "incl_ms": 0.03869817694369973,
+            "excl_ms": 0.0004640214477747989,
+            "count": 2414
+          },
+          {
+            "name": "FpstrueEnemyAI_SampleDecision",
+            "incl_ms": 0.05729249329758713,
+            "excl_ms": 0.0014132439678284181,
+            "count": 18348
+          },
+          {
+            "name": "SkinnedMeshComp Tick",
+            "incl_ms": 1.635274745308311,
+            "excl_ms": 0.12995710455764076,
+            "count": 302087
+          },
+          {
+            "name": "PerformAnimEvaluation",
+            "incl_ms": 0.8762056836461125,
+            "excl_ms": 0.04404997319034853,
+            "count": 20346
+          },
+          {
+            "name": "Anim Tick Time",
+            "incl_ms": 0.42502064343163537,
+            "excl_ms": 0.12578396782841822,
+            "count": 304304
+          },
+          {
+            "name": "CharMoveComp",
+            "incl_ms": 3.2618860053619305,
+            "excl_ms": 0.03906032171581769,
+            "count": 302087
+          },
+          {
+            "name": "Phys SetBodyTransform",
+            "incl_ms": 1.038710402144772,
+            "excl_ms": 1.038710402144772,
+            "count": 1313739
+          },
+          {
+            "name": "Game thread idle time",
+            "incl_ms": 20.698322091152814,
+            "excl_ms": 20.698322091152814,
+            "count": 1865
+          }
+        ]
+      }
+    },
+    "animation_policy": {
+      "start": {
+        "threading": false,
+        "full_authority_poses": 9,
+        "mesh": {
+          "everyFrameTick": 156,
+          "leaderPoseFollowers": 0,
+          "uroEnabled": 0,
+          "physicsStatesCreated": 0,
+          "validBodyInstances": 0,
+          "gameplayTiers": [
+            156,
+            4,
+            0
+          ],
+          "renderTiers": [
+            160,
+            0,
+            0
+          ]
+        },
+        "tactical_managers": [
+          {
+            "manager": "fpstrueSurroundManager_0",
+            "innerCapacity": 8,
+            "outerCapacity": 12,
+            "usableInnerSlots": 8,
+            "usableOuterSlots": 12,
+            "occupiedInnerSlots": 8,
+            "occupiedOuterSlots": 12,
+            "queuedEnemies": 16,
+            "activeAttackers": 4,
+            "grantCount": 378,
+            "releaseCount": 347,
+            "timeoutCount": 2
+          },
+          {
+            "manager": "fpstrueSurroundManager_1",
+            "innerCapacity": 8,
+            "outerCapacity": 12,
+            "usableInnerSlots": 8,
+            "usableOuterSlots": 12,
+            "occupiedInnerSlots": 8,
+            "occupiedOuterSlots": 12,
+            "queuedEnemies": 13,
+            "activeAttackers": 5,
+            "grantCount": 364,
+            "releaseCount": 303,
+            "timeoutCount": 1
+          }
+        ],
+        "gameplay_full_reasons": {
+          "sampleWorldTimeSeconds": 41.176583,
+          "sampledEnemies": 160,
+          "unsampledEnemies": 0,
+          "validDistanceSamples": 160,
+          "distance": 156,
+          "attacking": 9,
+          "meleeRangeWhileNotAttacking": 3,
+          "unknown": 0,
+          "countsCanOverlap": true,
+          "distanceSource": "Inverse of last applied max-player 1/(1+2D-distance) score, not a fresh player query"
+        }
+      },
+      "stop": {
+        "threading": false,
+        "full_authority_poses": 6,
+        "mesh": {
+          "everyFrameTick": 156,
+          "leaderPoseFollowers": 0,
+          "uroEnabled": 0,
+          "physicsStatesCreated": 0,
+          "validBodyInstances": 0,
+          "gameplayTiers": [
+            156,
+            4,
+            0
+          ],
+          "renderTiers": [
+            160,
+            0,
+            0
+          ]
+        },
+        "tactical_managers": [
+          {
+            "manager": "fpstrueSurroundManager_0",
+            "innerCapacity": 8,
+            "outerCapacity": 12,
+            "usableInnerSlots": 8,
+            "usableOuterSlots": 12,
+            "occupiedInnerSlots": 8,
+            "occupiedOuterSlots": 12,
+            "queuedEnemies": 20,
+            "activeAttackers": 4,
+            "grantCount": 762,
+            "releaseCount": 783,
+            "timeoutCount": 14
+          },
+          {
+            "manager": "fpstrueSurroundManager_1",
+            "innerCapacity": 8,
+            "outerCapacity": 12,
+            "usableInnerSlots": 8,
+            "usableOuterSlots": 12,
+            "occupiedInnerSlots": 8,
+            "occupiedOuterSlots": 12,
+            "queuedEnemies": 17,
+            "activeAttackers": 2,
+            "grantCount": 730,
+            "releaseCount": 787,
+            "timeoutCount": 12
+          }
+        ],
+        "gameplay_full_reasons": {
+          "sampleWorldTimeSeconds": 103.061188,
+          "sampledEnemies": 160,
+          "unsampledEnemies": 0,
+          "validDistanceSamples": 160,
+          "distance": 156,
+          "attacking": 5,
+          "meleeRangeWhileNotAttacking": 6,
+          "unknown": 0,
+          "countsCanOverlap": true,
+          "distanceSource": "Inverse of last applied max-player 1/(1+2D-distance) score, not a fresh player query"
+        }
+      }
+    },
+    "scope_note": "All module timings are inclusive/exclusive wall scopes, not on-core CPU; do not add nested or parallel totals.",
+    "worker_animation_statistics": [],
+    "worker_animation_threads": {},
+    "representative_waits": [
+      {
+        "name": "Game thread idle time",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 20.311199999994756,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 20.311199999994756,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 5.619599999988623,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 5.619599999988623,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 1.3717999999869335,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 1.3717999999869335,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.537399999998911,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.537399999998911,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.6067999999999074,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.6067999999999074,
+        "decomposition_complete": true
+      }
+    ]
+  },
+  "Client1": {
+    "frames": 5578,
+    "seconds": 61.783861,
+    "mean_frame_ms": 11.073877696665472,
+    "p95_ms": 12.6101,
+    "p99_ms": 13.955601,
+    "game_thread_cpu_ms": 8.521199355,
+    "native": {
+      "GameThreadMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 5578,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": 9.378542144
+      },
+      "RenderThreadMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 5578,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": 8.026646239
+      },
+      "RHIThreadMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 5578,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": 8.938120573
+      },
+      "GPUFrameMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 5578,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": true,
+        "meanMs": 6.973260792
+      },
+      "IdleMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 0,
+        "zeroSamples": 5578,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.0
+      },
+      "IdleOvershootMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 0,
+        "zeroSamples": 5578,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.0
+      },
+      "GameDriverTickFlushMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 5578,
+        "zeroSamples": 0,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.110560989
+      },
+      "DemoDriverTickFlushMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 0,
+        "zeroSamples": 5578,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.0
+      },
+      "FlushAsyncLoadingMs": {
+        "applicable": true,
+        "complete": true,
+        "finiteSamples": 5578,
+        "positiveSamples": 0,
+        "zeroSamples": 5578,
+        "invalidSamples": 0,
+        "zeroMayMeanUnavailable": false,
+        "meanMs": 0.0
+      }
+    },
+    "threads": {
+      "GT": {
+        "roots": [
+          {
+            "id": 4330,
+            "name": "FEngineLoop::Tick",
+            "depth": 0,
+            "path": [
+              "FEngineLoop::Tick"
+            ],
+            "count": 5579,
+            "incl_ms": 11.072981373252063,
+            "excl_ms": 0.007304952707063463
+          }
+        ],
+        "top_inclusive": [
+          {
+            "name": "FEngineLoop::Tick",
+            "count": 5579,
+            "incl_ms": 11.072981373252063,
+            "excl_ms": 0.007304952707063463
+          },
+          {
+            "name": "Frame",
+            "count": 5578,
+            "incl_ms": 11.054514951595554,
+            "excl_ms": 0.0033646109716744354
+          },
+          {
+            "name": "FrameTime",
+            "count": 11156,
+            "incl_ms": 11.038646486195768,
+            "excl_ms": 0.08409937253495876
+          },
+          {
+            "name": "GameEngine Tick",
+            "count": 5578,
+            "incl_ms": 8.669167694514162,
+            "excl_ms": 0.036504517748296876
+          },
+          {
+            "name": "UWorld_Tick",
+            "count": 5578,
+            "incl_ms": 5.7124158659017565,
+            "excl_ms": 0.013108390103979921
+          },
+          {
+            "name": "World Tick Time",
+            "count": 5578,
+            "incl_ms": 5.695946557906059,
+            "excl_ms": 0.019480817497310864
+          },
+          {
+            "name": "Tick Time",
+            "count": 22312,
+            "incl_ms": 4.9212176048763,
+            "excl_ms": 0.02285059160989602
+          },
+          {
+            "name": "ReleaseTickGroup Block",
+            "count": 33468,
+            "incl_ms": 4.773995410541412,
+            "excl_ms": 0.00088621369630692
+          },
+          {
+            "name": "TickCompletionEvents",
+            "count": 39046,
+            "incl_ms": 4.7731091968447465,
+            "excl_ms": 0.011553029759770527
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "count": 39046,
+            "incl_ms": 4.726617802079598,
+            "excl_ms": 0.2940813911796343
+          },
+          {
+            "name": "ExecuteTask",
+            "count": 2439567,
+            "incl_ms": 3.999671190390819,
+            "excl_ms": 0.13377809250627287
+          },
+          {
+            "name": "CharacterMesh0",
+            "count": 1887932,
+            "incl_ms": 3.6672010577267837,
+            "excl_ms": 0.10144756185012462
+          },
+          {
+            "name": "TG_PrePhysics",
+            "count": 5578,
+            "incl_ms": 3.562638544281105,
+            "excl_ms": 0.0019468268196486196
+          },
+          {
+            "name": "FActorComponentTickFunction::ExecuteTick",
+            "count": 2083094,
+            "incl_ms": 3.145346737181786,
+            "excl_ms": 0.04469236285406956
+          },
+          {
+            "name": "SK_Mannequin_UE4_WithWeapon",
+            "count": 1304207,
+            "incl_ms": 2.877086841161709,
+            "excl_ms": 0.047434295446057206
+          },
+          {
+            "name": "RedrawViewports",
+            "count": 5578,
+            "incl_ms": 2.7823979562567227,
+            "excl_ms": 0.0034020616708497664
+          },
+          {
+            "name": "FViewport_Draw",
+            "count": 5578,
+            "incl_ms": 2.778995894585873,
+            "excl_ms": 0.0544086052348512
+          },
+          {
+            "name": "BeginRenderingViewFamily",
+            "count": 5578,
+            "incl_ms": 2.572861401936178,
+            "excl_ms": 0.07034347436357118
+          },
+          {
+            "name": "UWorld_SendAllEndOfFrameUpdates",
+            "count": 5579,
+            "incl_ms": 2.489797257081391,
+            "excl_ms": 0.000315381857295805
+          },
+          {
+            "name": "Post Tick Component Update",
+            "count": 5579,
+            "incl_ms": 2.4894818752240946,
+            "excl_ms": 0.018379580494801002
+          },
+          {
+            "name": "STAT_PostTickComponentUpdate_ForcedGameThread",
+            "count": 5578,
+            "incl_ms": 2.463946109716744,
+            "excl_ms": 0.14354243456436
+          },
+          {
+            "name": "Transform or RenderData",
+            "count": 3208877,
+            "incl_ms": 2.2282857834349437,
+            "excl_ms": 0.2536152742918483
+          },
+          {
+            "name": "Frame Sync Time",
+            "count": 5578,
+            "incl_ms": 1.71740337038365,
+            "excl_ms": 0.008868447472212262
+          },
+          {
+            "name": "GameThreadWaitForTask",
+            "count": 4916,
+            "incl_ms": 1.7064392613840087,
+            "excl_ms": 0.0008915023305844389
+          },
+          {
+            "name": "Game thread idle time",
+            "count": 4916,
+            "incl_ms": 1.705547759053424,
+            "excl_ms": 1.7055474363571175
+          },
+          {
+            "name": "AnimGameThreadTime",
+            "count": 639981,
+            "incl_ms": 1.6478494442452492,
+            "excl_ms": 0.016363033345282572
+          },
+          {
+            "name": "USkinnedMeshComponent_TickComponent",
+            "count": 225620,
+            "incl_ms": 1.394438884904984,
+            "excl_ms": 0.004740928648081392
+          },
+          {
+            "name": "SkinnedMeshComp Tick",
+            "count": 225620,
+            "incl_ms": 1.389697956256723,
+            "excl_ms": 0.11717916816063287
+          },
+          {
+            "name": "CharMoveComp",
+            "count": 903636,
+            "incl_ms": 1.3592458228755826,
+            "excl_ms": 0.03336244173538903
+          },
+          {
+            "name": "UCharacterMovementComponent_TickComponent",
+            "count": 903636,
+            "incl_ms": 1.3258833811401936,
+            "excl_ms": 0.014702276801721046
+          },
+          {
+            "name": "Char Movement Total",
+            "count": 903636,
+            "incl_ms": 1.3111811043384727,
+            "excl_ms": 0.014562459662961635
+          },
+          {
+            "name": "SkelComp UpdateTransform",
+            "count": 915442,
+            "incl_ms": 1.3071880243814997,
+            "excl_ms": 0.023102205091486392
+          },
+          {
+            "name": "Char Tick",
+            "count": 903636,
+            "incl_ms": 1.296618644675511,
+            "excl_ms": 0.08248572965220509
+          },
+          {
+            "name": "MeshObject Update",
+            "count": 840230,
+            "incl_ms": 1.284085819290068,
+            "excl_ms": 1.2727642882753674
+          },
+          {
+            "name": "Char Simulated Time",
+            "count": 898058,
+            "incl_ms": 1.1162723019003227,
+            "excl_ms": 0.22490760129078521
+          },
+          {
+            "name": "SKM_Manny_Simple",
+            "count": 55780,
+            "incl_ms": 0.8779904804589495,
+            "excl_ms": 0.008424704195053784
+          },
+          {
+            "name": "RefreshBoneTransforms",
+            "count": 216970,
+            "incl_ms": 0.8474533883112243,
+            "excl_ms": 0.03721337396916512
+          },
+          {
+            "name": "Component CalcBounds",
+            "count": 6834269,
+            "incl_ms": 0.7392776622445516,
+            "excl_ms": 0.15383624955127892
+          },
+          {
+            "name": "MoveComponent(Primitive) Time",
+            "count": 1330135,
+            "incl_ms": 0.6288982789530297,
+            "excl_ms": 0.12687034779491577
+          },
+          {
+            "name": "Calc SkelMesh Bounds",
+            "count": 2783180,
+            "incl_ms": 0.5962521692366507,
+            "excl_ms": 0.5962521692366507
+          },
+          {
+            "name": "STAT_USkeletalMeshComponent_RefreshBoneTransforms_GamethreadEval",
+            "count": 11156,
+            "incl_ms": 0.5945117963427752,
+            "excl_ms": 0.002097543922552886
+          },
+          {
+            "name": "PerformAnimEvaluation",
+            "count": 11156,
+            "incl_ms": 0.5913641807099318,
+            "excl_ms": 0.015870831839368948
+          },
+          {
+            "name": "SceneQueryTotal",
+            "count": 891438,
+            "incl_ms": 0.5153940121907511,
+            "excl_ms": 0.015038974542848693
+          },
+          {
+            "name": "SkeletalComponentAnimEvaluate",
+            "count": 22312,
+            "incl_ms": 0.4868417353890283,
+            "excl_ms": 0.020341914664754393
+          },
+          {
+            "name": "TG_PostUpdateWork",
+            "count": 5578,
+            "incl_ms": 0.4842937432771603,
+            "excl_ms": 0.0012026174256005737
+          }
+        ],
+        "top_exclusive": [
+          {
+            "name": "Game thread idle time",
+            "count": 4916,
+            "incl_ms": 1.705547759053424,
+            "excl_ms": 1.7055474363571175
+          },
+          {
+            "name": "MeshObject Update",
+            "count": 840230,
+            "incl_ms": 1.284085819290068,
+            "excl_ms": 1.2727642882753674
+          },
+          {
+            "name": "Calc SkelMesh Bounds",
+            "count": 2783180,
+            "incl_ms": 0.5962521692366507,
+            "excl_ms": 0.5962521692366507
+          },
+          {
+            "name": "WaitForTasks",
+            "count": 13352,
+            "incl_ms": 0.4326438866977411,
+            "excl_ms": 0.4326438866977411
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "count": 39046,
+            "incl_ms": 4.726617802079598,
+            "excl_ms": 0.2940813911796343
+          },
+          {
+            "name": "Transform or RenderData",
+            "count": 3208877,
+            "incl_ms": 2.2282857834349437,
+            "excl_ms": 0.2536152742918483
+          },
+          {
+            "name": "Char Simulated Time",
+            "count": 898058,
+            "incl_ms": 1.1162723019003227,
+            "excl_ms": 0.22490760129078521
+          },
+          {
+            "name": "FpstrueFootIKRecovery",
+            "count": 468552,
+            "incl_ms": 0.23852405880243815,
+            "excl_ms": 0.21645842595912518
+          },
+          {
+            "name": "FpstrueEnemyUI_ViewAndWidgetTick",
+            "count": 892480,
+            "incl_ms": 0.23717249910362134,
+            "excl_ms": 0.168882269630692
+          },
+          {
+            "name": "Queue Ticks",
+            "count": 5578,
+            "incl_ms": 0.1656771244173539,
+            "excl_ms": 0.1656771244173539
+          },
+          {
+            "name": "Component CalcBounds",
+            "count": 6834269,
+            "incl_ms": 0.7392776622445516,
+            "excl_ms": 0.15383624955127892
+          },
+          {
+            "name": "UpdateChildTransforms",
+            "count": 1858813,
+            "incl_ms": 0.34973816780191325,
+            "excl_ms": 0.14438081749714454
+          },
+          {
+            "name": "STAT_PostTickComponentUpdate_ForcedGameThread",
+            "count": 5578,
+            "incl_ms": 2.463946109716744,
+            "excl_ms": 0.14354243456436
+          },
+          {
+            "name": "ExecuteTask",
+            "count": 2439567,
+            "incl_ms": 3.999671190390819,
+            "excl_ms": 0.13377809250627287
+          },
+          {
+            "name": "MoveComponent(Primitive) Time",
+            "count": 1330135,
+            "incl_ms": 0.6288982789530297,
+            "excl_ms": 0.12687034779491577
+          },
+          {
+            "name": "SkinnedMeshComp Tick",
+            "count": 225620,
+            "incl_ms": 1.389697956256723,
+            "excl_ms": 0.11717916816063287
+          },
+          {
+            "name": "FScene_UpdatePrimitiveTransform",
+            "count": 1242416,
+            "incl_ms": 0.12284125134456758,
+            "excl_ms": 0.11203083542488024
+          },
+          {
+            "name": "ComputeFloorDist",
+            "count": 189112,
+            "incl_ms": 0.12021554320544998,
+            "excl_ms": 0.10632208676945142
+          },
+          {
+            "name": "CharacterMesh0",
+            "count": 1887932,
+            "incl_ms": 3.6672010577267837,
+            "excl_ms": 0.10144756185012462
+          },
+          {
+            "name": "Phys SetBodyTransform",
+            "count": 243387,
+            "incl_ms": 0.0986464861957691,
+            "excl_ms": 0.0986464861957691
+          },
+          {
+            "name": "EnemyHealthBar",
+            "count": 2569265,
+            "incl_ms": 0.416826299749014,
+            "excl_ms": 0.09691308712800288
+          },
+          {
+            "name": "STAT_DispatchTickGroup",
+            "count": 39046,
+            "incl_ms": 0.09493474363571172,
+            "excl_ms": 0.09493474363571172
+          },
+          {
+            "name": "UChannel_ReceivedSequencedBunch",
+            "count": 97417,
+            "incl_ms": 0.31389610971674436,
+            "excl_ms": 0.0854873610613123
+          },
+          {
+            "name": "PreUpdateAnimation",
+            "count": 228126,
+            "incl_ms": 0.08441866260308532,
+            "excl_ms": 0.08441866260308532
+          },
+          {
+            "name": "FrameTime",
+            "count": 11156,
+            "incl_ms": 11.038646486195768,
+            "excl_ms": 0.08409937253495876
+          },
+          {
+            "name": "Char Tick",
+            "count": 903636,
+            "incl_ms": 1.296618644675511,
+            "excl_ms": 0.08248572965220509
+          },
+          {
+            "name": "FWaitingQueue_Unpark_SignalWaitingThread",
+            "count": 118008,
+            "incl_ms": 0.08156023664395302,
+            "excl_ms": 0.08156023664395302
+          },
+          {
+            "name": "UpdateComponentToWorld",
+            "count": 3425458,
+            "incl_ms": 0.47406409107206715,
+            "excl_ms": 0.07252289351021872
+          },
+          {
+            "name": "BeginRenderingViewFamily",
+            "count": 5578,
+            "incl_ms": 2.572861401936178,
+            "excl_ms": 0.07034347436357118
+          },
+          {
+            "name": "STAT_STAT_IsCursorDirectlyOverSlateWindow",
+            "count": 5578,
+            "incl_ms": 0.0633438329150233,
+            "excl_ms": 0.0633438329150233
+          },
+          {
+            "name": "Post Anim Evaluation",
+            "count": 216970,
+            "incl_ms": 0.44569566152742923,
+            "excl_ms": 0.06239345643599677
+          },
+          {
+            "name": "STAT_USkeletalMeshComponent_RefreshBoneTransforms_SetupParallel",
+            "count": 205814,
+            "incl_ms": 0.11651955898171568,
+            "excl_ms": 0.062100699175333444
+          },
+          {
+            "name": "IpConnection Socket SendTo",
+            "count": 3758,
+            "incl_ms": 0.06005853352456077,
+            "excl_ms": 0.06005853352456077
+          },
+          {
+            "name": "PostUpdateAnimation",
+            "count": 228126,
+            "incl_ms": 0.05998657224811869,
+            "excl_ms": 0.05998657224811869
+          },
+          {
+            "name": "FViewport_Draw",
+            "count": 5578,
+            "incl_ms": 2.778995894585873,
+            "excl_ms": 0.0544086052348512
+          },
+          {
+            "name": "enemy_anim_C",
+            "count": 147563,
+            "incl_ms": 0.22931167084976695,
+            "excl_ms": 0.05404031911079239
+          },
+          {
+            "name": "UpdateKinematicBonesToAnim",
+            "count": 11156,
+            "incl_ms": 0.0522892793115812,
+            "excl_ms": 0.0522892793115812
+          },
+          {
+            "name": "STAT_FTicker_Tick",
+            "count": 16734,
+            "incl_ms": 0.07889021154535676,
+            "excl_ms": 0.050591089996414484
+          },
+          {
+            "name": "MoveComponent",
+            "count": 150849,
+            "incl_ms": 0.05033985299390462,
+            "excl_ms": 0.050174148440302976
+          },
+          {
+            "name": "Char SmoothClientPosition_Visual",
+            "count": 678311,
+            "incl_ms": 0.30838126568662605,
+            "excl_ms": 0.05000406955898172
+          }
+        ],
+        "selected_modules": [
+          {
+            "name": "Game thread idle time",
+            "incl_ms": 1.705547759053424,
+            "excl_ms": 1.7055474363571175,
+            "count": 4916
+          },
+          {
+            "name": "Calc SkelMesh Bounds",
+            "incl_ms": 0.5962521692366507,
+            "excl_ms": 0.5962521692366507,
+            "count": 2783180
+          },
+          {
+            "name": "MeshObject Update",
+            "incl_ms": 1.284085819290068,
+            "excl_ms": 1.2727642882753674,
+            "count": 840230
+          },
+          {
+            "name": "NetDriver TickFlush",
+            "incl_ms": 0.11224419146647545,
+            "excl_ms": 0.0013989064180709933,
+            "count": 5578
+          },
+          {
+            "name": "FpstrueEnemySignificanceCoordinator_Update",
+            "incl_ms": 0.012793671566869846,
+            "excl_ms": 0.004044765148798853,
+            "count": 247
+          },
+          {
+            "name": "FpstrueEnemySignificance_ApplyPresentationBudget",
+            "incl_ms": 0.005244980279670133,
+            "excl_ms": 0.002293062029401219,
+            "count": 247
+          },
+          {
+            "name": "FpstrueEnemySignificance_RenderScoreAndBudget",
+            "incl_ms": 0.00287389745428469,
+            "excl_ms": 0.00287389745428469,
+            "count": 247
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "incl_ms": 4.726617802079598,
+            "excl_ms": 0.2940813911796343,
+            "count": 39046
+          },
+          {
+            "name": "FpstrueEnemyUI_ViewAndWidgetTick",
+            "incl_ms": 0.23717249910362134,
+            "excl_ms": 0.168882269630692,
+            "count": 892480
+          },
+          {
+            "name": "SkinnedMeshComp Tick",
+            "incl_ms": 1.389697956256723,
+            "excl_ms": 0.11717916816063287,
+            "count": 225620
+          },
+          {
+            "name": "Anim Tick Time",
+            "incl_ms": 0.4117897275008964,
+            "excl_ms": 0.03674318752240444,
+            "count": 217197
+          },
+          {
+            "name": "PerformAnimEvaluation",
+            "incl_ms": 0.5913641807099318,
+            "excl_ms": 0.015870831839368948,
+            "count": 11156
+          },
+          {
+            "name": "CharMoveComp",
+            "incl_ms": 1.3592458228755826,
+            "excl_ms": 0.03336244173538903,
+            "count": 903636
+          },
+          {
+            "name": "Phys SetBodyTransform",
+            "incl_ms": 0.0986464861957691,
+            "excl_ms": 0.0986464861957691,
+            "count": 243387
+          }
+        ]
+      },
+      "RT": {
+        "roots": [
+          {
+            "id": 5064,
+            "name": "FDrawSceneCommand",
+            "depth": 0,
+            "path": [
+              "FDrawSceneCommand"
+            ],
+            "count": 5578,
+            "incl_ms": 7.365904786661886,
+            "excl_ms": 0.04565622086769452
+          }
+        ],
+        "top_inclusive": [
+          {
+            "name": "FDrawSceneCommand",
+            "count": 5578,
+            "incl_ms": 7.365904786661886,
+            "excl_ms": 0.04565622086769452
+          },
+          {
+            "name": "RenderViewFamily",
+            "count": 5578,
+            "incl_ms": 7.276033255647185,
+            "excl_ms": 0.08659178917174615
+          },
+          {
+            "name": "Scene",
+            "count": 16740,
+            "incl_ms": 5.374407619218358,
+            "excl_ms": 0.25193415202581565
+          },
+          {
+            "name": "FDeferredShadingSceneRenderer_Render",
+            "count": 5578,
+            "incl_ms": 5.3112332377196125,
+            "excl_ms": 0.0011527967013266404
+          },
+          {
+            "name": "VisibilityCommands",
+            "count": 5578,
+            "incl_ms": 1.828953334528505,
+            "excl_ms": 0.002015220509143062
+          },
+          {
+            "name": "FDeferredShadingSceneRenderer_InitViews",
+            "count": 5578,
+            "incl_ms": 1.8269381140193617,
+            "excl_ms": 0.00039415561133022595
+          },
+          {
+            "name": "InitViews",
+            "count": 5578,
+            "incl_ms": 1.8265439584080316,
+            "excl_ms": 0.04415346002151309
+          },
+          {
+            "name": "View Visibility",
+            "count": 5578,
+            "incl_ms": 1.7028697077805663,
+            "excl_ms": 0.0002272319827895303
+          },
+          {
+            "name": "ProcessVisibilityTasks",
+            "count": 5578,
+            "incl_ms": 1.702642475797777,
+            "excl_ms": 0.004193348870562926
+          },
+          {
+            "name": "WaitUntilTasksComplete",
+            "count": 27916,
+            "incl_ms": 1.6945247095733242,
+            "excl_ms": 0.009666547149515956
+          },
+          {
+            "name": "WaitForTasks",
+            "count": 5607,
+            "incl_ms": 1.684613630333453,
+            "excl_ms": 1.684613630333453
+          },
+          {
+            "name": "WaitForGatherDynamicMeshElements",
+            "count": 5578,
+            "incl_ms": 1.6830534833273574,
+            "excl_ms": 0.002809537468626748
+          },
+          {
+            "name": "FRDGBuilder::Execute",
+            "count": 5585,
+            "incl_ms": 1.1517130692004303,
+            "excl_ms": 0.037305091430620295
+          },
+          {
+            "name": "RenderDeferredLighting",
+            "count": 5577,
+            "incl_ms": 0.8086166188598064,
+            "excl_ms": 0.0009717999282897096
+          },
+          {
+            "name": "DeferredShadingSceneRenderer Lighting",
+            "count": 5577,
+            "incl_ms": 0.8076448189315167,
+            "excl_ms": 0.00021955898171387592
+          },
+          {
+            "name": "RenderLighting",
+            "count": 5577,
+            "incl_ms": 0.8074252599498029,
+            "excl_ms": 0.016305898171387594
+          },
+          {
+            "name": "Scene::UpdateAllPrimitiveSceneInfos",
+            "count": 5578,
+            "incl_ms": 0.6629097167443528,
+            "excl_ms": 0.00015100394406597349
+          },
+          {
+            "name": "FScene_UpdateAllPrimitiveSceneInfos",
+            "count": 5578,
+            "incl_ms": 0.6627587128002869,
+            "excl_ms": 0.0004360523485120115
+          },
+          {
+            "name": "UpdatePrimitive",
+            "count": 5578,
+            "incl_ms": 0.6623226604517748,
+            "excl_ms": 0.014762889924704196
+          },
+          {
+            "name": "UpdateAllPrimitiveSceneInfos",
+            "count": 5578,
+            "incl_ms": 0.6292180889207601,
+            "excl_ms": 0.10170600573682323
+          },
+          {
+            "name": "FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion",
+            "count": 11154,
+            "incl_ms": 0.6086764790247401,
+            "excl_ms": 0.0008945500179275725
+          },
+          {
+            "name": "DiffuseIndirectAndAO",
+            "count": 11154,
+            "incl_ms": 0.6077819290068125,
+            "excl_ms": 0.019288221584797417
+          },
+          {
+            "name": "FTaskBase::WaitImpl_StateChangeEvent_WaitFor",
+            "count": 13240,
+            "incl_ms": 0.5687073861599139,
+            "excl_ms": 0.5687073861599139
+          },
+          {
+            "name": "Collect Resources",
+            "count": 5577,
+            "incl_ms": 0.4786114019361778,
+            "excl_ms": 0.0003356220867694514
+          },
+          {
+            "name": "FRDGBuilder::CollectResources",
+            "count": 5577,
+            "incl_ms": 0.47827577984940844,
+            "excl_ms": 0.1326309071351739
+          },
+          {
+            "name": "FinishDynamicMeshElements",
+            "count": 5577,
+            "incl_ms": 0.4764921297956257,
+            "excl_ms": 0.012345769092864826
+          },
+          {
+            "name": "LumenScreenProbeGather",
+            "count": 5577,
+            "incl_ms": 0.4381872534958766,
+            "excl_ms": 0.22600229472929365
+          },
+          {
+            "name": "FRDGBuilder::AllocateTransientResources",
+            "count": 5577,
+            "incl_ms": 0.30970917891717464,
+            "excl_ms": 0.26172870204374327
+          },
+          {
+            "name": "FRDGBuilder::ExecutePasses",
+            "count": 5577,
+            "incl_ms": 0.29594838651846544,
+            "excl_ms": 0.0005640372893510219
+          },
+          {
+            "name": "Execute",
+            "count": 5577,
+            "incl_ms": 0.29538434922911433,
+            "excl_ms": 0.02188234134098243
+          },
+          {
+            "name": "PostProcessing",
+            "count": 11154,
+            "incl_ms": 0.28486620652563643,
+            "excl_ms": 0.0037227142344926495
+          },
+          {
+            "name": "STAT_PostProcessing_Process",
+            "count": 5577,
+            "incl_ms": 0.2811206346360703,
+            "excl_ms": 0.07162730369307994
+          },
+          {
+            "name": "ShadowDepths",
+            "count": 11160,
+            "incl_ms": 0.2709152742918609,
+            "excl_ms": 0.013513786303336321
+          },
+          {
+            "name": "Tasks::Wait",
+            "count": 39041,
+            "incl_ms": 0.2613731086410899,
+            "excl_ms": 0.25376199354607387
+          },
+          {
+            "name": "DirectLighting",
+            "count": 11154,
+            "incl_ms": 0.25726566869845824,
+            "excl_ms": 0.002244621728217999
+          },
+          {
+            "name": "GPUSceneUpdate",
+            "count": 11155,
+            "incl_ms": 0.18388513804230905,
+            "excl_ms": 0.00833886697741126
+          },
+          {
+            "name": "UpdateRadianceCaches",
+            "count": 5577,
+            "incl_ms": 0.18175078881319467,
+            "excl_ms": 0.18175078881319467
+          },
+          {
+            "name": "FDeferredShadingSceneRenderer::RenderLumenSceneLighting",
+            "count": 5577,
+            "incl_ms": 0.1794462889924704,
+            "excl_ms": 0.00024141269272140553
+          },
+          {
+            "name": "RenderLumenSceneLighting",
+            "count": 11154,
+            "incl_ms": 0.17920487629974902,
+            "excl_ms": 0.001736088203657225
+          },
+          {
+            "name": "LumenSceneLighting",
+            "count": 5577,
+            "incl_ms": 0.1774687880960918,
+            "excl_ms": 0.008542757260666906
+          },
+          {
+            "name": "Lights",
+            "count": 11154,
+            "incl_ms": 0.17255089637863033,
+            "excl_ms": 0.007206023664395841
+          },
+          {
+            "name": "FScene_AddPrimitiveSceneInfos",
+            "count": 11168,
+            "incl_ms": 0.17116220867694515,
+            "excl_ms": 0.000679096450340624
+          },
+          {
+            "name": "RHICmdList_Submit",
+            "count": 150613,
+            "incl_ms": 0.16977398709214778,
+            "excl_ms": 0.0764912871997275
+          },
+          {
+            "name": "UpdatePrimitiveTransform",
+            "count": 5578,
+            "incl_ms": 0.16969580494801004,
+            "excl_ms": 0.04910123700250985
+          },
+          {
+            "name": "FDeferredShadingSceneRenderer_RenderLights",
+            "count": 5577,
+            "incl_ms": 0.16534487271423448,
+            "excl_ms": 0.0003047866618859806
+          }
+        ],
+        "top_exclusive": [
+          {
+            "name": "WaitForTasks",
+            "count": 5607,
+            "incl_ms": 1.684613630333453,
+            "excl_ms": 1.684613630333453
+          },
+          {
+            "name": "FTaskBase::WaitImpl_StateChangeEvent_WaitFor",
+            "count": 13240,
+            "incl_ms": 0.5687073861599139,
+            "excl_ms": 0.5687073861599139
+          },
+          {
+            "name": "FRDGBuilder::AllocateTransientResources",
+            "count": 5577,
+            "incl_ms": 0.30970917891717464,
+            "excl_ms": 0.26172870204374327
+          },
+          {
+            "name": "Tasks::Wait",
+            "count": 39041,
+            "incl_ms": 0.2613731086410899,
+            "excl_ms": 0.25376199354607387
+          },
+          {
+            "name": "Scene",
+            "count": 16740,
+            "incl_ms": 5.374407619218358,
+            "excl_ms": 0.25193415202581565
+          },
+          {
+            "name": "LumenScreenProbeGather",
+            "count": 5577,
+            "incl_ms": 0.4381872534958766,
+            "excl_ms": 0.22600229472929365
+          },
+          {
+            "name": "UpdateRadianceCaches",
+            "count": 5577,
+            "incl_ms": 0.18175078881319467,
+            "excl_ms": 0.18175078881319467
+          },
+          {
+            "name": "FWaitingQueue_Unpark_SignalWaitingThread",
+            "count": 199933,
+            "incl_ms": 0.13728863391899063,
+            "excl_ms": 0.13728863391899063
+          },
+          {
+            "name": "FRDGBuilder::CollectResources",
+            "count": 5577,
+            "incl_ms": 0.47827577984940844,
+            "excl_ms": 0.1326309071351739
+          },
+          {
+            "name": "LumenReflections",
+            "count": 5577,
+            "incl_ms": 0.11953447472212261,
+            "excl_ms": 0.11953447472212261
+          },
+          {
+            "name": "RayTracing_GatherDynamicRayTracingInstances",
+            "count": 5577,
+            "incl_ms": 0.10577325206167085,
+            "excl_ms": 0.10574021154535676
+          },
+          {
+            "name": "UpdateAllPrimitiveSceneInfos",
+            "count": 5578,
+            "incl_ms": 0.6292180889207601,
+            "excl_ms": 0.10170600573682323
+          },
+          {
+            "name": "SkeletalMesh/Game/EnemyWarriorAnimPack/SkeletalMesh/SK_Mannequin_UE4_WithWeapon.SK_Mannequin_UE4_WithWeapon",
+            "count": 892403,
+            "incl_ms": 0.09508022588741305,
+            "excl_ms": 0.09507664037289172
+          },
+          {
+            "name": "BuildRenderingCommandsDeferred(Culling=On)",
+            "count": 11154,
+            "incl_ms": 0.09202965220509143,
+            "excl_ms": 0.09202965220509143
+          },
+          {
+            "name": "FVirtualShadowMapArray_BuildPageAllocation",
+            "count": 5577,
+            "incl_ms": 0.11494259591251345,
+            "excl_ms": 0.09085060953746862
+          },
+          {
+            "name": "RenderViewFamily",
+            "count": 5578,
+            "incl_ms": 7.276033255647185,
+            "excl_ms": 0.08659178917174615
+          },
+          {
+            "name": "RHICmdList_Submit",
+            "count": 150613,
+            "incl_ms": 0.16977398709214778,
+            "excl_ms": 0.0764912871997275
+          },
+          {
+            "name": "STAT_PostProcessing_Process",
+            "count": 5577,
+            "incl_ms": 0.2811206346360703,
+            "excl_ms": 0.07162730369307994
+          },
+          {
+            "name": "All Command List Execute",
+            "count": 150613,
+            "incl_ms": 0.06995566511292936,
+            "excl_ms": 0.06995566511292936
+          },
+          {
+            "name": "TemporalSuperResolution(sg.AntiAliasingQuality=2) 1392x783 -> 1600x900",
+            "count": 5577,
+            "incl_ms": 0.06947956256722838,
+            "excl_ms": 0.06947956256722838
+          },
+          {
+            "name": "Radiosity",
+            "count": 5577,
+            "incl_ms": 0.05630905342416636,
+            "excl_ms": 0.05630905342416636
+          },
+          {
+            "name": "RenderTranslucency",
+            "count": 11154,
+            "incl_ms": 0.06252267837934743,
+            "excl_ms": 0.05445634636070276
+          },
+          {
+            "name": "LumenSceneUpdate: 2 card captures 0.031M texels",
+            "count": 5238,
+            "incl_ms": 0.13176251344567946,
+            "excl_ms": 0.04973963786303334
+          },
+          {
+            "name": "UpdatePrimitiveTransform",
+            "count": 5578,
+            "incl_ms": 0.16969580494801004,
+            "excl_ms": 0.04910123700250985
+          },
+          {
+            "name": "RenderSkyAtmosphereLookUpTables",
+            "count": 5577,
+            "incl_ms": 0.053552545715310144,
+            "excl_ms": 0.04758368590892793
+          },
+          {
+            "name": "FDrawSceneCommand",
+            "count": 5578,
+            "incl_ms": 7.365904786661886,
+            "excl_ms": 0.04565622086769452
+          },
+          {
+            "name": "D3D12RHI::AllocateBuffer",
+            "count": 3147,
+            "incl_ms": 0.04469177124417354,
+            "excl_ms": 0.044536859089307455
+          },
+          {
+            "name": "InitViews",
+            "count": 5578,
+            "incl_ms": 1.8265439584080316,
+            "excl_ms": 0.04415346002151309
+          },
+          {
+            "name": "CullDistanceFieldObjectsForLight MeshSDF",
+            "count": 5577,
+            "incl_ms": 0.04329833273574758,
+            "excl_ms": 0.04329833273574758
+          },
+          {
+            "name": "Shadow.Virtual.ProcessInvalidations",
+            "count": 11156,
+            "incl_ms": 0.04084241663678738,
+            "excl_ms": 0.04084241663678738
+          },
+          {
+            "name": "CullingPasses",
+            "count": 5577,
+            "incl_ms": 0.03990129078522768,
+            "excl_ms": 0.03990129078522768
+          },
+          {
+            "name": "CullTiles 1 lights",
+            "count": 5577,
+            "incl_ms": 0.03972757260666906,
+            "excl_ms": 0.03972757260666906
+          },
+          {
+            "name": "STAT_InitViews_InitRHIResources",
+            "count": 5578,
+            "incl_ms": 0.045874202223019,
+            "excl_ms": 0.038354284689853
+          },
+          {
+            "name": "FRDGBuilder::Execute",
+            "count": 5585,
+            "incl_ms": 1.1517130692004303,
+            "excl_ms": 0.037305091430620295
+          },
+          {
+            "name": "Dynamic shadow setup",
+            "count": 11155,
+            "incl_ms": 0.058192864826102544,
+            "excl_ms": 0.03650521692362854
+          },
+          {
+            "name": "PostRenderOpsFX",
+            "count": 11154,
+            "incl_ms": 0.06376326640372894,
+            "excl_ms": 0.035107637145930445
+          },
+          {
+            "name": "Bloom",
+            "count": 5577,
+            "incl_ms": 0.03389248834707781,
+            "excl_ms": 0.03389248834707781
+          },
+          {
+            "name": "TranslucencyVolumeLighting",
+            "count": 5577,
+            "incl_ms": 0.030771979204015774,
+            "excl_ms": 0.030771979204015774
+          },
+          {
+            "name": "Integrate",
+            "count": 5577,
+            "incl_ms": 0.03043416995338831,
+            "excl_ms": 0.03043416995338831
+          },
+          {
+            "name": "MotionBlur",
+            "count": 5577,
+            "incl_ms": 0.04284766941556113,
+            "excl_ms": 0.02956462889924704
+          }
+        ],
+        "selected_modules": [
+          {
+            "name": "WaitUntilTasksComplete",
+            "incl_ms": 1.6945247095733242,
+            "excl_ms": 0.009666547149515956,
+            "count": 27916
+          },
+          {
+            "name": "WaitForGatherDynamicMeshElements",
+            "incl_ms": 1.6830534833273574,
+            "excl_ms": 0.002809537468626748,
+            "count": 5578
+          }
+        ]
+      },
+      "RHI": {
+        "roots": [
+          {
+            "id": 40,
+            "name": "ExecuteTask",
+            "depth": 0,
+            "path": [
+              "ExecuteTask"
+            ],
+            "count": 131623,
+            "incl_ms": 9.241323287916817,
+            "excl_ms": 0.09972239153818573
+          }
+        ],
+        "top_inclusive": [
+          {
+            "name": "ExecuteTask",
+            "count": 131623,
+            "incl_ms": 9.241323287916817,
+            "excl_ms": 0.09972239153818573
+          },
+          {
+            "name": "RHI_Translate",
+            "count": 287030,
+            "incl_ms": 7.750488257439943,
+            "excl_ms": 0.12202294729293654
+          },
+          {
+            "name": "GPUSkinCache",
+            "count": 5578,
+            "incl_ms": 2.921649584855861,
+            "excl_ms": 0.6769829480684829
+          },
+          {
+            "name": "GPUSkinCache_UpdateSkinningBatches",
+            "count": 5577,
+            "incl_ms": 2.2369150053782696,
+            "excl_ms": 0.04906133022563634
+          },
+          {
+            "name": "Present time",
+            "count": 11156,
+            "incl_ms": 1.509480315525282,
+            "excl_ms": 0.04559738257439938
+          },
+          {
+            "name": "FRDGBuilder::Execute",
+            "count": 125250,
+            "incl_ms": 1.3880577984940816,
+            "excl_ms": 0.12907364646832165
+          },
+          {
+            "name": "Scene",
+            "count": 61358,
+            "incl_ms": 1.2541638938687747,
+            "excl_ms": 0.08187108282551092
+          },
+          {
+            "name": "Submission_Wait",
+            "count": 5578,
+            "incl_ms": 1.0663782179992827,
+            "excl_ms": 0.0005189673718483585
+          },
+          {
+            "name": "FTaskBase::WaitWithNamedThreadsSupport",
+            "count": 5578,
+            "incl_ms": 1.0658592506274644,
+            "excl_ms": 0.0037336321263589088
+          },
+          {
+            "name": "FTaskBase::WaitImpl_StateChangeEvent_WaitFor",
+            "count": 5578,
+            "incl_ms": 1.061852025815707,
+            "excl_ms": 1.061852025815707
+          },
+          {
+            "name": "RHI_SubmitToGPU",
+            "count": 66965,
+            "incl_ms": 0.8471063875941197,
+            "excl_ms": 0.3398861115095016
+          },
+          {
+            "name": "RHI_Finalize",
+            "count": 224981,
+            "incl_ms": 0.5474665830046612,
+            "excl_ms": 0.30035792398709216
+          },
+          {
+            "name": "DeleteRHIResources",
+            "count": 66965,
+            "incl_ms": 0.43289243456436005,
+            "excl_ms": 0.43288689494442456
+          },
+          {
+            "name": "D3D12_Present",
+            "count": 5578,
+            "incl_ms": 0.39750471495159495,
+            "excl_ms": 0.39750471495159495
+          },
+          {
+            "name": "SkinnedGeometryBuildBLAS",
+            "count": 5578,
+            "incl_ms": 0.36168187522409584,
+            "excl_ms": 0.05383755826436004
+          },
+          {
+            "name": "LumenSceneLighting",
+            "count": 5578,
+            "incl_ms": 0.35134761563284306,
+            "excl_ms": 0.004257888132128013
+          },
+          {
+            "name": "BuildAccelerationStructure_BottomLevel",
+            "count": 5578,
+            "incl_ms": 0.30181405521692284,
+            "excl_ms": 0.0007553782717097741
+          },
+          {
+            "name": "BuildBottomLevel",
+            "count": 5578,
+            "incl_ms": 0.3010586769451416,
+            "excl_ms": 0.2746365901756909
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=0 InStreamStart=0 OutStart=0 Vert=15443 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.2862731265686619,
+            "excl_ms": 0.2861182323413401
+          },
+          {
+            "name": "FD3D12BindlessResourceManager::RequestNewActiveGPUHeap",
+            "count": 15424,
+            "incl_ms": 0.24710865901756904,
+            "excl_ms": 0.13944801003944066
+          },
+          {
+            "name": "DirectLighting",
+            "count": 5578,
+            "incl_ms": 0.24346600932233745,
+            "excl_ms": 0.03069060595193614
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=1 InStreamStart=15443 OutStart=15443 Vert=18 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.1838828791681068,
+            "excl_ms": 0.18373284331296155
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=2 InStreamStart=15461 OutStart=15461 Vert=230 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.17977312656866296,
+            "excl_ms": 0.17954286482610318
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=3 InStreamStart=15691 OutStart=15691 Vert=88 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.17943047687346683,
+            "excl_ms": 0.17926269272144113
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=4 InStreamStart=15779 OutStart=15779 Vert=206 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.1777674793833092,
+            "excl_ms": 0.17760917891717412
+          },
+          {
+            "name": "RayTracingScene",
+            "count": 5578,
+            "incl_ms": 0.17771588382932899,
+            "excl_ms": 0.09953081749732871
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=5 InStreamStart=15985 OutStart=15985 Vert=140 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.17679564359992872,
+            "excl_ms": 0.17664229114386923
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=0 InStreamStart=0 OutStart=0 Vert=6573 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.15135310146975625,
+            "excl_ms": 0.15126000358520988
+          },
+          {
+            "name": "ShaderTableCommit",
+            "count": 5578,
+            "incl_ms": 0.13398040516314097,
+            "excl_ms": 0.016660362136939805
+          },
+          {
+            "name": "CullTiles 1 lights",
+            "count": 5578,
+            "incl_ms": 0.10846860882036567,
+            "excl_ms": 0.10604924704180724
+          },
+          {
+            "name": "FWaitingQueue_Unpark_SignalWaitingThread",
+            "count": 177317,
+            "incl_ms": 0.10777163858009593,
+            "excl_ms": 0.10777163858009593
+          },
+          {
+            "name": "CopyDescriptors HeapToHeap Scattered",
+            "count": 9510,
+            "incl_ms": 0.10765659734671926,
+            "excl_ms": 0.10765659734671926
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=1 InStreamStart=6573 OutStart=6573 Vert=11 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.10101382215865909,
+            "excl_ms": 0.10093076371477225
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=2 InStreamStart=6584 OutStart=6584 Vert=110 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.10016575833587307,
+            "excl_ms": 0.10007846898492284
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=4 InStreamStart=6749 OutStart=6749 Vert=170 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.09957742918603449,
+            "excl_ms": 0.09948176765858746
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=3 InStreamStart=6694 OutStart=6694 Vert=55 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.09851911079211176,
+            "excl_ms": 0.09843020795957308
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=5 InStreamStart=6919 OutStart=6919 Vert=92 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.09811335604103617,
+            "excl_ms": 0.09801075654290071
+          },
+          {
+            "name": "D3D12RHI::CreateRHIBuffer",
+            "count": 5578,
+            "incl_ms": 0.094037701685192,
+            "excl_ms": 0.00018047687330996205
+          },
+          {
+            "name": "CreateBuffer time",
+            "count": 5578,
+            "incl_ms": 0.09385722481176054,
+            "excl_ms": 0.004472929365586234
+          },
+          {
+            "name": "FD3D12BindlessResourceManager::UpdateDescriptor",
+            "count": 5183283,
+            "incl_ms": 0.09116869846185013,
+            "excl_ms": 0.09116869846185013
+          },
+          {
+            "name": "FD3D12BindlessResourceManager::InitializeDescriptor",
+            "count": 1966793,
+            "incl_ms": 0.0905443348849064,
+            "excl_ms": 0.0905443348849064
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=0 Chunk=0 InStreamStart=0 OutStart=0 Vert=23274 Morph=0/0",
+            "count": 115916,
+            "incl_ms": 0.09002208676930802,
+            "excl_ms": 0.08998192900666908
+          },
+          {
+            "name": "D3D12RHI::AllocateBuffer",
+            "count": 5578,
+            "incl_ms": 0.08792488347077773,
+            "excl_ms": 0.0013207422014447862
+          },
+          {
+            "name": "D3D12RHI::AllocatePoolResource",
+            "count": 5578,
+            "incl_ms": 0.08660414126927221,
+            "excl_ms": 0.0845341520258157
+          },
+          {
+            "name": "BuildAccelerationStructure_TopLevel",
+            "count": 11156,
+            "incl_ms": 0.0687821620652565,
+            "excl_ms": 0.000468429544589279
+          }
+        ],
+        "top_exclusive": [
+          {
+            "name": "FTaskBase::WaitImpl_StateChangeEvent_WaitFor",
+            "count": 5578,
+            "incl_ms": 1.061852025815707,
+            "excl_ms": 1.061852025815707
+          },
+          {
+            "name": "GPUSkinCache",
+            "count": 5578,
+            "incl_ms": 2.921649584855861,
+            "excl_ms": 0.6769829480684829
+          },
+          {
+            "name": "DeleteRHIResources",
+            "count": 66965,
+            "incl_ms": 0.43289243456436005,
+            "excl_ms": 0.43288689494442456
+          },
+          {
+            "name": "D3D12_Present",
+            "count": 5578,
+            "incl_ms": 0.39750471495159495,
+            "excl_ms": 0.39750471495159495
+          },
+          {
+            "name": "RHI_SubmitToGPU",
+            "count": 66965,
+            "incl_ms": 0.8471063875941197,
+            "excl_ms": 0.3398861115095016
+          },
+          {
+            "name": "RHI_Finalize",
+            "count": 224981,
+            "incl_ms": 0.5474665830046612,
+            "excl_ms": 0.30035792398709216
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=0 InStreamStart=0 OutStart=0 Vert=15443 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.2862731265686619,
+            "excl_ms": 0.2861182323413401
+          },
+          {
+            "name": "BuildBottomLevel",
+            "count": 5578,
+            "incl_ms": 0.3010586769451416,
+            "excl_ms": 0.2746365901756909
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=1 InStreamStart=15443 OutStart=15443 Vert=18 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.1838828791681068,
+            "excl_ms": 0.18373284331296155
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=2 InStreamStart=15461 OutStart=15461 Vert=230 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.17977312656866296,
+            "excl_ms": 0.17954286482610318
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=3 InStreamStart=15691 OutStart=15691 Vert=88 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.17943047687346683,
+            "excl_ms": 0.17926269272144113
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=4 InStreamStart=15779 OutStart=15779 Vert=206 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.1777674793833092,
+            "excl_ms": 0.17760917891717412
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=2 Chunk=5 InStreamStart=15985 OutStart=15985 Vert=140 Morph=0/0",
+            "count": 450235,
+            "incl_ms": 0.17679564359992872,
+            "excl_ms": 0.17664229114386923
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=0 InStreamStart=0 OutStart=0 Vert=6573 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.15135310146975625,
+            "excl_ms": 0.15126000358520988
+          },
+          {
+            "name": "FD3D12BindlessResourceManager::RequestNewActiveGPUHeap",
+            "count": 15424,
+            "incl_ms": 0.24710865901756904,
+            "excl_ms": 0.13944801003944066
+          },
+          {
+            "name": "FRDGBuilder::Execute",
+            "count": 125250,
+            "incl_ms": 1.3880577984940816,
+            "excl_ms": 0.12907364646832165
+          },
+          {
+            "name": "RHI_Translate",
+            "count": 287030,
+            "incl_ms": 7.750488257439943,
+            "excl_ms": 0.12202294729293654
+          },
+          {
+            "name": "FWaitingQueue_Unpark_SignalWaitingThread",
+            "count": 177317,
+            "incl_ms": 0.10777163858009593,
+            "excl_ms": 0.10777163858009593
+          },
+          {
+            "name": "CopyDescriptors HeapToHeap Scattered",
+            "count": 9510,
+            "incl_ms": 0.10765659734671926,
+            "excl_ms": 0.10765659734671926
+          },
+          {
+            "name": "CullTiles 1 lights",
+            "count": 5578,
+            "incl_ms": 0.10846860882036567,
+            "excl_ms": 0.10604924704180724
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=1 InStreamStart=6573 OutStart=6573 Vert=11 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.10101382215865909,
+            "excl_ms": 0.10093076371477225
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=2 InStreamStart=6584 OutStart=6584 Vert=110 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.10016575833587307,
+            "excl_ms": 0.10007846898492284
+          },
+          {
+            "name": "ExecuteTask",
+            "count": 131623,
+            "incl_ms": 9.241323287916817,
+            "excl_ms": 0.09972239153818573
+          },
+          {
+            "name": "RayTracingScene",
+            "count": 5578,
+            "incl_ms": 0.17771588382932899,
+            "excl_ms": 0.09953081749732871
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=4 InStreamStart=6749 OutStart=6749 Vert=170 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.09957742918603449,
+            "excl_ms": 0.09948176765858746
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=3 InStreamStart=6694 OutStart=6694 Vert=55 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.09851911079211176,
+            "excl_ms": 0.09843020795957308
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=1 Chunk=5 InStreamStart=6919 OutStart=6919 Vert=92 Morph=0/0",
+            "count": 251638,
+            "incl_ms": 0.09811335604103617,
+            "excl_ms": 0.09801075654290071
+          },
+          {
+            "name": "FD3D12BindlessResourceManager::UpdateDescriptor",
+            "count": 5183283,
+            "incl_ms": 0.09116869846185013,
+            "excl_ms": 0.09116869846185013
+          },
+          {
+            "name": "FD3D12BindlessResourceManager::InitializeDescriptor",
+            "count": 1966793,
+            "incl_ms": 0.0905443348849064,
+            "excl_ms": 0.0905443348849064
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=0 Chunk=0 InStreamStart=0 OutStart=0 Vert=23274 Morph=0/0",
+            "count": 115916,
+            "incl_ms": 0.09002208676930802,
+            "excl_ms": 0.08998192900666908
+          },
+          {
+            "name": "D3D12RHI::AllocatePoolResource",
+            "count": 5578,
+            "incl_ms": 0.08660414126927221,
+            "excl_ms": 0.0845341520258157
+          },
+          {
+            "name": "Scene",
+            "count": 61358,
+            "incl_ms": 1.2541638938687747,
+            "excl_ms": 0.08187108282551092
+          },
+          {
+            "name": "BuildTopLevel",
+            "count": 11156,
+            "incl_ms": 0.06831373252061701,
+            "excl_ms": 0.06831373252061701
+          },
+          {
+            "name": "BuildCardUpdateContext",
+            "count": 5578,
+            "incl_ms": 0.061074453209035706,
+            "excl_ms": 0.060389602007888156
+          },
+          {
+            "name": "SkinnedGeometryBuildBLAS",
+            "count": 5578,
+            "incl_ms": 0.36168187522409584,
+            "excl_ms": 0.05383755826436004
+          },
+          {
+            "name": "CommandList_Submit",
+            "count": 66965,
+            "incl_ms": 0.05286111509501614,
+            "excl_ms": 0.05286111509501614
+          },
+          {
+            "name": "GPUSkinCache_UpdateSkinningBatches",
+            "count": 5577,
+            "incl_ms": 2.2369150053782696,
+            "excl_ms": 0.04906133022563634
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=0 Chunk=1 InStreamStart=23274 OutStart=23274 Vert=35 Morph=0/0",
+            "count": 115916,
+            "incl_ms": 0.048915202581516694,
+            "excl_ms": 0.04888078164205813
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=0 Chunk=2 InStreamStart=23309 OutStart=23309 Vert=238 Morph=0/0",
+            "count": 115916,
+            "incl_ms": 0.04691538185702748,
+            "excl_ms": 0.04687798494049829
+          },
+          {
+            "name": "Skinning0000 Mesh=SK_Mannequin_UE4_WithWeapon LOD=0 Chunk=3 InStreamStart=23547 OutStart=23547 Vert=124 Morph=0/0",
+            "count": 115916,
+            "incl_ms": 0.046394603800878446,
+            "excl_ms": 0.04635498386547153
+          }
+        ],
+        "selected_modules": [
+          {
+            "name": "Submission_Wait",
+            "incl_ms": 1.0663782179992827,
+            "excl_ms": 0.0005189673718483585,
+            "count": 5578
+          },
+          {
+            "name": "GPUSkinCache",
+            "incl_ms": 2.921649584855861,
+            "excl_ms": 0.6769829480684829,
+            "count": 5578
+          }
+        ]
+      }
+    },
+    "animation_policy": {
+      "start": {
+        "threading": true,
+        "full_authority_poses": 0,
+        "mesh": {
+          "everyFrameTick": 27,
+          "leaderPoseFollowers": 133,
+          "uroEnabled": 0,
+          "physicsStatesCreated": 0,
+          "validBodyInstances": 0,
+          "gameplayTiers": [
+            160,
+            0,
+            0
+          ],
+          "renderTiers": [
+            20,
+            67,
+            73
+          ]
+        },
+        "tactical_managers": [],
+        "gameplay_full_reasons": {
+          "sampleWorldTimeSeconds": 37.877716,
+          "sampledEnemies": 0,
+          "unsampledEnemies": 160,
+          "validDistanceSamples": 0,
+          "distance": 0,
+          "attacking": 0,
+          "meleeRangeWhileNotAttacking": 0,
+          "unknown": 160,
+          "countsCanOverlap": true,
+          "distanceSource": "Inverse of last applied max-player 1/(1+2D-distance) score, not a fresh player query"
+        }
+      },
+      "stop": {
+        "threading": true,
+        "full_authority_poses": 0,
+        "mesh": {
+          "everyFrameTick": 24,
+          "leaderPoseFollowers": 136,
+          "uroEnabled": 0,
+          "physicsStatesCreated": 0,
+          "validBodyInstances": 0,
+          "gameplayTiers": [
+            160,
+            0,
+            0
+          ],
+          "renderTiers": [
+            20,
+            54,
+            86
+          ]
+        },
+        "tactical_managers": [],
+        "gameplay_full_reasons": {
+          "sampleWorldTimeSeconds": 99.663721,
+          "sampledEnemies": 0,
+          "unsampledEnemies": 160,
+          "validDistanceSamples": 0,
+          "distance": 0,
+          "attacking": 0,
+          "meleeRangeWhileNotAttacking": 0,
+          "unknown": 160,
+          "countsCanOverlap": true,
+          "distanceSource": "Inverse of last applied max-player 1/(1+2D-distance) score, not a fresh player query"
+        }
+      }
+    },
+    "scope_note": "All module timings are inclusive/exclusive wall scopes, not on-core CPU; do not add nested or parallel totals.",
+    "worker_animation_statistics": [
+      {
+        "name": "PerformAnimEvaluation_WorkerThread",
+        "incl_ms": 1.4945405163140908,
+        "excl_ms": 0.17230387235568306,
+        "count": 205814
+      },
+      {
+        "name": "ProxyUpdateAnimation_WorkerThread",
+        "incl_ms": 0.4158166009322337,
+        "excl_ms": 0.008024202223019004,
+        "count": 205814
+      },
+      {
+        "name": "NativeThreadSafeUpdateAnimation",
+        "incl_ms": 0.0042649695231265685,
+        "excl_ms": 0.0042649695231265685,
+        "count": 205814
+      },
+      {
+        "name": "BlueprintUpdateAnimation",
+        "incl_ms": 0.02364126927214055,
+        "excl_ms": 0.02364126927214055,
+        "count": 205814
+      },
+      {
+        "name": "NativeUpdateAnimation",
+        "incl_ms": 0.002197024022947293,
+        "excl_ms": 0.002197024022947293,
+        "count": 205814
+      },
+      {
+        "name": "SkeletalComponentAnimEvaluate_WorkerThread",
+        "incl_ms": 0.7954340265328076,
+        "excl_ms": 0.18632646109716744,
+        "count": 205814
+      },
+      {
+        "name": "EvaluateAnimInstance_WorkerThread",
+        "incl_ms": 0.6041220867694514,
+        "excl_ms": 0.013977231982789532,
+        "count": 205814
+      },
+      {
+        "name": "EvaluateAnimGraph_WorkerThread",
+        "incl_ms": 0.5268325564718537,
+        "excl_ms": 0.08275403370383651,
+        "count": 169648
+      },
+      {
+        "name": "EvaluateAnimStateMachine_WorkerThread",
+        "incl_ms": 0.20931606310505557,
+        "excl_ms": 0.040656328433130155,
+        "count": 104045
+      },
+      {
+        "name": "Anim Decompression",
+        "incl_ms": 0.4446943348870563,
+        "excl_ms": 0.028027429186088207,
+        "count": 224069
+      },
+      {
+        "name": "AnimSeq GetBonePose",
+        "incl_ms": 0.41666690570096804,
+        "excl_ms": 0.16483542488347078,
+        "count": 224069
+      },
+      {
+        "name": "Build Anim Track Pairs",
+        "incl_ms": 0.054225708139117965,
+        "excl_ms": 0.054225708139117965,
+        "count": 224069
+      },
+      {
+        "name": "Extract Pose From Anim Data",
+        "incl_ms": 0.17536679813553244,
+        "excl_ms": 0.17536679813553244,
+        "count": 224069
+      },
+      {
+        "name": "AnimSeq EvalCurveData",
+        "incl_ms": 0.012674435281462889,
+        "excl_ms": 0.012674435281462889,
+        "count": 224069
+      },
+      {
+        "name": "AnimSingleNodeInstance",
+        "incl_ms": 0.026930978845464325,
+        "excl_ms": 0.021406955898171386,
+        "count": 36166
+      },
+      {
+        "name": "SkeletalMesh/Game/EnemyWarriorAnimPack/SkeletalMesh/SK_Mannequin_UE4_WithWeapon.SK_Mannequin_UE4_WithWeapon",
+        "incl_ms": 1.6386082825385444,
+        "excl_ms": 0.011103262818214414,
+        "count": 813601
+      },
+      {
+        "name": "STAT_FAnimNode_ApplyMeshSpaceAdditive_Update",
+        "incl_ms": 0.03443474363571172,
+        "excl_ms": 0.023154714951595552,
+        "count": 11156
+      },
+      {
+        "name": "STAT_FAnimationNode_TwoWayBlend_Update",
+        "incl_ms": 0.011279849408390104,
+        "excl_ms": 0.011279849408390104,
+        "count": 33468
+      }
+    ],
+    "worker_animation_threads": {
+      "Foreground Worker #0": 300157,
+      "Foreground Worker #1": 305082,
+      "Foreground Worker (Standby #0)": 151,
+      "Foreground Worker (Standby #1)": 89,
+      "Background Worker #0": 24243,
+      "Background Worker #1": 24818,
+      "Background Worker #2": 24416,
+      "Background Worker #3": 25017,
+      "Background Worker #4": 22508,
+      "Background Worker #5": 25427,
+      "Background Worker #6": 24572,
+      "Background Worker #7": 25406,
+      "Background Worker #8": 24902,
+      "Background Worker #9": 25326,
+      "Background Worker #10": 25180,
+      "Background Worker #11": 23462,
+      "Background Worker #12": 22841,
+      "Background Worker #13": 24751,
+      "Background Worker #14": 25074,
+      "Background Worker #15": 24933,
+      "Background Worker #16": 24781,
+      "Background Worker #17": 25116,
+      "Background Worker #18": 24368,
+      "Background Worker #19": 24324,
+      "Background Worker (Standby #4)": 5
+    },
+    "representative_waits": [
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 3.6640000000005557,
+        "nested_task_scope_wall_ms": 3.494999999986703,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.1690000000138525,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.484000000000151,
+        "nested_task_scope_wall_ms": 0.12700000000620548,
+        "explicit_blocking_scope_wall_ms": 0.3489999999999327,
+        "unknown_remainder_scope_wall_ms": 0.007999999994012796,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.3489999999999327,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.3489999999999327,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.3339999999951715,
+        "nested_task_scope_wall_ms": 0.2630000000323207,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.07099999996285078,
+        "decomposition_complete": true
+      },
+      {
+        "name": "Frame Sync Time",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.681999999997629,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.681999999997629,
+        "decomposition_complete": true
+      },
+      {
+        "name": "GameThreadWaitForTask",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.6699999999995043,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.6699999999995043,
+        "decomposition_complete": true
+      },
+      {
+        "name": "Game thread idle time",
+        "thread": "GameThread",
+        "wrapper_scope_wall_ms": 0.6699999999995043,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0,
+        "unknown_remainder_scope_wall_ms": 0.6699999999995043,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RHIThread",
+        "wrapper_scope_wall_ms": 0.415000000003829,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.415000000003829,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RHIThread",
+        "wrapper_scope_wall_ms": 0.3030000000023847,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.3030000000023847,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RHIThread",
+        "wrapper_scope_wall_ms": 0.41899999999372994,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.41899999999372994,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "Submission_Wait",
+        "thread": "RHIThread",
+        "wrapper_scope_wall_ms": 1.4409999999998035,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 1.4309999999966294,
+        "unknown_remainder_scope_wall_ms": 0.010000000003174137,
+        "decomposition_complete": true
+      },
+      {
+        "name": "FTaskBase::WaitWithNamedThreadsSupport",
+        "thread": "RHIThread",
+        "wrapper_scope_wall_ms": 1.4389999999906422,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 1.4309999999966294,
+        "unknown_remainder_scope_wall_ms": 0.007999999994012796,
+        "decomposition_complete": true
+      },
+      {
+        "name": "FTaskBase::WaitImpl_StateChangeEvent_WaitFor",
+        "thread": "RHIThread",
+        "wrapper_scope_wall_ms": 1.4309999999966294,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 1.4309999999966294,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 1.4859999999998763,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 1.4859999999998763,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 0.5509999999873116,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.5509999999873116,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 0.5110000000030368,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.5110000000030368,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 2.6519999999976562,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 2.6519999999976562,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForGatherDynamicMeshElements",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 0.3750000000053433,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.37100000000123146,
+        "unknown_remainder_scope_wall_ms": 0.0040000000041118255,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitUntilTasksComplete",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 0.37400000000786804,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.37100000000123146,
+        "unknown_remainder_scope_wall_ms": 0.003000000006636583,
+        "decomposition_complete": true
+      },
+      {
+        "name": "WaitForTasks",
+        "thread": "RenderThread 0",
+        "wrapper_scope_wall_ms": 0.37100000000123146,
+        "nested_task_scope_wall_ms": 0,
+        "explicit_blocking_scope_wall_ms": 0.37100000000123146,
+        "unknown_remainder_scope_wall_ms": 0.0,
+        "decomposition_complete": true
+      }
+    ]
+  },
+  "surround_tests": {
+    "succeeded": 4,
+    "succeededWithWarnings": 1,
+    "failed": 0,
+    "notRun": 0,
+    "per_test": [
+      {
+        "fullTestPath": "fpstrue.AI.Surround.AttackWaitingQueue",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.CacheAndSlotOwnership",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.ParticipationAndGoalAvailability",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.TacticalBoundaryAndAssignments",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.TacticalQueueAndRecovery",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      }
+    ],
+    "startup_retry": "First launch failed before tests: no writable Zen/default DDC node. R2 used the existing project test DDC graph; failed startup log retained."
+  },
+  "scope": {
+    "build": "Current frozen Development Editor executables, not Shipping",
+    "load": "160 AI, dedicated server + 2 clients; Client1 DX12 1600x900, Client2 NullRHI",
+    "hit_strategy": "Six native query-only UBoxComponent hit proxies per enemy; Simple strategy",
+    "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU, chosen D3D12 adapter 0",
+    "repetitions": 1,
+    "trace_overhead_included": true,
+    "os_context_switch_capture": false,
+    "limits": "Timing scopes identify engine work/wait sites, not OS Ready-vs-Blocked or hardware cache misses. Native unit counters are pipeline-delayed. No causal A/B or Shipping performance claim."
+  },
+  "slot_audit": {
+    "model": "Stable spatial slot array + reverse ownership map + deduplicated FIFO admissions. Spatial ring is not a circular buffer.",
+    "per_target_inner": 8,
+    "per_target_outer": 12,
+    "attack_waiting_hard_limit": 8,
+    "spatial_waiting_limit": "Not the 8-person attack queue; may contain all registered non-inner participants. Production test explicitly exercises 152 spatial candidates at 160 participants.",
+    "recovery": "Actual MoveTo failure releases the owned assignment and appends a new FIFO request with 1s retry delay; no-progress watchdog is 8s. Stale assignment revisions cannot revoke a newer grant.",
+    "confirmed_gaps": [
+      {
+        "priority": "P1",
+        "source": "Source/fpstrue/Characters/Enemies/AI/fpstrueEnemyPositionQuery.cpp:245",
+        "finding": "Outer Kind0 navigation-projected positions skip the full-capsule environment occupancy test. NavMesh projection alone does not establish standability."
+      },
+      {
+        "priority": "P1",
+        "source": "Source/fpstrue/Characters/Enemies/AI/fpstrueSurroundManager.cpp:587",
+        "finding": "Failed ownership is requeued with a participant-wide delay, but the failed slot or enemy-slot pair is not excluded. A persistent bad candidate can be granted again."
+      },
+      {
+        "priority": "P2",
+        "source": "Source/fpstrue/Characters/Enemies/AI/fpstrueSurroundManager.cpp:262",
+        "finding": "Approach-point spacing is validated for inner Kind1, not outer Kind0. Different outer slots can project to overlapping locations."
+      }
+    ],
+    "minimal_followup": "Apply environmental capsule clearance and spacing to consumed outer goals; distinguish globally invalid geometry from per-enemy route failure and temporary crowd blockage. Preserve stable SlotId and use another valid candidate/short cooldown, not ring-array deletion or a second manager.",
+    "observed_timeouts": "Two manager counters 2->14 and 1->12: 23 additional no-progress requeues during this capture. Recovery was observed; blocked-corner gameplay quality was not validated.",
+    "changes_made_this_turn": "Diagnostics and existing tests only; no gameplay/source refactor."
+  }
+}

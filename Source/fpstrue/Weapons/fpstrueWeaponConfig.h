@@ -115,20 +115,11 @@ struct FPSTRUE_API FFPWeaponSettings
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|VisualRecoil", meta = (ClampMin = "0.04", ClampMax = "0.5", Units = "s"))
 	float VisualRecoilDuration = 0.12f;
 
-	// Reload Recovery
-	// 预计动画时长只用于兜底截止点：max(普通/空仓时长, FailSafeDuration) + GracePeriod。
-	// 正常装填由有身份的 Notify 提交，播放结束解除锁；超时只失败收尾，不伪造动画成功。
+	// 权威装弹时长；所有运行模式与无动画角色共用，表现素材不修改这份规则。
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float ReloadDuration = 0.8f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
 	float EmptyReloadDuration = 1.2f;
-
-	// 兜底等待时间的下限；比预计动画长时优先使用此值，避免提前结束正常动画。
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.1"))
-	float ReloadFailSafeDuration = 5.0f;
-	// 额外加在兜底截止点上的宽限时间；不是 CommitReload 后另起的倒计时。
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Reload", meta = (ClampMin = "0.0"))
-	float ReloadCompletionGracePeriod = 0.1f;
 
 	// 编辑器 Clamp 不能约束脚本/代码赋值；装备前与资产验证共用同一套检查。
 	// 非法整组拒绝，不静默混入默认字段或修改设计数值。

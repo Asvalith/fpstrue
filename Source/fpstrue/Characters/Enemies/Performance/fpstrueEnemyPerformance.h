@@ -103,7 +103,8 @@ struct FPSTRUE_API FFPEnemyRenderSignificancePolicy
 	float BudgetRetentionMargin = 0.05f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Budget", meta = (ClampMin = "0"))
-	int32 MaxFullRenderEnemies = 12;
+	// 每本地视图的画面预算，容纳围攻不同玩家的候选；不授予或限制每目标的服务器攻击名额。
+	int32 MaxFullRenderEnemies = 20;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Budget", meta = (ClampMin = "0"))
 	int32 MaxShadowCastingEnemies = 5;
@@ -298,12 +299,11 @@ FORCEINLINE void FPEnemyRenderTopKInsert(TArray<FFPEnemyRenderTopKEntry, Allocat
 
 
 
-class AfpstrueGameMode;
 class AfpstrueEnemyCharacter;
 class UfpstrueEnemyAnimationSharingCoordinator;
 
 /**
- * 显著性调度：GameMode/GameState 启动 Timer → GT 采样快照 → 插件更新玩法评分 → 本端分配表现预算 → GT 应用。
+ * 显著性调度：GameState 启动 Timer → GT 采样快照 → 插件更新玩法评分 → 本端分配表现预算 → GT 应用。
  * 服务器玩法只看有效玩家位置及战斗保护；客户端相机只决定自己的 LOD、动画、阴影和 RT。
  * 候选、预算持有者和策略归本组件，不复制评分/名额，也不授予 AI 目标或攻击资格。
  */
@@ -318,11 +318,9 @@ public:
 
 	// ==================== 生命周期 ====================
 
-	// GameMode 保留可编辑配置作为兼容层，Coordinator 独占评分、预算分配和应用流程。
-	void Start(AfpstrueGameMode* InGameMode);
 	// 多人 GameState 在每个 World 启动本地协调器：服务器更新玩法，客户端只分配自己的表现预算。
 	void StartMultiplayer(UfpstrueEnemyAnimationSharingCoordinator* InSharingCoordinator);
-	// 停止集中更新 Timer；GameMode 结束和组件销毁都会调用。
+	// 停止集中更新 Timer；GameState 结束和组件销毁都会调用。
 	void Stop();
 	// 只读诊断用于自动化验证启动、发现副本和采样端职责，不参与玩法判断。
 	bool IsRunning() const { return bRunning; }
@@ -387,11 +385,8 @@ private:
 	// 修正权重、阈值、距离和名额的非法配置。
 	void SanitizePolicy(FFPEnemyRenderSignificancePolicy& Policy);
 
-	TWeakObjectPtr<AfpstrueGameMode> GameMode;
 	TWeakObjectPtr<UfpstrueEnemyAnimationSharingCoordinator> AnimationSharingCoordinator;
 	FFPEnemyRenderSignificancePolicy ActiveRenderPolicy;
-	bool bPolicyInitialized = false;
-	bool bMultiplayerMode = false;
 	bool bRunning = false;
 	bool bSharingStartAttempted = false;
 	bool bReportedPopulatedUpdate = false;

@@ -25,6 +25,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Historical source only: AutoBenchmark and the single-player GameMode were retired.
+# Keep old launch/statistical logic for evidence review, but never launch the current build through it.
+throw "This historical single-player capture entry is retired. Use Tools/Performance/RunGroupAIBaseline.ps1 for the network 160-AI baseline; use the matching historical revision to reproduce old runs."
+
 # Resolve and validate before checking machine paths or creating any evidence.
 # Explicit CLI arguments (including -CaptureTaskTrace:$false) win over JSON.
 . (Join-Path $PSScriptRoot "ReadRenderCostConfig.ps1")

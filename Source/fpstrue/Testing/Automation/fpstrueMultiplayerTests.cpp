@@ -5,7 +5,6 @@
 #include "Misc/AutomationTest.h"
 #include <limits>
 #include "Game/fpstrueMultiplayer.h"
-#include "Game/fpstrueGameMode.h"
 #include "GameMapsSettings.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
@@ -102,7 +101,7 @@ bool BeginMultiplayerUnitWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& 
 {
 	if (Fixture.CreateTestWorld(EWorldType::Game))
 	{
-		Fixture.GetTestWorld()->GetWorldSettings()->DefaultGameMode = ModeClass != nullptr ? ModeClass : AGameModeBase::StaticClass();
+		Fixture.GetTestWorld()->GetWorldSettings()->DefaultGameMode = ModeClass != nullptr ? ModeClass : (bCreateAI ? AfpstruePvpGameMode::StaticClass() : AGameModeBase::StaticClass());
 		if (bCreateAI && !Test.TestNotNull(TEXT("Weapon fixture has its real AI controller system"), Fixture.GetTestWorld()->CreateAISystem())) return false;
 		if (Fixture.BeginPlayInTestWorld()) return true;
 	}
@@ -616,17 +615,26 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	Player->SetRole(ROLE_SimulatedProxy);
 	const FStructProperty* StateProperty = FindFProperty<FStructProperty>(Weapon->GetClass(), TEXT("NetworkState"));
 	UFunction* RepNotify = Weapon->FindFunction(TEXT("OnRep_NetworkState"));
+	const FStructProperty* OwnerProperty = FindFProperty<FStructProperty>(Weapon->GetClass(), TEXT("OwnerState"));
+	UFunction* OwnerNotify = Weapon->FindFunction(TEXT("OnRep_OwnerState"));
 	if (!TestNotNull(TEXT("Weapon has a reflected network state"), StateProperty) ||
-		!TestNotNull(TEXT("Weapon network state has a real RepNotify"), RepNotify)) return false;
-	if (!TestTrue(TEXT("Weapon snapshot has the declared complete state type"), StateProperty->Struct == FFPReplicatedWeaponState::StaticStruct())) return false;
+		!TestNotNull(TEXT("Weapon network state has a real RepNotify"), RepNotify)
+		|| !TestNotNull(TEXT("Owner has its private ammunition snapshot"), OwnerProperty)
+		|| !TestNotNull(TEXT("Owner snapshot has its real RepNotify"), OwnerNotify)) return false;
+	if (!TestTrue(TEXT("Weapon snapshot has the declared public state type"), StateProperty->Struct == FFPReplicatedWeaponState::StaticStruct())) return false;
 	TestTrue(TEXT("Weapon state participates in property replication"), StateProperty->HasAnyPropertyFlags(CPF_Net));
 	FFPReplicatedWeaponState* State = StateProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponState>(Weapon);
+	FFPReplicatedWeaponOwnerState* OwnerState = OwnerProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponOwnerState>(Weapon);
 	State->Holder = Player;
 	State->Action = EFPWeaponActionState::Ready;
-	State->Ammo = 7;
-	State->Reserve = 32;
+	State->EquipmentGeneration = 1; // 本夹具只成功装备一次；接收两份同代际快照，不重跑装备业务。
 	State->Revision = 10;
+	OwnerState->EquipmentGeneration = State->EquipmentGeneration;
+	OwnerState->Revision = State->Revision;
+	OwnerState->Ammo = 7;
+	OwnerState->Reserve = 32;
 	Weapon->ProcessEvent(RepNotify, nullptr);
+	Weapon->ProcessEvent(OwnerNotify, nullptr);
 	TestTrue(TEXT("Received equipment snapshot resolves the same native holder getter"), Weapon->GetOwningCharacter() == Player);
 	TestEqual(TEXT("Client snapshot sets the received magazine"), Weapon->GetCurrentAmmo(), 7);
 	TestEqual(TEXT("Client snapshot sets the received reserve"), Weapon->GetReserveAmmo(), 32);
@@ -647,8 +655,9 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Rejected direct client commands do not subtract authoritative ammo"), Weapon->GetCurrentAmmo(), 7);
 	TestEqual(TEXT("Rejected direct client commands do not execute another hitscan"), TargetHealth->GetHealth(), 60.0f);
 	// 迟到快照只剩一发时，预测达到本地上限只能停表现，不能替服务器结束连射或打断空仓换弹。
-	State->Ammo = 1;
-	Weapon->ProcessEvent(RepNotify, nullptr);
+	OwnerState->Ammo = 1;
+	++OwnerState->Revision;
+	Weapon->ProcessEvent(OwnerNotify, nullptr);
 	Weapon->StartFire();
 	Weapon->StopFire();
 	const float PredictionWait = FMath::Max(0.25f, 120.0f / Weapon->GetWeaponSettings().RoundsPerMinute);
@@ -657,8 +666,9 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A client estimate remains read-only authoritative ammo"), Weapon->GetCurrentAmmo(), 1);
 	TestFalse(TEXT("Direct client commands cannot create or end the fire ability"), FireSpec->IsActive());
 	Weapon->OnWeaponFirePerformed.RemoveDynamic(PresentationObserver.Get(), &UfpstrueReloadReentryObserver::HandleFirePerformed);
-	State->Ammo = 7;
-	Weapon->ProcessEvent(RepNotify, nullptr);
+	OwnerState->Ammo = 7;
+	++OwnerState->Revision;
+	Weapon->ProcessEvent(OwnerNotify, nullptr);
 	State->Action = EFPWeaponActionState::Reloading;
 	State->ReloadId = 77;
 	State->bCommitted = false;
@@ -1174,11 +1184,11 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("An already timer-executed request cannot be executed again manually"), QueueWeapon->ExecuteNetworkShot(Pending));
 	TestEqual(TEXT("The original queued request finalizes its own identity"), QueueWeapon->LastProcessedShotId, Pending.ShotId);
 	TestTrue(TEXT("The pending request finally publishes Accepted rather than a stale Duplicate result"),
-		QueueWeapon->LastShotResult == EFPShotResult::Accepted && QueueWeapon->NetworkState.ShotResult == EFPShotResult::Accepted);
+		QueueWeapon->LastShotResult == EFPShotResult::Accepted);
 	TestEqual(TEXT("Queue plus repeated delivery spends exactly one pending round"), QueueWeapon->GetCurrentAmmo(), AmmoBeforeQueue - 1);
 	TestTrue(TEXT("A completed queued request cannot execute a second time"), QueueWeapon->AcceptShotRequest(Pending) == EFPShotResult::Duplicate);
 	TestTrue(TEXT("Repeating a completed request cannot replace its persistent accepted acknowledgement"),
-		QueueWeapon->LastShotResult == EFPShotResult::Accepted && QueueWeapon->NetworkState.ShotResult == EFPShotResult::Accepted);
+		QueueWeapon->LastShotResult == EFPShotResult::Accepted);
 	TestEqual(TEXT("A finalized duplicate leaves the magazine unchanged"), QueueWeapon->GetCurrentAmmo(), AmmoBeforeQueue - 1);
 
 	// 三个时间间隔合法的输入在同一服务器帧到达：保留有界FIFO，而非第一发以后只能容纳一项。
@@ -1505,6 +1515,8 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 		OldWeaponRequest.FireSession == ReplacementWeapon->FireSession &&
 		OldWeaponRequest.ShotId == ReplacementWeapon->LastProcessedShotId);
 	const FFPReplicatedWeaponState BeforeStaleData = ReplacementWeapon->NetworkState;
+	const uint32 FinalizedShotBeforeStaleData = ReplacementWeapon->LastProcessedShotId;
+	const EFPShotResult ResultBeforeStaleData = ReplacementWeapon->LastShotResult;
 	const int32 AmmoBeforeStaleData = ReplacementWeapon->GetCurrentAmmo();
 	FGameplayAbilityTargetDataHandle OldWeaponData(new FGameplayAbilityTargetData_FPShot());
 	static_cast<FGameplayAbilityTargetData_FPShot*>(OldWeaponData.Get(0))->Request = OldWeaponRequest;
@@ -1514,9 +1526,9 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Old weapon ability data cannot recreate a cancelled target-data cache"),
 		QueueASC->CallReplicatedTargetDataDelegatesIfSet(QueueFireSpec->Handle, OldKey));
 	TestEqual(TEXT("Discarding old-key data does not publish another weapon's snapshot"), ReplacementWeapon->NetworkState.Revision, BeforeStaleData.Revision);
-	TestEqual(TEXT("Discarding old-key data cannot advance the new weapon's finalized shot"), ReplacementWeapon->NetworkState.LastProcessedShotId, BeforeStaleData.LastProcessedShotId);
+	TestEqual(TEXT("Discarding old-key data cannot advance the new weapon's finalized shot"), ReplacementWeapon->LastProcessedShotId, FinalizedShotBeforeStaleData);
 	TestTrue(TEXT("Discarding old-key data cannot overwrite the new weapon's accepted result"),
-		ReplacementWeapon->NetworkState.ShotResult == BeforeStaleData.ShotResult && ReplacementWeapon->LastShotResult == EFPShotResult::Accepted);
+		ReplacementWeapon->LastShotResult == ResultBeforeStaleData && ReplacementWeapon->LastShotResult == EFPShotResult::Accepted);
 	TestEqual(TEXT("Discarding old-key data cannot spend or restore the new weapon's ammunition"), ReplacementWeapon->GetCurrentAmmo(), AmmoBeforeStaleData);
 	ReplacementWeapon->EndAbilityFire();
 	QueueASC->RemoveLooseGameplayTag(FpstrueGameplayTags::State_Firing, QueueASC->GetTagCount(FpstrueGameplayTags::State_Firing));
@@ -1617,12 +1629,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerEnemyActivationTest,
 	"fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
-// 两种模式的登记入口必须拒绝本次BT启动失败；后续注入上下文不能伪造成功。
+// 唯一多人登记入口拒绝本次 BT 启动失败；后续注入上下文不能伪造成功。
 bool FFpstrueMultiplayerEnemyActivationTest::RunTest(const FString& Parameters)
 {
-	AddExpectedError(TEXT("has an incompatible Blackboard; activation rejected."), EAutomationExpectedErrorFlags::Contains, 2);
-	AddExpectedError(TEXT("No valid enemy BehaviorTree"), EAutomationExpectedErrorFlags::Contains, 2);
-	for (UClass* ModeClass : {AfpstrueGameMode::StaticClass(), AfpstruePvpGameMode::StaticClass()})
+	AddExpectedError(TEXT("has an incompatible Blackboard; activation rejected."), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedError(TEXT("No valid enemy BehaviorTree"), EAutomationExpectedErrorFlags::Contains, 1);
+	UClass* ModeClass = AfpstruePvpGameMode::StaticClass();
 	{
 		FTestWorldWrapper Fixture;
 		if (!BeginMultiplayerUnitWorld(Fixture, *this, true, ModeClass)) return false;
@@ -1645,12 +1657,6 @@ bool FFpstrueMultiplayerEnemyActivationTest::RunTest(const FString& Parameters)
 		{
 			Pvp->RegisterPveEnemy(Enemy);
 			TestEqual(TEXT("PvPvE does not register failed behavior startup"), Pvp->GetAliveEnemyCount(), 0);
-		}
-		else
-		{
-			auto* Single = World->GetAuthGameMode<AfpstrueGameMode>();
-			Single->RegisterEnemy(Enemy);
-			TestEqual(TEXT("Wave mode does not register failed behavior startup"), Single->RegisteredEnemies.Num(), 0);
 		}
 	}
 	return true;
@@ -1684,6 +1690,11 @@ bool FFpstrueMultiplayerPveAuthorityTest::RunTest(const FString& Parameters)
 	{
 		Player->SetActorEnableCollision(false);
 		Player->GetCharacterMovement()->SetComponentTickEnabled(false);
+		// 与正式规则相同，战斗目标必须由玩家控制器占有。
+		for (const FName ActionName : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+			TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+			FindFProperty<FObjectPropertyBase>(Player->GetClass(), ActionName)->SetObjectPropertyValue_InContainer(Player, NewObject<UInputAction>(Player));
+		World->SpawnActor<APlayerController>()->Possess(Player);
 	}
 	FirstPlayer->SetActorLocation(FVector(150.0f, 0.0f, 0.0f));
 	SecondPlayer->SetActorLocation(FVector(0.0f, 150.0f, 0.0f));
@@ -1710,12 +1721,13 @@ bool FFpstrueMultiplayerPveAuthorityTest::RunTest(const FString& Parameters)
 	FFPEnemyTacticalAssignment Assignment;
 	if (!TestTrue(TEXT("The server grants a real inner-ring assignment before an attack permit"),
 		Manager->GetOrRequestTacticalAssignment(Enemy, Assignment) && Assignment.Role == EFPEnemyTacticalRole::Inner)) return false;
+	Enemy->SetActorLocation(FirstPlayer->GetActorLocation() - FVector(1000, 0, 0));
 	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	TestTrue(TEXT("Server-side enemy acquires an attack permit"), Manager->TryAcquireAttackPermission(Enemy));
 	AddInfo(TEXT("Before arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
 	TestTrue(TEXT("The controller retains the granted inner lease revision"), Manager->HasInnerSlot(Enemy, Controller->TacticalAssignment.Revision));
-	TestFalse(TEXT("Holding an inner lease alone cannot attack before reaching its position"), Combat->TryAttackTarget());
-	// 禁碰撞夹具的原生AgentCylinder为0，不享有胶囊半径到达容差；明确移到席位，而非放宽生产接受半径。
+	TestFalse(TEXT("Holding a lease does not bypass the real melee range"), Combat->TryAttackTarget());
+	// 走到攻击范围内；导航点只指导移动，不再代替真实距离/朝向/LOS 准入。
 	Enemy->SetActorLocation(Assignment.Goal + FVector(0, 0, Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
 	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	AddInfo(TEXT("After arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
@@ -1923,8 +1935,6 @@ bool FFpstrueMultiplayerPveTargetLifecycleTest::RunTest(const FString& Parameter
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
 	if (!TestNotNull(TEXT("Target lifecycle controller"), Controller)) return false;
 	Controller->Possess(Enemy);
-	// 临时世界没有 NetDriver；只固定多人选敌模式，参与资格仍调用真实 Mode 注册表检查。
-	Controller->bUsesMultiplayerTargets = true;
 	if (Controller->GetBrainComponent() != nullptr) Controller->GetBrainComponent()->SetComponentTickEnabled(false);
 	const auto ReportSeen = [&](AfpstrueCharacter* Pawn)
 	{
@@ -1959,13 +1969,14 @@ bool FFpstrueMultiplayerPveTargetLifecycleTest::RunTest(const FString& Parameter
 		return Manager->GetOrRequestTacticalAssignment(Enemy, Assignment) && Assignment.Role == EFPEnemyTacticalRole::Inner;
 	};
 	if (!TestTrue(TEXT("Target lifecycle starts with a queue-granted inner seat"), GrantInner(FirstManager))) return false;
+	Enemy->SetActorLocation(FirstPawn->GetActorLocation() - FVector(1000, 0, 0));
 	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	AfpstrueSurroundManager::FCoverRequest Cover;
 	Cover.State = EFPCoverQueryResult::Found;
 	FirstManager->CoverRequests.Add(EnemyKey, Cover);
 	TestTrue(TEXT("Target lifecycle starts with a real granted attack permit"), FirstManager->TryAcquireAttackPermission(Enemy));
 	AddInfo(TEXT("Lifecycle before arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
-	TestFalse(TEXT("Target lifecycle cannot bypass arrival merely by holding the permit"), Enemy->GetCombatComponent()->TryAttackTarget());
+	TestFalse(TEXT("A permit alone does not bypass the real melee range"), Enemy->GetCombatComponent()->TryAttackTarget());
 	Enemy->SetActorLocation(Controller->TacticalAssignment.Goal + FVector(0, 0, Enemy->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
 	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
 	AddInfo(TEXT("Lifecycle after arrival: ") + DescribeEnemyAttackGate(*Enemy, *Controller, Controller->TacticalAssignment, Controller->CombatMoveAcceptanceRadius));
@@ -2329,8 +2340,10 @@ bool FFpstrueMultiplayerConnectionRevisionTest::RunTest(const FString& Parameter
 	TestEqual(TEXT("An old retry cannot advance the current operation"), Instance->OperationRevision, uint32(41));
 	TestEqual(TEXT("An old retry cannot consume another retry attempt"), Instance->RetryCount, 1);
 	const uint32 CancelledRevision = Instance->OperationRevision;
+	Instance->ResumeId = 77;
 	Instance->CancelPvpConnection();
 	TestFalse(TEXT("Explicit cancellation disables automatic reconnect"), Instance->bAutoReconnect);
+	TestEqual(TEXT("Cancellation clears the previous accepted identity, not just the cached token"), Instance->ResumeId, INDEX_NONE);
 	TestTrue(TEXT("Cancellation invalidates callbacks carrying the old operation revision"), Instance->OperationRevision != CancelledRevision);
 	TestTrue(TEXT("Cancellation leaves no active connect, ready wait or scheduled retry"),
 		Instance->ConnectionState != EFPConnectionState::Connecting && Instance->ConnectionState != EFPConnectionState::WaitingReady &&
@@ -3229,8 +3242,13 @@ bool FFpstrueMultiplayerRemoteLocomotionAnimationTest::RunTest(const FString&)
 	AfpstrueRARWeapon* RemoteRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(FVector(5000.0f), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Remote fixture has its real paired RAR rifle"), RemoteRifle)) return false;
 	UfpstrueWeaponComponent* RemoteWeapon = RemoteRifle->FindComponentByClass<UfpstrueWeaponComponent>();
-	if (!TestNotNull(TEXT("Remote fixture has its production weapon component"), RemoteWeapon)
-		|| !TestTrue(TEXT("Remote fixture equips through the authority transaction before receiving its proxy role"), RemoteWeapon->AttachWeapon(Character))) return false;
+	if (!TestNotNull(TEXT("Remote fixture has its production weapon component"), RemoteWeapon)) return false;
+	{
+		// 先由真实联网装备事务发布代际；接收夹具不能把当前身份硬写成猜测的 1。
+		// 只切同步调用的模式，不启动网络驱动、旅行或推进世界。
+		TGuardValue<FString> ListenMode(Fixture.GetTestWorld()->NextURL, TEXT("?listen"));
+		if (!TestTrue(TEXT("Remote fixture equips through the authority transaction before receiving its proxy role"), RemoteWeapon->AttachWeapon(Character))) return false;
+	}
 	Character->SetRole(ROLE_SimulatedProxy);
 	RemoteRifle->SetRole(ROLE_SimulatedProxy);
 	RemoteWeapon->RefreshNetworkEquipment();
@@ -3352,26 +3370,30 @@ bool FFpstrueMultiplayerRemoteLocomotionAnimationTest::RunTest(const FString&)
 	if (!TestNotNull(TEXT("Remote reload retains its replicated snapshot"), StateProperty)
 		|| !TestNotNull(TEXT("Remote reload retains its production RepNotify"), ReloadNotify)) return false;
 	FFPReplicatedWeaponState* State = StateProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponState>(RemoteWeapon);
+	if (!TestTrue(TEXT("Received reload uses the equipment identity actually published by authority"), State->EquipmentGeneration != 0)) return false;
+	TestEqual(TEXT("Locomotion sampling preserves the published equipment generation"), RemoteWeapon->EquipmentRevision, State->EquipmentGeneration);
+	TestTrue(TEXT("The received reload snapshot is newer than the last public presentation"), State->Revision + 10 > RemoteWeapon->LastPresentedStateRevision);
 	State->Holder = Character;
 	State->Action = EFPWeaponActionState::Reloading;
 	State->ReloadId = 91;
-	State->Ammo = 7;
-	State->Reserve = 32;
+	// 保留真实装备快照的代际；观察者只接收公共表现，不注入拥有者弹药。
+	const int32 ObserverAmmoBeforeReload = RemoteWeapon->GetCurrentAmmo();
 	State->ReloadDuration = RemoteWeapon->GetWeaponSettings().ReloadDuration;
 	State->ReloadStartServerTime = Fixture.GetTestWorld()->GetTimeSeconds();
 	State->Revision += 10;
 	RemoteWeapon->ProcessEvent(ReloadNotify, nullptr);
+	TestEqual(TEXT("The actual RepNotify accepts the matching public reload identity"), RemoteWeapon->GetActiveReloadId(), 91);
 	TestTrue(TEXT("The received reload starts on the complete remote body"), Animation->Montage_IsPlaying(Animation->ReloadMontage));
 	const UAnimInstance* RemoteGun = RemoteWeapon->GetAnimInstance();
 	TestTrue(TEXT("The same received reload starts the paired RAR gun mechanics"),
 		RemoteGun != nullptr && RemoteGun->Montage_IsPlaying(RemoteWeapon->WeaponReloadMontage));
 	TestTrue(TEXT("Received remote reload does not play the hidden first-person arms"),
 		RemoteArms == nullptr || !RemoteArms->Montage_IsPlaying(Animation->ReloadMontage));
-	TestEqual(TEXT("Remote animation does not independently commit ammunition"), RemoteWeapon->GetCurrentAmmo(), 7);
+	TestEqual(TEXT("Remote animation does not independently commit ammunition"), RemoteWeapon->GetCurrentAmmo(), ObserverAmmoBeforeReload);
 	for (int32 Frame = 0; Frame < 3; ++Frame) UpdateBody();
 	TestTrue(TEXT("Returning locomotion to idle cannot stop the received reload montage"), Animation->Montage_IsPlaying(Animation->ReloadMontage));
 	TestTrue(TEXT("Returning locomotion to idle cannot cancel the weapon's reload transaction"), RemoteWeapon->IsReloading());
-	TestEqual(TEXT("Idle sampling does not manufacture ammunition during reload"), RemoteWeapon->GetCurrentAmmo(), 7);
+	TestEqual(TEXT("Idle sampling does not manufacture ammunition during reload"), RemoteWeapon->GetCurrentAmmo(), ObserverAmmoBeforeReload);
 	// 本地只固定 CMC 采样后的 Acceleration/Velocity，覆盖松键惯性；不伪造真实按键或移动距离验收。
 	AfpstrueCharacter* LocalCharacter = Fixture.GetTestWorld()->SpawnActor<AfpstrueCharacter>(PawnClass, FVector(10000.0f, 0.0f, 0.0f), FRotator::ZeroRotator);
 	APlayerController* LocalController = Fixture.GetTestWorld()->SpawnActor<APlayerController>();
@@ -3521,11 +3543,7 @@ bool FFpstrueMultiplayerRARAssetsTest::RunTest(const FString&)
 	{
 		TestTrue(TEXT("A project montage has a positive finite playback length"), FMath::IsFinite(Montage->GetPlayLength()) && Montage->GetPlayLength() > 0.0f);
 		TestTrue(TEXT("A project montage actually contains an animation slot"), !Montage->SlotAnimTracks.IsEmpty());
-		for (const FAnimNotifyEvent& Event : Montage->Notifies)
-		{
-			TestTrue(TEXT("Montage notifications do not import vendor rules or duplicate audiovisual effects"),
-				Event.Notify != nullptr && Event.Notify->IsA<UfpstrueAnimNotify_ReloadCommit>() && Event.NotifyStateClass == nullptr);
-		}
+		TestTrue(TEXT("Project montages contain no vendor rules or obsolete ammunition notifications"), Montage->Notifies.IsEmpty());
 		for (const FSlotAnimationTrack& Slot : Montage->SlotAnimTracks)
 		{
 			TestEqual(TEXT("Project actions use the same slot consumed by all three animation graphs"), Slot.SlotName, FName(TEXT("RARAction")));
@@ -3827,9 +3845,7 @@ bool FFpstrueMultiplayerTemplateAssetsTest::RunTest(const FString&)
 	{
 		TestTrue(TEXT("Template montages have a positive finite playback length"), FMath::IsFinite(Montage->GetPlayLength()) && Montage->GetPlayLength() > 0.0f);
 		TestTrue(TEXT("Template montages contain an actual action slot"), !Montage->SlotAnimTracks.IsEmpty());
-		for (const FAnimNotifyEvent& Notify : Montage->Notifies)
-			TestTrue(TEXT("Template montages do not import supplier gameplay or duplicate audiovisual notifications"),
-				Notify.Notify != nullptr && Notify.Notify->IsA<UfpstrueAnimNotify_ReloadCommit>() && Notify.NotifyStateClass == nullptr);
+		TestTrue(TEXT("Template montages contain no supplier rules or obsolete ammunition notifications"), Montage->Notifies.IsEmpty());
 		for (const FSlotAnimationTrack& Slot : Montage->SlotAnimTracks)
 		{
 			TestEqual(TEXT("Template graphs and montages share the project action slot"), Slot.SlotName, FName(TEXT("TemplateAction")));
@@ -3849,8 +3865,8 @@ bool FFpstrueMultiplayerTemplateAssetsTest::RunTest(const FString&)
 	UClass* NetworkHud = LoadClass<UUserWidget>(nullptr, TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C"));
 	if (!TestNotNull(TEXT("The original single-player HUD asset remains available"), OriginalHud)
 		|| !TestNotNull(TEXT("The network copy of the original HUD exists"), NetworkHud)) return false;
-	TestTrue(TEXT("The original single-player HUD retains its original native parent"), OriginalHud->GetSuperClass() == UUserWidget::StaticClass());
-	TestTrue(TEXT("Only the network HUD copy inherits the native event-driven bridge"), NetworkHud->GetSuperClass() == UfpstruePvpIngameWidget::StaticClass());
+	TestTrue(TEXT("The retained authored layout now uses the single native multiplayer bridge"), OriginalHud->GetSuperClass() == UfpstruePvpIngameWidget::StaticClass());
+	TestTrue(TEXT("The network layout uses the same native event-driven bridge"), NetworkHud->GetSuperClass() == UfpstruePvpIngameWidget::StaticClass());
 	const auto* OriginalHudClass = Cast<UWidgetBlueprintGeneratedClass>(OriginalHud);
 	const auto* NetworkHudClass = Cast<UWidgetBlueprintGeneratedClass>(NetworkHud);
 	if (!TestNotNull(TEXT("The original HUD remains a compiled WidgetBlueprint"), OriginalHudClass)
@@ -4443,18 +4459,27 @@ bool FFpstrueMultiplayerRARReloadProgressTest::RunTest(const FString&)
 	if (!TestTrue(TEXT("Snapshot fixture actually enters the client presentation branch without a transport"), World->GetNetMode() == NM_Client)) return false;
 	const FStructProperty* StateProperty = FindFProperty<FStructProperty>(Weapon->GetClass(), TEXT("NetworkState"));
 	UFunction* OnRep = Weapon->FindFunction(TEXT("OnRep_NetworkState"));
+	const FStructProperty* OwnerProperty = FindFProperty<FStructProperty>(Weapon->GetClass(), TEXT("OwnerState"));
+	UFunction* OwnerNotify = Weapon->FindFunction(TEXT("OnRep_OwnerState"));
 	if (!TestNotNull(TEXT("Reload uses the actual replicated weapon snapshot"), StateProperty)
-		|| !TestNotNull(TEXT("Reload uses the actual RepNotify"), OnRep)) return false;
+		|| !TestNotNull(TEXT("Reload uses the actual RepNotify"), OnRep)
+		|| !TestNotNull(TEXT("Owner progress fixture has its private ammunition snapshot"), OwnerProperty)
+		|| !TestNotNull(TEXT("Owner progress fixture has its private RepNotify"), OwnerNotify)) return false;
 	FFPReplicatedWeaponState* State = StateProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponState>(Weapon);
+	FFPReplicatedWeaponOwnerState* OwnerState = OwnerProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponOwnerState>(Weapon);
 	State->Holder = Character;
 	State->Action = EFPWeaponActionState::Reloading;
 	State->ReloadId = 71;
-	State->Ammo = 7;
-	State->Reserve = 32;
+	State->EquipmentGeneration = 1;
 	State->ReloadDuration = Weapon->GetWeaponSettings().ReloadDuration;
 	State->ReloadStartServerTime = World->GetTimeSeconds() - State->ReloadDuration * 0.45;
 	State->Revision += 10;
+	OwnerState->EquipmentGeneration = State->EquipmentGeneration;
+	OwnerState->Revision = State->Revision;
+	OwnerState->Ammo = 7;
+	OwnerState->Reserve = 32;
 	Weapon->ProcessEvent(OnRep, nullptr);
+	Weapon->ProcessEvent(OwnerNotify, nullptr);
 	TestTrue(TEXT("Received server clock identifies the current reload phase"), FMath::IsNearlyEqual(Weapon->GetReloadProgress(), 0.45f, 0.01f));
 	ArmsMesh->SetAnimInstanceClass(ArmsClass);
 	ArmsMesh->TickAnimation(0.001f, false);

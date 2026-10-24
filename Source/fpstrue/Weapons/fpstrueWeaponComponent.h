@@ -78,8 +78,6 @@ struct FFPReplicatedWeaponState
 	GENERATED_BODY()
 	UPROPERTY() TObjectPtr<AfpstrueCharacter> Holder = nullptr;
 	UPROPERTY() EFPWeaponActionState Action = EFPWeaponActionState::Disabled;
-	UPROPERTY() int32 Ammo = 0;
-	UPROPERTY() int32 Reserve = 0;
 	UPROPERTY() int32 ReloadId = 0;
 	// 同一 ReloadId 的表现时钟：晚加入/重连从当前阶段播放，不重新开始服务器事务。
 	UPROPERTY() double ReloadStartServerTime = 0.0;
@@ -88,17 +86,26 @@ struct FFPReplicatedWeaponState
 	UPROPERTY() bool bCommitted = false;
 	UPROPERTY() EFPReloadEndReason EndReason = EFPReloadEndReason::Completed;
 	UPROPERTY() uint32 Revision = 0;
-	// 和弹药同批到达的表现进度，只帮助本地换弹资格；不授权客户端命中或数值结算。
+	// 公共单发表现进度；不授权客户端命中或数值结算。
 	UPROPERTY() int32 FirePresentationKey = 0;
 	UPROPERTY() int32 FirePresentationShot = 0;
 	UPROPERTY() uint32 EquipmentGeneration = 0;
 	UPROPERTY() uint32 FireSession = 0;
-	UPROPERTY() uint32 LastProcessedShotId = 0;
-	UPROPERTY() EFPShotResult ShotResult = EFPShotResult::Accepted;
 	// 死亡掉落是持久终态，不用一次性 RPC；初始条件只用于首帧，后续位姿交给 UE 物理复制。
 	UPROPERTY() bool bDroppedOnDeath = false;
 	UPROPERTY() FTransform DropTransform;
 	UPROPERTY() FVector_NetQuantize10 DropVelocity = FVector::ZeroVector;
+};
+
+// 拥有者私有的派生结果；与公共快照共用发布版本和装备代际，不构成第二套弹药业务状态。
+USTRUCT()
+struct FFPReplicatedWeaponOwnerState
+{
+	GENERATED_BODY()
+	UPROPERTY() uint32 EquipmentGeneration = 0;
+	UPROPERTY() uint32 Revision = 0;
+	UPROPERTY() int32 Ammo = 0;
+	UPROPERTY() int32 Reserve = 0;
 };
 
 //动态多播委托类型
@@ -123,7 +130,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FWeaponTraceEvent, bool, bHit, FVe
  * 动作互斥与连射调度由 GA 管理；本组件只执行单发射击和带播放身份的换弹事务。
  *
  * Character 向 ASC 提交输入；Action 枚举只展示 GAS 结果，不参与业务授权。
- * 单机用 Notify 提交换弹，联网由服务器时长完成；Timer 处理换弹、后坐力和已准入网络射击，不生成新的连射输入。
+ * 原生唯一 Timer 按服务器时长完成换弹；Timer 另处理后坐力和已准入网络射击，不生成新的连射输入。
  * 死亡或卸下先禁用装备，再取消相关能力，不能由旧回调重新启用武器。
  * Reloading 中提交只转移弹药；有身份的完成/中断、主动取消或超时才解除动作锁。
  */
@@ -135,7 +142,7 @@ class FPSTRUE_API UfpstrueWeaponComponent : public USkeletalMeshComponent
 public:
 	// 默认子组件参与复制；动作请求走角色 ASC，武器多播只传服务器已结算的单发表现。
 	UfpstrueWeaponComponent();
-	// 复制一份服务端业务快照，弹药、装备、动作与换弹阶段由接收端统一消费。
+	// 装备/动作复制给观察者，弹药仅复制给拥有者；逐发裁决走拥有者可靠 ACK。
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	// 原生根网格只复制业务快照；装备挂接由 Holder 驱动，掉落位姿由 Actor 物理复制，旧蓝图组件保留默认复制。
 	virtual void GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const override;
@@ -227,12 +234,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	bool IsEmptyReloadPresentation() const { return NetworkState.bEmptyReload; }
 
-	// 提交指定事务的装弹，至多转移一次；旧编号不能借用当前换弹。
-	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	// 原生完成入口内部提交一次，蓝图无装弹写入权限；旧编号不能借用当前换弹。
 	bool CommitReloadForTransaction(int32 ReloadId);
 
-	// 正常结束指定事务；需要时补交一次弹药，再统一清理动画和动作锁。
-	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	// 原生计时捕获编号后完成事务；不向蓝图暴露第二个动画完成入口。
 	void FinishReloadForTransaction(int32 ReloadId);
 
 	// 中断指定事务，只结束流程，不补弹也不撤销此前已提交的弹药。
@@ -247,9 +252,6 @@ public:
 	// 此接口接管实例的结束委托；不要再为同一实例设置 PlayMontageProxy 完成回调。
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	bool BindReloadMontage(int32 ReloadId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* Montage);
-
-	// 原生 Notify 只接受已绑定的播放实例；没有来源身份时拒绝，不猜“当前换弹”。
-	bool CommitReloadFromNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference);
 
 	// ==================== Owner Lifecycle ====================
 	//角色死亡、卸下或 EndPlay 时停止射击、换弹和后坐力，并禁用武器。
@@ -331,6 +333,8 @@ private:
 	friend class UfpstrueReloadAbility;
 	friend class UfpstrueAimAbility;
 	friend class FFpstrueMultiplayerShotProtocolTest;
+	friend class FFpstrueWeaponReplicationAudienceTest;
+	friend class FFpstrueMultiplayerRemoteLocomotionAnimationTest;
 	// 只有 GA 能调用执行器；公开 Start/Stop/Request 只是 ASC 请求入口，不再直接启动业务。
 	bool CanExecuteShot() const;
 	// 纯校验，不消费 ShotId、不修改会话；准入、执行和 ACK 共用装备归属规则。
@@ -365,6 +369,10 @@ private:
 	void PublishNetworkState();
 	// 客户端应用最新业务快照，先收尾旧播放再恢复新阶段，不反向执行伤害或补弹。
 	UFUNCTION() void OnRep_NetworkState();
+	// 私有快照可以先到；就绪入口只在公共装备身份匹配后消费，不猜测 Holder/Controller。
+	UFUNCTION() void OnRep_OwnerState();
+	// 应用比可靠 ACK 更新的弹药结果；返回是否确实更新了本地镜像，不修改权威业务。
+	bool ApplyOwnerNetworkState();
 	// 单发结果是瞬时表现；射线端点已由 FHitResult 序列化，不重复传输。
 	UFUNCTION(NetMulticast, Unreliable)
 	void MulticastShot(const FHitResult& Hit, int32 ShotIndex, uint32 EquipmentGeneration, uint32 Session);
@@ -374,6 +382,8 @@ private:
 		int32 Ammo, int32 Reserve, uint32 StateRevision);
 	UPROPERTY(ReplicatedUsing = OnRep_NetworkState)
 	FFPReplicatedWeaponState NetworkState;
+	UPROPERTY(ReplicatedUsing = OnRep_OwnerState)
+	FFPReplicatedWeaponOwnerState OwnerState;
 	bool bNetworkEmptyReload = false;
 	EFPReloadEndReason LastNetworkReloadEndReason = EFPReloadEndReason::Completed;
 	int32 LastPresentedReloadId = INDEX_NONE;
@@ -448,6 +458,8 @@ private:
 	bool bDeathDropPhysicsConfigured = false;
 	uint32 EquipmentRevision = 0;
 	EFPWeaponActionState LastPresentedAction = EFPWeaponActionState::Disabled;
+	// 公共表现与私有弹药分别拒绝旧版本：新 ACK 不能阻止尚未到达的公共换弹阶段。
+	uint32 LastPresentedStateRevision = 0;
 
 	// Ammo
 	//当前弹匣和备弹数量
@@ -457,7 +469,7 @@ private:
 	int32 ReserveAmmo = 0;
 
 	// Reload Transaction
-	// 同一次换弹中，多个已绑定 Notify / 显式完成回调最多只转移一次弹药。
+	// 同一次换弹最多提交一次弹药；动画回调只结束表现，不提交或撤销弹药。
 	bool bReloadAmmoCommitted = false;
 	// 每次接纳换弹递增；同步委托可能取消并重新请求，旧 Finish 不得操作新事务。
 	// 动作版本归 GA；这里只用递增事务编号区别两次装填。
@@ -573,22 +585,6 @@ class FPSTRUE_API UfpstrueWeaponCameraShake : public UCameraShakeBase
 public:
 	// 创建单实例视觉脉冲 Pattern，连发复用同一类 Shake 而非无限叠加实例。
 	UfpstrueWeaponCameraShake(const FObjectInitializer& ObjectInitializer);
-};
-
-/** 换弹提交点：在动画指定帧把备弹真正转移到弹匣。 */
-UCLASS(meta = (DisplayName = "Reload Commit"))
-class FPSTRUE_API UfpstrueAnimNotify_ReloadCommit : public UAnimNotify
-{
-	GENERATED_BODY()
-
-public:
-	// 找到武器后校验通知的 Montage 实例身份，再提交对应换弹事务。
-	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,const FAnimNotifyEventReference& EventReference) override;
-	// 将 Branching Point 的原始播放实例编号转为同一身份校验入口，不猜测当前播放。
-	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload) override;
-
-	// 返回动画编辑器中显示的 Notify 名称。
-	virtual FString GetNotifyName_Implementation() const override;
 };
 
 // ==================== 武器拾取入口 ====================

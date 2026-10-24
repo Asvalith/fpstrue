@@ -83,7 +83,7 @@ void UfpstrueBTTask_DecisionWait::TickTask(UBehaviorTreeComponent& OwnerComp, ui
 	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 }
 
-// 为原生构建的分支配置黑板条件，同时保持编辑器条件字段与运行字段一致。
+// 为原生分支配置 Bool 或 Object 的 Set/NotSet 条件，保持编辑器与运行字段一致。
 void UfpstrueBTDecorator_DecisionFlag::Configure(FName KeyName, bool bExpectedValue)
 {
 	BlackboardKey.SelectedKeyName = KeyName;
@@ -148,7 +148,7 @@ FBTCompositeChild& AddChild(UBTCompositeNode& Parent, UBTNode& Node)
 	return Child;
 }
 
-// 给一个子分支增加黑板布尔条件，装饰器对象归属于当前行为树。
+// 给一个子分支增加黑板 Set/NotSet 条件，装饰器对象归属于当前行为树。
 void AddCondition(UBehaviorTree& Tree, FBTCompositeChild& Child, FName Key, bool bExpected)
 {
 	UfpstrueBTDecorator_DecisionFlag* Condition = NewObject<UfpstrueBTDecorator_DecisionFlag>(&Tree);
@@ -164,6 +164,121 @@ FBTCompositeChild& AddAction(UBehaviorTree& Tree, UBTCompositeNode& Parent, EFPE
 	Task->NodeName = Name;
 	return AddChild(Parent, *Task);
 }
+
+// 只调整默认树的业务层次；原有叶子和条件实例继续由同一个 Controller 消费。
+void GroupDefaultBranches(UBehaviorTree& Tree, UBTCompositeNode& Choice)
+{
+	const TArray<FBTCompositeChild> Flat = Choice.Children;
+	check(Flat.Num() == 7);
+	Choice.Children.Reset();
+	const auto AddGroup = [&Tree, &Choice](UClass* Class, const TCHAR* Name, const TCHAR* Label)
+	{
+		UBTCompositeNode* Group = NewObject<UBTCompositeNode>(&Tree, Class, FName(Name));
+		Group->NodeName = Label;
+		AddChild(Choice, *Group);
+		return Group;
+	};
+	const auto MoveGuardToGroup = [](const FBTCompositeChild& Branch, FBTCompositeChild& Group, UBTCompositeNode& Composite)
+	{
+		Group.Decorators = Branch.Decorators;
+		Group.DecoratorOps = Branch.DecoratorOps;
+		FBTCompositeChild Leaf = Branch;
+		Leaf.Decorators.Reset();
+		Leaf.DecoratorOps.Reset();
+		Composite.Children.Add(MoveTemp(Leaf));
+	};
+	UBTCompositeNode* Retreat = AddGroup(UBTComposite_Sequence::StaticClass(), TEXT("RetreatBehavior"), TEXT("Retreat / cover"));
+	MoveGuardToGroup(Flat[1], Choice.Children.Last(), *Retreat);
+	UBTCompositeNode* Combat = AddGroup(UBTComposite_Selector::StaticClass(), TEXT("VisualCombat"), TEXT("Combat / visible target"));
+	AddCondition(Tree, Choice.Children.Last(), FPEnemyBlackboard::TargetActor, true);
+	for (int32 Index = 2; Index <= 5; ++Index) Combat->Children.Add(Flat[Index]);
+	UBTCompositeNode* Investigation = AddGroup(UBTComposite_Selector::StaticClass(), TEXT("InvestigateLastKnownPosition"), TEXT("Investigation / last known position"));
+	AddCondition(Tree, Choice.Children.Last(), FPEnemyBlackboard::HasTarget, true);
+	AddCondition(Tree, Choice.Children.Last(), FPEnemyBlackboard::TargetActor, false);
+	AddCondition(Tree, AddAction(Tree, *Investigation, EFPEnemyBehaviorAction::Idle, TEXT("OutsideInvestigationRange")),
+		FPEnemyBlackboard::InChaseRange, false);
+	Investigation->Children.Add(Flat[6]);
+	UBTCompositeNode* Idle = AddGroup(UBTComposite_Sequence::StaticClass(), TEXT("IdleBehavior"), TEXT("Idle / search"));
+	MoveGuardToGroup(Flat[0], Choice.Children.Last(), *Idle);
+}
+
+// 仅用于建立旧资产的严格比较模板，不向策划资产提供“任意树拍平”操作。
+void FlattenDefaultBranches(UBTCompositeNode& Choice)
+{
+	const TArray<FBTCompositeChild> Groups = Choice.Children;
+	check(Groups.Num() == 4);
+	const UBTCompositeNode* Combat = Groups[1].ChildComposite;
+	const auto Ungroup = [](const FBTCompositeChild& Group)
+	{
+		FBTCompositeChild Leaf = Group.ChildComposite->Children[0];
+		Leaf.Decorators = Group.Decorators;
+		Leaf.DecoratorOps = Group.DecoratorOps;
+		return Leaf;
+	};
+	Choice.Children = {Ungroup(Groups[3]), Ungroup(Groups[0]), Combat->Children[0], Combat->Children[1],
+		Combat->Children[2], Combat->Children[3], Groups[2].ChildComposite->Children[1]};
+}
+
+// 接受引擎的隐式 AND 或相同顺序的显式 AND；OR/NOT、重排或重复 Test 均不是默认规则。
+bool HasDefaultDecoratorLogic(const FBTCompositeChild& Child)
+{
+	if (Child.DecoratorOps.IsEmpty()) return true;
+	const int32 Count = Child.Decorators.Num();
+	const int32 FirstTest = Count > 1 ? 1 : 0;
+	if (Count == 0 || Child.DecoratorOps.Num() != Count + FirstTest) return false;
+	if (FirstTest != 0 && (Child.DecoratorOps[0].Operation != EBTDecoratorLogic::And || Child.DecoratorOps[0].Number != Count)) return false;
+	for (int32 Index = 0; Index < Count; ++Index)
+		if (Child.DecoratorOps[FirstTest + Index].Operation != EBTDecoratorLogic::Test || Child.DecoratorOps[FirstTest + Index].Number != Index) return false;
+	return true;
+}
+
+#if WITH_EDITOR
+// 只有严格模板验证通过才重接图。保留运行节点实例，并按叶子宽度给业务组留出空间。
+void RebuildDefaultGraph(UBehaviorTree& Tree, UBehaviorTreeGraph& Graph)
+{
+	Graph.LockUpdates();
+	const TArray<TObjectPtr<UEdGraphNode>> OldNodes = Graph.Nodes;
+	for (UEdGraphNode* Node : OldNodes)
+	{
+		for (UEdGraphPin* Pin : Node->Pins) if (Pin != nullptr) Pin->BreakAllPinLinks();
+		if (!Node->IsA<UBehaviorTreeGraphNode_Root>()) Graph.RemoveNode(Node);
+	}
+	Graph.OnCreated();
+	Graph.Initialize();
+	TMap<const UBTNode*, UBehaviorTreeGraphNode*> GraphNodes;
+	UBehaviorTreeGraphNode* EditorRoot = nullptr;
+	for (UEdGraphNode* Raw : Graph.Nodes)
+	{
+		UBehaviorTreeGraphNode* Node = CastChecked<UBehaviorTreeGraphNode>(Raw);
+		if (Node->IsA<UBehaviorTreeGraphNode_Root>()) EditorRoot = Node;
+		else GraphNodes.Add(CastChecked<UBTNode>(Node->NodeInstance), Node);
+	}
+	int32 NextLeafX = 0;
+	TFunction<int32(const UBTNode*, int32)> Layout = [&](const UBTNode* Runtime, int32 Depth)
+	{
+		UBehaviorTreeGraphNode* Node = GraphNodes.FindChecked(Runtime);
+		const UBTCompositeNode* Composite = Cast<UBTCompositeNode>(Runtime);
+		int32 FirstX = NextLeafX, LastX = NextLeafX;
+		if (Composite != nullptr && !Composite->Children.IsEmpty())
+		{
+			for (int32 Index = 0; Index < Composite->Children.Num(); ++Index)
+			{
+				const int32 ChildX = Layout(Composite->GetChildNode(Index), Depth + 1);
+				if (Index == 0) FirstX = ChildX;
+				LastX = ChildX;
+			}
+		}
+		else NextLeafX += 400;
+		Node->NodePosX = (FirstX + LastX) / 2;
+		Node->NodePosY = 180 + Depth * 240;
+		return Node->NodePosX;
+	};
+	const int32 RootX = Layout(Tree.RootNode, 0);
+	if (EditorRoot != nullptr) { EditorRoot->NodePosX = RootX; EditorRoot->NodePosY = 0; }
+	Graph.UpdateClassData();
+	Graph.UnlockUpdates();
+}
+#endif
 } // namespace
 
 // 复用本 World 的不可变默认树模板；运行黑板和节点内存仍由各 Controller 独立拥有。
@@ -239,7 +354,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	Choice->NodeName = TEXT("Enemy behavior priority");
 	AddChild(*Root, *Choice);
 
-	// 分支顺序明确优先级：无目标、维持攻击、超距空闲、近战，再尝试包围与追击。
+	// 先建立叶子和局部优先级，再将其归入撤退、可见战斗、位置调查、空闲四组。
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Idle, TEXT("NoTargetIdle")), FPEnemyBlackboard::HasTarget, false);
 	// 低血撤退先中断已有攻击，避免 SustainAttack 把伤害窗口一直维持到动画自然结束。
 	AddCondition(*Tree, AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Retreat, TEXT("RetreatToCover")),
@@ -256,6 +371,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 	AddAction(*Tree, *Combat, EFPEnemyBehaviorAction::MaintainCombatPosition, TEXT("MaintainCombatPosition"));
 	AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Surround, TEXT("MoveToSurroundSlot"));
 	AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Pursue, TEXT("PursueSharedTarget"));
+	GroupDefaultBranches(*Tree, *Choice);
 #if WITH_EDITOR
 	// 真实编辑器资产补建可编辑图；临时运行模板不创建编辑器图对象。
 	if (Tree->IsAsset() && !Tree->HasAnyFlags(RF_Transient))
@@ -267,17 +383,14 @@ bool UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UBehaviorTree* Tree, 
 		// 整张图连通后再解锁，由引擎一次重建运行树及执行索引，而非事后修改 Transient 标记。
 		Graph->LockUpdates();
 		Graph->GetSchema()->CreateDefaultNodesForGraph(*Graph);
-		Graph->OnCreated();
-		Graph->Initialize();
-		Graph->UpdateClassData();
-		Graph->UnlockUpdates();
+		RebuildDefaultGraph(*Tree, *Graph);
 		Tree->MarkPackageDirty();
 	}
 #endif
 	return true;
 }
 
-// 默认资产迁移分两段：先完整确认仍是已知模板，再追加撤退/战术字段；任一用户编辑都会阻止迁移。
+// 先严格确认已知默认模板，再升级业务分组及旧字段；任一自定义规则都会阻止迁移。
 bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTree* Tree, UBlackboardData* Blackboard)
 {
 	// 1. 验证上下文与黑板 schema，并生成只用于比较的默认参考树。
@@ -293,18 +406,29 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 			*GetPathNameSafe(Blackboard), *GetPathNameSafe(Tree == nullptr ? nullptr : Tree->BlackboardAsset.Get()), *GetPathNameSafe(Blackboard == nullptr ? nullptr : Blackboard->Parent.Get()),
 			Blackboard == nullptr ? -1 : Blackboard->Keys.Num(), Tree == nullptr ? -1 : Tree->RootDecorators.Num(), Tree == nullptr ? -1 : Tree->RootDecoratorOps.Num()));
 	const bool bCurrent = Blackboard->GetKeyID(FPEnemyBlackboard::Retreating) != FBlackboard::InvalidKey;
-	UBehaviorTree* Expected = NewObject<UBehaviorTree>(GetTransientPackage(), NAME_None, RF_Transient);
-	UBlackboardData* ExpectedBlackboard = NewObject<UBlackboardData>(Expected);
-	if (!PopulateDefaultTree(Expected, ExpectedBlackboard)) return Reject(TEXT("ReferenceBuild"));
-	UBTCompositeNode* ExpectedChoice = Expected->RootNode->Children[2].ChildComposite;
-	if (!bCurrent) ExpectedChoice->Children.RemoveAt(1);
 	UBTCompositeNode* Root = Tree->RootNode;
 	const auto HasClass = [](const UBTNode* Node, UClass* Class) { return Node != nullptr && Node->GetClass() == Class; };
-	// 只兼容已确认的历史保存排列；全部其他默认结构及编辑图检查仍在任何资产修改前完成。
 	const bool bHistoricalRootOrder = Root != nullptr && Root->Children.Num() == 3 &&
 		HasClass(Root->GetChildNode(0), UfpstrueBTTask_DecisionWait::StaticClass()) &&
 		HasClass(Root->GetChildNode(1), UBTComposite_Selector::StaticClass()) &&
 		HasClass(Root->GetChildNode(2), UfpstrueBTTask_SampleDecision::StaticClass());
+	const UBTCompositeNode* ActualChoice = Root != nullptr && Root->Children.Num() == 3 ?
+		Root->Children[bHistoricalRootOrder ? 1 : 2].ChildComposite.Get() : nullptr;
+	const bool bGrouped = ActualChoice != nullptr && ActualChoice->Children.Num() == 4;
+	// 只识别这一种已知坏签名；其余属性、节点、图映射仍须逐项与默认模板一致。
+	const bool bMisplacedRetreat = !bGrouped && bCurrent && ActualChoice != nullptr && ActualChoice->Children.Num() == 7 &&
+		ActualChoice->Children[1].Decorators.IsEmpty() && ActualChoice->Children[2].Decorators.Num() == 2;
+	UBehaviorTree* Expected = NewObject<UBehaviorTree>(GetTransientPackage(), NAME_None, RF_Transient);
+	UBlackboardData* ExpectedBlackboard = NewObject<UBlackboardData>(Expected);
+	if (!PopulateDefaultTree(Expected, ExpectedBlackboard)) return Reject(TEXT("ReferenceBuild"));
+	UBTCompositeNode* ExpectedChoice = Expected->RootNode->Children[2].ChildComposite;
+	if (!bGrouped) FlattenDefaultBranches(*ExpectedChoice);
+	if (!bCurrent) ExpectedChoice->Children.RemoveAt(1);
+	if (bMisplacedRetreat)
+	{
+		ExpectedChoice->Children[2].Decorators.Insert(ExpectedChoice->Children[1].Decorators[0], 0);
+		ExpectedChoice->Children[1].Decorators.Reset();
+	}
 	if (bHistoricalRootOrder) Expected->RootNode->Children.Swap(1, 2);
 	TSet<FName> SeenKeys;
 	for (const FBlackboardEntry& Entry : Blackboard->Keys)
@@ -351,7 +475,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 			const FBTCompositeChild& Child = Composite->Children[Index];
 			const FBTCompositeChild& DefaultChild = DefaultComposite->Children[Index];
 			if ((Child.ChildComposite != nullptr && Child.ChildTask != nullptr) || Child.Decorators.Num() != DefaultChild.Decorators.Num() ||
-				(!Child.DecoratorOps.IsEmpty() && (Child.Decorators.Num() != 1 || Child.DecoratorOps.Num() != 1 || Child.DecoratorOps[0].Operation != EBTDecoratorLogic::Test || Child.DecoratorOps[0].Number != 0)))
+				!HasDefaultDecoratorLogic(Child))
 				return Reject(TEXT("RuntimeBranchDecorators"), FString::Printf(TEXT("parent=%s index=%d decorators=%d expected=%d ops=%d"), *Node->GetNodeName(), Index, Child.Decorators.Num(), DefaultChild.Decorators.Num(), Child.DecoratorOps.Num()));
 			for (int32 DecoratorIndex = 0; DecoratorIndex < Child.Decorators.Num(); ++DecoratorIndex)
 			{
@@ -425,7 +549,7 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 			return Reject(TEXT("HistoricalRootLayout"), TEXT("Wait and Choice must leave space for Sample between them."));
 	}
 #endif
-	// 4. 所有校验通过后才提交已知历史顺序修正及缺少的默认节点。
+	// 4. 所有校验通过后才提交修正；新分层树重复调用不替换节点或重建图。
 	if (bHistoricalRootOrder)
 	{
 		Root->Children.Swap(1, 2);
@@ -435,46 +559,42 @@ bool UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(UBehaviorTre
 #endif
 		Tree->MarkPackageDirty();
 	}
-	if (bCurrent)
+	if (Blackboard->GetKeyID(FPEnemyBlackboard::TacticalRole) == FBlackboard::InvalidKey)
 	{
-		if (Blackboard->GetKeyID(FPEnemyBlackboard::TacticalRole) == FBlackboard::InvalidKey)
-		{
-			AddTacticalKeys(*Blackboard);
-			Blackboard->MarkPackageDirty();
-		}
+		AddTacticalKeys(*Blackboard);
+		Blackboard->MarkPackageDirty();
+	}
+	if (bGrouped)
+	{
 #if WITH_EDITOR
 		if (bHistoricalRootOrder && Graph != nullptr) Graph->UpdateAsset();
 #endif
+		UE_LOG(LogTemp, Display, TEXT("FPEnemyBTUpgrade verified Grouped default tree: %s"), *Tree->GetPathName());
 		return true;
 	}
-	// 所有拒绝检查完成后才追加键和节点，保持旧资产、旧节点及策划可编辑布局。
-	AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Retreating);
-	if (Blackboard->GetKeyID(FPEnemyBlackboard::TacticalRole) == FBlackboard::InvalidKey) AddTacticalKeys(*Blackboard);
 	UBTCompositeNode* Choice = Root->Children[2].ChildComposite;
-	FBTCompositeChild Retreat = AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Retreat, TEXT("RetreatToCover"));
-	Choice->Children.Pop();
-	Choice->Children.Insert(Retreat, 1);
-	AddCondition(*Tree, Choice->Children[1], FPEnemyBlackboard::Retreating, true);
-#if WITH_EDITOR
-	if (Graph != nullptr)
+	if (!bCurrent)
 	{
-		Graph->LockUpdates();
-		UBehaviorTreeGraphNode_Task* Task = NewObject<UBehaviorTreeGraphNode_Task>(Graph);
-		Task->CreateNewGuid();
-		Task->SetFlags(RF_Transactional);
-		Task->NodeInstance = Choice->Children[1].ChildTask;
-		Task->NodePosX = (GraphNodes.FindChecked(Choice->GetChildNode(0))->NodePosX + GraphNodes.FindChecked(Choice->GetChildNode(2))->NodePosX) / 2;
-		Task->NodePosY = GraphNodes.FindChecked(Choice->GetChildNode(2))->NodePosY;
-		Graph->AddNode(Task);
-		Task->AllocateDefaultPins();
-		UBehaviorTreeGraphNode_Decorator* Decorator = NewObject<UBehaviorTreeGraphNode_Decorator>(Graph);
-		Decorator->NodeInstance = Choice->Children[1].Decorators[0];
-		Task->AddSubNode(Decorator, Graph);
-		GraphNodes.FindChecked(Choice)->GetOutputPin()->MakeLinkTo(Task->GetInputPin());
-		Graph->UpdateClassData();
-		Graph->UnlockUpdates();
+		AddKey<UBlackboardKeyType_Bool>(*Blackboard, FPEnemyBlackboard::Retreating);
+		FBTCompositeChild Retreat = AddAction(*Tree, *Choice, EFPEnemyBehaviorAction::Retreat, TEXT("RetreatToCover"));
+		Choice->Children.Pop();
+		Choice->Children.Insert(Retreat, 1);
+		AddCondition(*Tree, Choice->Children[1], FPEnemyBlackboard::Retreating, true);
 	}
+	else if (bMisplacedRetreat)
+	{
+		Choice->Children[1].Decorators.Add(Choice->Children[2].Decorators[0]);
+		Choice->Children[2].Decorators.RemoveAt(0);
+		Choice->Children[1].DecoratorOps.Reset();
+		Choice->Children[2].DecoratorOps.Reset();
+		UE_LOG(LogTemp, Display, TEXT("FPEnemyBTUpgrade repaired the verified misplaced Retreating condition on %s"), *Tree->GetPathName());
+	}
+	GroupDefaultBranches(*Tree, *Choice);
+#if WITH_EDITOR
+	if (Graph != nullptr) RebuildDefaultGraph(*Tree, *Graph);
 #endif
+	UE_LOG(LogTemp, Display, TEXT("FPEnemyBTUpgrade upgraded %s default tree to Grouped: %s"),
+		bMisplacedRetreat ? TEXT("Misplaced") : TEXT("Flat"), *Tree->GetPathName());
 	Tree->MarkPackageDirty();
 	Blackboard->MarkPackageDirty();
 	return true;

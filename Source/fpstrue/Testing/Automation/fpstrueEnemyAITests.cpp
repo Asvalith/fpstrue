@@ -11,6 +11,7 @@
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Game/fpstrueMultiplayer.h"
 #include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
@@ -73,6 +74,57 @@ void DisableAutomaticBehaviorTick(UBrainComponent& Brain)
 	Brain.PrimaryComponentTick.bCanEverTick = false;
 }
 
+// 目标资格沿用真实多人规则；不再由测试写入旧单机/多人模式标志。
+AfpstrueCharacter* SpawnBehaviorTarget(UWorld& World)
+{
+	AfpstrueCharacter* Target = World.SpawnActor<AfpstrueCharacter>();
+	if (Target == nullptr) return nullptr;
+	// 普通拥有者也会经过真实 Pawn 初始化；补齐临时世界没有保存蓝图提供的输入资产。
+	for (const FName Name : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+		TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+	{
+		FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(Target->GetClass(), Name);
+		if (Property != nullptr && Property->GetObjectPropertyValue_InContainer(Target) == nullptr)
+			Property->SetObjectPropertyValue_InContainer(Target, NewObject<UInputAction>(Target));
+	}
+	APlayerController* Player = World.SpawnActor<APlayerController>();
+	if (Player == nullptr) { Target->Destroy(); return nullptr; }
+	Player->Possess(Target);
+	return Player->GetPawn() == Target ? Target : nullptr;
+}
+
+// 只隔离无关的人口补充和预算采样，保留真实 GameMode、参与资格、感知和行为树。
+void IsolateEnemyTestWorld(UWorld& World)
+{
+	if (AfpstruePvpGameMode* Mode = World.GetAuthGameMode<AfpstruePvpGameMode>())
+		World.GetTimerManager().ClearAllTimersForObject(Mode);
+	if (AfpstruePvpGameState* State = World.GetGameState<AfpstruePvpGameState>())
+	{
+		if (auto* Coordinator = State->FindComponentByClass<UfpstrueEnemySignificanceCoordinator>()) Coordinator->Stop();
+		if (auto* Sharing = State->FindComponentByClass<UfpstrueEnemyAnimationSharingCoordinator>()) Sharing->Stop();
+	}
+}
+
+bool BeginEnemyTestPlay(FTestWorldWrapper& Fixture)
+{
+	if (!Fixture.BeginPlayInTestWorld()) return false;
+	UWorld& World = *Fixture.GetTestWorld();
+	IsolateEnemyTestWorld(World);
+	return World.GetAuthGameMode<AfpstruePvpGameMode>() != nullptr;
+}
+
+// 真实 BT 的请求与任务唤醒可跨帧；有界等待状态，不直接调用任务来制造预期结果。
+bool TickBehaviorUntil(FTestWorldWrapper& Fixture, FAutomationTestBase& Test,
+	TFunctionRef<bool()> IsReady, float TimeoutSeconds = 0.5f)
+{
+	for (int32 Frame = 0; Frame < FMath::CeilToInt(TimeoutSeconds / 0.01f); ++Frame)
+	{
+		if (IsReady()) return true;
+		if (!Fixture.TickTestWorld(0.01f)) { Fixture.ForwardErrorMessages(&Test); return false; }
+	}
+	return IsReady();
+}
+
 // 经真实感知组件派发成功/失败刺激，保留回调链；只固定输入，不替代 Controller 的处理逻辑。
 bool ReportBehaviorSightStimulus(AfpstrueEnemyAIController* Controller, AActor* Target, bool bSensed,
 	const FVector& StimulusLocation, FAutomationTestBase& Test)
@@ -98,6 +150,105 @@ void ReportBehaviorHearingStimulus(AfpstrueEnemyAIController& Controller, AActor
 	Controller.GetPerceptionComponent()->RegisterStimulus(&Source, Stimulus);
 	Controller.GetPerceptionComponent()->ProcessStimuli();
 }
+
+// 同时检查运行模板与保存资产的职责分层，尤其避免撤退条件错挂到维持攻击分支。
+bool CheckLayeredEnemyTree(FAutomationTestBase& Test, const UBehaviorTree& Tree)
+{
+	const UBTComposite_Sequence* Root = Cast<UBTComposite_Sequence>(Tree.RootNode);
+	if (!Test.TestNotNull(TEXT("Decision cycle is a real Sequence"), Root) ||
+		!Test.TestEqual(TEXT("One wait, one sample, one behavior choice"), Root->Children.Num(), 3)) return false;
+	bool bValid = Test.TestNotNull(TEXT("First node preserves adaptive waiting"), Cast<UfpstrueBTTask_DecisionWait>(Root->Children[0].ChildTask));
+	bValid &= Test.TestNotNull(TEXT("Second node samples once"), Cast<UfpstrueBTTask_SampleDecision>(Root->Children[1].ChildTask));
+	for (const FBTCompositeChild& Child : Root->Children)
+		bValid &= Test.TestEqual(TEXT("Cycle nodes have no branch conditions"), Child.Decorators.Num(), 0);
+	const UBTComposite_Selector* Choice = Cast<UBTComposite_Selector>(Root->Children[2].ChildComposite);
+	if (!Test.TestNotNull(TEXT("Behavior selection belongs to Selector"), Choice) ||
+		!Test.TestEqual(TEXT("Retreat, visible combat, investigation, idle"), Choice->Children.Num(), 4)) return false;
+	const auto CheckCondition = [&Test](const FBTCompositeChild& Child, int32 Index, FName Key, bool bExpected)
+	{
+		const UfpstrueBTDecorator_DecisionFlag* Actual = Child.Decorators.IsValidIndex(Index)
+			? Cast<UfpstrueBTDecorator_DecisionFlag>(Child.Decorators[Index]) : nullptr;
+		UfpstrueBTDecorator_DecisionFlag* Expected = NewObject<UfpstrueBTDecorator_DecisionFlag>();
+		Expected->Configure(Key, bExpected);
+		return Test.TestTrue(FString::Printf(TEXT("Branch owns %s %s condition"), *Key.ToString(), bExpected ? TEXT("set") : TEXT("not set")),
+			Actual != nullptr && Actual->HasSameCondition(*Expected));
+	};
+	const auto CheckAction = [&Test](const FBTCompositeChild& Child, EFPEnemyBehaviorAction Expected, const TCHAR* Label)
+	{
+		const UfpstrueBTTask_EnemyAction* Task = Cast<UfpstrueBTTask_EnemyAction>(Child.ChildTask);
+		return Test.TestTrue(Label, Task != nullptr && Task->Action == Expected);
+	};
+	const int32 ExpectedConditions[] = {1, 1, 2, 1};
+	for (int32 Index = 0; Index < 4; ++Index)
+		bValid &= Test.TestEqual(TEXT("Each behavior group owns only its eligibility conditions"), Choice->Children[Index].Decorators.Num(), ExpectedConditions[Index]);
+	bValid &= CheckCondition(Choice->Children[0], 0, FPEnemyBlackboard::Retreating, true);
+	bValid &= CheckCondition(Choice->Children[1], 0, FPEnemyBlackboard::TargetActor, true);
+	bValid &= CheckCondition(Choice->Children[2], 0, FPEnemyBlackboard::HasTarget, true);
+	bValid &= CheckCondition(Choice->Children[2], 1, FPEnemyBlackboard::TargetActor, false);
+	bValid &= CheckCondition(Choice->Children[3], 0, FPEnemyBlackboard::HasTarget, false);
+	const UBTComposite_Sequence* Retreat = Cast<UBTComposite_Sequence>(Choice->Children[0].ChildComposite);
+	const UBTComposite_Selector* Combat = Cast<UBTComposite_Selector>(Choice->Children[1].ChildComposite);
+	const UBTComposite_Selector* Investigation = Cast<UBTComposite_Selector>(Choice->Children[2].ChildComposite);
+	const UBTComposite_Sequence* Idle = Cast<UBTComposite_Sequence>(Choice->Children[3].ChildComposite);
+	if (!Test.TestNotNull(TEXT("Retreat is a separate sequence"), Retreat) ||
+		!Test.TestNotNull(TEXT("Visible combat is a separate selector"), Combat) ||
+		!Test.TestNotNull(TEXT("Investigation is a separate selector"), Investigation) ||
+		!Test.TestNotNull(TEXT("Idle is a separate sequence"), Idle) ||
+		!Test.TestEqual(TEXT("Retreat has one immediate action"), Retreat->Children.Num(), 1) ||
+		!Test.TestEqual(TEXT("Combat sustains, checks range, attacks, then surrounds"), Combat->Children.Num(), 4) ||
+		!Test.TestEqual(TEXT("Investigation checks range then pursues memory"), Investigation->Children.Num(), 2) ||
+		!Test.TestEqual(TEXT("Idle has one immediate action"), Idle->Children.Num(), 1)) return false;
+	bValid &= CheckAction(Retreat->Children[0], EFPEnemyBehaviorAction::Retreat, TEXT("Retreat precedes all combat decisions"));
+	bValid &= Test.TestEqual(TEXT("Retreat eligibility belongs to its group, not a sibling action"), Retreat->Children[0].Decorators.Num(), 0);
+	bValid &= CheckAction(Combat->Children[0], EFPEnemyBehaviorAction::SustainAttack, TEXT("Existing attack takes priority over distance idle"));
+	bValid &= CheckAction(Combat->Children[1], EFPEnemyBehaviorAction::Idle, TEXT("Visible target outside chase range idles"));
+	bValid &= CheckAction(Combat->Children[3], EFPEnemyBehaviorAction::Surround, TEXT("Visible combat falls back to authorized surround movement"));
+	for (int32 Index = 0; Index < 3; ++Index)
+		bValid &= Test.TestEqual(TEXT("Combat conditions remain on their own branch"), Combat->Children[Index].Decorators.Num(), 1);
+	bValid &= CheckCondition(Combat->Children[0], 0, FPEnemyBlackboard::Attacking, true);
+	bValid &= CheckCondition(Combat->Children[1], 0, FPEnemyBlackboard::InChaseRange, false);
+	bValid &= CheckCondition(Combat->Children[2], 0, FPEnemyBlackboard::InAttackRange, true);
+	bValid &= Test.TestEqual(TEXT("Surround has no second state condition"), Combat->Children[3].Decorators.Num(), 0);
+	const UBTComposite_Selector* NearCombat = Cast<UBTComposite_Selector>(Combat->Children[2].ChildComposite);
+	if (!Test.TestNotNull(TEXT("Attack fallback is still a Selector"), NearCombat) ||
+		!Test.TestEqual(TEXT("Attack attempt then position maintenance"), NearCombat->Children.Num(), 2)) return false;
+	bValid &= CheckAction(NearCombat->Children[0], EFPEnemyBehaviorAction::TryAttack, TEXT("TryAttack is first"));
+	bValid &= CheckAction(NearCombat->Children[1], EFPEnemyBehaviorAction::MaintainCombatPosition, TEXT("Cooldown or permit refusal maintains position"));
+	for (const FBTCompositeChild& Child : NearCombat->Children)
+		bValid &= Test.TestEqual(TEXT("Near combat leaves do not resample branch conditions"), Child.Decorators.Num(), 0);
+	bValid &= CheckAction(Investigation->Children[0], EFPEnemyBehaviorAction::Idle, TEXT("Out of range investigation idles"));
+	bValid &= Test.TestEqual(TEXT("Investigation range gate has one condition"), Investigation->Children[0].Decorators.Num(), 1);
+	bValid &= CheckCondition(Investigation->Children[0], 0, FPEnemyBlackboard::InChaseRange, false);
+	bValid &= CheckAction(Investigation->Children[1], EFPEnemyBehaviorAction::Pursue, TEXT("Hidden target only drives remembered-location pursuit"));
+	bValid &= Test.TestEqual(TEXT("Memory pursuit inherits group eligibility"), Investigation->Children[1].Decorators.Num(), 0);
+	bValid &= CheckAction(Idle->Children[0], EFPEnemyBehaviorAction::Idle, TEXT("No target reaches idle search"));
+	bValid &= Test.TestEqual(TEXT("Idle leaf inherits its no-target condition"), Idle->Children[0].Decorators.Num(), 0);
+	return bValid;
+}
+
+// 从默认分层树重现旧版平面资产；复用旧叶子和条件实例，验证迁移而不是重建模板。
+UBTComposite_Selector* MakeFlatEnemyTreeFixture(UBehaviorTree& Tree)
+{
+	UBTCompositeNode* Root = Tree.RootNode;
+	UBTComposite_Selector* Choice = CastChecked<UBTComposite_Selector>(Root->Children[2].ChildComposite);
+	UBTCompositeNode* Retreat = Choice->Children[0].ChildComposite;
+	UBTCompositeNode* Combat = Choice->Children[1].ChildComposite;
+	UBTCompositeNode* Investigation = Choice->Children[2].ChildComposite;
+	UBTCompositeNode* Idle = Choice->Children[3].ChildComposite;
+	FBTCompositeChild NoTarget = Idle->Children[0];
+	NoTarget.Decorators = Choice->Children[3].Decorators;
+	FBTCompositeChild RetreatAction = Retreat->Children[0];
+	RetreatAction.Decorators = Choice->Children[0].Decorators;
+	Choice->Children = {NoTarget, RetreatAction, Combat->Children[0], Combat->Children[1], Combat->Children[2],
+		Combat->Children[3], Investigation->Children[1]};
+	for (UBTCompositeNode* Group : {Retreat, Combat, Investigation, Idle})
+	{
+		Group->Children.Reset();
+		Group->Rename(*MakeUniqueObjectName(GetTransientPackage(), Group->GetClass()).ToString(), GetTransientPackage(),
+			REN_DontCreateRedirectors | REN_DoNotDirty);
+	}
+	return Choice;
+}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyHearingInvestigationTest,
@@ -111,8 +262,8 @@ bool FFPEnemyHearingInvestigationTest::RunTest(const FString& Parameters)
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Hearing fixture creates the native AI system"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!BeginEnemyTestPlay(Fixture)) { Fixture.ForwardErrorMessages(this); return false; }
 	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
 		FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	if (!TestNotNull(TEXT("Hearing listener pawn"), Enemy)) return false;
@@ -121,7 +272,7 @@ bool FFPEnemyHearingInvestigationTest::RunTest(const FString& Parameters)
 	Enemy->SetActorEnableCollision(false);
 	Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	AActor* Wall = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Hearing controller"), Controller) || !TestNotNull(TEXT("Noise source"), Target) ||
 		!TestNotNull(TEXT("Real occluder"), Wall)) return false;
@@ -269,37 +420,7 @@ bool FFPEnemyBehaviorTreeStructureTest::RunTest(const FString& Parameters)
 			  bHadEngineSelfKey);
 	TestTrue(TEXT("Required blackboard keys have correct types"), FPHasEnemyBlackboardSchema(Blackboard));
 	TestEqual(TEXT("Default schema includes independent retreat and tactical state"), Blackboard->Keys.Num(), 10);
-	UBTComposite_Sequence* Root = Cast<UBTComposite_Sequence>(Tree->RootNode);
-	if (!TestNotNull(TEXT("Decision cycle is a real Sequence"), Root))
-		return false;
-	if (!TestEqual(TEXT("Wait, sample, selector"), Root->Children.Num(), 3))
-		return false;
-	TestNotNull(TEXT("First node preserves adaptive waiting"), Cast<UfpstrueBTTask_DecisionWait>(Root->Children[0].ChildTask));
-	TestNotNull(TEXT("Second node samples once"), Cast<UfpstrueBTTask_SampleDecision>(Root->Children[1].ChildTask));
-	UBTComposite_Selector* Selector = Cast<UBTComposite_Selector>(Root->Children[2].ChildComposite);
-	if (!TestNotNull(TEXT("Behavior selection belongs to Selector"), Selector))
-		return false;
-	if (!TestEqual(TEXT("Invalid target, retreat, attack, outside range, combat, surround, pursue"), Selector->Children.Num(), 7))
-		return false;
-	for (int32 Index = 0; Index < 5; ++Index)
-	{
-		TestEqual(TEXT("Conditional branches are guarded by Blackboard"), Selector->Children[Index].Decorators.Num(), 1);
-	}
-	const UfpstrueBTTask_EnemyAction* Retreat = Cast<UfpstrueBTTask_EnemyAction>(Selector->Children[1].ChildTask);
-	const UfpstrueBTTask_EnemyAction* Sustain = Cast<UfpstrueBTTask_EnemyAction>(Selector->Children[2].ChildTask);
-	TestTrue(TEXT("Retreat takes priority over sustaining an attack"), Retreat != nullptr && Retreat->Action == EFPEnemyBehaviorAction::Retreat);
-	TestTrue(TEXT("SustainAttack remains after retreat"), Sustain != nullptr && Sustain->Action == EFPEnemyBehaviorAction::SustainAttack);
-	// 攻击尝试失败必须有站位维护兜底，避免敌人因许可不足而停止整个决策循环。
-	UBTComposite_Selector* Combat = Cast<UBTComposite_Selector>(Selector->Children[4].ChildComposite);
-	if (!TestNotNull(TEXT("Combat fallback is another Selector"), Combat))
-		return false;
-	if (!TestEqual(TEXT("Attack attempt then position maintenance"), Combat->Children.Num(), 2))
-		return false;
-	const UfpstrueBTTask_EnemyAction* Attempt = Cast<UfpstrueBTTask_EnemyAction>(Combat->Children[0].ChildTask);
-	const UfpstrueBTTask_EnemyAction* Fallback = Cast<UfpstrueBTTask_EnemyAction>(Combat->Children[1].ChildTask);
-	TestTrue(TEXT("TryAttack is first"), Attempt != nullptr && Attempt->Action == EFPEnemyBehaviorAction::TryAttack);
-	TestTrue(TEXT("Maintenance is fallback"), Fallback != nullptr && Fallback->Action == EFPEnemyBehaviorAction::MaintainCombatPosition);
-	return true;
+	return CheckLayeredEnemyTree(*this, *Tree);
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeAssetSafetyTest, "fpstrue.AI.BehaviorTree.AssetSafety",
@@ -346,6 +467,17 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Upgrading a current default tree is idempotent"),
 		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
 	TestTrue(TEXT("Current default upgrade preserves the root instance"), Tree->RootNode == OriginalRoot);
+	FBTCompositeChild& InvestigationBranch = OriginalRoot->Children[2].ChildComposite->Children[2];
+	InvestigationBranch.DecoratorOps = {FBTDecoratorLogic(EBTDecoratorLogic::And, 2),
+		FBTDecoratorLogic(EBTDecoratorLogic::Test, 0), FBTDecoratorLogic(EBTDecoratorLogic::Test, 1)};
+	TestTrue(TEXT("Explicit AND of the two investigation conditions is the same default contract"),
+		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
+	InvestigationBranch.DecoratorOps[0].Operation = EBTDecoratorLogic::Or;
+	TestFalse(TEXT("Designer OR logic cannot be silently changed to the default AND eligibility"),
+		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
+	TestTrue(TEXT("Rejected upgrade preserves the designer's OR logic"),
+		InvestigationBranch.DecoratorOps[0].Operation == EBTDecoratorLogic::Or);
+	InvestigationBranch.DecoratorOps.Reset();
 	Blackboard->Keys.RemoveAt(Blackboard->GetKeyID(FPEnemyBlackboard::Retreating));
 	TestFalse(TEXT("Missing required key is rejected"), FPHasEnemyBlackboardSchema(Blackboard));
 	UBehaviorTree* LegacyTree = NewObject<UBehaviorTree>();
@@ -353,8 +485,9 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("Legacy fixture starts from the native default template"),
 		UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(LegacyTree, LegacyBlackboard))) return false;
 	UBTComposite_Sequence* LegacyRoot = CastChecked<UBTComposite_Sequence>(LegacyTree->RootNode);
-	UBTComposite_Selector* LegacyChoice = CastChecked<UBTComposite_Selector>(LegacyRoot->Children[2].ChildComposite);
+	UBTComposite_Selector* LegacyChoice = MakeFlatEnemyTreeFixture(*LegacyTree);
 	UBTTaskNode* OriginalSustain = LegacyChoice->Children[2].ChildTask;
+	UBTTaskNode* OriginalPursue = LegacyChoice->Children[6].ChildTask;
 	LegacyChoice->Children.RemoveAt(1);
 	LegacyBlackboard->Keys.RemoveAt(LegacyBlackboard->GetKeyID(FPEnemyBlackboard::Retreating));
 	for (const FName Key : {FPEnemyBlackboard::TacticalRole, FPEnemyBlackboard::TacticalGoal, FPEnemyBlackboard::HasInnerSlot})
@@ -364,25 +497,67 @@ bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A verified legacy native default tree upgrades in place"),
 		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(LegacyTree, LegacyBlackboard));
 	TestTrue(TEXT("Legacy upgrade preserves the original root"), LegacyTree->RootNode == LegacyRoot);
-	TestTrue(TEXT("Legacy upgrade preserves the original attack task instance"), LegacyChoice->Children[2].ChildTask == OriginalSustain);
+	TestTrue(TEXT("Legacy upgrade preserves the original choice instance"), LegacyRoot->Children[2].ChildComposite == LegacyChoice);
+	if (!CheckLayeredEnemyTree(*this, *LegacyTree)) return false;
+	const UBTCompositeNode* LegacyCombat = LegacyChoice->Children[1].ChildComposite;
+	const UBTCompositeNode* LegacyInvestigation = LegacyChoice->Children[2].ChildComposite;
+	TestTrue(TEXT("Legacy upgrade preserves the original attack task instance"), LegacyCombat->Children[0].ChildTask == OriginalSustain);
+	TestTrue(TEXT("Legacy upgrade moves the original pursuit task into investigation"), LegacyInvestigation->Children[1].ChildTask == OriginalPursue);
 	TestEqual(TEXT("Legacy upgrade adds independent retreat and tactical keys"), LegacyBlackboard->Keys.Num(), 10);
 	TestTrue(TEXT("The upgraded legacy schema satisfies the full contract"), FPHasEnemyBlackboardSchema(LegacyBlackboard));
-	const UfpstrueBTTask_EnemyAction* LegacyRetreat = Cast<UfpstrueBTTask_EnemyAction>(LegacyChoice->Children[1].ChildTask);
+	const UfpstrueBTTask_EnemyAction* LegacyRetreat = Cast<UfpstrueBTTask_EnemyAction>(LegacyChoice->Children[0].ChildComposite->Children[0].ChildTask);
 	TestTrue(TEXT("Legacy upgrade inserts retreat before the existing attack branch"),
 		LegacyRetreat != nullptr && LegacyRetreat->Action == EFPEnemyBehaviorAction::Retreat);
+	// 已有撤退/战术字段的平面版本也只调整层次，不替换现有动作实例。
+	UBehaviorTree* FlatTree = NewObject<UBehaviorTree>();
+	UBlackboardData* FlatBlackboard = NewObject<UBlackboardData>(FlatTree);
+	if (!UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(FlatTree, FlatBlackboard)) return false;
+	UBTComposite_Selector* FlatChoice = MakeFlatEnemyTreeFixture(*FlatTree);
+	UBTTaskNode* FlatRetreat = FlatChoice->Children[1].ChildTask;
+	UBTCompositeNode* FlatNearCombat = FlatChoice->Children[4].ChildComposite;
+	TestTrue(TEXT("The verified current flat default upgrades"), UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(FlatTree, FlatBlackboard));
+	if (!CheckLayeredEnemyTree(*this, *FlatTree)) return false;
+	TestTrue(TEXT("Flat upgrade keeps the retreat action"), FlatChoice->Children[0].ChildComposite->Children[0].ChildTask == FlatRetreat);
+	TestTrue(TEXT("Flat upgrade keeps the existing attack fallback selector"), FlatChoice->Children[1].ChildComposite->Children[2].ChildComposite == FlatNearCombat);
+	// 仅修复已知默认错挂：撤退条件丢到下一条 SustainAttack；其他条件仍必须精确匹配。
+	UBehaviorTree* MisplacedTree = NewObject<UBehaviorTree>();
+	UBlackboardData* MisplacedBlackboard = NewObject<UBlackboardData>(MisplacedTree);
+	if (!UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(MisplacedTree, MisplacedBlackboard)) return false;
+	UBTComposite_Selector* MisplacedChoice = MakeFlatEnemyTreeFixture(*MisplacedTree);
+	UBTTaskNode* MisplacedRetreat = MisplacedChoice->Children[1].ChildTask;
+	UBTDecorator* OriginalRetreatCondition = MisplacedChoice->Children[1].Decorators[0];
+	MisplacedChoice->Children[1].Decorators.Reset();
+	MisplacedChoice->Children[2].Decorators.Insert(OriginalRetreatCondition, 0);
+	TestTrue(TEXT("Only the verified default misplaced retreat condition is repaired"),
+		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(MisplacedTree, MisplacedBlackboard));
+	if (!CheckLayeredEnemyTree(*this, *MisplacedTree)) return false;
+	TestTrue(TEXT("Repair preserves the existing retreat action"), MisplacedChoice->Children[0].ChildComposite->Children[0].ChildTask == MisplacedRetreat);
+	TestTrue(TEXT("Repair moves the original retreat condition to the retreat group"), MisplacedChoice->Children[0].Decorators[0] == OriginalRetreatCondition);
 	UBehaviorTree* CustomizedTree = NewObject<UBehaviorTree>();
 	UBlackboardData* CustomizedBlackboard = NewObject<UBlackboardData>(CustomizedTree);
 	if (!TestTrue(TEXT("Custom fixture starts from a valid native template"),
 		UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(CustomizedTree, CustomizedBlackboard))) return false;
 	UBTComposite_Sequence* CustomizedRoot = CastChecked<UBTComposite_Sequence>(CustomizedTree->RootNode);
 	UBTComposite_Selector* CustomizedChoice = CastChecked<UBTComposite_Selector>(CustomizedRoot->Children[2].ChildComposite);
-	UfpstrueBTTask_EnemyAction* CustomizedAction = CastChecked<UfpstrueBTTask_EnemyAction>(CustomizedChoice->Children[1].ChildTask);
+	UfpstrueBTTask_EnemyAction* CustomizedAction = CastChecked<UfpstrueBTTask_EnemyAction>(CustomizedChoice->Children[0].ChildComposite->Children[0].ChildTask);
 	CustomizedAction->Action = EFPEnemyBehaviorAction::Idle;
 	TestFalse(TEXT("Upgrade refuses a designer-modified behavior branch"),
 		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(CustomizedTree, CustomizedBlackboard));
 	TestTrue(TEXT("Rejected upgrade preserves the designer root"), CustomizedTree->RootNode == CustomizedRoot);
 	TestTrue(TEXT("Rejected upgrade preserves the designer action"), CustomizedAction->Action == EFPEnemyBehaviorAction::Idle);
 	TestEqual(TEXT("Rejected upgrade preserves all Blackboard entries"), CustomizedBlackboard->Keys.Num(), 10);
+	UBehaviorTree* CustomConditionTree = NewObject<UBehaviorTree>();
+	UBlackboardData* CustomConditionBlackboard = NewObject<UBlackboardData>(CustomConditionTree);
+	if (!UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(CustomConditionTree, CustomConditionBlackboard)) return false;
+	UBTComposite_Selector* CustomConditionChoice = MakeFlatEnemyTreeFixture(*CustomConditionTree);
+	UBTDecorator* CustomRetreatCondition = CustomConditionChoice->Children[1].Decorators[0];
+	CustomConditionChoice->Children[1].Decorators.Reset();
+	CustomConditionChoice->Children[3].Decorators.Insert(CustomRetreatCondition, 0);
+	TestFalse(TEXT("An arbitrary designer condition move cannot masquerade as the known default repair"),
+		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(CustomConditionTree, CustomConditionBlackboard));
+	TestEqual(TEXT("Rejected condition move preserves the flat designer structure"), CustomConditionChoice->Children.Num(), 7);
+	TestTrue(TEXT("Rejected condition move keeps the designer's condition on the selected branch"),
+		CustomConditionChoice->Children[3].Decorators[0] == CustomRetreatCondition);
 
 	// 已有自定义键的资产不得被默认模板覆盖，拒绝后也不能留下半成品树。
 	UBehaviorTree* UnconfiguredTree = NewObject<UBehaviorTree>();
@@ -414,8 +589,8 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	// FTestWorldWrapper 的 Game 临时世界默认不创建 AI 系统，真实 Blackboard 初始化需要它。
 	if (!TestNotNull(TEXT("Test world has an AI system"), World->CreateAISystem()))
 		return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld())
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!BeginEnemyTestPlay(Fixture))
 	{
 		Fixture.ForwardErrorMessages(this);
 		return false;
@@ -438,7 +613,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	AfpstrueEnemyCharacter* SecondEnemy = SpawnEnemy();
 	AfpstrueEnemyAIController* First = World->SpawnActor<AfpstrueEnemyAIController>();
 	AfpstrueEnemyAIController* Second = World->SpawnActor<AfpstrueEnemyAIController>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("First enemy"), FirstEnemy) || !TestNotNull(TEXT("Second enemy"), SecondEnemy) ||
 		!TestNotNull(TEXT("First controller"), First) || !TestNotNull(TEXT("Second controller"), Second) ||
 		!TestNotNull(TEXT("Target"), Target))
@@ -535,6 +710,12 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Arriving at remembered position cannot face the hidden player"), First->FaceTargetAtRest());
 	TestTrue(TEXT("Search preserves control rotation instead of looking at the live target"),
 		First->GetControlRotation().Equals(RotationBeforeSearch));
+	// 让真实分层树消费失去视觉的唤醒；只调用 Pursue 叶子无法发现错误的可见战斗分组条件。
+	if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+	TestTrue(TEXT("The running investigation group pursues the remembered position"),
+		First->GetAIState() == EFPEnemyAIState::Chase && First->MoveFailures[0].Goal.Location.Equals(RememberedLocation));
+	TestNull(TEXT("Investigation execution keeps the hidden Actor out of its Blackboard"),
+		First->GetBlackboardComponent()->GetValueAsObject(FPEnemyBlackboard::TargetActor));
 	TestTrue(TEXT("Search can request pursuit of its remembered position"), First->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Pursue));
 	// 临时世界没有 NavMesh；真实寻路失败记录携带提交目标，可以区分记忆位置与 Manager 的实时位置。
 	TestTrue(TEXT("Search navigation uses remembered location instead of Manager snapshot"),
@@ -563,7 +744,17 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	// 单轮采样由一个入口构建；目标失效时不能留下上轮的近战条件。
 	Target->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
 	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
+	AfpstrueSurroundManager* NearManager = World->GetAuthGameMode<AfpstruePvpGameMode>()->GetOrCreateSurroundManager(Target);
+	if (!TestNotNull(TEXT("Near combat uses the real target-owned manager"), NearManager)) return false;
+	// 临时世界没有 NavMesh：只固定位置查询的输出，内圈资格仍由实际申请链授予。
+	NearManager->UpdateSharedTargetSnapshot(true);
+	NearManager->PublishedTargetLocation = NearManager->CachedTargetLocation;
+	NearManager->SurroundSlots[0].bHasProjectedSlotLocation = NearManager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	NearManager->SurroundSlots[0].ProjectedSlotLocation = NearManager->SurroundSlots[0].ProjectedApproachLocation = FirstEnemy->GetNavAgentLocation();
+	First->InitializeCombatContext(Target, NearManager);
+	if (!ReportBehaviorSightStimulus(First, Target, true, Target->GetActorLocation(), *this)) return false;
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestTrue(TEXT("Near-range sampling requires a genuine manager-owned inner lease"), NearManager->HasInnerSlot(FirstEnemy));
 	TestTrue(TEXT("Near target enters attack range"), First->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InAttackRange));
 	APlayerController* LocalPlayer = World->SpawnActor<APlayerController>();
 	if (!TestNotNull(TEXT("A local player remains present while combat target is revoked"), LocalPlayer)) return false;
@@ -575,6 +766,12 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 		ActionProperty->SetObjectPropertyValue_InContainer(Target, NewObject<UInputAction>(Target));
 	}
 	LocalPlayer->Possess(Target);
+	// 多人采样可以重选仍被真实视觉感知的玩家；清空上下文本身不是忘记视觉的命令。
+	First->InitializeCombatContext(nullptr, nullptr);
+	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
+	TestTrue(TEXT("A still-perceived valid player can be reselected after a context clear"), First->GetTargetCharacter() == Target);
+	// 撤销感知后才检查失效快照；保留普通玩家实例，证明不是按全局玩家索引偷偷恢复。
+	First->GetPerceptionComponent()->ForgetActor(Target);
 	First->AIState = EFPEnemyAIState::Chase;
 	First->InitializeCombatContext(nullptr, nullptr);
 	TestTrue(TEXT("Revoking a target immediately returns the enemy to Idle"), First->GetAIState() == EFPEnemyAIState::Idle);
@@ -602,8 +799,8 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	DecisionBlackboard->UnregisterObserver(TargetKey, SnapshotObserver);
 	TestEqual(TEXT("Invalid refresh publishes one complete target snapshot"), InvalidSnapshotNotifications, 1);
 	First->RefreshBehaviorDecision(*DecisionBlackboard);
-	TestNull(TEXT("A later decision does not silently reacquire the local player"), First->GetTargetCharacter());
-	TestFalse(TEXT("A local player alone cannot restore a revoked combat target"), DecisionBlackboard->GetValueAsBool(FPEnemyBlackboard::HasTarget));
+	TestNull(TEXT("A later decision cannot reacquire a player absent from sight memory"), First->GetTargetCharacter());
+	TestFalse(TEXT("A local player alone cannot replace a missing perception result"), DecisionBlackboard->GetValueAsBool(FPEnemyBlackboard::HasTarget));
 	First->InitializeCombatContext(Target, nullptr);
 	First->RefreshBehaviorDecision(*First->GetBlackboardComponent());
 	TestFalse(TEXT("Reinjecting the same player starts an undiscovered context"),
@@ -619,7 +816,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Death clears the Blackboard target condition"), DecisionBlackboard->GetValueAsBool(FPEnemyBlackboard::HasTarget));
 	TestTrue(TEXT("Target loss idles the enemy without permanently stopping its tree"),
 		First->GetAIState() == EFPEnemyAIState::Idle && First->GetBrainComponent()->IsRunning());
-	AfpstrueCharacter* Replacement = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Replacement = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("An explicitly injected replacement target exists"), Replacement)) return false;
 	Replacement->SetActorEnableCollision(false);
 	Replacement->SetActorLocation(FVector(100000.0f, 0.0f, 0.0f));
@@ -644,7 +841,7 @@ bool FFPEnemyBehaviorTreeLifecycleTest::RunTest(const FString& Parameters)
 		UnpossessedController->MoveToGoal(FVector::ZeroVector, 15.0f, true) ==
 		AfpstrueEnemyAIController::EMoveGoalResult::InvalidContext);
 	// 先将成功刺激排队再 StopAI，确保迟到的真实回调不能重新打开命令入口。
-	AfpstrueCharacter* StoppedProbe = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* StoppedProbe = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("A queued sight event has a live target when AI stops"), StoppedProbe)) return false;
 	StoppedProbe->SetActorEnableCollision(false);
 	StoppedProbe->GetCharacterMovement()->SetComponentTickEnabled(false);
@@ -687,8 +884,8 @@ bool FFPEnemySightOcclusionTest::RunTest(const FString& Parameters)
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Sight test world has an AI system"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!BeginEnemyTestPlay(Fixture)) { Fixture.ForwardErrorMessages(this); return false; }
 	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(
 		AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity, nullptr, nullptr,
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
@@ -697,7 +894,7 @@ bool FFPEnemySightOcclusionTest::RunTest(const FString& Parameters)
 	Enemy->FinishSpawning(FTransform::Identity);
 	Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	AActor* Wall = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Real sight controller"), Controller) || !TestNotNull(TEXT("Real sight target"), Target)
 		|| !TestNotNull(TEXT("Sight blocking actor"), Wall)) return false;
@@ -754,7 +951,7 @@ bool FFPEnemyIdleSearchSightTest::RunTest(const FString& Parameters)
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Idle search world has the real AI system"), World->CreateAISystem())) return false;
 	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	if (!BeginEnemyTestPlay(Fixture)) { Fixture.ForwardErrorMessages(this); return false; }
 	AActor* Floor = World->SpawnActor<AActor>();
 	AActor* Wall = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Idle search floor"), Floor) || !TestNotNull(TEXT("Idle search wall"), Wall)) return false;
@@ -796,7 +993,6 @@ bool FFPEnemyIdleSearchSightTest::RunTest(const FString& Parameters)
 	Controller->IdleSearchYawSpeed = 90.0f;
 	Controller->Possess(Enemy);
 	// 临时世界没有网络驱动，只固定多人选敌模式；目标入场资格、BT、旋转、遮挡和视距仍走生产实现。
-	Controller->bUsesMultiplayerTargets = true;
 	Controller->InitializeCombatContext(nullptr, nullptr);
 	UAIPerceptionSystem* PerceptionSystem = UAIPerceptionSystem::GetCurrent(World);
 	if (!TestNotNull(TEXT("Real idle search sight system"), PerceptionSystem) ||
@@ -864,7 +1060,6 @@ bool FFPEnemyIdleSearchSightTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("A stale idle request cannot restart a stopped controller"), Controller->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Idle));
 	Controller->UnPossess();
 	Controller->Possess(Enemy);
-	Controller->bUsesMultiplayerTargets = true;
 	Controller->InitializeCombatContext(nullptr, nullptr);
 	if (!TickFor(0.3f)) return false;
 	UGameplayStatics::ApplyDamage(Enemy, 1000.0f, Player, Target, nullptr);
@@ -887,8 +1082,8 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
 	World->CreateAISystem();
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!BeginEnemyTestPlay(Fixture)) { Fixture.ForwardErrorMessages(this); return false; }
 	const FTransform SpawnTransform(FVector(1000.0, 0.0, 0.0));
 	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
 		SpawnTransform, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
@@ -899,6 +1094,12 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Controller"), Controller)) return false;
 	Controller->Possess(Enemy);
 	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
+	AfpstrueSurroundManager* Manager = IsValid(Target)
+		? World->GetAuthGameMode<AfpstruePvpGameMode>()->GetOrCreateSurroundManager(Target) : nullptr;
+	if (!TestNotNull(TEXT("Movement ownership has a valid multiplayer target and shared budget"), Manager)) return false;
+	Manager->bEnableMoveRequestBudget = false; // 本用例隔离帧总额，只验真实请求归属与失败退避。
+	Controller->InitializeCombatContext(Target, Manager);
 	UPathFollowingComponent* Following = Controller->GetPathFollowingComponent();
 	if (!TestNotNull(TEXT("Engine path-following component"), Following)) return false;
 	int32 SubmittedCompletions = 0;
@@ -929,6 +1130,7 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Another controller owns its own navigation"), OtherController)) return false;
 	OtherController->Possess(OtherEnemy);
 	DisableAutomaticBehaviorTick(*OtherController->GetBrainComponent());
+	OtherController->InitializeCombatContext(Target, Manager);
 	UPathFollowingComponent* OtherFollowing = OtherController->GetPathFollowingComponent();
 	if (!TestNotNull(TEXT("Another enemy retains its own path-following component"), OtherFollowing)) return false;
 	TestTrue(TEXT("Shared candidate locations do not share path-following state"), Following != OtherFollowing);
@@ -966,11 +1168,39 @@ bool FFPEnemyMoveRequestOwnershipTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Delayed completion preserves new goal semantics"), Controller->LastMoveGoal.Matches(ArrivalGoal, 1.0f));
 	Controller->OnMoveCompleted(OtherFailedId, FPathFollowingResult(EPathFollowingResult::Invalid));
 	TestTrue(TEXT("Another controller's old completion cannot clear the first arrival cache"), Controller->bHasMoveGoal);
+	// 无槽候场也走真实围攻叶子：MoveTo 失败后会停路，但不能顺手删掉刚记下的目标级退避。
+	if (!ReportBehaviorSightStimulus(Controller, Target, true, Target->GetActorLocation(), *this)) return false;
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	FFPEnemyTacticalAssignment WaitingBefore;
+	if (!TestTrue(TEXT("Without NavMesh a normal participant keeps a waiting goal, not a fabricated inner lease"),
+		Manager->GetOrRequestTacticalAssignment(Enemy, WaitingBefore) && WaitingBefore.bHasGoal && WaitingBefore.Role == EFPEnemyTacticalRole::Waiting)) return false;
+	const int32 BeforeWaitingFailure = SubmittedCompletions;
+	Controller->HandleSurroundMovement();
+	TestEqual(TEXT("A waiting goal makes one real failed navigation submission"), SubmittedCompletions, BeforeWaitingFailure + 1);
+	const double WaitingRetryAfter = Controller->MoveFailures[0].RetryAfter;
+	TestTrue(TEXT("Stopping after a waiting failure preserves its future retry deadline"), WaitingRetryAfter > World->GetTimeSeconds());
+	for (int32 Decision = 0; Decision < 6; ++Decision) Controller->HandleSurroundMovement();
+	TestEqual(TEXT("Repeated waiting leaves do not submit another request during backoff"), SubmittedCompletions, BeforeWaitingFailure + 1);
+	TestEqual(TEXT("Polling a waiting failure neither clears nor extends its deadline"), Controller->MoveFailures[0].RetryAfter, WaitingRetryAfter);
+	FFPEnemyTacticalAssignment WaitingAfter;
+	Manager->GetOrRequestTacticalAssignment(Enemy, WaitingAfter);
+	TestTrue(TEXT("A failed waiting path does not churn spatial identity, rank or fixed goal"),
+		WaitingAfter.Role == WaitingBefore.Role && WaitingAfter.Revision == WaitingBefore.Revision && WaitingAfter.Goal.Equals(WaitingBefore.Goal));
+	// 只推进这条失败记录的期限，不运行本用例无关的移动/感知模拟；下一次失败仍来自真实 MoveTo。
+	Controller->MoveFailures[0].RetryAfter = World->GetTimeSeconds() - 1.0;
+	Controller->HandleSurroundMovement();
+	TestEqual(TEXT("A waiting goal retries once after its existing backoff expires"), SubmittedCompletions, BeforeWaitingFailure + 2);
+	Controller->InitializeCombatContext(nullptr, nullptr);
+	TestTrue(TEXT("Changing combat context explicitly clears both old movement failure ledgers"),
+		Controller->MoveFailures[0].RetryAfter == 0.0 && Controller->MoveFailures[1].RetryAfter == 0.0);
+	Controller->InitializeCombatContext(Target, Manager);
 	bStopDuringCompletion = true;
 	Controller->MoveToGoal(Unreachable + FVector(1000.0, 0.0, 0.0), 15.0f, true);
 	TestFalse(TEXT("StopAI inside synchronous completion closes command gate"), Controller->AcceptsCombatCommands());
 	TestFalse(TEXT("Outer MoveTo return cannot restore stopped cache"), Controller->bHasMoveGoal);
 	TestFalse(TEXT("Outer MoveTo return cannot restore stopped request ownership"), Controller->OwnedMoveRequestId.IsValid());
+	TestTrue(TEXT("Whole AI stop explicitly clears both failure ledgers"),
+		Controller->MoveFailures[0].RetryAfter == 0.0 && Controller->MoveFailures[1].RetryAfter == 0.0);
 	// 解除本用例的完成监听，后续世界清理不再访问局部测试状态。
 	Following->OnRequestFinished.Remove(Observer);
 	OtherFollowing->OnRequestFinished.Remove(OtherObserver);
@@ -1031,6 +1261,7 @@ bool FFPEnemyBehaviorTreeAssetGraphTest::RunTest(const FString& Parameters)
 		return false;
 	TestTrue(TEXT("Tree uses the saved Blackboard, not a transient fallback"), Tree->BlackboardAsset == Data);
 	TestTrue(TEXT("Saved Blackboard schema is valid"), FPHasEnemyBlackboardSchema(Data));
+	if (!CheckLayeredEnemyTree(*this, *Tree)) return false;
 	UObject* ControllerDefaults = ControllerBlueprint->GeneratedClass->GetDefaultObject();
 	TestTrue(TEXT("Blueprint Controller defaults reference the saved BT"),
 			 FPEnemyBehaviorAssetTests::ReadObjectProperty(ControllerDefaults, TEXT("BehaviorTreeAsset")) == Tree);
@@ -1172,7 +1403,7 @@ bool FFPEnemyBehaviorTreeAssetGraphTest::RunTest(const FString& Parameters)
 
 namespace
 {
-// 建立不含项目玩法的测试世界，按需创建 AI 系统，隔离攻击事务与导航/生成流程。
+// 使用唯一多人规则建立世界，按需创建 AI；仅隔离无关人口生成与预算采样。
 bool BeginCombatTestWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test, bool bCreateAI = false)
 {
 	if (!Fixture.CreateTestWorld(EWorldType::Game))
@@ -1182,8 +1413,8 @@ bool BeginCombatTestWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test,
 	}
 	UWorld* World = Fixture.GetTestWorld();
 	if (bCreateAI && !Test.TestNotNull(TEXT("The native BT has an AI system"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (Fixture.BeginPlayInTestWorld()) return true;
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (BeginEnemyTestPlay(Fixture)) return true;
 	Fixture.ForwardErrorMessages(&Test);
 	return false;
 }
@@ -1230,7 +1461,7 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	};
 	AfpstrueEnemyCharacter* Enemy = SpawnEnemy();
 	AfpstrueEnemyCharacter* Probe = SpawnEnemy();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
 	AfpstrueSurroundManager* Surround = World->SpawnActor<AfpstrueSurroundManager>();
 	if (!TestNotNull(TEXT("Enemy"), Enemy) || !TestNotNull(TEXT("Budget probe"), Probe)
@@ -1429,13 +1660,15 @@ bool FFpstrueEnemyCombatLifecycleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("StopAI cancels the old attack timer"), World->GetTimerManager().IsTimerActive(Combat->AttackFinishTimerHandle));
 	TestTrue(TEXT("StopAI releases the captured permit issuer"), Surround->TryAcquireAttackPermission(Probe));
 	Surround->ReleaseAttackPermission(Probe);
+	Controller->UnPossess();
+	Controller->Possess(Enemy);
 	Controller->InitializeCombatContext(Target, Surround);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
 	if (!TestTrue(TEXT("A restarted context obtains a new inner lease and revision"), SeedCombatSlots(Target))) return false;
 	TestTrue(TEXT("The stopped enemy can acquire a fresh permit"), Surround->TryAcquireAttackPermission(Enemy));
 	TestTrue(TEXT("A new context begins a fresh attack"), Combat->TryAttackTarget());
 	// 换目标不能让旧攻击改打新玩家；应取消旧事务，再由新事务捕获目标。
-	AfpstrueCharacter* ReplacementTarget = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* ReplacementTarget = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("Replacement player"), ReplacementTarget)) return false;
 	ReplacementTarget->SetActorEnableCollision(false);
 	ReplacementTarget->SetActorLocation(FVector(200.0f, 0.0f, 0.0f));
@@ -1469,7 +1702,7 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
 	AfpstrueSurroundManager* Manager = World->SpawnActor<AfpstrueSurroundManager>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("Manager"), Manager) || !TestNotNull(TEXT("Target"), Target)) return false;
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector::ZeroVector);
@@ -1659,6 +1892,82 @@ bool FFpstrueSurroundCacheLifecycleTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Clearing target releases old allocations"), Manager->EnemyToSlot.Num(), 0);
 	TestEqual(TEXT("Late success cannot restore query ownership after reset"), Manager->ApproachQueryId, INDEX_NONE);
 	TestFalse(TEXT("Late success cannot republish slots after reset"), Manager->SurroundSlots[0].bHasProjectedApproachLocation);
+	// 固定一条路径输入，只验真实 PathFollowing 启动/停路广播，不冒充本临时世界已有可达 NavMesh。
+	AfpstrueEnemyCharacter* ReentrantEnemy = SpawnEnemy();
+	AfpstrueEnemyAIController* ReentrantController = World->SpawnActor<AfpstrueEnemyAIController>();
+	if (!TestNotNull(TEXT("Refresh callback enemy"), ReentrantEnemy) || !TestNotNull(TEXT("Refresh callback controller"), ReentrantController)) return false;
+	ReentrantController->Possess(ReentrantEnemy);
+	DisableAutomaticBehaviorTick(*ReentrantController->GetBrainComponent());
+	UPathFollowingComponent* Following = ReentrantController->GetPathFollowingComponent();
+	if (!TestNotNull(TEXT("Refresh callback uses native path following"), Following)) return false;
+	bool bCallbackArmed = false;
+	bool bReinjectSameTarget = false;
+	int32 ResetCallbacks = 0;
+	FAIRequestID ExpectedMove = FAIRequestID::InvalidRequest;
+	uint32 ReinitializedRevision = 0;
+	const FVector ReinitializedLocation(500.0f, 100.0f, 0.0f);
+	const FDelegateHandle ResetOnStop = Following->OnRequestFinished.AddLambda([&](FAIRequestID Id, const FPathFollowingResult& Result)
+	{
+		if (!bCallbackArmed || Id != ExpectedMove || Result.Code != EPathFollowingResult::Aborted) return;
+		bCallbackArmed = false;
+		++ResetCallbacks;
+		Manager->ResetManager();
+		if (bReinjectSameTarget)
+		{
+			Target->SetActorLocation(ReinitializedLocation);
+			Manager->SetTargetCharacter(Target);
+			ReinitializedRevision = Manager->PositionQueryRevision;
+			// 相同 Actor 指针不足以辨认上下文：旧刷新若继续运行，将把这次移动写进刚重建的缓存。
+			Target->SetActorLocation(ReinitializedLocation + FVector(1000.0f, 0.0f, 0.0f));
+		}
+	});
+	ON_SCOPE_EXIT { Following->OnRequestFinished.Remove(ResetOnStop); };
+	for (int32 Case = 0; Case < 2; ++Case)
+	{
+		Manager->SetTargetCharacter(Target);
+		World->GetTimerManager().ClearTimer(Manager->SharedTargetTimerHandle);
+		const int32 QueryToAbort = Manager->ApproachQueryId;
+		Manager->ApproachQueryId = INDEX_NONE;
+		++Manager->PositionQueryRevision;
+		if (QueryToAbort != INDEX_NONE)
+			if (UEnvQueryManager* Queries = UEnvQueryManager::GetCurrent(World)) Queries->AbortQuery(QueryToAbort);
+		Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+		for (FfpstrueSurroundSlot& Slot : Manager->SurroundSlots)
+			Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = false;
+		FfpstrueSurroundSlot& CallbackSlot = Manager->SurroundSlots[0];
+		CallbackSlot.ProjectedApproachLocation = Manager->CachedTargetLocation + FVector(120.0f, 0.0f, 0.0f);
+		CallbackSlot.bHasProjectedApproachLocation = true;
+		ReentrantEnemy->SetActorLocation(Manager->CachedTargetLocation + FVector(1000.0f, 0.0f, 0.0f));
+		ReentrantController->InitializeCombatContext(Target, Manager);
+		FFPEnemyTacticalAssignment CallbackAssignment;
+		if (!TestTrue(TEXT("Callback fixture obtains a real inner lease through normal admission"),
+			Manager->GetOrRequestTacticalAssignment(ReentrantEnemy, CallbackAssignment) && CallbackAssignment.Role == EFPEnemyTacticalRole::Inner)) return false;
+		Manager->Participants.FindChecked(ReentrantEnemy).LastProgressTime -= Manager->SlotApproachTimeout + 1.0f;
+		const FVector MoveStart = ReentrantEnemy->GetNavAgentLocation();
+		const FVector MoveEnd = MoveStart + FVector(1000.0f, 0.0f, 0.0f);
+		FAIMoveRequest PendingMove(MoveEnd);
+		PendingMove.SetAcceptanceRadius(15.0f);
+		FNavPathSharedPtr ScriptedPath = MakeShared<FNavigationPath, ESPMode::ThreadSafe>(TArray<FVector>{MoveStart, MoveEnd});
+		ExpectedMove = Following->RequestMove(PendingMove, ScriptedPath);
+		if (!TestTrue(TEXT("Native path following owns an active request before the manager callback"),
+			ExpectedMove.IsValid() && Following->GetStatus() == EPathFollowingStatus::Moving)) return false;
+		bReinjectSameTarget = Case == 1;
+		bCallbackArmed = true;
+		Manager->UpdateSharedTargetSnapshot(false);
+		TestEqual(TEXT("Approach timeout notification really stops the path and invokes reset"), ResetCallbacks, Case + 1);
+		if (!bReinjectSameTarget)
+		{
+			TestNull(TEXT("A callback reset keeps the target cleared when the old refresh returns"), Manager->TargetCharacter.Get());
+			TestFalse(TEXT("A callback reset cannot be followed by stale snapshot publication"), Manager->GetSharedTargetSnapshot(Snapshot));
+			TestEqual(TEXT("The old refresh does not submit another query after reset"), Manager->ApproachQueryId, INDEX_NONE);
+		}
+		else
+		{
+			TestTrue(TEXT("Same-target reinitialization retains its newly published snapshot"),
+				Manager->GetSharedTargetSnapshot(Snapshot) && Snapshot.Equals(ReinitializedLocation));
+			TestEqual(TEXT("The old refresh cannot overwrite the new same-target query generation"), Manager->PositionQueryRevision, ReinitializedRevision);
+		}
+	}
 	Manager->SetTargetCharacter(Target);
 	const int32 EndingQueryId = Manager->ApproachQueryId;
 	const uint32 EndingRevision = Manager->PositionQueryRevision;
@@ -1681,7 +1990,7 @@ bool FFpstrueSurroundTacticalQueueTest::RunTest(const FString& Parameters)
 	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
 	AfpstrueSurroundManager* Manager = World->SpawnActor<AfpstrueSurroundManager>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("Queue manager"), Manager) || !TestNotNull(TEXT("Queue target"), Target)) return false;
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector::ZeroVector);
@@ -1717,11 +2026,11 @@ bool FFpstrueSurroundTacticalQueueTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("First valid request obtains the only inner position"), A.Role == EFPEnemyTacticalRole::Inner);
 	TestTrue(TEXT("Second request holds outer while still queuing for inner"), B.Role == EFPEnemyTacticalRole::Outer);
 	TestTrue(TEXT("Overflow receives a real peripheral waiting goal"), C.Role == EFPEnemyTacticalRole::Waiting && C.Goal.Size2D() > Manager->OuterRadius);
-	TestEqual(TEXT("Only requests without inner eligibility remain queued"), Manager->WaitingQueue.Num(), 3);
+	TestEqual(TEXT("Only requests without inner eligibility remain queued"), Manager->SlotWaitingQueue.Num(), 3);
 	const uint64 SecondSequence = Manager->Participants.FindChecked(Second).RequestSequence;
 	FFPEnemyTacticalAssignment Repeated;
 	Manager->GetOrRequestTacticalAssignment(Second, Repeated);
-	TestEqual(TEXT("Repeated decisions do not requeue"), Manager->WaitingQueue.Num(), 3);
+	TestEqual(TEXT("Repeated decisions do not requeue"), Manager->SlotWaitingQueue.Num(), 3);
 	TestEqual(TEXT("Repeated decisions preserve FIFO identity"), Manager->Participants.FindChecked(Second).RequestSequence, SecondSequence);
 	TestEqual(TEXT("Repeated decisions preserve assignment revision"), Repeated.Revision, B.Revision);
 	TestTrue(TEXT("Inner lease permits one attack transaction"), Manager->TryAcquireAttackPermission(First));
@@ -1804,7 +2113,7 @@ bool FFpstrueSurroundTacticalBoundaryTest::RunTest(const FString& Parameters)
 	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
 	AfpstrueSurroundManager* Manager = World->SpawnActor<AfpstrueSurroundManager>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("Boundary manager"), Manager) || !TestNotNull(TEXT("Boundary target"), Target)) return false;
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector::ZeroVector);
@@ -1873,7 +2182,7 @@ bool FFPEnemyBehaviorStartupTest::RunTest(const FString& Parameters)
 	AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(),
 		FTransform::Identity, nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("Startup enemy"), Enemy) || !TestNotNull(TEXT("Startup controller"), Controller) || !TestNotNull(TEXT("Startup target"), Target)) return false;
 	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
 	Enemy->FinishSpawning(FTransform::Identity);
@@ -1905,8 +2214,13 @@ bool FFPEnemyBehaviorStartupTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Successful lifecycle also stops idempotently"), Controller->MoveRequestRevision, CompletedStopRevision);
 	TestFalse(TEXT("Completed stop really stops the brain"), Controller->GetBrainComponent()->IsRunning());
 	Controller->InitializeCombatContext(Target, nullptr);
-	TestTrue(TEXT("Explicit restart of a previously successful lifecycle reruns the tree"), Controller->IsBehaviorReady());
-	TestTrue(TEXT("Explicit restart publishes only its new target"), Controller->TargetCharacter.Get() == Target);
+	TestFalse(TEXT("A stopped successful lifecycle cannot restart from context injection"), Controller->IsBehaviorReady());
+	TestNull(TEXT("Stopped context injection cannot publish a target"), Controller->TargetCharacter.Get());
+	Controller->UnPossess();
+	Controller->Possess(Enemy);
+	TestTrue(TEXT("Only a new possession starts the next successful lifecycle"), Controller->IsBehaviorReady());
+	Controller->InitializeCombatContext(Target, nullptr);
+	TestTrue(TEXT("The new lifecycle accepts only its explicit target"), Controller->TargetCharacter.Get() == Target);
 	Controller->StopAI();
 	return true;
 }
@@ -2168,7 +2482,7 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 	AfpstrueEnemyCharacter* Enemy = SpawnEnemy();
 	AfpstrueEnemyCharacter* Probe = SpawnEnemy();
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	AfpstrueSurroundManager* Surround = World->SpawnActor<AfpstrueSurroundManager>();
 	if (!TestNotNull(TEXT("Retreat enemy"), Enemy) || !TestNotNull(TEXT("Permit probe"), Probe) ||
 		!TestNotNull(TEXT("Retreat controller"), Controller) || !TestNotNull(TEXT("Known threat"), Target) ||
@@ -2210,6 +2524,33 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("Healthy attacker owns its permit"), Surround->TryAcquireAttackPermission(Enemy)) ||
 		!TestTrue(TEXT("Healthy attack begins through the real combat component"), Combat->TryAttackTarget())) return false;
 	TestFalse(TEXT("Another living enemy cannot take the active attack permit"), Surround->TryAcquireAttackPermission(Probe));
+	// 缩小真实配置范围，使同一快照同时满足正在攻击/超距；必须由树先维持事务，不能闲置清掉许可。
+	FFloatProperty* ChaseRangeProperty = FindFProperty<FFloatProperty>(Enemy->GetClass(), TEXT("ChaseRange"));
+	if (!TestNotNull(TEXT("Enemy chase range is an editable configuration value"), ChaseRangeProperty)) return false;
+	const float OriginalChaseRange = ChaseRangeProperty->GetPropertyValue_InContainer(Enemy);
+	ChaseRangeProperty->SetPropertyValue_InContainer(Enemy, 100.0f);
+	UBehaviorTreeComponent* Tree = Cast<UBehaviorTreeComponent>(Controller->GetBrainComponent());
+	if (!TestNotNull(TEXT("Retreat fixture uses the real behavior-tree scheduler"), Tree)) return false;
+	Controller->GetBrainComponent()->PrimaryComponentTick.bCanEverTick = true;
+	Controller->GetBrainComponent()->SetComponentTickEnabled(true);
+	if (!TestTrue(TEXT("A real adaptive wait is registered before sending the explicit decision wake"),
+		TickBehaviorUntil(Fixture, *this, [&]() { return Cast<UfpstrueBTTask_DecisionWait>(Tree->GetActiveNode()) != nullptr; }, 0.2f))) return false;
+	Controller->RequestBehaviorDecision();
+	const bool bSustainedByTree = TickBehaviorUntil(Fixture, *this, [&]()
+	{
+		return !Controller->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InChaseRange) &&
+			Controller->GetAIState() == EFPEnemyAIState::Attack && Combat->IsAttacking();
+	}, 0.2f);
+	if (!TestTrue(TEXT("The bounded real-tree cycle executes the active attack branch"), bSustainedByTree)) return false;
+	if (!TestTrue(TEXT("The next adaptive wait is active before testing the health interrupt"),
+		TickBehaviorUntil(Fixture, *this, [&]() { return Cast<UfpstrueBTTask_DecisionWait>(Tree->GetActiveNode()) != nullptr; }, 0.2f))) return false;
+	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
+	TestFalse(TEXT("Real tree samples the target outside configured chase range"),
+		Controller->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::InChaseRange));
+	TestTrue(TEXT("The combat group sustains the active transaction before outside-range idle"),
+		Combat->IsAttacking() && Controller->GetAIState() == EFPEnemyAIState::Attack);
+	TestFalse(TEXT("Sustaining the existing attack keeps its unique permit"), Surround->TryAcquireAttackPermission(Probe));
+	ChaseRangeProperty->SetPropertyValue_InContainer(Enemy, OriginalChaseRange);
 	UGameplayStatics::ApplyDamage(Enemy, 75.0f, nullptr, nullptr, nullptr);
 	TestTrue(TEXT("Real health notification requests retreat without editing AI flags"), Controller->bRetreatRequested);
 	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
@@ -2228,8 +2569,17 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 		return Pending.Revision;
 	};
 	const uint32 FirstCoverRevision = SeedPendingCover();
-	TestTrue(TEXT("Retreat starts while a cover result is pending"), Controller->ExecuteBehaviorAction(EFPEnemyBehaviorAction::Retreat));
-	TestTrue(TEXT("A pending cover request keeps retreat active"), Controller->bRetreatActive);
+	// 同一正在攻击的实例被健康消息唤醒，由真实树选择撤退并执行完整取消链。
+	Controller->GetBrainComponent()->PrimaryComponentTick.bCanEverTick = true;
+	Controller->GetBrainComponent()->SetComponentTickEnabled(true);
+	Controller->RequestBehaviorDecision();
+	const bool bRetreatedByTree = TickBehaviorUntil(Fixture, *this, [&]() { return Controller->bRetreatActive; }, 0.2f);
+	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
+	if (!TestTrue(TEXT("The bounded real-tree cycle executes retreat after the health wake"), bRetreatedByTree)) return false;
+	TestTrue(TEXT("The running tree selects retreat ahead of the existing attack"), Controller->bRetreatActive);
+	const auto* PendingCover = Surround->CoverRequests.Find(Enemy);
+	TestTrue(TEXT("Retreat retains the same pending asynchronous cover request"),
+		PendingCover != nullptr && PendingCover->Revision == FirstCoverRevision && PendingCover->State == EFPCoverQueryResult::Pending);
 	TestFalse(TEXT("Retreat cancels the old attack transaction"), Combat->IsAttacking());
 	TestFalse(TEXT("Retreat releases the old surround slot"), Surround->EnemyToSlot.Contains(Enemy));
 	TestTrue(TEXT("Retreat releases the captured attack permit while its owner lives"), Surround->TryAcquireAttackPermission(Probe));
@@ -2336,14 +2686,20 @@ bool FFpstrueEnemyLowHealthRetreatTest::RunTest(const FString& Parameters)
 	Target->SetActorLocation(FVector(100000.0f, 0.0f, 0.0f));
 	Controller->InitializeCombatContext(Target, Surround);
 	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
-	for (int32 Frame = 0; Frame < 40; ++Frame)
-	{
-		if (!Fixture.TickTestWorld(0.01f)) { Fixture.ForwardErrorMessages(this); return false; }
-	}
+	if (!TestTrue(TEXT("The tree reaches its real long adaptive wait before health is changed"),
+		TickBehaviorUntil(Fixture, *this, [&]()
+		{
+			return Cast<UfpstrueBTTask_DecisionWait>(Tree->GetActiveNode()) != nullptr &&
+				FMath::IsNearlyEqual(Controller->GetBehaviorDecisionDelay(), 10.0f);
+		}))) return false;
 	TestTrue(TEXT("The real behavior tree is running before the health wake event"), Controller->GetBrainComponent()->IsRunning());
 	TestEqual(TEXT("The far visible threat leaves a ten-second idle decision wait"), Controller->GetBehaviorDecisionDelay(), 10.0f);
 	UGameplayStatics::ApplyDamage(Enemy, 75.0f, nullptr, nullptr, nullptr);
-	if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+	if (!TestTrue(TEXT("Health interrupts the real ten-second wait within a bounded short window"),
+		TickBehaviorUntil(Fixture, *this, [&]()
+		{
+			return Controller->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::Retreating);
+		}, 0.2f))) return false;
 	TestTrue(TEXT("The health event wakes a ten-second behavior wait for a real retreat sample"),
 		Controller->GetBlackboardComponent()->GetValueAsBool(FPEnemyBlackboard::Retreating));
 	Controller->StopAI();
@@ -2422,14 +2778,28 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
 	Enemy->FinishSpawning(FTransform::Identity);
 	Enemy->SetActorEnableCollision(false);
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
 	if (!TestNotNull(TEXT("Target"), Target) || !TestNotNull(TEXT("Controller"), Controller)) return false;
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector(200.0, 0.0, 0.0));
 	Controller->Possess(Enemy);
-	Controller->InitializeCombatContext(Target, nullptr);
-	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
+	AfpstrueSurroundManager* Manager = World->GetAuthGameMode<AfpstruePvpGameMode>()->GetOrCreateSurroundManager(Target);
+	if (!TestNotNull(TEXT("Playback uses the real target-owned tactical manager"), Manager)) return false;
+	const auto AcquirePlaybackLease = [&]()
+	{
+		// 只固定无 NavMesh 夹具的位置输出；真实 Controller 采样申请资格，不直接写攻击状态。
+		Manager->UpdateSharedTargetSnapshot(true);
+		Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+		FfpstrueSurroundSlot& Slot = Manager->SurroundSlots[0];
+		Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = true;
+		Slot.ProjectedSlotLocation = Slot.ProjectedApproachLocation = Enemy->GetNavAgentLocation();
+		Controller->InitializeCombatContext(Target, Manager);
+		if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
+		Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+		return Manager->HasInnerSlot(Enemy);
+	};
+	if (!TestTrue(TEXT("Playback attacker has a genuine inner lease before the transaction"), AcquirePlaybackLease())) return false;
 	DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 	UfpstrueEnemyCombatComponent* Combat = Enemy->GetCombatComponent();
 	USkeletalMeshComponent* Mesh = Enemy->GetMesh();
@@ -2522,8 +2892,9 @@ bool FFpstrueEnemyAttackPlaybackTest::RunTest(const FString& Parameters)
 	Instance->OnMontageBlendingOutStarted.Unbind();
 
 	// 没有 AttackFinished Notify 的动画也通过真实实例自然结束收尾，而不是等待保护 Timer。
-	Controller->InitializeCombatContext(Target, nullptr);
-	if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
+	Controller->UnPossess();
+	Controller->Possess(Enemy);
+	if (!TestTrue(TEXT("New possession reacquires a real lease before the next playback"), AcquirePlaybackLease())) return false;
 	TestTrue(TEXT("A new session accepts the next attack"), Combat->TryAttackTarget());
 	TestTrue(TEXT("Natural-completion attack plays"), Combat->PlayAttackMontageForAttack(Combat->AttackSequence, Attack));
 	FAnimMontageInstance* NaturalPlayback = Anim->GetActiveInstanceForMontage(Attack);
@@ -2617,10 +2988,12 @@ bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 	FTestWorldWrapper Fixture;
 	if (!BeginCombatTestWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
-	AfpstrueCharacter* Target = World->SpawnActor<AfpstrueCharacter>();
+	AfpstrueCharacter* Target = SpawnBehaviorTarget(*World);
 	if (!TestNotNull(TEXT("Test target"), Target)) return false;
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector(180.0, 0.0, 0.0));
+	AfpstrueSurroundManager* Manager = World->GetAuthGameMode<AfpstruePvpGameMode>()->GetOrCreateSurroundManager(Target);
+	if (!TestNotNull(TEXT("Project playback uses a real multiplayer tactical manager"), Manager)) return false;
 	// 分别用新实例测试自然结束和中断，不改事务状态/播放 ID，也无需跳过冷却。
 	for (const bool bInterrupt : {false, true})
 	{
@@ -2633,8 +3006,15 @@ bool FFpstrueEnemyAttackAssetIntegrationTest::RunTest(const FString& Parameters)
 		AfpstrueEnemyAIController* Controller = World->SpawnActor<AfpstrueEnemyAIController>();
 		if (!TestNotNull(TEXT("Controller"), Controller)) return false;
 		Controller->Possess(Enemy);
-		Controller->InitializeCombatContext(Target, nullptr);
+		Manager->UpdateSharedTargetSnapshot(true);
+		Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+		FfpstrueSurroundSlot& Slot = Manager->SurroundSlots[0];
+		Slot.bHasProjectedSlotLocation = Slot.bHasProjectedApproachLocation = true;
+		Slot.ProjectedSlotLocation = Slot.ProjectedApproachLocation = Enemy->GetNavAgentLocation();
+		Controller->InitializeCombatContext(Target, Manager);
 		if (!ReportVisibleCombatTarget(Controller, Target, *this)) return false;
+		Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+		if (!TestTrue(TEXT("Project playback owns its real inner lease"), Manager->HasInnerSlot(Enemy))) return false;
 		DisableAutomaticBehaviorTick(*Controller->GetBrainComponent());
 		UfpstrueEnemyCombatComponent* Combat = Enemy->GetCombatComponent();
 		USkeletalMeshComponent* Mesh = Enemy->GetMesh();
@@ -2687,8 +3067,8 @@ bool FFPEnemyNativeFloorCacheTest::RunTest(const FString& Parameters)
 	FTestWorldWrapper Fixture;
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
-	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+	if (!BeginEnemyTestPlay(Fixture)) { Fixture.ForwardErrorMessages(this); return false; }
 	// UE5.5 StartFalling在Editor中保护世界最初1秒，避免PIE首帧场景未加载时跌落。
 	// 真实推进World越过保护期，不修改TimeSeconds/GIsEditor或伪造MOVE_Falling。
 	for (int32 Frame = 0; Frame < 12; ++Frame)
@@ -2834,7 +3214,7 @@ bool FFpstrueAnimationSharingStopTest::RunTest(const FString& Parameters)
 		World.ForwardErrorMessages(this);
 		return false;
 	}
-	World.GetTestWorld()->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	World.GetTestWorld()->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
 	if (!World.BeginPlayInTestWorld())
 	{
 		World.ForwardErrorMessages(this);

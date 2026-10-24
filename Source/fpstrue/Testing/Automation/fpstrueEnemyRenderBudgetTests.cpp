@@ -6,6 +6,7 @@
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
+#include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Game/fpstrueMultiplayer.h"
@@ -20,11 +21,14 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
+#include "InputAction.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
 #include "Tests/AutomationCommon.h"
+#include "TimerManager.h"
+#include "UObject/UnrealType.h"
 #include "SignificanceManager.h"
 #include "AnimationSharingManager.h"
 #include "Animation/AnimInstance.h"
@@ -32,6 +36,36 @@
 #include "Math/RotationMatrix.h"
 
 #include <limits>
+
+namespace
+{
+// 资格与目标选择沿生产链进入；临时原生玩家补齐蓝图原本提供的输入资产。
+bool ObserveRenderCombatParticipant(FAutomationTestBase& Test, AfpstrueEnemyAIController& Controller, AfpstrueCharacter& Target)
+{
+	UWorld* World = Target.GetWorld();
+	AfpstruePvpGameMode* Mode = World->GetAuthGameMode<AfpstruePvpGameMode>();
+	if (!Test.TestNotNull(TEXT("Combat fixture uses the real gameplay mode"), Mode)) return false;
+	for (const FName Name : {TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"), TEXT("FireAction"),
+		TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+	{
+		FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(Target.GetClass(), Name);
+		if (!Test.TestNotNull(TEXT("Combat player exposes its required input action"), Property)) return false;
+		Property->SetObjectPropertyValue_InContainer(&Target, NewObject<UInputAction>(&Target));
+	}
+	APlayerController* Player = World->SpawnActor<APlayerController>();
+	if (!Test.TestNotNull(TEXT("Combat target has an ordinary PlayerController"), Player)) return false;
+	Player->Possess(&Target);
+	if (!Test.TestTrue(TEXT("Combat target is a real player participant"), Mode->IsCombatParticipant(&Target))) return false;
+	UAIPerceptionComponent* Perception = Controller.GetPerceptionComponent();
+	if (!Test.TestNotNull(TEXT("Combat fixture uses real sight"), Perception)) return false;
+	FAIStimulus Sight(*GetDefault<UAISense_Sight>(), 1.0f, Target.GetActorLocation(),
+		Controller.GetPawn()->GetActorLocation(), FAIStimulus::SensingSucceeded);
+	Sight.SetWantsNotifyOnlyOnValueChange(false);
+	Perception->RegisterStimulus(&Target, Sight);
+	Perception->ProcessStimuli();
+	return Test.TestTrue(TEXT("Sight selects the participant"), Controller.GetTargetCharacter() == &Target);
+}
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueEnemySignificanceCombatSampleTest,
 	"fpstrue.Performance.Significance.ScopedCombatProtection",
@@ -48,7 +82,7 @@ bool FFpstrueEnemySignificanceCombatSampleTest::RunTest(const FString& Parameter
 	}
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Significance fixture has an AI system"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
 	if (!Fixture.BeginPlayInTestWorld())
 	{
 		Fixture.ForwardErrorMessages(this);
@@ -66,13 +100,17 @@ bool FFpstrueEnemySignificanceCombatSampleTest::RunTest(const FString& Parameter
 	Target->SetActorEnableCollision(false);
 	Target->SetActorLocation(FVector(100.0f, 0.0f, 0.0f));
 	Controller->Possess(Enemy);
-	Controller->InitializeCombatContext(Target, nullptr);
-	UAIPerceptionComponent* Perception = Controller->GetPerceptionComponent();
-	if (!TestNotNull(TEXT("Real sight listener"), Perception)) return false;
-	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(),
-		Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
-	Perception->RegisterStimulus(Target, Stimulus);
-	Perception->ProcessStimuli();
+	if (!ObserveRenderCombatParticipant(*this, *Controller, *Target)) return false;
+	AfpstrueSurroundManager* Manager = Controller->GetSurroundManager();
+	if (!TestNotNull(TEXT("Sample target owns a real manager"), Manager)) return false;
+	Manager->ApproachQueryId = INDEX_NONE;
+	++Manager->PositionQueryRevision;
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[0].ProjectedApproachLocation = Enemy->GetActorLocation();
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	if (!TestTrue(TEXT("Sample enemy obtains a real inner lease"), Manager->HasInnerSlot(Enemy,
+		Controller->GetTacticalAssignmentRevision()))) return false;
 	UBehaviorTreeComponent* Behavior = Cast<UBehaviorTreeComponent>(Controller->GetBrainComponent());
 	if (!TestNotNull(TEXT("Behavior brain"), Behavior) ||
 		!TestTrue(TEXT("Fixture starts the real behavior tree"), Behavior->IsRunning()) ||
@@ -134,7 +172,7 @@ bool FFpstrueEnemyGameplayTierReasonSnapshotTest::RunTest(const FString& Paramet
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Reason fixture has native AI services"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
 	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
 	auto* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(AfpstrueEnemyCharacter::StaticClass(), FTransform::Identity);
 	if (!TestNotNull(TEXT("Reason fixture enemy"), Enemy)) return false;
@@ -149,10 +187,17 @@ bool FFpstrueEnemyGameplayTierReasonSnapshotTest::RunTest(const FString& Paramet
 	Target->SetActorEnableCollision(false);
 	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
 	Controller->Possess(Enemy);
-	Controller->InitializeCombatContext(Target, nullptr);
-	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
-	Controller->GetPerceptionComponent()->RegisterStimulus(Target, Stimulus);
-	Controller->GetPerceptionComponent()->ProcessStimuli();
+	if (!ObserveRenderCombatParticipant(*this, *Controller, *Target)) return false;
+	AfpstrueSurroundManager* Manager = Controller->GetSurroundManager();
+	if (!TestNotNull(TEXT("Reason target owns a real manager"), Manager)) return false;
+	Manager->ApproachQueryId = INDEX_NONE;
+	++Manager->PositionQueryRevision;
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[0].ProjectedApproachLocation = Enemy->GetActorLocation();
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	if (!TestTrue(TEXT("Reason enemy obtains a real inner lease"), Manager->HasInnerSlot(Enemy,
+		Controller->GetTacticalAssignmentRevision()))) return false;
 	Controller->GetBrainComponent()->StopLogic(TEXT("Gameplay reason snapshot fixture"));
 	const bool bNotInRange = false;
 	TGuardValue<const bool*> NoRangeSample(Enemy->SignificanceCombatProtectionSample, &bNotInRange);
@@ -597,7 +642,7 @@ bool FFpstrueEnemyReplicationTieringTest::RunTest(const FString& Parameters)
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Replication fixture has native AI services"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
 	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
 	const auto SpawnConfiguredEnemy = [World](float Frequency, float MinFrequency)
 	{
@@ -678,11 +723,18 @@ bool FFpstrueEnemyReplicationTieringTest::RunTest(const FString& Parameters)
 	Target->SetActorEnableCollision(false);
 	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
 	Controller->Possess(Enemy);
-	Controller->InitializeCombatContext(Target, nullptr);
 	Controller->GetBrainComponent()->SetComponentTickEnabled(false);
-	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
-	Controller->GetPerceptionComponent()->RegisterStimulus(Target, Stimulus);
-	Controller->GetPerceptionComponent()->ProcessStimuli();
+	if (!ObserveRenderCombatParticipant(*this, *Controller, *Target)) return false;
+	AfpstrueSurroundManager* Manager = Controller->GetSurroundManager();
+	if (!TestNotNull(TEXT("Replication target owns a real manager"), Manager)) return false;
+	Manager->ApproachQueryId = INDEX_NONE;
+	++Manager->PositionQueryRevision;
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[0].ProjectedApproachLocation = Enemy->GetActorLocation();
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	if (!TestTrue(TEXT("Replication enemy obtains a real inner lease"), Manager->HasInnerSlot(Enemy,
+		Controller->GetTacticalAssignmentRevision()))) return false;
 	if (!TestTrue(TEXT("Protection starts a real attack transaction"), Enemy->GetCombatComponent()->TryAttackTarget())) return false;
 	TestEqual(TEXT("Attack immediately restores the Full replication cap"), Enemy->GetNetUpdateFrequency(), 30.0f);
 	Enemy->GetCombatComponent()->ResetCombat();
@@ -933,7 +985,7 @@ bool FFpstrueMultiplayerAuthorityPoseTest::RunTest(const FString& Parameters)
 	if (!Fixture.CreateTestWorld(EWorldType::Game)) { Fixture.ForwardErrorMessages(this); return false; }
 	UWorld* World = Fixture.GetTestWorld();
 	if (!TestNotNull(TEXT("Authority pose fixture has native AI services"), World->CreateAISystem())) return false;
-	World->GetWorldSettings()->DefaultGameMode = AGameModeBase::StaticClass();
+	World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
 	if (!Fixture.BeginPlayInTestWorld()) { Fixture.ForwardErrorMessages(this); return false; }
 	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
 	World->SetPlayInEditorInitialNetMode(NM_ListenServer);
@@ -985,11 +1037,18 @@ bool FFpstrueMultiplayerAuthorityPoseTest::RunTest(const FString& Parameters)
 	Target->SetActorEnableCollision(false);
 	Target->GetCharacterMovement()->SetComponentTickEnabled(false);
 	Controller->Possess(Enemy);
-	Controller->InitializeCombatContext(Target, nullptr);
 	Controller->GetBrainComponent()->SetComponentTickEnabled(false);
-	FAIStimulus Stimulus(*GetDefault<UAISense_Sight>(), 1.0f, Target->GetActorLocation(), Enemy->GetActorLocation(), FAIStimulus::SensingSucceeded);
-	Controller->GetPerceptionComponent()->RegisterStimulus(Target, Stimulus);
-	Controller->GetPerceptionComponent()->ProcessStimuli();
+	if (!ObserveRenderCombatParticipant(*this, *Controller, *Target)) return false;
+	AfpstrueSurroundManager* Manager = Controller->GetSurroundManager();
+	if (!TestNotNull(TEXT("Authority pose target owns a real manager"), Manager)) return false;
+	Manager->ApproachQueryId = INDEX_NONE;
+	++Manager->PositionQueryRevision;
+	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
+	Manager->SurroundSlots[0].bHasProjectedApproachLocation = true;
+	Manager->SurroundSlots[0].ProjectedApproachLocation = Enemy->GetActorLocation();
+	Controller->RefreshBehaviorDecision(*Controller->GetBlackboardComponent());
+	if (!TestTrue(TEXT("Authority pose enemy obtains a real inner lease"), Manager->HasInnerSlot(Enemy,
+		Controller->GetTacticalAssignmentRevision()))) return false;
 	if (!TestTrue(TEXT("Simple authority starts a real attack transaction"), Enemy->GetCombatComponent()->TryAttackTarget())) return false;
 	TestTrue(TEXT("Attack protects authority Socket and Notify pose"), Enemy->RequiresFullAuthorityPose());
 	TestEqual(TEXT("Attack immediately removes the previous Background cooldown"), Enemy->GetMesh()->GetComponentTickInterval(), 0.0f);

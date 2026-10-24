@@ -48,8 +48,6 @@ bool FFPWeaponSettings::Validate(FString& OutError) const
 		{TEXT("VisualRecoilDuration"), VisualRecoilDuration, 0.04f, 0.5f},
 		{TEXT("ReloadDuration"), ReloadDuration, 0.1f},
 		{TEXT("EmptyReloadDuration"), EmptyReloadDuration, 0.1f},
-		{TEXT("ReloadFailSafeDuration"), ReloadFailSafeDuration, 0.1f},
-		{TEXT("ReloadCompletionGracePeriod"), ReloadCompletionGracePeriod, 0.0f},
 	};
 	for (const FRange& Range : Ranges)
 	{
@@ -59,7 +57,7 @@ bool FFPWeaponSettings::Validate(FString& OutError) const
 			return false;
 		}
 	}
-	// 镜头旋转轴和最终超时总和单独检查，避免单字段有效但组合后溢出。
+	// 镜头旋转轴不使用标量配置表，单独校验。
 	for (const double Angle : {VisualRecoilRotation.Pitch, VisualRecoilRotation.Yaw, VisualRecoilRotation.Roll})
 	{
 		if (!FMath::IsFinite(Angle) || FMath::Abs(Angle) > 5.0)
@@ -67,11 +65,6 @@ bool FFPWeaponSettings::Validate(FString& OutError) const
 			OutError = TEXT("VisualRecoilRotation axes must be finite and within [-5, 5] degrees.");
 			return false;
 		}
-	}
-	if (!FMath::IsFinite(FMath::Max3(ReloadDuration, EmptyReloadDuration, ReloadFailSafeDuration) + ReloadCompletionGracePeriod))
-	{
-		OutError = TEXT("Reload timeout plus grace period must be finite.");
-		return false;
 	}
 	return true;
 }

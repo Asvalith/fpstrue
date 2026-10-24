@@ -10,7 +10,6 @@
 #include "Weapons/fpstrueWeaponComponent.h"
 #include "fpstrueTestObservers.generated.h"
 
-class AfpstrueGameMode;
 class AfpstrueCharacter;
 
 // 只计数生产受击 RPC 的 ProcessEvent 分派，不替换扣血或 RPC 实现，不代表真实网络送达。
@@ -46,39 +45,6 @@ public:
 protected:
 	// 先走生产初始化，再触发测试指定的销毁或清理行为。
 	virtual void BeginPlay() override;
-};
-
-// 动态多播委托的最小反射接收者，仅由自动化测试创建。
-UCLASS(Transient, NotBlueprintable)
-class UfpstrueGameModeTestObserver : public UObject
-{
-	GENERATED_BODY()
-
-public:
-	TWeakObjectPtr<AfpstrueGameMode> GameMode;
-	TWeakObjectPtr<AfpstrueCharacter> Player;
-	bool bReenterStart = false;
-	bool bKillOnInitialTime = false;
-	bool bKillOnFirstWave = false;
-	bool bSawRunningState = false;
-	int32 InitialTime = -1;
-	int32 TimeEvents = 0;
-	int32 WaveEvents = 0;
-	int32 AliveEvents = 0;
-	int32 ResultEvents = 0;
-
-	// 记录初始倒计时；按开关在通知中再次开始对局或杀死玩家，模拟同步监听者重入。
-	UFUNCTION()
-	void HandleTime(int32 RemainingTime);
-	// 记录波次通知，并可在第一波通知期间杀死玩家以检查后续生成是否停止。
-	UFUNCTION()
-	void HandleWave(int32 CurrentWave, int32 TotalWaves);
-	// 统计存活数通知，检查注销只广播真实发生的数量变化。
-	UFUNCTION()
-	void HandleAlive(int32 AliveEnemies);
-	// 统计结算次数，检查失败或胜利不会因重入重复广播。
-	UFUNCTION()
-	void HandleResult(bool bPlayerWon);
 };
 
 class UfpstrueHealthComponent;

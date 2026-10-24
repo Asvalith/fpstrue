@@ -327,6 +327,7 @@ private:
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;
 	friend class FFpstrueMultiplayerSpawnReadinessTest;
 	friend class FFpstrueMultiplayerEnemyActivationTest;
+	friend class FFpstrueMultiplayerMatchLifecycleTest;
 	void UpdatePvePopulation();
 	AfpstrueEnemyCharacter* SpawnPveEnemy(AfpstrueCharacter* NearPlayer = nullptr);
 	void RegisterPveEnemy(AfpstrueEnemyCharacter* Enemy);

@@ -38,15 +38,15 @@
 /*
  * 玩家武器的单发结算与换弹事务实现。
  * GAS 独占动作互斥和本地连射输入；组件拥有已准入网络执行队列、装备、弹药、射速约束与后坐力恢复。
- * 角色向 ASC 提交输入；单机动画通过 Notify 提交换弹，联网由服务器时长完成。
+ * 角色向 ASC 提交输入；所有模式都由原生唯一 Timer 按服务器时长完成换弹。
  * 原生/蓝图表现桥选择素材并消费事实；C++ 拥有命中/弹药结算以及明确的播放身份和结束边界。
  *
  * 主要调用链：
  *   输入 -> Character -> ASC / Fire GA -> 单机 Fire / 联网 TargetData -> 准入队列 -> 执行复核 -> Fire -> Hitscan
  *   权威结算 -> 弹药/动作快照 + 逐发 ACK + 单发表现多播；拥有者只预测表现和未确认弹药缺口。
  *   输入 -> Character::RequestWeaponReload -> ASC / Reload GA -> BeginAbilityReload -> PlaybackRequested(ReloadId)
- *   单机：已绑定 ReloadCommit Notify -> 提交弹药；全部播放正常结束 -> Completed；主动中断 -> Cancelled。
- *   单机播放链缺失 -> TimedOut，仅解除动作锁；播放失败 -> PlaybackFailed。联网由服务器 Timer 完成事务。
+ *   Reload Timer -> FinishReloadForTransaction -> 提交弹药并完成；主动取消只终止未完成事务。
+ *   动画结束只回收播放身份；缺少/中断表现不反向提前装弹或延长服务器换弹。
  *
  * CurrentAmmo、ReserveAmmo 和后坐力累计量都只由本组件写入；Character/HUD 通过只读接口和
  * Delegate 观察结果，从结构上避免蓝图、角色和武器各保存一份可变状态。
@@ -210,6 +210,7 @@ void UfpstrueWeaponComponent::GetLifetimeReplicatedProps(TArray<FLifetimePropert
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(UfpstrueWeaponComponent, NetworkState);
+	DOREPLIFETIME_CONDITION(UfpstrueWeaponComponent, OwnerState, COND_OwnerOnly);
 }
 
 void UfpstrueWeaponComponent::GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const
@@ -244,8 +245,6 @@ void UfpstrueWeaponComponent::PublishNetworkState()
 		: ASC != nullptr && ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading) ? EFPWeaponActionState::Reloading
 		: ASC != nullptr && ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing) ? EFPWeaponActionState::Firing
 		: EFPWeaponActionState::Ready;
-	NetworkState.Ammo = CurrentAmmo;
-	NetworkState.Reserve = ReserveAmmo;
 	NetworkState.ReloadId = ReloadSerial;
 	NetworkState.bEmptyReload = bNetworkEmptyReload;
 	NetworkState.bCommitted = bReloadAmmoCommitted;
@@ -254,11 +253,33 @@ void UfpstrueWeaponComponent::PublishNetworkState()
 	NetworkState.FirePresentationShot = FirePresentationShot;
 	NetworkState.EquipmentGeneration = EquipmentRevision;
 	NetworkState.FireSession = FireSession;
-	NetworkState.LastProcessedShotId = LastProcessedShotId;
-	NetworkState.ShotResult = LastShotResult;
 	NetworkState.bDroppedOnDeath = bDroppedOnDeath;
 	++NetworkState.Revision;
+	// 同一次提交派生两个受众的结果；弹药不再向旁观连接发送，逐发裁决只走可靠 ACK。
+	OwnerState.EquipmentGeneration = EquipmentRevision;
+	OwnerState.Revision = NetworkState.Revision;
+	OwnerState.Ammo = CurrentAmmo;
+	OwnerState.Reserve = ReserveAmmo;
 	OwnerActor->ForceNetUpdate();
+}
+
+bool UfpstrueWeaponComponent::ApplyOwnerNetworkState()
+{
+	if (GetOwner() == nullptr || GetOwner()->HasAuthority() || bDroppedOnDeath || !Character.IsValid()
+		|| OwnerState.Revision == 0 || OwnerState.Revision <= LastAmmoStateRevision
+		|| OwnerState.EquipmentGeneration != EquipmentRevision
+		|| OwnerState.EquipmentGeneration != NetworkState.EquipmentGeneration
+		|| LastPresentedStateRevision == 0) return false;
+	// COND_OwnerOnly 已限定受众；不再要求 Controller 先到，也不让网格/Socket 就绪阻塞 HUD。
+	CurrentAmmo = OwnerState.Ammo;
+	ReserveAmmo = OwnerState.Reserve;
+	LastAmmoStateRevision = OwnerState.Revision;
+	return true;
+}
+
+void UfpstrueWeaponComponent::OnRep_OwnerState()
+{
+	RefreshNetworkEquipment();
 }
 
 // 复制的组件引用不保证与持有者引用同一时刻解析；持有者就绪后再次调用可完成附着。
@@ -271,6 +292,7 @@ void UfpstrueWeaponComponent::RefreshNetworkEquipment()
 		DropForDeath(Holder->GetVelocity());
 		return;
 	}
+	if (ApplyOwnerNetworkState()) BroadcastAmmoChanged();
 	if (!IsValid(Holder) || Holder->GetEquippedWeaponComponent() != this) return;
 	USkeletalMeshComponent* TargetMesh = Holder->IsLocallyControlled() ? Holder->GetMesh1P() : Holder->GetMesh();
 	if (TargetMesh == nullptr) return;
@@ -314,8 +336,8 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 		return;
 	}
 	if (bDroppedOnDeath) { ApplyDeathDropPhysics(); return; }
-	// 同一武器通道的 ACK 可已带来更新弹药；旧属性快照也不能撤销新动作的本地表现。
-	if (NetworkState.Revision < LastAmmoStateRevision) return;
+	// 公共动作只与公共版本比较；较新的可靠弹药 ACK 不能挡住此处的换弹/装备表现。
+	if (NetworkState.Revision < LastPresentedStateRevision || NetworkState.EquipmentGeneration < EquipmentRevision) return;
 	const EFPWeaponActionState Previous = LastPresentedAction;
 	const int32 PreviousReloadId = ActiveReloadId;
 	Character = NetworkState.Holder;
@@ -326,11 +348,14 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 	}
 	LastPresentedAction = NetworkState.Action;
 	bEquipmentEnabled = NetworkState.Action != EFPWeaponActionState::Disabled;
-	if (EquipmentRevision != NetworkState.EquipmentGeneration) OutstandingShots.Reset();
+	if (EquipmentRevision != NetworkState.EquipmentGeneration)
+	{
+		OutstandingShots.Reset();
+		// 换人/重新占有时不借用上一代拥有者的弹药；匹配的私有快照随后补齐。
+		CurrentAmmo = ReserveAmmo = 0;
+	}
 	EquipmentRevision = NetworkState.EquipmentGeneration;
-	CurrentAmmo = NetworkState.Ammo;
-	ReserveAmmo = NetworkState.Reserve;
-	LastAmmoStateRevision = NetworkState.Revision;
+	LastPresentedStateRevision = NetworkState.Revision;
 	if (FPredictedFirePresentation* Presented = PredictedPresentations.FindByPredicate(
 		[this](const FPredictedFirePresentation& P) { return P.Generation == EquipmentRevision && P.Session == NetworkState.FireSession; }))
 		Presented->ConfirmedShots = FMath::Max(Presented->ConfirmedShots, NetworkState.FirePresentationShot);
@@ -348,7 +373,6 @@ void UfpstrueWeaponComponent::OnRep_NetworkState()
 	}
 	// 先结束旧播放，才能启动新编号的播放；复制允许跳过中间 Ready，不能把新播放一起停止。
 	RefreshNetworkEquipment();
-	BroadcastAmmoChanged();
 	if (NetworkState.Action == EFPWeaponActionState::Reloading && LastPresentedReloadId != ActiveReloadId && IsOperational())
 	{
 		LastPresentedReloadId = ActiveReloadId;
@@ -1104,6 +1128,7 @@ bool UfpstrueWeaponComponent::AttachWeapon(AfpstrueCharacter* TargetCharacter)
 	{
 		return false;
 	}
+	PublishNetworkState();
 	BroadcastAmmoChanged();
 
 	return IsOperational() && Character.Get() == TargetCharacter;
@@ -1282,6 +1307,8 @@ bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAt
 		Request != nullptr ? bAimingAtAdmission : OwningCharacter->IsAiming());
 	if (EquipmentRevision == ShotEquipment && IsOperational())
 		ApplyRecoil(Cast<APlayerController>(OwningCharacter->GetController()));
+	// 网络逐发在 AcknowledgeShot 发布含裁决的最终快照，避免弹药通知隐式发布半成品。
+	if (Request == nullptr) PublishNetworkState();
 	BroadcastAmmoChanged();
 	// 这是已发生的一发，而不是继续开火的许可；命中/弹药回调中断动作也不能吞掉事实事件。
 	OnWeaponFirePerformed.Broadcast();
@@ -1421,7 +1448,7 @@ bool UfpstrueWeaponComponent::BeginAbilityReload(int32& OutReloadId)
 {
 	OutReloadId = INDEX_NONE;
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return false;
-	// 这里只开启事务，不立刻搬运弹药；单机在动画帧提交，联网由服务器计时提交。
+	// 所有运行模式共用权威计时；动画只观察事务，不能决定装弹成功或失败。
 	// 换弹必须同时满足：武器可用、当前不在换弹、弹匣未满且仍有备弹。
 	if (!CanAcceptOwnerInput() || ActiveReloadId != INDEX_NONE
 		|| GetWorld() == nullptr || CurrentAmmo >= Settings.MagazineSize || ReserveAmmo <= 0)
@@ -1444,30 +1471,14 @@ bool UfpstrueWeaponComponent::BeginAbilityReload(int32& OutReloadId)
 	NetworkState.ReloadStartServerTime = GetWorld()->GetTimeSeconds();
 	NetworkState.ReloadDuration = SelectedReloadDuration;
 	NetworkState.bEmptyReload = bWasEmptyReload;
-	// 使用唯一超时句柄，显式播放可按真实长度延长截止点；排队的旧回调只能结束它保存的那次换弹。
-	const bool bNetworkReload = GetNetMode() != NM_Standalone;
-	// 网络模式的装弹由服务器时长决定，Dedicated Server 没有第一人称动画也能完成；客户端 Notify 无权提交。
-	if (bNetworkReload)
-	{
-		bNetworkEmptyReload = bWasEmptyReload;
-		GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
-			FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::FinishReloadForTransaction, RequestedReloadId),
-			SelectedReloadDuration, false);
-		PublishNetworkState();
-	}
-	else
-	{
-		// 超时 Timer 是动作锁的容错，不替代装填 Notify；动画链断开时不把失败当成补弹成功。
-		const float Timeout = FMath::Max(0.01f, FMath::Max(SelectedReloadDuration, Settings.ReloadFailSafeDuration) + Settings.ReloadCompletionGracePeriod);
-		GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
-			FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::EndReload, RequestedReloadId, EFPReloadEndReason::TimedOut), Timeout, false);
-	}
-	if (!bNetworkReload || Character->IsLocallyControlled() || Character->UsesNativePresentation())
-	{
-		// 蓝图明确提交 ReloadId/Mesh/Montage，禁止通过广播前后列表差分猜测动画归属。
-		// 原生权威身体也消费同一事实以刷新命中骨骼；专服的枪械/第一人称表现各自在监听入口跳过。
-		OnWeaponReloadPlaybackRequested.Broadcast(RequestedReloadId, bWasEmptyReload);
-	}
+	// 唯一完成入口捕获事务编号，旧计时不能结束下一次换弹。专服无动画也按同一规则完成。
+	bNetworkEmptyReload = bWasEmptyReload;
+	GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
+		FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::FinishReloadForTransaction, RequestedReloadId),
+		SelectedReloadDuration, false);
+	PublishNetworkState();
+	// 表现接收者自行跳过专服/无素材；播放失败不能取消已经接纳的权威事务。
+	OnWeaponReloadPlaybackRequested.Broadcast(RequestedReloadId, bWasEmptyReload);
 
 	// true 表示请求曾被接纳；监听者可能已同步结束换弹，广播之后不再写回状态或重设计时器。
 	return true;
@@ -1491,7 +1502,7 @@ float UfpstrueWeaponComponent::GetReloadProgress() const
 	return static_cast<float>(FMath::Clamp((ServerNow - NetworkState.ReloadStartServerTime) / NetworkState.ReloadDuration, 0.0, 1.0));
 }
 
-// 显式播放并绑定本次换弹的手臂、身体或武器 Montage；单机失败结束事务，联网表现失败不改变服务器结算。
+// 显式播放并绑定本次换弹的表现；播放失败不改变权威时钟和弹药。
 bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* Montage, float PlayRate)
 {
 	if (!IsCurrentReload(ReloadId) || !IsOperational() || bChangingReloadPlayback) return false;
@@ -1504,27 +1515,20 @@ bool UfpstrueWeaponComponent::PlayReloadMontage(int32 ReloadId, USkeletalMeshCom
 		|| PlaybackMesh->GetSkeletalMeshAsset() == nullptr
 		|| Montage->GetSkeleton() != PlaybackMesh->GetSkeletalMeshAsset()->GetSkeleton())
 	{
-		if (GetNetMode() == NM_Standalone) EndReload(ReloadId, EFPReloadEndReason::PlaybackFailed);
 		return false;
 	}
 	// 保留原蓝图的同组互斥：UE 的 true 停同一 Montage Group，不停其他组的表现。
 	// ★【重要边界】[回调重入] 播放会打断旧 Montage 并触发回调；随后绑定再次校验本次事务，不仅判断播放返回值。
 	// 联网中途收到同一事务时追到当前阶段；只定位表现，不重新启动服务器计时或提交弹药。
-	const float StartPosition = GetNetMode() != NM_Standalone ? GetReloadProgress() * Montage->GetPlayLength() : 0.0f;
+	const float StartPosition = GetReloadProgress() * Montage->GetPlayLength();
 	const float Duration = Anim->Montage_Play(Montage, PlayRate, EMontagePlayReturnType::Duration, StartPosition, true);
 	if (Duration <= 0.0f || !BindReloadMontage(ReloadId, PlaybackMesh, Montage))
 	{
 		// 成功路径只绑定一次；仅在播放成功但事务已失效时回收本次实例，不停止播放失败前的旧实例。
 		FFPActionPlayback UnboundPlayback;
 		if (Duration > 0.0f && UnboundPlayback.TryBind(ReloadId, PlaybackMesh, Montage)) UnboundPlayback.Stop();
-		if (GetNetMode() == NM_Standalone) EndReload(ReloadId, EFPReloadEndReason::PlaybackFailed);
 		return false;
 	}
-	// 延迟开始/较长素材也有真实播放时间；兜底不能在已接纳播放正常结束前抢先超时。
-	const float Remaining = GetWorld()->GetTimerManager().GetTimerRemaining(ReloadTimerHandle);
-	const float Timeout = FMath::Max(Remaining, Duration + Settings.ReloadCompletionGracePeriod);
-	if (GetNetMode() == NM_Standalone) GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
-		FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::EndReload, ReloadId, EFPReloadEndReason::TimedOut), FMath::Max(0.01f, Timeout), false);
 	return true;
 }
 
@@ -1547,72 +1551,17 @@ bool UfpstrueWeaponComponent::BindReloadMontage(int32 ReloadId, USkeletalMeshCom
 	return true;
 }
 
-// 处理本次已绑定实例的结束：任一中断取消换弹，最后一个自然结束时完成换弹。
+// 只释放已经结束的表现身份；正常结束或动画中断均不结算权威换弹。
 void UfpstrueWeaponComponent::HandleReloadPlaybackEnded(UAnimMontage*, bool bInterrupted,
 	int32 ReloadId, TWeakObjectPtr<USkeletalMeshComponent> PlaybackMesh, int32 InstanceId)
 {
 	if (!IsCurrentReload(ReloadId)) return;
-	const int32 Removed = ReloadPlaybacks.RemoveAll([PlaybackMesh, InstanceId](const FFPActionPlayback& P)
+	ReloadPlaybacks.RemoveAll([PlaybackMesh, InstanceId](const FFPActionPlayback& P)
 	{
 		return P.Mesh == PlaybackMesh && P.MontageInstanceId == InstanceId;
 	});
-	if (Removed == 0) return;
-	if (GetNetMode() != NM_Standalone) return; // 联机播放结束只结束表现，动作事实等待服务器复制。
-	if (bInterrupted) EndReload(ReloadId, EFPReloadEndReason::Cancelled);
-	else if (ReloadPlaybacks.IsEmpty()) EndReload(ReloadId, EFPReloadEndReason::Completed);
 }
 
-// 换弹装填帧携带原始 Montage 播放身份；旧动画通知不能通过“当前装备”提交新一轮换弹。
-void UfpstrueAnimNotify_ReloadCommit::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
-											 const FAnimNotifyEventReference& EventReference)
-{
-	Super::Notify(MeshComp, Animation, EventReference);
-
-	if (MeshComp == nullptr)
-	{
-		return;
-	}
-
-	// MeshComp 是播放动画的骨骼组件，应从它的 Owner 取得装备关系。
-	UfpstrueWeaponComponent* WeaponComponent = Cast<UfpstrueWeaponComponent>(MeshComp);
-	if (const AfpstrueCharacter* Character = Cast<AfpstrueCharacter>(MeshComp->GetOwner()))
-	{
-		WeaponComponent = Character->GetEquippedWeaponComponent();
-	}
-
-	if (WeaponComponent != nullptr)
-	{
-		WeaponComponent->CommitReloadFromNotify(MeshComp, EventReference);
-	}
-}
-
-// 保留分支点的原始 Montage 实例编号，再转入与普通 Notify 共用的装弹校验。
-void UfpstrueAnimNotify_ReloadCommit::BranchingPointNotify(FBranchingPointNotifyPayload& Payload)
-{
-	// ★【重要边界】[异步身份] 分支点必须传递原始播放实例编号；装填的即时执行不等于可以省略来源校验。
-	// UE 的默认桥接会丢弃 MontageInstanceID；显式携带，Queued/BranchingPoint 使用同一身份校验。
-	FAnimNotifyEventReference EventReference(Payload.NotifyEvent, Payload.SequenceAsset);
-	EventReference.AddContextData<UE::Anim::FAnimNotifyMontageInstanceContext>(Payload.MontageInstanceID);
-	Notify(Payload.SkelMeshComponent, Payload.SequenceAsset, EventReference);
-}
-
-// 返回动画编辑器显示名称，不读取或修改换弹事务。
-FString UfpstrueAnimNotify_ReloadCommit::GetNotifyName_Implementation() const
-{
-	return TEXT("Reload Commit");
-}
-
-// 先核对 Notify 的 Mesh、AnimInstance 与播放实例，匹配后才提交当前换弹编号。
-bool UfpstrueWeaponComponent::CommitReloadFromNotify(USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference)
-{
-	// 联网包括监听主机与专服均只由服务器 Timer 装弹；新增身体动画不能通过通知抢先结算。
-	if (GetNetMode() != NM_Standalone) return false;
-	const bool bMatchesPlayback = ReloadPlaybacks.ContainsByPredicate([this, PlaybackMesh, &EventReference](const FFPActionPlayback& Playback)
-	{
-		return Playback.Matches(ActiveReloadId, PlaybackMesh, EventReference);
-	});
-	return bMatchesPlayback && CommitReloadForTransaction(ActiveReloadId);
-}
 
 // 按弹匣缺口与备弹量转移一次弹药；先标记已提交再通知 HUD，防止回调重复装弹。
 bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
@@ -1636,6 +1585,7 @@ bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 	if (bNetworkEmptyReload && FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=AutoReload Ammo=%d Reserve=%d"), CurrentAmmo, ReserveAmmo);
 #endif
+	PublishNetworkState();
 	BroadcastAmmoChanged();
 	return true;
 }
@@ -1680,7 +1630,7 @@ void UfpstrueWeaponComponent::EndReload(int32 ReloadId, EFPReloadEndReason Reaso
 		TGuardValue<bool> PlaybackGuard(bChangingReloadPlayback, true);
 		for (const FFPActionPlayback& Playback : EndedPlaybacks) Playback.Stop();
 	}
-	// 超时只释放动作锁；未发生装填 Notify 的动画失败不能被兜底伪装成补弹成功。
+	// 取消不补弹；正常完成只能由保存事务身份的权威入口提交。
 	// 发布前已完成所有旧事务清理；监听者开启新事务后，旧栈不能再写状态。
 	OnAbilityReloadEnded.Broadcast(ReloadId, Reason, bCommitted);
 	PublishNetworkState();
@@ -1948,7 +1898,6 @@ void UfpstrueWeaponComponent::InterruptOwnerInput()
 // 发布已经提交的弹药快照，HUD 和蓝图只观察结果，不在此重复结算。
 void UfpstrueWeaponComponent::BroadcastAmmoChanged()
 {
-	PublishNetworkState();
 	// 弹药状态只由 WeaponComponent 写入；角色、HUD 和蓝图通过该委托读取同一份结果。
 	OnAmmoChanged.Broadcast(CurrentAmmo, Settings.MagazineSize, ReserveAmmo);
 }

@@ -160,6 +160,7 @@ protected:
 
 private:
 	friend class FFpstrueEnemyCombatLifecycleTest;
+	friend class FFpstrueSurroundAttackQueueTest;
 	friend class FFpstrueEnemyCombatStateConfigTest;
 	friend class FFpstrueEnemyAttackPlaybackTest;
 	friend class FFpstrueEnemyAttackAssetIntegrationTest;

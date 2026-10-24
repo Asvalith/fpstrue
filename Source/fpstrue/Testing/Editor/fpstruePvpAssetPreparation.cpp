@@ -96,7 +96,9 @@
 #include "Factories/AnimBlueprintFactory.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Game/fpstrueMultiplayer.h"
-#include "Game/fpstrueGameMode.h"
+#include "GameFramework/WorldSettings.h"
+#include "K2Node_InputKey.h"
+#include "K2Node_MacroInstance.h"
 #include "Blueprint/WidgetTree.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/Button.h"
@@ -116,26 +118,29 @@
  * 编辑器资源工具与显式画面验收入口，不是运行时玩法的一部分（WITH_EDITOR）。
  * Prepare/Repair/Calibrate 命令默认检查，只有 Apply 才在限定路径备份、改图/默认值并保存；
  * RAR/Template 首次生成还会备份并保存所用骨架的兼容声明与动作槽，不是完全零源资产写入。
- * 资源 Audit 只读取/采样，不编译或保存资源；AuditPickupWalk/AuditStandaloneLoop 则显式驱动真实
+ * 资源 Audit 只读取/采样，不编译或保存资源；AuditPickupWalk 则显式驱动真实
  * 游戏输入、等待正常结算并写截图，不能当作只读玩法检查。所有入口在编辑器 Game Thread 执行。
  * 主链：检查来源与已有结构 -> Apply 时备份/构造 -> 编译 -> 保存；验收链不替代 GAS/服务器结算。
  */
 
-// 固定单机关卡和旧武器的联机适配：保留原执行图，只在 Apply 时增加独立运行门和持有者读取桥。
+// 多人唯一入口迁移；先检查全图，Apply 仅删除可确认的旧开局/UI链，保留场景逻辑和控件布局。
 namespace FpstruePvpAssetPreparation
 {
-constexpr const TCHAR* MapPackage = TEXT("/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked");
-constexpr const TCHAR* WeaponObject = TEXT("/Game/FirstPerson/Blueprints/weapon/BP_Weapon.BP_Weapon");
-constexpr const TCHAR* GateMarker = TEXT("PvP: preserve the original menu chain only in Standalone");
+constexpr const TCHAR* MapPackages[] = {
+	TEXT("/Game/PerformanceCandidates/SplineBake_Tracks20260928/Demonstration_Baked"),
+	TEXT("/Game/PerformanceCandidates/Nanite_HardSurface20260929/Demonstration_Nanite"),
+	TEXT("/Game/FactoryDistrict/Maps/Demonstration"),
+	TEXT("/Game/FirstPerson/Maps/FirstPersonMap")};
+constexpr const TCHAR* HUDObjects[] = {TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network"),
+	TEXT("/Game/FirstPerson/UI/ingame.ingame")};
 
-// 记录资源准备失败原因并返回 false，供检查与写入流程在原调用点中止。
 bool Fail(const FString& Reason)
 {
 	UE_LOG(LogTemp, Error, TEXT("PVP_ASSET_PREP FAIL %s"), *Reason);
 	return false;
 }
 
-// Added nodes receive their own positions/comments; no authored node or comment is deleted.
+// 其他表现工具继续使用以下建节点、备份、编译助手。
 template <typename TNode>
 TNode* AddNode(UEdGraph* Graph, int32 X, int32 Y)
 {
@@ -145,19 +150,6 @@ TNode* AddNode(UEdGraph* Graph, int32 X, int32 Y)
 	Node->NodePosY = Y;
 	Graph->AddNode(Node, false, false);
 	return Node;
-}
-
-// A genuine already-connected Standalone guard is idempotent, not merely a matching comment.
-bool HasStandaloneGuard(const UEdGraphPin* BeginOutput)
-{
-	if (BeginOutput == nullptr || BeginOutput->LinkedTo.Num() != 1) return false;
-	const UK2Node_IfThenElse* Branch = Cast<UK2Node_IfThenElse>(BeginOutput->LinkedTo[0]->GetOwningNode());
-	if (Branch == nullptr || Branch->GetElsePin()->LinkedTo.Num() != 0) return false;
-	const UEdGraphPin* Condition = Branch->GetConditionPin();
-	if (Condition->LinkedTo.Num() != 1) return false;
-	const UK2Node_CallFunction* Check = Cast<UK2Node_CallFunction>(Condition->LinkedTo[0]->GetOwningNode());
-	return Check != nullptr && Check->FunctionReference.GetMemberName() == TEXT("IsStandalone")
-		&& Check->GetTargetFunction() == UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("IsStandalone"));
 }
 
 // Preserve the on-disk originals in a unique run directory; existing backups are never overwritten.
@@ -173,76 +165,6 @@ bool BackupAsset(const FString& Filename, const FString& BackupDirectory)
 	return true;
 }
 
-// The execution edge alone is rerouted. The entire existing single-player chain remains intact.
-bool GuardBeginPlay(UK2Node_Event* Begin)
-{
-	UEdGraph* Graph = Begin->GetGraph();
-	const UEdGraphSchema_K2* Schema = Cast<UEdGraphSchema_K2>(Graph->GetSchema());
-	if (Schema == nullptr) return Fail(TEXT("Level graph does not use the K2 schema."));
-	UEdGraphPin* BeginOutput = Begin->FindPin(UEdGraphSchema_K2::PN_Then);
-	const TArray<UEdGraphPin*> OldTargets = BeginOutput->LinkedTo;
-	Graph->Modify();
-	Begin->Modify();
-	UK2Node_IfThenElse* Branch = AddNode<UK2Node_IfThenElse>(Graph, Begin->NodePosX + 240, Begin->NodePosY);
-	Branch->NodeComment = GateMarker;
-	Branch->AllocateDefaultPins();
-	UK2Node_CallFunction* Check = AddNode<UK2Node_CallFunction>(Graph, Begin->NodePosX, Begin->NodePosY + 180);
-	Check->SetFromFunction(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("IsStandalone")));
-	Check->AllocateDefaultPins();
-	UK2Node_Self* Self = AddNode<UK2Node_Self>(Graph, Begin->NodePosX - 180, Begin->NodePosY + 240);
-	Self->AllocateDefaultPins();
-	UEdGraphPin* Context = Check->FindPin(TEXT("WorldContextObject"));
-	UEdGraphPin* SelfOutput = Self->FindPin(UEdGraphSchema_K2::PN_Self);
-	if (Context == nullptr || SelfOutput == nullptr
-		|| !Schema->TryCreateConnection(SelfOutput, Context)
-		|| !Schema->TryCreateConnection(Check->FindPin(UEdGraphSchema_K2::PN_ReturnValue), Branch->GetConditionPin()))
-		return Fail(TEXT("Could not connect the explicit level-script WorldContext."));
-	BeginOutput->BreakAllPinLinks();
-	if (!Schema->TryCreateConnection(BeginOutput, Branch->GetExecPin())) return Fail(TEXT("Could not insert BeginPlay guard."));
-	for (UEdGraphPin* Target : OldTargets)
-	{
-		Target->GetOwningNode()->Modify();
-		if (!Schema->TryCreateConnection(Branch->GetThenPin(), Target)) return Fail(TEXT("Could not preserve original BeginPlay successor."));
-	}
-	return true;
-}
-
-// Reads use the replicated holder through the component; the old pickup setter remains untouched.
-bool ReplaceOwnerRead(UK2Node_VariableGet* Read, FName ComponentName, UFunction* Getter)
-{
-	UEdGraph* Graph = Read->GetGraph();
-	const UEdGraphSchema_K2* Schema = Cast<UEdGraphSchema_K2>(Graph->GetSchema());
-	if (Schema == nullptr) return Fail(TEXT("Weapon graph does not use the K2 schema."));
-	Graph->Modify();
-	Read->Modify();
-	UK2Node_VariableGet* Component = AddNode<UK2Node_VariableGet>(Graph, Read->NodePosX - 220, Read->NodePosY + 100);
-	Component->VariableReference.SetSelfMember(ComponentName);
-	Component->AllocateDefaultPins();
-	UK2Node_CallFunction* Query = AddNode<UK2Node_CallFunction>(Graph, Read->NodePosX, Read->NodePosY + 100);
-	Query->SetFromFunction(Getter);
-	Query->AllocateDefaultPins();
-	UEdGraphPin* ComponentOutput = Component->FindPin(ComponentName);
-	UEdGraphPin* QuerySelf = Query->FindPin(UEdGraphSchema_K2::PN_Self);
-	UEdGraphPin* Output = Query->FindPin(UEdGraphSchema_K2::PN_ReturnValue);
-	UEdGraphPin* OldOutput = Read->FindPin(Read->GetVarName());
-	if (ComponentOutput == nullptr || QuerySelf == nullptr || Output == nullptr || OldOutput == nullptr
-		|| !Schema->TryCreateConnection(ComponentOutput, QuerySelf))
-		return Fail(TEXT("Could not connect the weapon component holder getter."));
-	const TArray<UEdGraphPin*> OldTargets = OldOutput->LinkedTo;
-	for (UEdGraphPin* Target : OldTargets)
-	{
-		if (!Schema->ArePinTypesCompatible(Output->PinType, Target->PinType))
-			return Fail(TEXT("Holder getter has an incompatible authored target pin."));
-	}
-	for (UEdGraphPin* Target : OldTargets)
-	{
-		Target->GetOwningNode()->Modify();
-		OldOutput->BreakLinkTo(Target);
-		if (!Schema->TryCreateConnection(Output, Target)) return Fail(TEXT("Could not preserve an owningactor consumer."));
-	}
-	return true;
-}
-
 // 编译一个已编辑蓝图并返回实际错误状态；只编译，不在此保存包。
 bool Compile(UBlueprint* Blueprint)
 {
@@ -255,130 +177,302 @@ bool Compile(UBlueprint* Blueprint)
 	return Results.NumErrors == 0 && Blueprint->Status != BS_Error;
 }
 
-// 无参数只检查固定地图/武器；Apply 备份后最小接线、全部编译通过，再保存相应地图和武器包。
+struct FLegacyGraphPlan
+{
+	TSet<UEdGraphNode*> Nodes;
+	TArray<UEdGraph*> Functions;
+	TArray<FName> Variables;
+	bool bSafe = true;
+};
+
+bool IsLegacyReference(const FString& Path)
+{
+	for (const TCHAR* Prefix : {TEXT("/Game/FirstPerson/Blueprints/gamemode/fpstruegamemode."),
+		TEXT("/Game/FirstPerson/Blueprints/BP_FirstPersonGameMode."), TEXT("/Script/fpstrue.fpstrueGameMode"),
+		TEXT("/Game/FirstPerson/UI/mainmenu."), TEXT("/Game/FirstPerson/UI/mainmenushake."),
+		TEXT("/Game/FirstPerson/UI/ingame."), TEXT("/Game/FirstPerson/UI/winorfail.")})
+		if (Path.Contains(Prefix)) return true;
+	return false;
+}
+
+bool ReferencesLegacy(const UEdGraphNode& Node)
+{
+	if (const auto* Call = Cast<UK2Node_CallFunction>(&Node))
+	{
+		// CoreRedirect 会把旧 OwnerClass 改成新 GameMode；函数名仍是已删除的单机规则。
+		const FName Member = Call->FunctionReference.GetMemberName();
+		if (Member == TEXT("GetRemainingTime") || Member == TEXT("StartGameMode")) return true;
+		if (const UFunction* Function = Call->GetTargetFunction())
+			if (IsLegacyReference(Function->GetOwnerClass()->GetPathName())) return true;
+	}
+	for (const UEdGraphPin* Pin : Node.Pins)
+		if (Pin && (IsLegacyReference(GetPathNameSafe(Pin->DefaultObject)) ||
+			IsLegacyReference(GetPathNameSafe(Pin->PinType.PinSubCategoryObject.Get())) ||
+			IsLegacyReference(GetPathNameSafe(Pin->PinType.PinValueType.TerminalSubCategoryObject.Get())) ||
+			IsLegacyReference(Pin->DefaultValue))) return true;
+	return false;
+}
+
+// 数据节点可随旧UI移除；遇到其他有副作用的场景行为则拒绝，不从 BeginPlay 盲目清空整图。
+bool IsLegacyUINode(const UEdGraphNode& Node)
+{
+	if (const auto* Call = Cast<UK2Node_CallFunction>(&Node))
+	{
+		const UFunction* Function = Call->GetTargetFunction();
+		if (Function && (Function->HasAnyFunctionFlags(FUNC_BlueprintPure) ||
+			Function->GetOwnerClass()->IsChildOf(UWidget::StaticClass()) ||
+			IsLegacyReference(Function->GetOwnerClass()->GetPathName()))) return true;
+		const FName Name = Call->FunctionReference.GetMemberName();
+		for (const FName Allowed : {FName(TEXT("IsStandalone")), FName(TEXT("AddToViewport")), FName(TEXT("AddToPlayerScreen")),
+			// Check 日志确认这些节点仅属于旧菜单/倒计时/胜负 UI 链；不删除场景中的相机 Actor。
+			FName(TEXT("GetRemainingTime")), FName(TEXT("StartGameMode")), FName(TEXT("Entergameplay")),
+			FName(TEXT("SetViewTargetWithBlend")), FName(TEXT("EnableInput")), FName(TEXT("DisableInput")),
+			FName(TEXT("SetText")), FName(TEXT("SetColorAndOpacity")),
+			FName(TEXT("RemoveFromParent")), FName(TEXT("RemoveAllWidgets")), FName(TEXT("SetGamePaused")),
+			FName(TEXT("SetInputMode_GameAndUIEx")), FName(TEXT("SetInputMode_UIOnlyEx")), FName(TEXT("SetInputMode_GameOnly")),
+			FName(TEXT("PlayAnimation")), FName(TEXT("PlayAnimationForward")), FName(TEXT("PlayAnimationReverse")),
+			FName(TEXT("StopAnimation")), FName(TEXT("SetVisibility")), FName(TEXT("Delay")),
+			FName(TEXT("K2_SetTimerDelegate")), FName(TEXT("K2_SetTimer")), FName(TEXT("K2_ClearTimerHandle")),
+			FName(TEXT("K2_ClearAndInvalidateTimerHandle"))})
+			if (Name == Allowed) return true;
+		return false;
+	}
+	if (const auto* Event = Cast<UK2Node_Event>(&Node); Event && Node.GetClass() == UK2Node_Event::StaticClass())
+	{
+		const FName Name = Event->EventReference.GetMemberName();
+		return Name == TEXT("ReceiveBeginPlay") || Name == TEXT("Construct") || Name == TEXT("PreConstruct") || Name == TEXT("Destruct");
+	}
+	if (const auto* Input = Cast<UK2Node_InputKey>(&Node)) return Input->InputKey == EKeys::AnyKey;
+	if (const auto* Macro = Cast<UK2Node_MacroInstance>(&Node))
+		return Macro->GetMacroGraph() && Macro->GetMacroGraph()->GetOutermost()->GetName() == TEXT("/Engine/EditorBlueprintResources/StandardMacros");
+	for (const FName Allowed : {FName(TEXT("K2Node_VariableGet")), FName(TEXT("K2Node_VariableSet")),
+		FName(TEXT("K2Node_MakeStruct")), FName(TEXT("K2Node_Literal")),
+		FName(TEXT("K2Node_DynamicCast")), FName(TEXT("K2Node_Self")), FName(TEXT("K2Node_CreateWidget")),
+		FName(TEXT("K2Node_Knot")), FName(TEXT("K2Node_IfThenElse")), FName(TEXT("K2Node_ExecutionSequence")),
+		FName(TEXT("K2Node_CustomEvent")), FName(TEXT("K2Node_AddDelegate")), FName(TEXT("K2Node_RemoveDelegate")),
+		FName(TEXT("K2Node_AssignDelegate")), FName(TEXT("K2Node_ClearDelegate")), FName(TEXT("K2Node_CreateDelegate")),
+		FName(TEXT("K2Node_CallDelegate")), FName(TEXT("K2Node_ComponentBoundEvent")),
+		FName(TEXT("K2Node_FunctionEntry")), FName(TEXT("K2Node_FunctionResult"))})
+		if (Node.GetClass()->GetFName() == Allowed) return true;
+	return false;
+}
+
+FLegacyGraphPlan InspectLegacyGraphs(UBlueprint& Blueprint)
+{
+	FLegacyGraphPlan Plan;
+	TArray<UEdGraph*> Graphs;
+	Blueprint.GetAllGraphs(Graphs);
+	TArray<UEdGraphNode*> Pending;
+	for (UEdGraph* Graph : Graphs)
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+			UE_LOG(LogTemp, Display, TEXT("MP_ONLY NODE Asset=%s Graph=%s Node=%s Guid=%s Class=%s Title=%s LegacySeed=%d"),
+				*Blueprint.GetPathName(), *Graph->GetName(), *Node->GetName(), *Node->NodeGuid.ToString(),
+				*Node->GetClass()->GetName(), *Node->GetNodeTitle(ENodeTitleType::ListView).ToString(), ReferencesLegacy(*Node));
+			if (ReferencesLegacy(*Node)) Pending.Add(Node);
+			for (const UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin) continue;
+				UE_LOG(LogTemp, Display, TEXT("MP_ONLY PIN Node=%s Name=%s Direction=%d Type=%s Object=%s Default=%s Links=%d"),
+					*Node->GetName(), *Pin->PinName.ToString(), static_cast<int32>(Pin->Direction),
+					*GetPathNameSafe(Pin->PinType.PinSubCategoryObject.Get()), *GetPathNameSafe(Pin->DefaultObject), *Pin->DefaultValue, Pin->LinkedTo.Num());
+				for (const UEdGraphPin* Linked : Pin->LinkedTo)
+					if (Linked) UE_LOG(LogTemp, Display, TEXT("MP_ONLY EDGE From=%s.%s To=%s.%s"), *Node->GetName(),
+						*Pin->PinName.ToString(), *Linked->GetOwningNode()->GetName(), *Linked->PinName.ToString());
+			}
+		}
+	while (!Pending.IsEmpty())
+	{
+		UEdGraphNode* Node = Pending.Pop(EAllowShrinking::No);
+		if (Plan.Nodes.Contains(Node)) continue;
+		Plan.Nodes.Add(Node);
+		if (!IsLegacyUINode(*Node))
+		{
+			Plan.bSafe = false;
+			UE_LOG(LogTemp, Warning, TEXT("MP_ONLY REVIEW_REQUIRED Asset=%s Graph=%s Node=%s Class=%s Title=%s"),
+				*Blueprint.GetPathName(), *Node->GetGraph()->GetName(), *Node->GetName(), *Node->GetClass()->GetName(),
+				*Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		}
+		for (UEdGraphPin* Pin : Node->Pins)
+			if (Pin) for (UEdGraphPin* Linked : Pin->LinkedTo) if (Linked) Pending.Add(Linked->GetOwningNode());
+	}
+	for (UEdGraph* Graph : Blueprint.FunctionGraphs)
+	{
+		if (!Graph->Nodes.ContainsByPredicate([&Plan](UEdGraphNode* Node) { return Plan.Nodes.Contains(Node); })) continue;
+		const bool bWholeFunction = !Graph->Nodes.ContainsByPredicate([&Plan](UEdGraphNode* Node)
+			{ return Node && Node->GetClass()->GetFName() != TEXT("EdGraphNode_Comment") && !Plan.Nodes.Contains(Node); });
+		if (bWholeFunction) Plan.Functions.Add(Graph);
+		else { Plan.bSafe = false; UE_LOG(LogTemp, Warning, TEXT("MP_ONLY REVIEW_REQUIRED MixedFunction=%s"), *Graph->GetPathName()); }
+	}
+	for (const FBPVariableDescription& Variable : Blueprint.NewVariables)
+		if (IsLegacyReference(GetPathNameSafe(Variable.VarType.PinSubCategoryObject.Get()))) Plan.Variables.Add(Variable.VarName);
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY PLAN Asset=%s RemoveNodes=%d RemoveFunctions=%d RemoveVariables=%d Safe=%d"),
+		*Blueprint.GetPathName(), Plan.Nodes.Num(), Plan.Functions.Num(), Plan.Variables.Num(), Plan.bSafe);
+	return Plan;
+}
+
+void RemoveLegacyGraphs(UBlueprint& Blueprint, const FLegacyGraphPlan& Plan)
+{
+	Blueprint.Modify();
+	for (UEdGraphNode* Node : Plan.Nodes)
+		if (!Plan.Functions.Contains(Node->GetGraph())) FBlueprintEditorUtils::RemoveNode(&Blueprint, Node, true);
+	for (UEdGraph* Graph : Plan.Functions) FBlueprintEditorUtils::RemoveGraph(&Blueprint, Graph, EGraphRemoveFlags::None);
+	for (const FName Variable : Plan.Variables) FBlueprintEditorUtils::RemoveMemberVariable(&Blueprint, Variable);
+}
+
+bool InspectMap(UWorld& World, FLegacyGraphPlan& Plan)
+{
+	AWorldSettings* Settings = World.GetWorldSettings();
+	ULevelScriptBlueprint* Level = World.PersistentLevel ? World.PersistentLevel->GetLevelScriptBlueprint(false) : nullptr;
+	if (!Settings || Settings->GetOutermost() != World.GetOutermost() || (Level && Level->GetOutermost() != World.GetOutermost()))
+		return Fail(TEXT("World settings and level script must belong to the exact map package."));
+	const UClass* CurrentMode = Settings->DefaultGameMode.Get();
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY MAP Package=%s DefaultGameMode=%s LevelScript=%s"),
+		*World.GetOutermost()->GetName(), *GetPathNameSafe(CurrentMode), *GetPathNameSafe(Level));
+	if (Level) Plan = InspectLegacyGraphs(*Level);
+	if (CurrentMode && CurrentMode != AfpstruePvpGameMode::StaticClass() && !IsLegacyReference(CurrentMode->GetPathName()))
+		return Fail(TEXT("Unexpected authored GameMode requires review: ") + CurrentMode->GetPathName());
+	return Plan.bSafe;
+}
+
+bool InspectNetworkHUD(UWidgetBlueprint& HUD, FLegacyGraphPlan& Plan)
+{
+	Plan = InspectLegacyGraphs(HUD);
+	for (const FDelegateEditorBinding& Binding : HUD.Bindings)
+		UE_LOG(LogTemp, Display, TEXT("MP_ONLY HUD_BINDING Object=%s Property=%s Function=%s"),
+			*Binding.ObjectName, *Binding.PropertyName.ToString(), *Binding.FunctionName.ToString());
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY HUD Parent=%s Bindings=%d LayoutUnchanged=1"), *GetPathNameSafe(HUD.ParentClass.Get()), HUD.Bindings.Num());
+	return Plan.bSafe;
+}
+
 void Run(const TArray<FString>& Args)
 {
 	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
-	if (Args.Num() > 0 && !bApply) { Fail(TEXT("Usage: fp.PreparePvpAssets [Apply]; no argument is read-only.")); return; }
-	if (GEditor == nullptr || GEditor->PlayWorld != nullptr) { Fail(TEXT("Requires an editor world with no active PIE.")); return; }
-	UWorld* PreviousWorld = GEditor->GetEditorWorldContext().World();
-	if (PreviousWorld != nullptr && PreviousWorld->GetOutermost()->IsDirty())
+	const bool bCheck = Args.IsEmpty() || (Args.Num() == 1 && Args[0].Equals(TEXT("Check"), ESearchCase::IgnoreCase));
+	if ((!bApply && !bCheck) || !GEditor || GEditor->PlayWorld)
+	{ Fail(TEXT("Usage: fp.MigrateMultiplayerOnly [Check|Apply], outside PIE.")); return; }
+	UWorld* Previous = GEditor->GetEditorWorldContext().World();
+	if (Previous && Previous->GetOutermost()->IsDirty()) { Fail(TEXT("Current map has unsaved edits.")); return; }
+	TArray<TStrongObjectPtr<UWidgetBlueprint>> HUDs;
+	TArray<bool> NeedsHUD;
+	bool bSafe = true;
+	for (const TCHAR* Object : HUDObjects)
 	{
-		Fail(TEXT("Current editor map is dirty. Save it before loading the fixed audit target."));
-		return;
+		TStrongObjectPtr<UWidgetBlueprint> HUD(LoadObject<UWidgetBlueprint>(nullptr, Object));
+		if (!HUD.IsValid() || HUD->GetOutermost()->IsDirty()) { Fail(FString(TEXT("Saved HUD is missing or dirty: ")) + Object); return; }
+		FLegacyGraphPlan Plan;
+		bSafe &= InspectNetworkHUD(*HUD.Get(), Plan);
+		NeedsHUD.Add(!Plan.Nodes.IsEmpty() || !Plan.Variables.IsEmpty() || !HUD->Bindings.IsEmpty() ||
+			HUD->ParentClass != UfpstruePvpIngameWidget::StaticClass());
+		HUDs.Add(MoveTemp(HUD));
 	}
-	const FString MapFilename = FPackageName::LongPackageNameToFilename(MapPackage, FPackageName::GetMapPackageExtension());
-	UWorld* World = UEditorLoadingAndSavingUtils::LoadMap(MapFilename);
-	if (World == nullptr || World->PersistentLevel == nullptr || World->GetOutermost()->GetName() != MapPackage)
+	TArray<FString> ChangedMaps;
+	for (const TCHAR* Package : MapPackages)
 	{
-		Fail(TEXT("Could not load the exact target map."));
-		return;
+		UWorld* World = UEditorLoadingAndSavingUtils::LoadMap(FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension()));
+		if (!World || World->GetOutermost()->GetName() != Package) { Fail(FString(TEXT("Cannot load exact map: ")) + Package); return; }
+		FLegacyGraphPlan Plan;
+		bSafe &= InspectMap(*World, Plan);
+		if (World->GetOutermost()->IsDirty()) { Fail(TEXT("Loading changed a map; inspect it before migration.")); return; }
+		if (World->GetWorldSettings()->DefaultGameMode != AfpstruePvpGameMode::StaticClass() || !Plan.Nodes.IsEmpty() || !Plan.Variables.IsEmpty())
+			ChangedMaps.Add(Package);
 	}
-	if (World->GetWorldPartition() != nullptr || World->PersistentLevel->IsUsingExternalActors()
-		|| World->PersistentLevel->IsUsingExternalObjects())
+	int32 ChangedHUDs = 0;
+	for (const bool bNeeds : NeedsHUD) if (bNeeds) ++ChangedHUDs;
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY CHECK_COMPLETE Safe=%d MapsToChange=%d HUDsToChange=%d NoAssetsSaved=1"), bSafe, ChangedMaps.Num(), ChangedHUDs);
+	if (!bApply) return;
+	if (!bSafe) { Fail(TEXT("Unrecognized scene logic touches the old UI chain. Review Check output; no assets changed.")); return; }
+	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/MultiplayerOnly") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	for (const FString& Package : ChangedMaps)
+		if (!BackupAsset(FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension()), Backup)) return;
+	for (int32 Index = 0; Index < HUDs.Num(); ++Index)
+		if (NeedsHUD[Index] && !BackupAsset(FPackageName::LongPackageNameToFilename(HUDs[Index]->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
+	for (const FString& Package : ChangedMaps)
 	{
-		Fail(TEXT("External/partitioned map is outside this single-package repair tool."));
-		return;
-	}
-	ULevelScriptBlueprint* LevelBlueprint = World->PersistentLevel->GetLevelScriptBlueprint(true);
-	TStrongObjectPtr<UBlueprint> Weapon(LoadObject<UBlueprint>(nullptr, WeaponObject));
-	if (LevelBlueprint == nullptr || !Weapon.IsValid() || Weapon->SimpleConstructionScript == nullptr)
-	{
-		Fail(TEXT("Target level script or weapon construction script is missing."));
-		return;
-	}
-	if (Weapon->GetOutermost()->IsDirty()) { Fail(TEXT("Weapon package has unsaved edits; refusing to publish them incidentally.")); return; }
-	UK2Node_Event* Begin = nullptr;
-	TArray<UEdGraph*> Graphs;
-	LevelBlueprint->GetAllGraphs(Graphs);
-	for (UEdGraph* Graph : Graphs)
-	{
-		for (UEdGraphNode* Node : Graph->Nodes)
+		UWorld* World = UEditorLoadingAndSavingUtils::LoadMap(FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension()));
+		if (!World) { Fail(TEXT("Map reload failed after backup.")); return; }
+		FLegacyGraphPlan Plan;
+		if (!InspectMap(*World, Plan)) return;
+		World->GetWorldSettings()->Modify();
+		World->GetWorldSettings()->DefaultGameMode = AfpstruePvpGameMode::StaticClass();
+		if (ULevelScriptBlueprint* Level = World->PersistentLevel->GetLevelScriptBlueprint(false))
 		{
-			UK2Node_Event* Event = Cast<UK2Node_Event>(Node);
-			if (Event == nullptr || Event->EventReference.GetMemberName() != TEXT("ReceiveBeginPlay")) continue;
-			if (Begin != nullptr) { Fail(TEXT("Multiple BeginPlay nodes require manual inspection.")); return; }
-			Begin = Event;
+			RemoveLegacyGraphs(*Level, Plan);
+			if (!Compile(Level)) { Fail(TEXT("Level compile failed; no save. Backup=") + Backup); return; }
 		}
+		World->MarkPackageDirty();
+		if (!UEditorLoadingAndSavingUtils::SaveMap(World, Package)) { Fail(TEXT("Map save failed. Backup=") + Backup); return; }
 	}
-	UEdGraphPin* BeginOutput = Begin != nullptr ? Begin->FindPin(UEdGraphSchema_K2::PN_Then) : nullptr;
-	if (BeginOutput == nullptr || BeginOutput->LinkedTo.Num() != 1)
+	for (int32 Index = 0; Index < HUDs.Num(); ++Index)
 	{
-		Fail(TEXT("Expected exactly one existing level BeginPlay successor; refusing a custom layout."));
-		return;
+		if (!NeedsHUD[Index]) continue;
+		UWidgetBlueprint* HUD = HUDs[Index].Get();
+		// LoadMap 可触发蓝图重建；应用前重新解析，不能使用加载地图前的节点指针。
+		FLegacyGraphPlan CurrentPlan;
+		if (!InspectNetworkHUD(*HUD, CurrentPlan)) { Fail(TEXT("HUD changed since inspection. Backup=") + Backup); return; }
+		RemoveLegacyGraphs(*HUD, CurrentPlan);
+		if (!InspectLegacyGraphs(*HUD).Nodes.IsEmpty()) { Fail(TEXT("HUD still references a removed gameplay entry. Backup=") + Backup); return; }
+		HUD->ParentClass = UfpstruePvpIngameWidget::StaticClass();
+		HUD->Bindings.Reset();
+		if (!Compile(HUD)) { Fail(TEXT("HUD compile failed; no save. Backup=") + Backup); return; }
+		HUD->MarkPackageDirty();
+		if (!UEditorLoadingAndSavingUtils::SavePackages({HUD->GetOutermost()}, false)) { Fail(TEXT("HUD save failed. Backup=") + Backup); return; }
 	}
-	const bool bNeedsGate = !HasStandaloneGuard(BeginOutput);
-	if (bNeedsGate)
-	{
-		for (UEdGraph* Graph : Graphs)
-			for (UEdGraphNode* Node : Graph->Nodes)
-				if (Node->NodeComment == GateMarker) { Fail(TEXT("An incomplete prior guard requires manual inspection.")); return; }
-	}
-	FName ComponentName = NAME_None;
-	for (USCS_Node* Node : Weapon->SimpleConstructionScript->GetAllNodes())
-	{
-		if (Node == nullptr || Node->ComponentClass == nullptr || !Node->ComponentClass->IsChildOf(UfpstrueWeaponComponent::StaticClass())) continue;
-		if (!ComponentName.IsNone()) { Fail(TEXT("Multiple weapon components require an explicit asset decision.")); return; }
-		ComponentName = Node->GetVariableName();
-	}
-	if (ComponentName.IsNone()) { Fail(TEXT("Weapon component SCS variable was not found.")); return; }
-	UFunction* Getter = UfpstrueWeaponComponent::StaticClass()->FindFunctionByName(TEXT("GetOwningCharacter"));
-	if (Getter == nullptr) { Fail(TEXT("Native GetOwningCharacter must be available before applying the graph repair.")); return; }
-	TArray<UK2Node_VariableGet*> Reads;
-	Graphs.Reset();
-	Weapon->GetAllGraphs(Graphs);
-	int32 RewiredLinks = 0;
-	for (UEdGraph* Graph : Graphs)
-	{
-		for (UEdGraphNode* Node : Graph->Nodes)
-		{
-			UK2Node_VariableGet* Read = Cast<UK2Node_VariableGet>(Node);
-			if (Read == nullptr || Read->GetVarName() != TEXT("owningactor")) continue;
-			UEdGraphPin* Output = Read->FindPin(Read->GetVarName());
-			if (Output == nullptr || Output->LinkedTo.IsEmpty()) continue;
-			UEdGraphPin* Self = Read->FindPin(UEdGraphSchema_K2::PN_Self);
-			if (!Read->IsNodePure() || (Self != nullptr && (!Self->LinkedTo.IsEmpty() || Self->DefaultObject != nullptr)))
-			{
-				Fail(TEXT("Non-pure or external owningactor read requires manual inspection."));
-				return;
-			}
-			Reads.Add(Read);
-			RewiredLinks += Output->LinkedTo.Num();
-			UE_LOG(LogTemp, Display, TEXT("PVP_ASSET_PREP READ Graph=%s Node=%s Consumers=%d"), *Graph->GetName(), *Read->GetName(), Output->LinkedTo.Num());
-		}
-	}
-	UE_LOG(LogTemp, Display, TEXT("PVP_ASSET_PREP AUDIT Mode=%s Map=%s Monolithic=true NeedsGuard=%s WeaponComponent=%s OwnerReads=%d ConsumerLinks=%d"),
-		bApply ? TEXT("Apply") : TEXT("Check"), MapPackage, bNeedsGate ? TEXT("true") : TEXT("false"), *ComponentName.ToString(), Reads.Num(), RewiredLinks);
-	if (!bApply || (!bNeedsGate && Reads.IsEmpty()))
-	{
-		UE_LOG(LogTemp, Display, TEXT("PVP_ASSET_PREP PASS %s"), bApply ? TEXT("Already prepared; no assets changed.") : TEXT("Read-only audit complete; no assets changed."));
-		return;
-	}
-	const FString BackupDirectory = FPaths::ProjectSavedDir() / TEXT("Backups/PvpAssetPreparation")
-		/ (FDateTime::UtcNow().ToString(TEXT("%Y%m%d_%H%M%S")) + TEXT("_") + FGuid::NewGuid().ToString(EGuidFormats::Digits));
-	const FString WeaponFilename = FPackageName::LongPackageNameToFilename(Weapon->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
-	if ((bNeedsGate && !BackupAsset(MapFilename, BackupDirectory)) || (!Reads.IsEmpty() && !BackupAsset(WeaponFilename, BackupDirectory))) return;
-	if (bNeedsGate && !GuardBeginPlay(Begin)) return;
-	for (UK2Node_VariableGet* Read : Reads) if (!ReplaceOwnerRead(Read, ComponentName, Getter)) return;
-	if ((bNeedsGate && !Compile(LevelBlueprint)) || (!Reads.IsEmpty() && !Compile(Weapon.Get())))
-	{
-		Fail(TEXT("Compilation failed; edited graphs remain unsaved. Originals are in ") + BackupDirectory);
-		return;
-	}
-	if (bNeedsGate && !UEditorLoadingAndSavingUtils::SaveMap(World, MapPackage)) { Fail(TEXT("Could not save the target map; backup retained.")); return; }
-	if (!Reads.IsEmpty() && !UEditorLoadingAndSavingUtils::SavePackages({Weapon->GetOutermost()}, false))
-	{
-		Fail(TEXT("Could not save the target weapon package; backup retained."));
-		return;
-	}
-	UE_LOG(LogTemp, Display, TEXT("PVP_ASSET_PREP PASS GuardAdded=%s OwnerReadsRewired=%d Backups=%s"),
-		bNeedsGate ? TEXT("true") : TEXT("false"), Reads.Num(), *BackupDirectory);
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY APPLIED Maps=%d HUDs=%d Backup=%s UnrelatedSceneLogicAndWidgetLayoutRetained=1"),
+		ChangedMaps.Num(), ChangedHUDs, *Backup);
 }
 
-FAutoConsoleCommand PreparePvpAssets(
-	TEXT("fp.PreparePvpAssets"),
-	TEXT("Audit the shipped PvP map/weapon graphs. Add Apply to back up, minimally rewire, compile and save only those assets."),
+FAutoConsoleCommand PreparePvpAssets(TEXT("fp.PreparePvpAssets"),
+	TEXT("Check/Apply multiplayer-only migration of fixed map GameModes, legacy level UI chains and network HUD graphs."),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
+FAutoConsoleCommand MigrateMultiplayerOnly(TEXT("fp.MigrateMultiplayerOnly"),
+	TEXT("Check logs all level/HUD nodes. Apply backs up exact packages and removes only recognized legacy UI chains."),
+	FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
+
+// 换弹已统一权威时钟；逐资产删除旧原生装弹 Notify，不删除音效或其他通知。
+void RemoveLegacyReloadNotifies(const TArray<FString>& Args)
+{
+	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
+	if ((!Args.IsEmpty() && !bApply) || !GEditor || GEditor->PlayWorld)
+	{ Fail(TEXT("Usage: fp.RemoveLegacyReloadNotifies [Apply], outside PIE.")); return; }
+	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	Registry.SearchAllAssets(true);
+	TArray<FAssetData> Assets;
+	Registry.GetAssetsByClass(UAnimSequenceBase::StaticClass()->GetClassPathName(), Assets, true);
+	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/ReloadNotify") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	int32 Changed = 0;
+	for (const FAssetData& Asset : Assets)
+	{
+		if (!Asset.PackageName.ToString().StartsWith(TEXT("/Game/"))) continue;
+		UAnimSequenceBase* Animation = Cast<UAnimSequenceBase>(Asset.GetAsset());
+		if (!Animation) { Fail(TEXT("Could not inspect animation: ") + Asset.GetObjectPathString()); return; }
+		const auto IsLegacy = [](const FAnimNotifyEvent& Event)
+		{
+			return Event.Notify && Event.Notify->GetClass()->GetPathName() == TEXT("/Script/fpstrue.fpstrueAnimNotify_ReloadCommit");
+		};
+		const int32 Count = Animation->Notifies.FilterByPredicate(IsLegacy).Num();
+		if (!Count) continue;
+		UE_LOG(LogTemp, Display, TEXT("RELOAD_NOTIFY LEGACY Asset=%s Count=%d"), *Animation->GetPathName(), Count);
+		if (bApply)
+		{
+			if (Animation->GetOutermost()->IsDirty()) { Fail(TEXT("Animation has unsaved changes: ") + Animation->GetPathName()); return; }
+			if (!BackupAsset(FPackageName::LongPackageNameToFilename(Asset.PackageName.ToString(), FPackageName::GetAssetPackageExtension()), Backup)) return;
+			Animation->Modify();
+			Animation->Notifies.RemoveAll(IsLegacy);
+			Animation->PostEditChange();
+			Animation->MarkPackageDirty();
+			if (!UEditorLoadingAndSavingUtils::SavePackages({Animation->GetOutermost()}, false))
+			{ Fail(TEXT("Animation save failed. Backup=") + Backup); return; }
+		}
+		++Changed;
+	}
+	UE_LOG(LogTemp, Display, TEXT("RELOAD_NOTIFY COMPLETE Apply=%d Assets=%d Backup=%s"), bApply, Changed, *Backup);
+}
+
+FAutoConsoleCommand RemoveReloadNotifies(TEXT("fp.RemoveLegacyReloadNotifies"),
+	TEXT("Check, or Apply with backups, removal of the obsolete native reload commit notifies."),
+	FConsoleCommandWithArgsDelegate::CreateStatic(&RemoveLegacyReloadNotifies));
 
 // 只读输出 ShouldMove 的上游值流；节点与引脚逐一标明，检查不会 Modify、编译或保存蓝图。
 void AuditRARBodyNode(const UEdGraphNode* Node, TSet<const UEdGraphNode*>& Visited, int32 Depth = 0)
@@ -2090,32 +2184,43 @@ FAutoConsoleCommand GroundCalibrationCommand(TEXT("fp.CalibrateTemplateGrounding
 	TEXT("Read-only CPU sole and authored-step-speed calibration. Apply backs up and modifies only saved Template BP mesh Z and Directions sample rates."),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&CalibrateGrounding));
 
-// 原单机 ingame 不动：联机复制件保留控件树、动画、旧节点与注释，只解除失效的数据入口。
+// 网络 HUD 由原生事件驱动：保留控件布局，删除已识别的旧 GameMode 链，不再复制并遗留不可达节点。
 void PrepareHUD(const TArray<FString>& Args)
 {
 	const bool bApply = Args.Num() == 1 && Args[0] == TEXT("Apply");
 	if (GEditor == nullptr || GEditor->PlayWorld != nullptr || (Args.Num() && !bApply)) return;
-	auto* Source = Load<UWidgetBlueprint>(TEXT("/Game/FirstPerson/UI/ingame"));
 	const FString Target = TEXT("/Game/FirstPerson/UI/ingame_network");
-	if (!Source || FPackageName::DoesPackageExist(Target)) { Error(TEXT("HUD source missing or copy already exists; no overwrite.")); return; }
-	if (!bApply) { UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS ReadOnly=true")); return; }
-	UPackage* Package = CreatePackage(*Target);
-	auto* Copy = DuplicateObject<UWidgetBlueprint>(Source, Package, TEXT("ingame_network"));
-	Copy->SetFlags(RF_Public | RF_Standalone | RF_Transactional); FAssetRegistryModule::AssetCreated(Copy);
+	const bool bExists = FPackageName::DoesPackageExist(Target);
+	auto* Copy = Load<UWidgetBlueprint>(bExists ? Target : TEXT("/Game/FirstPerson/UI/ingame"));
+	if (!Copy || Copy->GetOutermost()->IsDirty()) { Error(TEXT("Saved HUD is missing or has unsaved edits.")); return; }
+	FpstruePvpAssetPreparation::FLegacyGraphPlan Plan;
+	if (!FpstruePvpAssetPreparation::InspectNetworkHUD(*Copy, Plan))
+	{ Error(TEXT("HUD contains an unrecognized old UI chain; inspect the node audit before Apply.")); return; }
+	if (!bApply) { UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS ReadOnly=true ExistingNetworkHUD=%d"), bExists); return; }
+	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/NetworkHUD") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	if (bExists)
+	{
+		if (!FpstruePvpAssetPreparation::BackupAsset(FPackageName::LongPackageNameToFilename(Copy->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
+	}
+	else
+	{
+		UPackage* NewPackage = CreatePackage(*Target);
+		Copy = DuplicateObject<UWidgetBlueprint>(Copy, NewPackage, TEXT("ingame_network"));
+		Copy->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+		FAssetRegistryModule::AssetCreated(Copy);
+		Plan = FpstruePvpAssetPreparation::InspectLegacyGraphs(*Copy);
+		if (!Plan.bSafe) { Error(TEXT("Copied HUD graph differs from the inspected source; no save.")); return; }
+	}
+	FpstruePvpAssetPreparation::RemoveLegacyGraphs(*Copy, Plan);
 	Copy->ParentClass = UfpstruePvpIngameWidget::StaticClass();
-	for (UEdGraph* Graph : Copy->UbergraphPages)
-		for (UEdGraphNode* Node : Graph->Nodes)
-			if (auto* Event = Cast<UK2Node_Event>(Node))
-				if (Event->EventReference.GetMemberName() == TEXT("Construct"))
-					if (UEdGraphPin* Then = Event->FindPin(UEdGraphSchema_K2::PN_Then)) Then->BreakAllPinLinks();
-	// 旧式 UMG 属性轮询中仍 Cast 旧蓝图角色；复制件由 Native 事件推送，不让轮询覆盖新弹药。
-	Copy->Bindings.Reset(); FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Copy);
+	Copy->Bindings.Reset();
 	if (!FpstruePvpAssetPreparation::Compile(Copy)) return;
+	UPackage* Package = Copy->GetOutermost();
 	Package->MarkPackageDirty();
 	if (!UEditorLoadingAndSavingUtils::SavePackages({Package}, false)) { Error(TEXT("HUD copy save failed.")); return; }
-	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS OriginalUntouched=true Copy=%s"), *Target);
+	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS Copy=%s LegacyGameModeNodesRemoved=1 LayoutUnchanged=1 Backup=%s"), *Target, *Backup);
 }
-FAutoConsoleCommand HUDCommand(TEXT("fp.PrepareNetworkHUD"), TEXT("Apply duplicates original ingame layout and bridges network events without touching the single-player widget."), FConsoleCommandWithArgsDelegate::CreateStatic(&PrepareHUD));
+FAutoConsoleCommand HUDCommand(TEXT("fp.PrepareNetworkHUD"), TEXT("Check/Apply native network HUD graphs while retaining layout and removing recognized legacy GameMode chains."), FConsoleCommandWithArgsDelegate::CreateStatic(&PrepareHUD));
 
 // 已生成的身体图只移动现有受击节点，不删除节点/注释、不重生成其他资产；改动前保留可恢复备份。
 void RepairUnarmedHit(const TArray<FString>& Args)
@@ -3191,344 +3296,6 @@ void Start(UWorld* World)
 FAutoConsoleCommandWithWorld PickupWalkCommand(TEXT("fp.AuditPickupWalk"),
 	TEXT("Normal rendered client only: walk through CharacterMovement to the nearest replicated template pickup, verify real overlap/HUD, and capture empty/equipped views. Does not test EnhancedInput bindings."),
 	FConsoleCommandWithWorldDelegate::CreateStatic(&Start));
-}
-
-// 原单机结算 UI 的限定修复：默认只检查，Apply 备份并保存重开接线/文字对比度，不改界面布局。
-namespace FpstrueStandaloneUIRepair
-{
-// 只处理原结算 Widget 的已知重开入口和文字颜色；先检查和备份，不删图、事件、注释或改布局。
-void Run(const TArray<FString>& Args)
-{
-	const bool bApply = Args.Num() == 1 && Args[0] == TEXT("Apply");
-	if (!GEditor || GEditor->PlayWorld || (Args.Num() && !bApply)) return;
-	auto* Blueprint = LoadObject<UWidgetBlueprint>(nullptr, TEXT("/Game/FirstPerson/UI/winorfail.winorfail"));
-	if (!Blueprint || !Blueprint->WidgetTree || Blueprint->GetOutermost()->IsDirty())
-	{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=MissingOrUnsavedOriginalWidget")); return; }
-	TArray<UEdGraph*> Graphs; Blueprint->GetAllGraphs(Graphs);
-	UK2Node_CallFunction* Open = nullptr;
-	UK2Node_CallFunction* Current = nullptr;
-	for (UEdGraph* Graph : Graphs)
-		for (UEdGraphNode* Node : Graph->Nodes)
-			if (auto* Call = Cast<UK2Node_CallFunction>(Node))
-			{
-				const FName Function = Call->FunctionReference.GetMemberName();
-				if (Function == TEXT("GetCurrentLevelName"))
-				{
-					if (Current) { UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=AmbiguousCurrentMapQuery")); return; }
-					Current = Call;
-				}
-				if (Function == TEXT("OpenLevel"))
-				{
-					if (Open) { UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=AmbiguousRestart")); return; }
-					Open = Call;
-				}
-				if (Function == TEXT("OpenLevel") || Function == TEXT("SetColorAndOpacity") || Function == TEXT("SelectColor"))
-					for (UEdGraphPin* Pin : Call->Pins)
-						if (Pin->Direction == EGPD_Input && Pin->LinkedTo.IsEmpty())
-							UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_UI_REPAIR PIN Function=%s Pin=%s Value=%s"), *Function.ToString(), *Pin->PinName.ToString(), *Pin->DefaultValue);
-			}
-	UEdGraphPin* Level = Open ? Open->FindPin(TEXT("LevelName")) : nullptr;
-	if (!Level) { UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=MissingOriginalRestart")); return; }
-	const bool bNeedsRoute = Level->LinkedTo.IsEmpty();
-	if (bNeedsRoute && !Level->DefaultValue.Contains(TEXT("Demonstration")))
-	{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=UnknownEditedRestart")); return; }
-	if (!bApply)
-	{ UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_UI_REPAIR CHECK LiteralRestart=%d Original=%s"), bNeedsRoute, *Level->DefaultValue); return; }
-	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/StandaloneUI") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	if (!FpstruePvpAssetPreparation::BackupAsset(FPackageName::LongPackageNameToFilename(Blueprint->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
-	Blueprint->Modify(); Open->GetGraph()->Modify();
-	if (bNeedsRoute)
-	{
-		UEdGraph* Graph = Open->GetGraph();
-		Current = NewObject<UK2Node_CallFunction>(Graph);
-		Current->CreateNewGuid(); Current->SetFromFunction(UGameplayStatics::StaticClass()->FindFunctionByName(TEXT("GetCurrentLevelName")));
-		Current->AllocateDefaultPins(); Current->NodePosX = Open->NodePosX - 420; Current->NodePosY = Open->NodePosY + 160;
-		Current->NodeComment = TEXT("重开当前关卡，保留优化图及调用地图；不硬编码旧 Factory 地图。");
-		Graph->AddNode(Current, false, false);
-		if (!Graph->GetSchema()->TryCreateConnection(Current->FindPin(TEXT("ReturnValue")), Level))
-		{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=CannotConnectCurrentMap")); return; }
-	}
-	// UE5.5 的 GetCurrentLevelName 是 BlueprintCallable（不是 Pure）；必须接入原按钮执行链。
-	if (!Current || !Current->GetExecPin() || !Open->GetExecPin())
-	{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=MissingCurrentMapExecutionPins")); return; }
-	if (Current->GetExecPin()->LinkedTo.IsEmpty())
-	{
-		const auto Incoming = Open->GetExecPin()->LinkedTo;
-		if (Incoming.Num() != 1) { UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=AmbiguousOriginalButtonExecution")); return; }
-		Open->GetExecPin()->BreakAllPinLinks();
-		const UEdGraphSchema* Schema = Open->GetGraph()->GetSchema();
-		if (!Schema->TryCreateConnection(Incoming[0], Current->GetExecPin()) || !Schema->TryCreateConnection(Current->GetThenPin(), Open->GetExecPin()))
-		{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=CannotPreserveButtonExecution")); return; }
-	}
-	int32 Labels = 0;
-	TArray<UWidget*> Widgets; Blueprint->WidgetTree->GetAllWidgets(Widgets);
-	for (UWidget* Widget : Widgets)
-		if (auto* Text = Cast<UTextBlock>(Widget))
-		{ Text->Modify(); Text->SetColorAndOpacity(FSlateColor(FLinearColor(0.92f, 0.96f, 1.0f, 1.0f))); ++Labels; }
-	int32 BoundColors = 0;
-	for (UEdGraph* Graph : Graphs)
-		for (UEdGraphNode* Node : Graph->Nodes)
-			if (auto* Call = Cast<UK2Node_CallFunction>(Node); Call && Call->FunctionReference.GetMemberName() == TEXT("SelectColor"))
-				for (UEdGraphPin* Pin : Call->Pins)
-					if (Pin->Direction == EGPD_Input && Pin->LinkedTo.IsEmpty() && (Pin->PinName == TEXT("A") || Pin->PinName == TEXT("B")))
-					{
-						FLinearColor Color;
-						if (!Color.InitFromString(Pin->DefaultValue)) continue;
-						FLinearColor HSV = Color.LinearRGBToHSV(); HSV.G = 0.25f; HSV.B = 1.0f;
-						const FLinearColor Brighter = HSV.HSVToLinearRGB();
-						Graph->Modify(); Call->Modify();
-						Graph->GetSchema()->TrySetDefaultValue(*Pin, Brighter.ToString());
-						++BoundColors;
-					}
-	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
-	if (!FpstruePvpAssetPreparation::Compile(Blueprint)) return;
-	if (Blueprint->Status != BS_UpToDate)
-	{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=CompilerWarning_NoSave")); return; }
-	Blueprint->MarkPackageDirty();
-	if (!UEditorLoadingAndSavingUtils::SavePackages({Blueprint->GetOutermost()}, false))
-	{ UE_LOG(LogTemp, Error, TEXT("FPS_STANDALONE_UI_REPAIR FAIL Reason=Save")); return; }
-	UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_UI_REPAIR PASS Backup=%s Labels=%d BoundColors=%d LayoutAndEventsRetained=1 CurrentMapRestart=1"), *Backup, Labels, BoundColors);
-}
-FAutoConsoleCommand Command(TEXT("fp.RepairStandaloneUI"), TEXT("Check original winorfail restart/color pins; Apply narrowly backs up and repairs current-map restart and label contrast."), FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
-}
-
-// 显式单机画面验收：真实菜单输入 -> 自然胜负 -> 原按钮重开；仅临时缩短配置，写截图但不保存资源。
-namespace FpstrueStandaloneVisualAudit
-{
-// 读回活体 Pawn 的真实导航尺寸及实际选中的数据；不修改胶囊、NavProps 或查询结果。
-bool LogNavigationCoverage(ACharacter* Pawn)
-{
-	const auto* Movement = Pawn->GetCharacterMovement();
-	const auto* Capsule = Pawn->GetCapsuleComponent();
-	const FNavAgentProperties& PawnProps = Pawn->GetNavAgentPropertiesRef();
-	const FNavAgentProperties& MovementProps = Movement->GetNavAgentPropertiesRef();
-	auto* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Pawn->GetWorld());
-	const ANavigationData* Selected = Navigation ? Navigation->GetNavDataForProps(PawnProps, Pawn->GetActorLocation()) : nullptr;
-	const FNavDataConfig* Config = Selected ? &Selected->GetConfig() : nullptr;
-	const float Radius = Capsule->GetScaledCapsuleRadius(), Height = Capsule->GetScaledCapsuleHalfHeight() * 2.0f;
-	const bool bCovered = Config && Config->AgentRadius >= Radius && Config->AgentHeight >= Height
-		&& PawnProps.AgentRadius >= Radius && PawnProps.AgentHeight >= Height;
-	UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL NAV_PAWN Pawn=%s Capsule=%.1f/%.1f PawnProps=%.1f/%.1f CMCProps=%.1f/%.1f UpdateFromCollision=%d Selected=%s Config=%.1f/%.1f Extent=%s Covered=%d"),
-		*Pawn->GetName(), Radius, Height, PawnProps.AgentRadius, PawnProps.AgentHeight, MovementProps.AgentRadius, MovementProps.AgentHeight,
-		Movement->ShouldUpdateNavAgentWithOwnersCollision(), *GetNameSafe(Selected), Config ? Config->AgentRadius : -1.0f,
-		Config ? Config->AgentHeight : -1.0f, Config ? *Config->DefaultQueryExtent.ToCompactString() : TEXT("None"), bCovered);
-	return bCovered;
-}
-
-// 递归读取文本控件的可见文案，供验收选择原菜单/结算按钮，不依赖固定子控件名称。
-FString ReadText(UWidget* Widget)
-{
-	if (const auto* Text = Cast<UTextBlock>(Widget)) return Text->GetText().ToString();
-	FString Result;
-	if (const auto* Panel = Cast<UPanelWidget>(Widget))
-		for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index) Result += ReadText(Panel->GetChildAt(Index));
-	return Result;
-}
-
-// Ticker 持有的一次单机验收状态，可跨原按钮触发的地图重开继续观察；不拥有生产资源配置。
-struct FState
-{
-	FString Directory;
-	bool bVictory = false;
-	bool bCurrentWorldConfigured = false;
-	int32 Phase = 0;
-	uint32 OriginalWorldId = 0;
-	double Deadline = FPlatformTime::Seconds() + 210.0;
-	double PhaseAt = 0.0;
-	double NextRouteAt = 0.0;
-	double MenuSeenAt = 0.0;
-	FString OriginalMap;
-	TArray<FVector> Route;
-	int32 RoutePoint = 0;
-	TSet<FString> Requested;
-	TWeakObjectPtr<AfpstrueEnemyCharacter> Enemy;
-
-	// 只改当前世界内的临时配置副本；生产蓝图/Data Asset 不写盘、不更改默认值。
-	bool Configure(AfpstrueGameMode* Mode)
-	{
-		auto* Property = FindFProperty<FObjectProperty>(AfpstrueGameMode::StaticClass(), TEXT("WaveConfiguration"));
-		auto* Old = Cast<UfpstrueWaveConfiguration>(Property->GetObjectPropertyValue_InContainer(Mode));
-		auto* Config = Old ? DuplicateObject<UfpstrueWaveConfiguration>(Old, Mode) : NewObject<UfpstrueWaveConfiguration>(Mode);
-		if (!Old)
-		{
-			auto* ClassProperty = FindFProperty<FClassProperty>(AfpstrueGameMode::StaticClass(), TEXT("EnemyClass"));
-			Config->DefaultEnemyClass = Cast<UClass>(ClassProperty->GetObjectPropertyValue_InContainer(Mode));
-		}
-		Config->Waves.SetNum(1);
-		Config->Waves[0].EnemyCount = 1;
-		Config->GameDuration = bVictory ? 6 : 120;
-		Property->SetObjectPropertyValue_InContainer(Mode, Config);
-		UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL CONFIG Case=%s Duration=%d Enemies=1 TransientOnly=1"), bVictory ? TEXT("Victory") : TEXT("Defeat"), Config->GameDuration);
-		return Config->DefaultEnemyClass || Config->Waves[0].EnemyClass;
-	}
-
-	// 截图请求与实际 PNG 分离，不能把请求发出等同于画面已经生成。
-	bool Capture(const TCHAR* Name)
-	{
-		const FString Filename = FPaths::Combine(Directory, FString(Name) + TEXT(".png"));
-		if (!Requested.Contains(Name) && !FScreenshotRequest::IsScreenshotRequested())
-		{
-			FScreenshotRequest::RequestScreenshot(Filename, true, false, false);
-			Requested.Add(Name);
-		}
-		return Requested.Contains(Name) && IFileManager::Get().FileExists(*Filename);
-	}
-
-	// 文案和所属 Widget 都必须匹配，不回退成点击任意第一个按钮。
-	bool Click(UUserWidget* Widget, bool bRestart)
-	{
-		if (!Widget || !Widget->WidgetTree) return false;
-		TArray<UWidget*> Widgets; Widget->WidgetTree->GetAllWidgets(Widgets);
-		for (UWidget* Child : Widgets)
-			if (auto* Button = Cast<UButton>(Child); Button && Button->GetIsEnabled() && Button->IsVisible())
-			{
-				const FString Label = ReadText(Button);
-				UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL BUTTON Widget=%s Button=%s Label=%s Restart=%d"), *Widget->GetName(), *Button->GetName(), *Label, bRestart);
-				const bool bMatches = bRestart ? (Label.Contains(TEXT("重新")) || Label.Contains(TEXT("再来")) || Label.Contains(TEXT("Restart")) || Label.Contains(TEXT("Again")))
-					: (Label.Contains(TEXT("开始")) || Label.Contains(TEXT("Start")) || Label.Contains(TEXT("Play")));
-				if (!bMatches) continue;
-				UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL CLICK Widget=%s Button=%s Label=%s Restart=%d"), *Widget->GetName(), *Button->GetName(), *Label, bRestart);
-				Button->OnClicked.Broadcast();
-				return true;
-			}
-		return false;
-	}
-
-	// 逐帧送入原菜单/行走输入并观察真实结果与重开世界；超时或不符即结束，不直接设置胜负。
-	bool Tick(float)
-	{
-		const double Now = FPlatformTime::Seconds();
-		if (Now > Deadline) { UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FAIL Phase=%d Reason=Deadline"), Phase); return false; }
-		UWorld* World = nullptr;
-		for (const FWorldContext& Context : GEngine->GetWorldContexts())
-			if (Context.WorldType == EWorldType::Game && Context.World() && Context.World()->GetNetMode() == NM_Standalone && !Context.World()->bIsTearingDown) { World = Context.World(); break; }
-		if (!World) return true;
-		auto* Mode = World->GetAuthGameMode<AfpstrueGameMode>();
-		APlayerController* Player = World->GetFirstPlayerController();
-		auto* Pawn = Player ? Cast<AfpstrueCharacter>(Player->GetPawn()) : nullptr;
-		if (!Mode || !Pawn) return true;
-		UUserWidget* Menu = nullptr; UUserWidget* Result = nullptr;
-		for (TObjectIterator<UUserWidget> It; It; ++It)
-			if (It->GetWorld() == World && It->IsInViewport() && It->IsVisible())
-			{
-				const FString Class = It->GetClass()->GetPathName();
-				if (Class.Contains(TEXT("/mainmenu."))) Menu = *It;
-				if (Class.Contains(TEXT("/winorfail."))) Result = *It;
-			}
-		if (Phase == 0 || Phase == 4)
-		{
-			if (Phase == 4 && World->GetUniqueID() == OriginalWorldId) return true;
-			if (Phase == 4 && World->GetOutermost()->GetName() != OriginalMap)
-			{ UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FAIL Reason=RestartChangedMap Actual=%s"), *World->GetOutermost()->GetName()); return false; }
-			if (!Menu) return true;
-			if (MenuSeenAt <= 0.0) { MenuSeenAt = Now; return true; }
-			if (Now - MenuSeenAt < 3.0 || !Capture(Phase == 0 ? TEXT("MainMenu") : TEXT("RestartMenu"))) return true;
-			if (!bCurrentWorldConfigured)
-			{
-				if (!Configure(Mode)) { UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FAIL Reason=MissingActualEnemyClass")); return false; }
-				bCurrentWorldConfigured = true;
-			}
-			// 原主菜单是“任意键开始”的文本动画，不是按钮；输入仍经过原 PlayerInput/关卡蓝图 AnyKey。
-			Player->InputKey(FInputKeyParams(EKeys::Enter, IE_Pressed, 1.0));
-			Player->InputKey(FInputKeyParams(EKeys::Enter, IE_Released, 0.0));
-			UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL START_KEY Key=Enter Route=PlayerControllerInputKey_LevelScriptAnyKey"));
-			if (Phase == 0) { OriginalWorldId = World->GetUniqueID(); OriginalMap = World->GetOutermost()->GetName(); }
-			Phase = Phase == 0 ? 1 : 5; PhaseAt = Now;
-			return true;
-		}
-		if (Phase == 1 || Phase == 5)
-		{
-			if (!Mode->IsRunning() || Pawn->IsDead() || !Capture(Phase == 1 ? TEXT("Playing") : TEXT("RestartPlaying"))) return true;
-			if (!LogNavigationCoverage(Pawn))
-			{ UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FAIL Reason=NavAgentCoverage")); return false; }
-			if (Phase == 5)
-			{
-				UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL PASS Case=%s DifferentWorld=1 OriginalAnyKeyAndRestart=1 Health=%.1f"), bVictory ? TEXT("Victory") : TEXT("Defeat"), Pawn->GetCurrentHealth());
-				return false;
-			}
-			Phase = 2; PhaseAt = Now;
-		}
-		if (Phase == 2)
-		{
-			if (Mode->IsFinished())
-			{
-				if ((bVictory && (Pawn->IsDead() || Mode->GetRemainingTime() != 0)) || (!bVictory && !Pawn->IsDead()))
-				{ UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FAIL Reason=WrongNaturalOutcome")); return false; }
-				Phase = 3; PhaseAt = Now;
-				UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FINISHED Case=%s Health=%.1f Remaining=%d"), bVictory ? TEXT("Victory") : TEXT("Defeat"), Pawn->GetCurrentHealth(), Mode->GetRemainingTime());
-				return true;
-			}
-			if (!bVictory)
-			{
-				if (!Enemy.IsValid()) for (TActorIterator<AfpstrueEnemyCharacter> It(World); It; ++It) if (!It->IsDead())
-				{
-					Enemy = *It;
-					if (!LogNavigationCoverage(*It))
-					{ UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL FAIL Reason=EnemyNavAgentCoverage")); return false; }
-					break;
-				}
-				if (Enemy.IsValid())
-				{
-					Player->SetControlRotation((Enemy->GetActorLocation() - Pawn->GetPawnViewLocation()).Rotation());
-					if (Now >= NextRouteAt)
-					{
-						NextRouteAt = Now + 2.0;
-						UNavigationSystemV1* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-						UNavigationPath* Path = Navigation ? Navigation->FindPathToLocationSynchronously(World, Pawn->GetActorLocation(), Enemy->GetActorLocation(), Pawn) : nullptr;
-						if (Path && Path->IsValid() && !Path->IsPartial()) { Route = Path->PathPoints; RoutePoint = 0; }
-						while (Route.IsValidIndex(RoutePoint) && FVector::DistSquared2D(Pawn->GetActorLocation(), Route[RoutePoint]) < FMath::Square(20.0)) ++RoutePoint;
-						const FVector NextPoint = Route.IsValidIndex(RoutePoint) ? Route[RoutePoint] : Pawn->GetActorLocation();
-						const FVector MoveDirection = (NextPoint - Pawn->GetActorLocation()).GetSafeNormal2D();
-						FHitResult Blocker;
-						FCollisionQueryParams MovementQuery(SCENE_QUERY_STAT(FpsStandaloneVisualMovement), false, Pawn);
-						const auto* Capsule = Pawn->GetCapsuleComponent();
-						const bool bBlocked = World->SweepSingleByChannel(Blocker, Pawn->GetActorLocation(), Pawn->GetActorLocation() + MoveDirection * 100.0f,
-							Pawn->GetActorQuat(), Capsule->GetCollisionObjectType(), FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight()), MovementQuery);
-						const UPrimitiveComponent* BlockedComponent = Blocker.GetComponent();
-						UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL ROUTE_NEXT Index=%d/%d Point=%s DistanceCm=%.1f SweepBlocked=%d Component=%s Normal=%s Penetrating=%d NavAffect=%d NavRelevant=%d"),
-							RoutePoint, Route.Num(), *NextPoint.ToCompactString(), FVector::Dist2D(Pawn->GetActorLocation(), NextPoint), bBlocked,
-							*GetPathNameSafe(BlockedComponent), *Blocker.ImpactNormal.ToCompactString(), Blocker.bStartPenetrating,
-							BlockedComponent && BlockedComponent->CanEverAffectNavigation(), BlockedComponent && BlockedComponent->IsNavigationRelevant());
-						auto* AI = Cast<AfpstrueEnemyAIController>(Enemy->GetController());
-						UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL APPROACH Nav=%d Path=%d Partial=%d Points=%d Player=%s Enemy=%s DistanceCm=%.1f Speed=%.1f MoveIgnored=%d MovementMode=%d Health=%.1f Target=%s Sight=%d"),
-							Navigation != nullptr, Path && Path->IsValid(), Path && Path->IsPartial(), Route.Num(), *Pawn->GetActorLocation().ToCompactString(),
-							*Enemy->GetActorLocation().ToCompactString(), FVector::Dist2D(Pawn->GetActorLocation(), Enemy->GetActorLocation()), Pawn->GetVelocity().Size2D(),
-							Player->IsMoveInputIgnored(), static_cast<int32>(Pawn->GetCharacterMovement()->MovementMode), Pawn->GetCurrentHealth(),
-							*GetNameSafe(AI ? AI->GetTargetCharacter() : nullptr), AI && AI->LineOfSightTo(Pawn));
-						if (Now - PhaseAt > 5.0) Capture(TEXT("DefeatApproach"));
-						if (Now - PhaseAt > 15.0 && Pawn->GetVelocity().Size2D() < 1.0f && FVector::Dist2D(Pawn->GetActorLocation(), NextPoint) > 100.0f)
-							Capture(TEXT("DefeatBlocked"));
-					}
-					// 保留真实路线拐点，不能由验收驱动提前大幅切角穿出 Nav 的胶囊安全走廊。
-					while (Route.IsValidIndex(RoutePoint) && FVector::DistSquared2D(Pawn->GetActorLocation(), Route[RoutePoint]) < FMath::Square(20.0)) ++RoutePoint;
-					if (Route.IsValidIndex(RoutePoint) && FVector::Dist2D(Pawn->GetActorLocation(), Enemy->GetActorLocation()) > 140.0)
-						Pawn->AddMovementInput((Route[RoutePoint] - Pawn->GetActorLocation()).GetSafeNormal2D(), 1.0f, false);
-				}
-			}
-			return true;
-		}
-		if (Phase == 3 && Result && Now - PhaseAt > 1.0 && Capture(bVictory ? TEXT("VictoryUI") : TEXT("DefeatUI")) && Click(Result, true))
-		{ Phase = 4; PhaseAt = Now; bCurrentWorldConfigured = false; MenuSeenAt = 0.0; }
-		return true;
-	}
-};
-
-// 只在显式胜/负用例和绝对截图目录齐备时启动，Ticker 每帧驱动以保持 CMC 输入连续。
-void Start()
-{
-	static TWeakPtr<FState> Active;
-	if (Active.IsValid() || !FApp::CanEverRender()) return;
-	FString Case; auto State = MakeShared<FState>();
-	if (!FParse::Value(FCommandLine::Get(), TEXT("FpsStandaloneVisualCase="), Case) || (Case != TEXT("Victory") && Case != TEXT("Defeat"))
-		|| !FParse::Value(FCommandLine::Get(), TEXT("FpsStandaloneCaptureDir="), State->Directory) || FPaths::IsRelative(State->Directory)) return;
-	State->bVictory = Case == TEXT("Victory");
-	IFileManager::Get().MakeDirectory(*State->Directory, true);
-	Active = State;
-	// CMC 每帧消耗输入；“按住行走”必须每帧喂入，不能隔帧产生一走一刹的夹具假象。
-	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([State](float Delta) { return State->Tick(Delta); }), 0.0f);
-	UE_LOG(LogTemp, Display, TEXT("FPS_STANDALONE_VISUAL START Case=%s Scope=RealStandaloneMenu_NaturalOutcome_OriginalRestartButtons"), *Case);
-}
-FAutoConsoleCommand Command(TEXT("fp.AuditStandaloneLoop"), TEXT("Explicit rendered acceptance of original single-player menu, natural short-config victory or real AI defeat, and original restart buttons."), FConsoleCommandDelegate::CreateStatic(&Start));
 }
 
 #endif // WITH_EDITOR

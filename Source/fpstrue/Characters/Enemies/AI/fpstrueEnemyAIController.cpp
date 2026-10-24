@@ -5,6 +5,10 @@
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Int.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Object.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Vector.h"
 #include "BrainComponent.h"
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
@@ -16,7 +20,6 @@
 #include "AITypes.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "Kismet/GameplayStatics.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationPath.h"
 #include "NavFilters/NavigationQueryFilter.h"
@@ -121,7 +124,6 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 		return;
 	}
 	bDisableDecisionThrottlingForBenchmark = FFPRuntimeOptions::Get().bDisableAIThrottling;
-	bUsesMultiplayerTargets = GetNetMode() != NM_Standalone && GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>() != nullptr;
 
 	ControlledEnemy = Cast<AfpstrueEnemyCharacter>(InPawn);
 	CommandPhase = ECommandPhase::Uninitialized;
@@ -197,16 +199,11 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 {
 	// Controller 只保存敌人决策上下文；共享包围目标由 GameMode 统一初始化。
 	if (!HasAuthority() || GetNetMode() == NM_Client) return;
-	if (CommandPhase == ECommandPhase::Stopping || CommandPhase == ECommandPhase::ChangingContext)
+	if (CommandPhase == ECommandPhase::Stopped || CommandPhase == ECommandPhase::Stopping || CommandPhase == ECommandPhase::ChangingContext)
 	{
 		return; // 清理期间不接受外部回调重新注入上下文。
 	}
 	if (!IsValid(ControlledEnemy) || ControlledEnemy->IsDead()) return;
-	if (CommandPhase == ECommandPhase::Stopped)
-	{
-		// 仅本次 Possess 曾成功启动的树允许显式重启；启动失败不会因注入目标而复活。
-		if (ActiveBehaviorTree == nullptr || !StartBehaviorLogic()) return;
-	}
 	if (!IsBehaviorReady()) return;
 	// 无效/死亡目标统一视为撤销；恢复追击必须由同一个上下文入口重新注入。
 	if (!IsTargetUsable(NewTargetCharacter)) NewTargetCharacter = nullptr;
@@ -217,6 +214,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 	{
 		// ★【重要边界】[状态提交] 先关闭旧上下文的命令入口，再停止攻击和导航，清理回调不能重启旧行为。
 		CommandPhase = ECommandPhase::ChangingContext;
+		MoveFailures[0] = MoveFailures[1] = FMoveFailure{};
 		if (TargetCharacter != nullptr)
 		{
 			TargetCharacter->OnPlayerDeathReported.RemoveDynamic(this, &ThisClass::HandleCombatTargetDied);
@@ -227,8 +225,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 		TargetForgetTime = 0.0;
 		LastKnownTargetLocation = FVector::ZeroVector;
 		bInvestigatingNoise = false;
-		// 单机撤销注入仍忘记全部刺激；多人换目标必须保留其他可见玩家，不能换一次目标就清空整份感知。
-		if (!bUsesMultiplayerTargets) GetPerceptionComponent()->ForgetAll();
+		// 换目标保留其他可见玩家的感知缓存；停止和目标离场在各自入口撤销刺激。
 		if (ControlledEnemy != nullptr && ControlledEnemy->GetCombatComponent() != nullptr)
 		{
 			ControlledEnemy->GetCombatComponent()->ResetCombat();
@@ -256,7 +253,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 	{
 		bRetreatRequested = bPendingRetreatBeforeContextChange && IsBelowRetreatThreshold() && GetWorld()->GetTimeSeconds() >= NextRetreatAllowedTime;
 	}
-	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), AcceptsCombatCommands() && (bUsesMultiplayerTargets || TargetCharacter != nullptr));
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), AcceptsCombatCommands());
 	GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), AcceptsCombatCommands());
 	if (TargetCharacter == nullptr)
 	{
@@ -268,7 +265,7 @@ void AfpstrueEnemyAIController::InitializeCombatContext(AfpstrueCharacter* NewTa
 // 当前可见目标不因另一个玩家靠近而抖动切换；失去它后才从已感知玩家中选一个新的可见目标。
 void AfpstrueEnemyAIController::SelectPerceivedTarget()
 {
-	if (!bUsesMultiplayerTargets || !AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead()) return;
+	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead()) return;
 	if (bTargetVisible && IsTargetUsable(TargetCharacter)) return;
 	UAIPerceptionComponent* Perception = GetPerceptionComponent();
 	TArray<AActor*> VisiblePlayers;
@@ -370,15 +367,10 @@ void AfpstrueEnemyAIController::OnTacticalAssignmentChanged(AfpstrueSurroundMana
 
 bool AfpstrueEnemyAIController::IsTacticalAttackPositionReady(bool bRequireFacing) const
 {
-	if (GetTargetCharacter() == nullptr || !IsValid(ControlledEnemy)) return false;
-	if (SurroundManager != nullptr)
-	{
-		if (TacticalAssignment.Role != EFPEnemyTacticalRole::Inner || TacticalAssignment.Revision == 0 ||
-			!SurroundManager->HasInnerSlot(ControlledEnemy, TacticalAssignment.Revision)) return false;
-		const UPathFollowingComponent* Following = GetPathFollowingComponent();
-		if (Following == nullptr || !Following->HasReached(TacticalAssignment.Goal, EPathFollowingReachMode::OverlapAgent, CombatMoveAcceptanceRadius)) return false;
-	}
-	else if (bUsesMultiplayerTargets) return false;
+	if (GetTargetCharacter() == nullptr || !IsValid(ControlledEnemy) || !IsValid(SurroundManager)) return false;
+	// 内圈归属独立于导航点缓存；实际攻击距离/LOS 由 Combat 再检查，不把导航投影当攻击许可。
+	if (TacticalAssignment.Role != EFPEnemyTacticalRole::Inner || TacticalAssignment.Revision == 0 ||
+		!SurroundManager->HasInnerSlot(ControlledEnemy, TacticalAssignment.Revision)) return false;
 	if (!bRequireFacing) return true;
 	const FVector ToTarget = TargetCharacter->GetActorLocation() - ControlledEnemy->GetActorLocation();
 	return ToTarget.SizeSquared2D() <= UE_SMALL_NUMBER || FMath::Abs(FMath::FindDeltaAngleDegrees(ControlledEnemy->GetActorRotation().Yaw,
@@ -397,7 +389,7 @@ void AfpstrueEnemyAIController::HandleTargetPerceptionUpdated(AActor* Actor, FAI
 	if (Stimulus.Type != UAISense::GetSenseID<UAISense_Sight>()) return;
 	if (Actor != TargetCharacter)
 	{
-		if (bUsesMultiplayerTargets && Stimulus.WasSuccessfullySensed()) SelectPerceivedTarget();
+		if (Stimulus.WasSuccessfullySensed()) SelectPerceivedTarget();
 		return;
 	}
 	if (!IsTargetUsable(TargetCharacter)) { NotifyCombatTargetUnavailable(TargetCharacter); return; }
@@ -445,7 +437,7 @@ void AfpstrueEnemyAIController::HandleHearingStimulus(AActor* Actor, const FAISt
 	AfpstrueCharacter* Source = Cast<AfpstrueCharacter>(Actor);
 	UWorld* World = GetWorld();
 	if (!Stimulus.WasSuccessfullySensed() || Stimulus.Tag != FName(TEXT("Weapon.Gunshot")) || World == nullptr ||
-		!IsTargetUsable(Source) || (!bUsesMultiplayerTargets && Source != TargetCharacter) ||
+		!IsTargetUsable(Source) ||
 		!FAISystem::IsValidLocation(Stimulus.StimulusLocation) || Stimulus.StimulusLocation.ContainsNaN() ||
 		!FMath::IsFinite(Stimulus.Strength) || Stimulus.Strength <= 0.0f || BrainComponent == nullptr ||
 		!BrainComponent->IsRunning() || BrainComponent->IsPaused()) return;
@@ -463,13 +455,9 @@ void AfpstrueEnemyAIController::HandleHearingStimulus(AActor* Actor, const FAISt
 	}
 	else
 	{
-		AfpstrueSurroundManager* Manager = SurroundManager;
-		if (bUsesMultiplayerTargets)
-		{
-			auto* Mode = World->GetAuthGameMode<AfpstruePvpGameMode>();
-			Manager = Mode != nullptr ? Mode->GetOrCreateSurroundManager(Source) : nullptr;
-			if (!IsValid(Manager)) return; // 不允许声音调查绕过多人共享 MoveTo 预算。
-		}
+		auto* Mode = World->GetAuthGameMode<AfpstruePvpGameMode>();
+		AfpstrueSurroundManager* Manager = Mode != nullptr ? Mode->GetOrCreateSurroundManager(Source) : nullptr;
+		if (!IsValid(Manager)) return; // 声音调查也使用同一个玩家管理器及共享 MoveTo 预算。
 		InitializeCombatContext(Source, Manager);
 		if (!AcceptsCombatCommands() || TargetCharacter != Source || !IsTargetUsable(Source)) return;
 		bInvestigatingNoise = true;
@@ -524,6 +512,34 @@ bool AfpstrueEnemyAIController::IsBelowRetreatThreshold() const
 
 // ==================== 启动唯一行为树 ====================
 
+bool AfpstrueEnemyAIController::InitializeBlackboard(UBlackboardComponent& BlackboardComp, UBlackboardData& BlackboardAsset)
+{
+	return Super::InitializeBlackboard(BlackboardComp, BlackboardAsset) && CacheDecisionBlackboardKeys(BlackboardComp);
+}
+
+bool AfpstrueEnemyAIController::CacheDecisionBlackboardKeys(UBlackboardComponent& BlackboardComp)
+{
+	UBlackboardData* Asset = BlackboardComp.GetBlackboardAsset();
+	if (Asset != nullptr && CachedDecisionBlackboardAsset.Get() == Asset) return true;
+	CachedDecisionBlackboardAsset.Reset();
+	DecisionKeys = FDecisionBlackboardKeys{};
+	if (!FPHasEnemyBlackboardSchema(Asset)) return false;
+	DecisionKeys.TargetActor = Asset->GetKeyID(FPEnemyBlackboard::TargetActor);
+	DecisionKeys.HasTarget = Asset->GetKeyID(FPEnemyBlackboard::HasTarget);
+	DecisionKeys.Attacking = Asset->GetKeyID(FPEnemyBlackboard::Attacking);
+	DecisionKeys.InAttackRange = Asset->GetKeyID(FPEnemyBlackboard::InAttackRange);
+	DecisionKeys.InChaseRange = Asset->GetKeyID(FPEnemyBlackboard::InChaseRange);
+	DecisionKeys.Retreating = Asset->GetKeyID(FPEnemyBlackboard::Retreating);
+	DecisionKeys.TacticalRole = Asset->GetKeyID(FPEnemyBlackboard::TacticalRole);
+	if (DecisionKeys.TacticalRole != FBlackboard::InvalidKey)
+	{
+		DecisionKeys.TacticalGoal = Asset->GetKeyID(FPEnemyBlackboard::TacticalGoal);
+		DecisionKeys.HasInnerSlot = Asset->GetKeyID(FPEnemyBlackboard::HasInnerSlot);
+	}
+	CachedDecisionBlackboardAsset = Asset;
+	return true;
+}
+
 // 校验配置树及黑板契约，拒绝不兼容配置；随机首轮等待用于分散群体决策峰值。
 bool AfpstrueEnemyAIController::StartBehaviorLogic()
 {
@@ -556,6 +572,14 @@ bool AfpstrueEnemyAIController::StartBehaviorLogic()
 		StopAI();
 		return false;
 	}
+	// UseBlackboard 可以直接复用同资产而不再调 InitializeBlackboard；始终绑定实际运行的 schema。
+	UBlackboardComponent* DecisionBlackboard = GetBlackboardComponent();
+	if (DecisionBlackboard == nullptr || !CacheDecisionBlackboardKeys(*DecisionBlackboard))
+	{
+		ActiveBehaviorTree = nullptr;
+		StopAI();
+		return false;
+	}
 	CommandPhase = ECommandPhase::Accepting;
 	// 首次启动与显式合法重启都从当前生命值恢复事件订阅，不保留旧停止周期的观测值。
 	EnemyHealthComponent = ControlledEnemy->FindComponentByClass<UfpstrueHealthComponent>();
@@ -565,7 +589,7 @@ bool AfpstrueEnemyAIController::StartBehaviorLogic()
 		EnemyHealthComponent->OnHealthChanged.AddUniqueDynamic(this, &ThisClass::HandleEnemyHealthChanged);
 	}
 	bRetreatRequested = IsBelowRetreatThreshold();
-	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), bUsesMultiplayerTargets || TargetCharacter != nullptr);
+	GetPerceptionComponent()->SetSenseEnabled(UAISense_Sight::StaticClass(), true);
 	GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), true);
 	if (IsBehaviorReady()) return true;
 	ActiveBehaviorTree = nullptr;
@@ -573,9 +597,49 @@ bool AfpstrueEnemyAIController::StartBehaviorLogic()
 	return false;
 }
 
-// ==================== 单轮采样：校验上下文 → 距离快照 → 更新间隔 ====================
+// ==================== 单轮决策：维护上下文 → 距离筛选/申请资源 → 发布快照 ====================
 
-// 为本轮行为树生成一次完整决策快照：有效目标、距离、范围及下一轮等待时间统一发布。
+bool AfpstrueEnemyAIController::PrepareBehaviorDecisionContext()
+{
+	AfpstrueEnemyCharacter* const PreparingEnemy = ControlledEnemy;
+	if (bInvestigatingNoise && GetWorld() != nullptr && GetWorld()->GetTimeSeconds() >= TargetForgetTime) FinishNoiseInvestigation();
+	if (!AcceptsCombatCommands() || ControlledEnemy != PreparingEnemy) return false;
+	// 死亡入口负责停止树；这里仅拒绝继续使用敌人，不在 BT 任务内重入 StopTree。
+	if (!IsValid(PreparingEnemy) || PreparingEnemy->IsDead()) return true;
+	if (!IsTargetUsable(TargetCharacter))
+	{
+		// 只撤销失效上下文；后续选择只读已感知玩家，不从全局玩家索引偷偷恢复追击。
+		InitializeCombatContext(nullptr, nullptr);
+		if (!AcceptsCombatCommands() || ControlledEnemy != PreparingEnemy) return false;
+	}
+	SelectPerceivedTarget();
+	if (!AcceptsCombatCommands() || ControlledEnemy != PreparingEnemy) return false;
+	if (IsTargetUsable(TargetCharacter) && !IsValid(SurroundManager))
+	{
+		AfpstrueCharacter* const ResolvingTarget = TargetCharacter;
+		AfpstrueSurroundManager* ResolvedManager = ResolveSurroundManager();
+		if (!AcceptsCombatCommands() || ControlledEnemy != PreparingEnemy || TargetCharacter != ResolvingTarget) return false;
+		SurroundManager = ResolvedManager;
+	}
+	return true;
+}
+
+bool AfpstrueEnemyAIController::RefreshTacticalAssignment()
+{
+	if (!IsValid(SurroundManager)) return true;
+	AfpstrueEnemyCharacter* const RequestingEnemy = ControlledEnemy;
+	AfpstrueCharacter* const RequestingTarget = TargetCharacter;
+	AfpstrueSurroundManager* const RequestingManager = SurroundManager;
+	FFPEnemyTacticalAssignment Assignment;
+	const bool bRegistered = RequestingManager->GetOrRequestTacticalAssignment(RequestingEnemy, Assignment);
+	// 授席通知可同步停路、换目标或结束 AI；旧调用栈不得回写新上下文的分配。
+	if (!AcceptsCombatCommands() || ControlledEnemy != RequestingEnemy || TargetCharacter != RequestingTarget ||
+		SurroundManager != RequestingManager || !bTargetVisible || !IsTargetUsable(RequestingTarget)) return false;
+	if (bRegistered) TacticalAssignment = Assignment;
+	return true;
+}
+
+// 准备阶段允许资源和上下文副作用，随后才生成并一次性发布本轮快照；BT 仍独占高层分支选择。
 void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& DecisionBlackboard)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyAI_SampleDecision);
@@ -583,26 +647,12 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	CSV_CUSTOM_STAT(fpstrueAI, DecisionCount, 1, ECsvCustomStatOp::Accumulate);
 	SCOPE_CYCLE_COUNTER(STAT_fpstrueAIDecisionTime);
 	INC_DWORD_STAT(STAT_fpstrueAIDecisionCount);
-
-	// 一次采样同时供 Blackboard 条件和下一轮间隔复用；Selector 只负责选择叶子。
+	if (!AcceptsCombatCommands() || !CacheDecisionBlackboardKeys(DecisionBlackboard)) return;
 	DecisionContext = FDecisionContext{};
 	TacticalAssignment = FFPEnemyTacticalAssignment{};
-	if (bInvestigatingNoise && GetWorld() != nullptr && GetWorld()->GetTimeSeconds() >= TargetForgetTime) FinishNoiseInvestigation();
-	// 统一修复或拒绝敌人、目标和 Manager 上下文，保证后续决策分支可以直接使用这些引用。
-	// 不在采样任务的 ExecuteTask 内重入 StopTree；死亡入口会停止树，本轮走安全 Idle 叶子。
-	bool bHasTarget = AcceptsCombatCommands() && IsValid(ControlledEnemy) && !ControlledEnemy->IsDead();
-	if (bHasTarget)
-	{
-		if (!IsTargetUsable(TargetCharacter))
-		{
-			// 平时使用 GameMode 注入的玩家；仅在缓存目标失效时安全解析，不在正常路径反复查询。
-			// 此处只撤销失效上下文，不从全局玩家索引重新绑定，避免清空目标后又偷偷恢复追击。
-			InitializeCombatContext(nullptr, nullptr);
-		}
-		SelectPerceivedTarget();
-		if (IsTargetUsable(TargetCharacter) && !IsValid(SurroundManager)) SurroundManager = ResolveSurroundManager();
-		bHasTarget = AcceptsCombatCommands() && IsTargetUsable(TargetCharacter) && (bTargetVisible || GetWorld()->GetTimeSeconds() < TargetForgetTime);
-	}
+	if (!PrepareBehaviorDecisionContext()) return;
+	const bool bHasTarget = IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() && IsTargetUsable(TargetCharacter)
+		&& (bTargetVisible || GetWorld()->GetTimeSeconds() < TargetForgetTime);
 
 	// 一轮只计算一次二维距离平方，并派生攻击/追击两个布尔条件，避免各分支重复开方和取位置。
 	// 敌人和目标校验成功后才采样；叶子保留存活检查，但不重复计算距离与范围。
@@ -624,14 +674,20 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 		DecisionContext.bInChaseRange = DecisionContext.DistanceSquared <= FMath::Square(ControlledEnemy->GetChaseRange());
 		if (bTargetVisible && DecisionContext.bInChaseRange && !bRetreatRequested && !bRetreatActive)
 		{
-			if (SurroundManager != nullptr && !SurroundManager->GetOrRequestTacticalAssignment(ControlledEnemy, TacticalAssignment))
-				TacticalAssignment = FFPEnemyTacticalAssignment{};
+			if (!RefreshTacticalAssignment()) return;
 			// 非内环只维护候场/外环目标，不执行不能转化为攻击的近战遮挡查询。
-			if (Combat != nullptr && (SurroundManager == nullptr || TacticalAssignment.Role == EFPEnemyTacticalRole::Inner))
+			if (Combat != nullptr && TacticalAssignment.Role == EFPEnemyTacticalRole::Inner)
 				DecisionContext.bInAttackRange = Combat->SampleAttackReach(DecisionContext.DistanceSquared, DecisionContext.EffectiveAttackRange);
 		}
 	}
-	if ((bRetreatRequested || bRetreatActive) && (!bHasTarget || !IsBelowRetreatThreshold())) FinishRetreat();
+	if ((bRetreatRequested || bRetreatActive) && (!bHasTarget || !IsBelowRetreatThreshold()))
+	{
+		AfpstrueEnemyCharacter* const FinishingEnemy = ControlledEnemy;
+		AfpstrueCharacter* const FinishingTarget = TargetCharacter;
+		AfpstrueSurroundManager* const FinishingManager = SurroundManager;
+		FinishRetreat(); // 归还掩体/停路也可同步触发外部回调，之后才能继续发布这一轮。
+		if (!AcceptsCombatCommands() || ControlledEnemy != FinishingEnemy || TargetCharacter != FinishingTarget || SurroundManager != FinishingManager) return;
+	}
 
 	// 计算下一轮等待，记忆追击不能等过遗忘期限才结束。
 	NextBehaviorDecisionDelay =
@@ -657,18 +713,20 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	// ★【重要边界】[状态提交] 黑板整轮快照写完才恢复通知，装饰器和观察者不能消费半更新条件。
 	DecisionBlackboard.PauseObserverNotifications();
 	// 搜索只提供位置记忆；不把隐藏玩家的 Actor 暴露给自定义 Blackboard 消费者。
-	DecisionBlackboard.SetValueAsObject(FPEnemyBlackboard::TargetActor, bHasTarget && bTargetVisible ? TargetCharacter.Get() : nullptr);
-	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::HasTarget, bHasTarget);
-	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::Attacking, bHasTarget && ControlledEnemy->IsAttacking());
-	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InAttackRange, DecisionContext.bInAttackRange);
-	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::InChaseRange, DecisionContext.bInChaseRange);
-	DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::Retreating, bHasTarget && (bRetreatRequested || bRetreatActive));
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Object>(DecisionKeys.TargetActor, bHasTarget && bTargetVisible ? TargetCharacter.Get() : nullptr);
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasTarget, bHasTarget);
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.Attacking, bHasTarget && ControlledEnemy->IsAttacking());
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InAttackRange, DecisionContext.bInAttackRange);
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InChaseRange, DecisionContext.bInChaseRange);
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.Retreating, bHasTarget && (bRetreatRequested || bRetreatActive));
 	// 战术键是默认树的可读镜像；旧自定义黑板没有这些键仍保留自己的图表，不静默替换树。
-	if (DecisionBlackboard.GetKeyID(FPEnemyBlackboard::TacticalRole) != FBlackboard::InvalidKey)
+	if (DecisionKeys.TacticalRole != FBlackboard::InvalidKey)
 	{
-		DecisionBlackboard.SetValueAsInt(FPEnemyBlackboard::TacticalRole, static_cast<int32>(TacticalAssignment.Role));
-		DecisionBlackboard.SetValueAsVector(FPEnemyBlackboard::TacticalGoal, TacticalAssignment.Goal);
-		DecisionBlackboard.SetValueAsBool(FPEnemyBlackboard::HasInnerSlot, TacticalAssignment.Role == EFPEnemyTacticalRole::Inner && TacticalAssignment.Revision != 0);
+		DecisionBlackboard.SetValue<UBlackboardKeyType_Int>(DecisionKeys.TacticalRole, static_cast<int32>(TacticalAssignment.Role));
+		if (TacticalAssignment.bHasGoal) DecisionBlackboard.SetValue<UBlackboardKeyType_Vector>(DecisionKeys.TacticalGoal, TacticalAssignment.Goal);
+		else DecisionBlackboard.ClearValue(DecisionKeys.TacticalGoal);
+		DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasInnerSlot,
+			TacticalAssignment.Role == EFPEnemyTacticalRole::Inner && TacticalAssignment.Revision != 0);
 	}
 	DecisionBlackboard.ResumeObserverNotifications(true);
 }
@@ -687,7 +745,7 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext&
 		FMath::IsFinite(CombatResponseRangeMultiplier) ? FMath::Clamp(CombatResponseRangeMultiplier, 1.0f, 10.0f) : 1.5f;
 	const bool bNeedsCombatResponse =
 		ControlledEnemy->IsAttacking() || AIState == EFPEnemyAIState::Attack ||
-		((SurroundManager == nullptr || TacticalAssignment.Role == EFPEnemyTacticalRole::Inner) &&
+		(TacticalAssignment.Role == EFPEnemyTacticalRole::Inner &&
 		Context.DistanceSquared <= FMath::Square(Context.EffectiveAttackRange * SafeCombatResponseRangeMultiplier));
 	if (bNeedsCombatResponse)
 	{
@@ -707,16 +765,11 @@ float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext&
 	return ChaseDecisionInterval * SignificanceDecisionMultiplier;
 }
 
-// 在共享管理器引用缺失时查找关卡中的管理器，不为每个敌人创建独立群体资源。
+// 始终使用该目标玩家在唯一 GameMode 中登记的管理器。
 AfpstrueSurroundManager* AfpstrueEnemyAIController::ResolveSurroundManager() const
 {
-	if (bUsesMultiplayerTargets)
-	{
-		auto* Mode = GetWorld() != nullptr ? GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>() : nullptr;
-		return Mode != nullptr && IsTargetUsable(TargetCharacter) ? Mode->GetOrCreateSurroundManager(TargetCharacter) : nullptr;
-	}
-	// 仅在注入失败或引用失效时兜底查找关卡中的唯一 Manager。
-	return Cast<AfpstrueSurroundManager>(UGameplayStatics::GetActorOfClass(this, AfpstrueSurroundManager::StaticClass()));
+	auto* Mode = GetWorld() != nullptr ? GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>() : nullptr;
+	return Mode != nullptr && IsTargetUsable(TargetCharacter) ? Mode->GetOrCreateSurroundManager(TargetCharacter) : nullptr;
 }
 
 // 仅检查候选玩家是否有效且存活；是否可见由感知状态另行约束。
@@ -724,7 +777,6 @@ bool AfpstrueEnemyAIController::IsTargetUsable(const AfpstrueCharacter* Target) 
 {
 	// 目标必须存在且存活；死亡后的停止、槽位释放由上层统一处理。
 	if (!IsValid(Target) || Target->IsActorBeingDestroyed() || Target->IsDead() || Target->GetWorld() != GetWorld()) return false;
-	if (!bUsesMultiplayerTargets) return true;
 	if (!Target->HasActorBegunPlay()) return false;
 	const auto* Mode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>();
 	// 有限恢复期保留的服务器 Pawn 仍是可受伤的参与者；不能因暂时无 Controller 就给予 AI 免伤。
@@ -757,7 +809,7 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 		// 固定出生朝向加有限视锥不能负责全周警戒：Idle 只发布下段巡视方向，Movement 按转速和原生 DeltaTime 平滑转动。
 		// 不读取隐藏玩家的位置、不增加 Tick/Timer；发现仍只由真实 Sight 确认，暂停和停止由旋转查询同步拒绝。
 		const float SafeYawSpeed = FMath::IsFinite(IdleSearchYawSpeed) ? FMath::Clamp(IdleSearchYawSpeed, 0.0f, 90.0f) : 30.0f;
-		const bool bSearch = bUsesMultiplayerTargets && !bTargetVisible && SafeYawSpeed > 0.0f && IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() &&
+		const bool bSearch = !bTargetVisible && SafeYawSpeed > 0.0f && IsValid(ControlledEnemy) && !ControlledEnemy->IsDead() &&
 			BrainComponent != nullptr && BrainComponent->IsRunning() && !BrainComponent->IsPaused() &&
 			ControlledEnemy->GetCharacterMovement() != nullptr && ControlledEnemy->GetCharacterMovement()->IsMovingOnGround();
 		ApplyRotationPolicy(AIState, false, bSearch);
@@ -772,7 +824,7 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 	{
 		return false;
 	}
-	if (bUsesMultiplayerTargets && !IsValid(SurroundManager)) return false;
+	if (!IsValid(SurroundManager)) return false;
 	// 撤退只使用进入时的已知位置；允许丢失视觉后继续沿这个固定威胁快照寻找掩体。
 	if (Action == EFPEnemyBehaviorAction::Retreat) return HandleRetreat();
 	if (bRetreatActive || bRetreatRequested) return false;
@@ -850,13 +902,13 @@ bool AfpstrueEnemyAIController::ExecuteBehaviorAction(EFPEnemyBehaviorAction Act
 bool AfpstrueEnemyAIController::HandleSurroundMovement()
 {
 	// Controller 不计算全局站位，只消费 SurroundManager 已缓存并投影到 NavMesh 的接近点。
-	if (SurroundManager == nullptr)
+	if (!IsValid(SurroundManager))
 	{
 		return false;
 	}
 
 	FVector Goal;
-	if (!SurroundManager->ResolveTacticalMoveGoal(ControlledEnemy, TacticalAssignment, Goal))
+	if (!TacticalAssignment.bHasGoal || !SurroundManager->ResolveTacticalMoveGoal(ControlledEnemy, TacticalAssignment, Goal))
 	{
 		StopMovementIfNeeded();
 		return true;
@@ -987,7 +1039,7 @@ AfpstrueEnemyAIController::EMoveGoalResult AfpstrueEnemyAIController::MoveToGoal
 {
 	if (!AcceptsCombatCommands() || !IsValid(ControlledEnemy) || ControlledEnemy->IsDead() || GetWorld() == nullptr ||
 		GoalLocation.ContainsNaN() || !FMath::IsFinite(AcceptanceRadius) || AcceptanceRadius < 0.0f ||
-		(bUsesMultiplayerTargets && !IsValid(SurroundManager)))
+		!IsValid(SurroundManager))
 	{
 		return EMoveGoalResult::InvalidContext;
 	}
@@ -1235,6 +1287,7 @@ void AfpstrueEnemyAIController::StopAI()
 	if (CommandPhase == ECommandPhase::Stopping || CommandPhase == ECommandPhase::Stopped) return;
 	// StopLogic/StopMovement/ResetCombat 都可能同步回调；先关门，旧调用栈就不能注入新上下文。
 	CommandPhase = ECommandPhase::Stopping;
+	MoveFailures[0] = MoveFailures[1] = FMoveFailure{};
 	bInvestigatingNoise = false;
 	LastAcceptedNoiseTime = -TNumericLimits<double>::Max();
 	NextNoiseInvestigationTime = 0.0;
@@ -1270,21 +1323,21 @@ void AfpstrueEnemyAIController::StopAI()
 	TargetCharacter = nullptr;
 	ReleaseSurroundSlot();
 	DecisionContext = FDecisionContext{};
-	if (UBlackboardComponent* DecisionBlackboard = GetBlackboardComponent())
+	if (UBlackboardComponent* DecisionBlackboard = GetBlackboardComponent(); DecisionBlackboard != nullptr && CacheDecisionBlackboardKeys(*DecisionBlackboard))
 	{
 		// RunBehaviorTree 可以复用兼容 Blackboard；停止后不能保留上一轮目标和条件。
 		DecisionBlackboard->PauseObserverNotifications();
-		DecisionBlackboard->ClearValue(FPEnemyBlackboard::TargetActor);
-		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::HasTarget, false);
-		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::Attacking, false);
-		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::InAttackRange, false);
-		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::InChaseRange, false);
-		DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::Retreating, false);
-		if (DecisionBlackboard->GetKeyID(FPEnemyBlackboard::TacticalRole) != FBlackboard::InvalidKey)
+		DecisionBlackboard->ClearValue(DecisionKeys.TargetActor);
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasTarget, false);
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.Attacking, false);
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InAttackRange, false);
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InChaseRange, false);
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.Retreating, false);
+		if (DecisionKeys.TacticalRole != FBlackboard::InvalidKey)
 		{
-			DecisionBlackboard->SetValueAsInt(FPEnemyBlackboard::TacticalRole, static_cast<int32>(EFPEnemyTacticalRole::Waiting));
-			DecisionBlackboard->ClearValue(FPEnemyBlackboard::TacticalGoal);
-			DecisionBlackboard->SetValueAsBool(FPEnemyBlackboard::HasInnerSlot, false);
+			DecisionBlackboard->SetValue<UBlackboardKeyType_Int>(DecisionKeys.TacticalRole, static_cast<int32>(EFPEnemyTacticalRole::Waiting));
+			DecisionBlackboard->ClearValue(DecisionKeys.TacticalGoal);
+			DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasInnerSlot, false);
 		}
 		DecisionBlackboard->ResumeObserverNotifications(false);
 	}
@@ -1307,7 +1360,7 @@ void AfpstrueEnemyAIController::StopMovementIfNeeded(bool bPreserveMoveGoal)
 		++MoveRequestRevision;
 		OwnedMoveRequestId = FAIRequestID::InvalidRequest;
 		bHasMoveGoal = false;
-		MoveFailures[0] = MoveFailures[1] = FMoveFailure{};
+		// 停路不等于换上下文；失败出口刚写入的目标级退避必须保留，尤其是没有槽位可回收的候场者。
 	}
 	if (bShouldStop)
 	{
