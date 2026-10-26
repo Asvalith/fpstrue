@@ -72,9 +72,6 @@ public:
 	static bool ReportAuthoritativeGunshot(AfpstrueCharacter* Source, const FVector& NoiseLocation,
 		float Loudness = 1.0f, float MaxRange = 4500.0f);
 
-	// Benchmark 消融入口：单独关闭 PathFollowingComponent Tick。
-	void ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick);
-
 	// Gameplay Significance 调整决策间隔，远处敌人减少 CPU 更新频率。
 	void SetSignificanceDecisionMultiplier(float NewMultiplier);
 
@@ -358,7 +355,6 @@ private:
 	FAIRequestID OwnedMoveRequestId = FAIRequestID::InvalidRequest;
 	uint32 MoveRequestRevision = 0;
 	bool bHasMoveGoal = false;
-	bool bDisableDecisionThrottlingForBenchmark = false;
 	float SignificanceDecisionMultiplier = 1.0f;
 	FDecisionContext DecisionContext;
 	float NextBehaviorDecisionDelay = 0.1f;

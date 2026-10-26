@@ -283,9 +283,7 @@ void UfpstrueWeaponComponent::PublishNetworkState()
 		: ASC != nullptr && ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing) ? EFPWeaponActionState::Firing
 		: EFPWeaponActionState::Ready;
 	NetworkState.ReloadId = ReloadSerial;
-	NetworkState.bEmptyReload = bNetworkEmptyReload;
 	NetworkState.bCommitted = bReloadAmmoCommitted;
-	NetworkState.EndReason = LastNetworkReloadEndReason;
 	NetworkState.EquipmentGeneration = EquipmentRevision;
 	NetworkState.bDroppedOnDeath = bDroppedOnDeath;
 	++NetworkState.Revision;
@@ -1786,7 +1784,6 @@ bool UfpstrueWeaponComponent::BeginAbilityReload(int32& OutReloadId, int32 Predi
 	NetworkState.bEmptyReload = bWasEmptyReload;
 	NetworkState.ReloadPredictionKey = PredictionKey;
 	// 唯一完成入口捕获事务编号，旧计时不能结束下一次换弹。专服无动画也按同一规则完成。
-	bNetworkEmptyReload = bWasEmptyReload;
 	GetWorld()->GetTimerManager().SetTimer(ReloadTimerHandle,
 		FTimerDelegate::CreateUObject(this, &UfpstrueWeaponComponent::FinishReloadForTransaction, RequestedReloadId),
 		SelectedReloadDuration, false);
@@ -1991,7 +1988,7 @@ bool UfpstrueWeaponComponent::CommitReloadForTransaction(int32 ReloadId)
 #if !UE_BUILD_SHIPPING
 	if (GetNetMode() != NM_Standalone && ShouldLogShotProtocol())
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=Reload Ammo=%d Reserve=%d"), CurrentAmmo, ReserveAmmo);
-	if (bNetworkEmptyReload && ShouldLogShotProtocol())
+	if (NetworkState.bEmptyReload && ShouldLogShotProtocol())
 		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE PASS=AutoReload Ammo=%d Reserve=%d"), CurrentAmmo, ReserveAmmo);
 #endif
 	PublishNetworkState();
@@ -2030,7 +2027,7 @@ void UfpstrueWeaponComponent::EndReload(int32 ReloadId, EFPReloadEndReason Reaso
 		if (!IsCurrentReload(ReloadId)) return;
 	}
 	const bool bCommitted = bReloadAmmoCommitted;
-	LastNetworkReloadEndReason = Reason;
+	NetworkState.EndReason = Reason;
 	const auto EndedPlaybacks = MoveTemp(ReloadPlaybacks);
 	// ★【重要边界】[生命周期] 先失效旧状态，再停止其动画，最后广播结束；Stop 触发的旧回调不能再次结算换弹。
 	ActiveReloadId = INDEX_NONE;

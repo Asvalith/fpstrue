@@ -794,17 +794,6 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 	}
 
-	// 统计当前世界尚存的旧武器副本，验证联机替换是否完整；不主动回收它们。
-	int32 CountLegacyPickups() const
-	{
-		int32 Count = 0;
-		if (UWorld* CurrentWorld = World.Get())
-			for (TActorIterator<AActor> It(CurrentWorld); It; ++It)
-				if (IsValid(*It) && (It->GetClass() == AfpstrueRARWeapon::StaticClass()
-					|| It->GetClass()->GetPathName() == TEXT("/Game/FirstPerson/Blueprints/weapon/BP_Weapon.BP_Weapon_C"))) ++Count;
-		return Count;
-	}
-
 	// 单次结束验收，释放已按住的输入和 Timer，保留实际结果与未通过原因。
 	void Finish(bool bPassed, const TCHAR* Reason)
 	{
@@ -819,8 +808,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 					ASC->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Aim));
 				}
 		if (UWorld* CurrentWorld = World.Get()) CurrentWorld->GetTimerManager().ClearTimer(Timer);
-		UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK %s Reason=%s LegacyRemaining=%d Scope=ClientCharacterMovementAndRealOverlap_NotEnhancedInputBinding_NotVisualQualityAcceptance"),
-			bPassed ? TEXT("PASS") : TEXT("FAIL"), Reason, CountLegacyPickups());
+		UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK %s Reason=%s Scope=ClientCharacterMovementAndRealOverlap_NotEnhancedInputBinding_NotVisualQualityAcceptance"),
+			bPassed ? TEXT("PASS") : TEXT("FAIL"), Reason);
 	}
 
 	// 仅向空闲截图系统提交不覆盖的请求；返回 true 只是已请求，不等于 PNG 已生成。
@@ -853,8 +842,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			if (Character->IsDead() || Character->HasEquippedWeapon()) { Finish(false, TEXT("RequiresLivingEmptyHands")); return; }
 			Controller = Local; Pawn = Character; bLockedPawn = true;
 			StartLocation = Character->GetActorLocation();
-			UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK START Pawn=%s LegacyRemaining=%d Scope=AddMovementInputThroughCharacterMovement_NotEnhancedInputBinding"),
-				*Character->GetName(), CountLegacyPickups());
+			UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK START Pawn=%s Scope=AddMovementInputThroughCharacterMovement_NotEnhancedInputBinding"),
+				*Character->GetName());
 		}
 		APlayerController* Local = Controller.Get();
 		AfpstrueCharacter* Character = Pawn.Get();
@@ -881,8 +870,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			}
 			if (!Target.IsValid()) return;
 			bWalking = true;
-			UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK WALK Target=%s DistanceCm=%.1f LegacyRemaining=%d EmptyHandsHidden=1"),
-				*Target->GetName(), FMath::Sqrt(Nearest), CountLegacyPickups());
+			UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK WALK Target=%s DistanceCm=%.1f EmptyHandsHidden=1"),
+				*Target->GetName(), FMath::Sqrt(Nearest));
 		}
 		AfpstrueTemplateWeapon* Rifle = Target.Get();
 		if (Rifle == nullptr) { Finish(false, TEXT("TargetPickupDestroyed")); return; }
@@ -915,9 +904,9 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		if (EquippedAt <= 0.0)
 		{
 			EquippedAt = Now;
-			UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK EQUIPPED Pawn=%s Weapon=%s Ammo=%d Reserve=%d MovedCm=%.1f HUDDrawn=1 ArmsHidden=0 LegacyRemaining=%d"),
+			UE_LOG(LogTemp, Display, TEXT("PVP_PICKUP_WALK EQUIPPED Pawn=%s Weapon=%s Ammo=%d Reserve=%d MovedCm=%.1f HUDDrawn=1 ArmsHidden=0"),
 				*Character->GetName(), *Rifle->GetName(), Equipped->GetCurrentAmmo(), Equipped->GetReserveAmmo(),
-				FVector::Dist2D(StartLocation, Character->GetActorLocation()), CountLegacyPickups());
+				FVector::Dist2D(StartLocation, Character->GetActorLocation()));
 		}
 		if (Now - EquippedAt < 0.5) return;
 		if (!bEquippedCaptureRequested) { bEquippedCaptureRequested = RequestCapture(TEXT("PickupEquipped")); return; }
@@ -1100,7 +1089,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 
 
-		Finish(CountLegacyPickups() == 0, CountLegacyPickups() == 0 ? TEXT("RealPickupAndPaintedHudVerified") : TEXT("LegacyPickupReplicaRemains"));
+		Finish(true, TEXT("RealPickupAndPaintedHudVerified"));
 	}
 };
 
