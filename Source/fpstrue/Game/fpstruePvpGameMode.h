@@ -47,11 +47,6 @@ public:
 	// 玩家离开时撤销待重生Timer并清理服务器生成的武器。
 	virtual void Logout(AController* Exiting) override;
 	virtual void PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage) override;
-	bool PreserveDisconnectedPlayer(AfpstruePvpPlayerController* Player);
-	void CompleteConnectionHandshake(AfpstruePvpPlayerController* Player, const FString& Token);
-	bool IsRetainedDisconnectedPawn(const AfpstrueCharacter* Pawn) const;
-	bool HandleRetainedPawnEliminated(AfpstrueCharacter* Pawn, AController* Killer);
-	void ClearRejoinSlots();
 
 protected:
 	// 世界开始后将复制的对局状态置为活动。
@@ -88,6 +83,12 @@ protected:
 	FName EnemySpawnTag = TEXT("EnemySpawn");
 
 private:
+	// 握手/离线结算是本规则内部步骤，Controller只转交请求。
+	bool PreserveDisconnectedPlayer(AfpstruePvpPlayerController* Player);
+	void CompleteConnectionHandshake(AfpstruePvpPlayerController* Player, const FString& Token);
+	bool IsRetainedDisconnectedPawn(const AfpstrueCharacter* Pawn) const;
+	bool HandleRetainedPawnEliminated(AfpstrueCharacter* Pawn, AController* Killer);
+	void ClearRejoinSlots();
 	friend class AfpstruePvpPlayerController;
 	friend class FFpstrueMultiplayerPveTargetLifecycleTest;
 	friend class FFpstrueMultiplayerSignificanceCoordinatorTest;

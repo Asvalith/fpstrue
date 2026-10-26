@@ -24,6 +24,9 @@
 #include "Windows/WindowsHWrapper.h"
 #endif
 
+// 实现留在同一开发输入文件，不向Gameplay公开新的启动接口。
+void StartPvpNormalPairDriver(UWorld* World);
+
 namespace
 {
 bool ReadCurrentThreadCpu(uint64& Value)
@@ -327,7 +330,9 @@ struct FNetworkDiagnostics : TSharedFromThis<FNetworkDiagnostics>
 void StartPvpNetworkDiagnostics(UWorld* World)
 {
 #if !UE_BUILD_SHIPPING
-	if (World == nullptr || !FParse::Param(FCommandLine::Get(), TEXT("PvpNetMetrics"))) return;
+	if (World == nullptr) return;
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpNormalPair"))) StartPvpNormalPairDriver(World);
+	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpNetMetrics"))) return;
 #if PLATFORM_WINDOWS && defined(PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION)
 	// 单变量平台诊断，仅作用于自有测试进程；默认不改系统策略，不调整全机电源或进程优先级。
 	FString TimerPolicy;

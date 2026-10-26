@@ -2,7 +2,23 @@
 
 基于 UE5.5、C++ 与蓝图独立实现多人 PvPvE 射击，完成装备、射击换弹、伤害死亡、计分重生、敌人战斗与 HUD。主要实践逐发同步与预测校正、群体调度和线程性能分析。
 
-> `main` 是源码展示快照，需要有授权的 Content 资源才能运行；不分发素材、原始日志、凭据或缓存。源码来自开发提交 `3c59c4f`，Source树一致，没有另写展示玩法。[公开范围](Docs/SHOWCASE_SCOPE.md)与[资源依赖](Docs/ASSET_REQUIREMENTS.md)说明边界。
+> `main` 是源码展示快照，需要有授权的 Content 资源才能运行；不分发素材、原始日志、凭据或缓存。源码来自开发提交 `c9fa4e5`，Source树一致，没有另写展示玩法。[公开范围](Docs/SHOWCASE_SCOPE.md)与[资源依赖](Docs/ASSET_REQUIREMENTS.md)说明边界。
+
+## 当前入口
+
+| 工作 | 唯一入口 |
+| --- | --- |
+| 对局规则 | AfpstruePvpGameMode |
+| 连接、取消与重连 | UfpstrueMultiplayerGameInstance；离场统一LeavePvp |
+| 开火与换弹输入 | Character → ASC/GAS → WeaponComponent唯一执行器 |
+| 敌人行为 | 正式BT_FPEnemy/BB_FPEnemy；Controller只执行已配置树 |
+| 群体资格与攻击许可 | 每目标SurroundManager |
+| 网络开发场景 | GameState → StartPvpNetworkDiagnostics，按参数启动所需场景 |
+| 网络验证与交付 | RunFpsNetworkMatrix / BuildPvpDelivery |
+| 性能采集与导出 | RunGroupAIBaseline / ExportPerformanceTrace |
+| 蓝图核对 | AuditProjectContracts调用同一只读原生合同审计 |
+
+配置见[CONFIGURATION](Docs/CONFIGURATION.md)，具体参数见[工具入口](Tools/README.md)。旧建树、迁移/修复命令、历史单机脚本及无消费者的兼容API已删除，不保留另一套启动链。
 
 ## 实现链路
 
@@ -18,7 +34,7 @@
 - 开发场景位于 `Testing/`。已删除 Foot IK、AI 世界血条、旧 Profile 采集器及无人消费的公共射击字段；保留唯一 Baseline 入口，没有空兼容接口。
 - 网络协议为7，两端需一起重建。Fire 由完整批次触发原生授权，不等待另一条可靠激活；结束与终结兜底仍依赖 UE 可靠传输。没有自研 UDP/RTO，也不保证任意弱网零丢发。
 
-## 验证（2026-10-26，协议7）
+## 已有网络实测（2026-10-26，提交3c59c4f）
 
 | 范围 | 结果 |
 | --- | --- |
@@ -43,6 +59,8 @@
 **未通过范围：**弱网＋真实渲染＋横移组合仍失败。首发与下一次补发之间跨两帧约275ms，首发准入年龄301.383ms，超过300ms上限；服务器拒绝且没有错误扣弹。该功能运行没有Trace，未确认帧停顿的具体来源。首激活Trace整轮另有一发过期拒绝，也不算整轮零拒绝。不能把NullRHI通过当作渲染、公网、8人或发布包通过。
 
 [本轮白名单证据](Docs/Testing/fps-adaptive-fire-20261026.json)保留完整逐轮指标、原预算及失败；[历史协议6证据](Docs/Testing/fps-network-20261026.json)保持原样。历史13.28ms与70.4%来自旧场景，未改写成本轮结果。
+
+本轮入口清理通过Editor/Shipping编译及35项受影响回归（29 clean、6 warned）；没有重跑性能或弱网矩阵，以上网络实测保留原提交口径。
 
 ## 阅读与运行
 

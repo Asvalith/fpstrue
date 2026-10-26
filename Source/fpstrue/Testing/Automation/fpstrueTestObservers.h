@@ -140,3 +140,8 @@ public:
 	UFUNCTION()
 	void HandleReloadPlaybackRequested(int32 ReloadId, bool bWasEmptyReload);
 };
+
+namespace FpstrueTest
+{
+void SetFireInput(UfpstrueWeaponComponent* Weapon, bool bPressed);
+}

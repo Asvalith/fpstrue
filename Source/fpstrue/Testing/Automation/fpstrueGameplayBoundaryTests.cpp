@@ -2,10 +2,27 @@
 
 #include "Testing/Automation/fpstrueTestObservers.h"
 #include "Weapons/fpstrueWeaponComponent.h"
+#include "Weapons/fpstrueCombatAbilities.h"
+#include "AbilitySystemComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "UObject/UnrealType.h"
+
+namespace FpstrueTest
+{
+// 只为边界夹具提交真实ASC按键，不替换能力、射击或结果；生产武器不保留测试专用输入别名。
+void SetFireInput(UfpstrueWeaponComponent* Weapon, bool bPressed)
+{
+	if (Weapon == nullptr || Weapon->GetOwner() == nullptr || !Weapon->GetOwner()->HasAuthority()) return;
+	AfpstrueCharacter* Holder = Weapon->GetOwningCharacter();
+	if (UAbilitySystemComponent* ASC = Holder != nullptr ? Holder->GetAbilitySystemComponent() : nullptr)
+	{
+		if (bPressed) ASC->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Fire));
+		else ASC->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Fire));
+	}
+}
+}
 
 // 读取实际调用生成 RPC 包装函数时传入的参数；不依赖私有成员或手工构造的 RPC 参数布局。
 void UfpstrueShotPresentationTestWeapon::ProcessEvent(UFunction* Function, void* Parameters)
@@ -72,7 +89,7 @@ void UfpstrueReloadReentryObserver::HandleReloadEnded(int32 ReloadId, EFPReloadE
 	bLastReloadCommitted = bAmmoCommitted;
 	if (UfpstrueWeaponComponent* ObservedWeapon = Weapon.Get())
 	{
-		if (bFireOnReloadEnd) ObservedWeapon->StartFire();
+		if (bFireOnReloadEnd) FpstrueTest::SetFireInput(ObservedWeapon, true);
 		if (bRestartReloadOnEnd) bReloadRestartAccepted = ObservedWeapon->RequestReload();
 	}
 	if (OnReloadEnded) OnReloadEnded();
@@ -350,8 +367,8 @@ UfpstrueWeaponComponent* EquipWeaponWithOneSpentRound(FGameplayWorld& Fixture, F
 		return nullptr;
 	}
 
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	if (!Test.TestEqual(TEXT("One real shot creates a reloadable magazine"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize() - 1))
 	{
 		return nullptr;
@@ -650,8 +667,8 @@ bool FFpstrueHitscanDamageTest::RunTest(const FString& Parameters)
 	Health->RegisterComponent();
 	Health->SetMaxHealthAndReset(100.0f);
 	const int32 AmmoBeforeShot = Weapon->GetCurrentAmmo();
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestEqual(TEXT("A single shot consumes exactly one round"), Weapon->GetCurrentAmmo(), AmmoBeforeShot - 1);
 	TestEqual(TEXT("A blocking hit applies native body damage once"), Health->GetHealth(), 60.0f);
 
@@ -661,8 +678,8 @@ bool FFpstrueHitscanDamageTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestEqual(TEXT("A miss still consumes one round"), Weapon->GetCurrentAmmo(), AmmoBeforeShot - 2);
 	TestEqual(TEXT("A nonblocking target takes no additional damage"), Health->GetHealth(), 60.0f);
 	return true;
@@ -681,13 +698,13 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	if (Weapon == nullptr) return false;
 
 	// 连射进入换弹后旧开火 Timer 不得继续扣弹，重复请求也不能解除换弹锁。
-	Weapon->StartFire();
+	FpstrueTest::SetFireInput(Weapon, true);
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
 	const int32 ReserveBefore = Weapon->GetReserveAmmo();
 	TestTrue(TEXT("Reload interrupts automatic fire"), Weapon->RequestReload());
 	const int32 CancelledReloadId = Weapon->GetActiveReloadId();
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestTrue(TEXT("Trigger input cannot unlock Reloading"), Weapon->IsReloading());
 	TestFalse(TEXT("Repeated reload is rejected"), Weapon->RequestReload());
 	if (!World.Advance(0.3f)) return false;
@@ -706,8 +723,8 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Cancellation after commit keeps loaded ammunition"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
 	TestEqual(TEXT("Reload conserves total ammunition"), Weapon->GetCurrentAmmo() + Weapon->GetReserveAmmo(), AmmoBefore + ReserveBefore);
 
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestTrue(TEXT("Begin reload before unequipping"), Weapon->RequestReload());
 	// 保存被卸下时的旧编号，之后结束/取消/超时都不能继续装弹或开火。
 	const int32 UnequippedReloadId = Weapon->GetActiveReloadId();
@@ -715,7 +732,7 @@ bool FFpstrueReloadTransitionsTest::RunTest(const FString& Parameters)
 	CastChecked<AfpstrueCharacter>(Weapon->GetAttachParent()->GetOwner())->ClearEquippedWeaponComponent(Weapon);
 	Weapon->FinishReloadForTransaction(UnequippedReloadId);
 	Weapon->CancelReload();
-	Weapon->StartFire();
+	FpstrueTest::SetFireInput(Weapon, true);
 	if (!World.Advance(5.2f)) return false;
 	TestFalse(TEXT("Unequipped weapon remains disabled"), Weapon->IsFiring());
 	TestFalse(TEXT("Unequipping cancels reload"), Weapon->IsReloading());
@@ -747,7 +764,7 @@ bool FFpstrueAutoReloadConflictTest::RunTest(const FString& Parameters)
 	{
 		AbilitySystem->AbilityLocalInputPressed(MovementInput);
 		if (!TestTrue(TEXT("The actual movement ability establishes the initial state"), Player->IsAiming() || Sprinting->GetPropertyValue_InContainer(Player))) return false;
-		Weapon->StartFire();
+		FpstrueTest::SetFireInput(Weapon, true);
 		TestTrue(TEXT("Fire preserves the existing aim or sprint ability until reload"), Player->IsAiming() || Sprinting->GetPropertyValue_InContainer(Player));
 		const int32 MaxSteps = FMath::CeilToInt((Weapon->GetCurrentAmmo() * 60.0f / Weapon->GetWeaponSettings().RoundsPerMinute + 1.0f) / 0.01f);
 		// 在第一次观测到空仓的同一帧验收能力切换，不多推进一帧来掩盖延迟或额外请求往返。
@@ -809,8 +826,8 @@ bool FFpstrueReloadFinishReentryTest::RunTest(const FString& Parameters)
 	Weapon->OnAmmoChanged.RemoveDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
 
 	// 先完成普通换弹，再用真实射击准备重入场景，避免未提交弹药掩盖错误。
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	if (!TestEqual(TEXT("A real shot prepares the reentrant reload"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize() - 1)
 		|| !World.Advance(0.2f))
 	{
@@ -837,10 +854,10 @@ bool FFpstrueReloadFinishReentryTest::RunTest(const FString& Parameters)
 	// Probe the state using gameplay behavior, with no private-state accessor or reflection.
 	// Before the fix the resumed Finish wrote Ready, so this shot fired successfully.
 	const int32 AmmoBeforeProbe = Weapon->GetCurrentAmmo();
-	Weapon->StartFire();
+	FpstrueTest::SetFireInput(Weapon, true);
 	TestFalse(TEXT("The resumed Finish cannot re-enable firing"), Weapon->IsFiring());
 	TestEqual(TEXT("The disabled weapon cannot consume another round"), Weapon->GetCurrentAmmo(), AmmoBeforeProbe);
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, false);
 	return true;
 }
 
@@ -881,8 +898,8 @@ bool FFpstrueReloadIdentityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Completed reports the actual ammo commit"), Observer->bLastReloadCommitted);
 	TestEqual(TEXT("Only A cancellation and B completion were reported"), Observer->ReloadEndCount, 2);
 
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	// 没有动画也使用唯一权威时钟，预览不能保留另一套 Notify 装弹规则。
 	TestTrue(TEXT("A presentation-free reload starts"), Weapon->RequestReload());
 	const int32 ReserveBeforeTimer = Weapon->GetReserveAmmo();
@@ -946,7 +963,7 @@ bool FFpstrueExternalEquipmentLifetimeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Owner teardown reports Disabled"), Observer->LastReloadEndReason, EFPReloadEndReason::Disabled);
 	TestNull(TEXT("Player EndPlay releases external attachment"), Weapon->GetAttachParent());
 	Weapon->FinishReloadForTransaction(DestroyedOwnerReloadId);
-	Weapon->StartFire();
+	FpstrueTest::SetFireInput(Weapon, true);
 	if (!World.Advance(5.2f)) return false;
 	TestEqual(TEXT("Late completion and fallback cannot load the orphaned weapon"), Weapon->GetCurrentAmmo(), AmmoBefore);
 	TestFalse(TEXT("An orphaned external weapon cannot keep firing"), Weapon->IsFiring());
@@ -964,14 +981,14 @@ bool FFpstrueShotCooldownReentryTest::RunTest(const FString& Parameters)
 	if (!World.Initialize()) return false;
 	UfpstrueWeaponComponent* Weapon = EquipWeaponWithOneSpentRound(World, *this);
 	if (Weapon == nullptr) return false;
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	const int32 AmmoAfterShot = Weapon->GetCurrentAmmo();
 	if (!World.Advance(0.07f)) return false;
-	Weapon->StartFire();
+	FpstrueTest::SetFireInput(Weapon, true);
 	TestEqual(TEXT("A quick re-press respects the remaining cooldown"), Weapon->GetCurrentAmmo(), AmmoAfterShot);
 	if (!World.Advance(0.05f)) return false;
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestEqual(TEXT("The next shot uses the remainder, not a fresh full interval"), Weapon->GetCurrentAmmo(), AmmoAfterShot - 1);
 	if (!World.Advance(0.2f)) return false;
 
@@ -981,7 +998,7 @@ bool FFpstrueShotCooldownReentryTest::RunTest(const FString& Parameters)
 	Observer->bDisableWeaponOnAmmoChanged = true;
 	Weapon->OnAmmoChanged.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
 	Weapon->OnWeaponFirePerformed.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleFirePerformed);
-	Weapon->StartFire();
+	FpstrueTest::SetFireInput(Weapon, true);
 	TestEqual(TEXT("A committed shot still emits its fact event after a reentrant disable"), Observer->FireEventCount, 1);
 	TestFalse(TEXT("The fact event does not restart the disabled action"), Weapon->IsFiring());
 	const int32 AmmoAfterDisable = Weapon->GetCurrentAmmo();
@@ -1045,8 +1062,8 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 			OldKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
 			OriginalGeneration = Weapon->EquipmentRevision;
 			OriginalSession = Weapon->FireSession;
-			Weapon->StopFire();
-			Weapon->StartFire();
+			FpstrueTest::SetFireInput(Weapon, false);
+			FpstrueTest::SetFireInput(Weapon, true);
 			ReplacementKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
 			TestTrue(Label + TEXT("The replacement ability really activates"), Fire->IsActive());
 			TestNotEqual(Label + TEXT("The replacement owns a different activation key"), ReplacementKey, OldKey);
@@ -1068,7 +1085,7 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 			// UE 可由待旅行 URL 推导 ListenServer 模式；作用域内只执行同步开火，绝不 Tick 或实际旅行。
 			TGuardValue<FString> ListenMode(Fixture.GetWorld()->NextURL, TEXT("?listen"));
 			if (!TestTrue(Label + TEXT("The real network-only shot branch is enabled"), Weapon->GetNetMode() != NM_Standalone)) return false;
-			Weapon->StartFire();
+			FpstrueTest::SetFireInput(Weapon, true);
 		}
 		TestTrue(Label + TEXT("The temporary URL is restored before any world tick"), Fixture.GetWorld()->NextURL.IsEmpty());
 		TestEqual(Label + TEXT("The expected real callback reentered once"), Reentries, 1);
@@ -1094,7 +1111,7 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		// 在已恢复 Standalone 的世界推进真正 WaitDelay；验证新轮只有一发、序号从一开始，而非伪造任务回调。
 		if (!Fixture.Advance(60.0f / Weapon->GetWeaponSettings().RoundsPerMinute + 0.03f)) return false;
 		TestEqual(Label + TEXT("Only the replacement task fires the next single shot"), Weapon->GetCurrentAmmo(), AmmoBefore - 2);
-		Weapon->StopFire();
+		FpstrueTest::SetFireInput(Weapon, false);
 		TestEqual(Label + TEXT("The replacement shot preserves its own activation key"), Weapon->FirePresentationKey, ReplacementKey);
 		TestEqual(Label + TEXT("The replacement round starts with ordinal one"), Weapon->FirePresentationShot, 1);
 		TestFalse(Label + TEXT("Cleanup ends the replacement fire ability"), Fire->IsActive());
@@ -1111,8 +1128,8 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		Weapon->GetOwningCharacter()->GetActorEyesViewPoint(EyeLocation, EyeRotation);
 		{
 			TGuardValue<FString> ListenMode(Fixture.GetWorld()->NextURL, TEXT("?listen"));
-			Weapon->StartFire();
-			Weapon->StopFire();
+			FpstrueTest::SetFireInput(Weapon, true);
+			FpstrueTest::SetFireInput(Weapon, false);
 		}
 		if (!TestEqual(TEXT("An unobstructed shot still dispatches one presentation RPC"), Weapon->ShotPresentations.Num(), 1)) return false;
 		const FHitResult& Miss = Weapon->ShotPresentations[0].Hit;
@@ -1251,8 +1268,8 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The authority timer completes despite missing presentation"), Observer->ReloadEndCount, 1);
 	TestEqual(TEXT("The timer reports Completed, not animation success"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
 	TestEqual(TEXT("The authority timer filled the magazine once"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 
 	// 用真实原生动画实例重试播放，分别检查取消与自然结束的弹药和动作结果。
 	USkeletalMeshComponent* Arms = CastChecked<USkeletalMeshComponent>(Weapon->GetAttachParent());
@@ -1457,8 +1474,8 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	Controller->SetActorTickEnabled(false);
 	Player->GetCharacterMovement()->SetComponentTickEnabled(false);
 	Controller->RotationInput = FRotator::ZeroRotator;
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	const double Kick = Controller->RotationInput.Pitch;
 	if (!TestFalse(TEXT("The real PlayerController received recoil input"), FMath::IsNearlyZero(Kick))) return false;
 	APlayerCameraManager* CameraManager = Controller->PlayerCameraManager;
@@ -1500,8 +1517,8 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	const FRotator RecoveredInput = Controller->RotationInput;
 	if (!World.AdvanceSingleFrame(0.1f)) return false;
 	TestTrue(TEXT("Completed recovery leaves no later input correction"), Controller->RotationInput.Equals(RecoveredInput, 0.001));
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	ActiveShakes.Reset(); // UE 的查询接口向输出数组追加，不能把上次快照算成仍在播放的实例。
 	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
 	TestEqual(TEXT("Repeated fire never stacks visual recoil instances"), ActiveShakes.Num(), 1);
@@ -1512,8 +1529,8 @@ bool FFpstrueRecoilElapsedTimeTest::RunTest(const FString& Parameters)
 	ShakeModifier->GetActiveCameraShakes(ActiveShakes);
 	TestEqual(TEXT("Losing owner input removes weapon visual recoil"), ActiveShakes.Num(), 0);
 	if (!World.Advance(0.2f)) return false;
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	Weapon->DisableWeapon();
 	ActiveShakes.Reset();
 	ShakeModifier->GetActiveCameraShakes(ActiveShakes);

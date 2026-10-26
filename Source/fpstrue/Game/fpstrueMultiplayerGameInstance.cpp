@@ -143,12 +143,6 @@ void UfpstrueMultiplayerGameInstance::JoinPvp(const FString& Address)
 	StartClientTravel(Revision);
 }
 
-// 控制台取消与主动离场共用同一清理链，不另建取消状态。
-void UfpstrueMultiplayerGameInstance::CancelPvpConnection()
-{
-	LeavePvp();
-}
-
 // 使旧重试失效并清票据，再通知服务器主动退出；三秒未完成则由 Ticker 返回本地世界。
 void UfpstrueMultiplayerGameInstance::LeavePvp()
 {

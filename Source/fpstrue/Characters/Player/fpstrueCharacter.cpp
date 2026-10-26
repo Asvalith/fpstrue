@@ -26,7 +26,6 @@
 #include "Game/fpstruePvpPlayerState.h"
 #include "Runtime/fpstrueRuntime.h"
 #include "Net/UnrealNetwork.h"
-#include "Engine/Engine.h"
 #include "EngineUtils.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
@@ -195,21 +194,6 @@ void AfpstrueCharacter::BeginPlay()
 		}
 		if (IsDead()) HandleDeath();
 #if !UE_BUILD_SHIPPING
-	#if WITH_EDITOR
-		// 显式实机诊断不依赖键鼠或自动开火；等真实装备/动画复制就绪后，读取本端实际世界。
-		if (FParse::Param(FCommandLine::Get(), TEXT("PvpPresentationAudit")) || FParse::Param(FCommandLine::Get(), TEXT("PvpPickupWalk")))
-		{
-			FTimerHandle AuditHandle;
-			GetWorldTimerManager().SetTimer(AuditHandle, FTimerDelegate::CreateWeakLambda(this, [this]()
-			{
-				if (GEngine != nullptr && !bEndingPlay)
-				{
-					if (FParse::Param(FCommandLine::Get(), TEXT("PvpPresentationAudit"))) GEngine->Exec(GetWorld(), TEXT("fp.AuditRARWorld"));
-					if (IsLocallyControlled() && FParse::Param(FCommandLine::Get(), TEXT("PvpPickupWalk"))) GEngine->Exec(GetWorld(), TEXT("fp.AuditPickupWalk"));
-				}
-			}), 5.0f, false);
-		}
-	#endif
 		// ★【重要边界】[发布隔离] 自动输入只编入开发/测试版本；Shipping 不响应测试命令行。
 		if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
 		{
@@ -601,22 +585,6 @@ void AfpstrueCharacter::RequestWeaponReload()
 		HealthComponent->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Reload));
 		HealthComponent->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Reload));
 	}
-}
-
-// 独立公开命令：完整取消冲刺和瞄准，不触碰开火、换弹与弹药状态。
-void AfpstrueCharacter::ResetMovementModifiers()
-{
-	// 调用者不必预先取消能力：本命令取消移动能力后，从剩余标签重算步速并广播瞄准变化。
-	// 能力结束的蓝图回调可能建立新动作；刷新只读取当前标签，避免覆盖监听者的新状态。
-	// 只取消移动修饰能力，不能顺带结束调用本接口的 Reload 或其他战斗能力。
-	if (HealthComponent != nullptr)
-	{
-		FGameplayTagContainer MovementAbilities;
-		MovementAbilities.AddTag(FpstrueGameplayTags::Ability_Aim);
-		MovementAbilities.AddTag(FpstrueGameplayTags::Ability_Sprint);
-		HealthComponent->CancelAbilities(&MovementAbilities);
-	}
-	RefreshMovementAbilityState();
 }
 
 // 判断角色是否仍允许维持装备关系；临时失去输入与角色死亡分别处理。

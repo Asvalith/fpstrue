@@ -25,7 +25,7 @@ public class fpstrue : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[] { "SignificanceManager", "PlatformCrypto", "PlatformCryptoOpenSSL", "AnimationCore", "PhysicsCore", "EngineSettings" });
 		if (Target.bBuildEditor)
 		{
-			// 可编辑行为树资产生成和编辑器自动化测试需要这些模块；Game 目标不依赖它们。
+			// 资产只读审计和编辑器自动化测试使用这些模块；Game 目标不依赖编辑器代码。
 			PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "UMGEditor", "SlateCore", "AIGraph", "BehaviorTreeEditor", "BlueprintGraph", "GraphEditor", "KismetCompiler", "AnimGraph", "AnimGraphRuntime", "AssetRegistry", "RHI", "RenderCore", "Json", "TraceServices" });
 		}
 	}

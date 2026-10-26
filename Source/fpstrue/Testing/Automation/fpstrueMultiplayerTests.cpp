@@ -667,8 +667,8 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Client snapshot sets the received magazine"), Weapon->GetCurrentAmmo(), 7);
 	TestEqual(TEXT("Client snapshot sets the received reserve"), Weapon->GetReserveAmmo(), 32);
 	TestFalse(TEXT("A client cannot authorize another equipment attachment"), Weapon->AttachWeapon(Player));
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestEqual(TEXT("Client fire cannot spend an authoritative round"), Weapon->GetCurrentAmmo(), 7);
 	TestEqual(TEXT("Client fire cannot execute hitscan damage"), TargetHealth->GetHealth(), 60.0f);
 	TestFalse(TEXT("Client cannot start an authoritative reload from an otherwise ready state"), Weapon->RequestReload());
@@ -676,8 +676,8 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	// GAS 重写后预测调度归 Fire AbilityTask；本夹具不伪造远端授予或预测键，真实预测与任务退出由双客户端 smoke 验证。
 	TStrongObjectPtr<UfpstrueReloadReentryObserver> PresentationObserver(NewObject<UfpstrueReloadReentryObserver>());
 	Weapon->OnWeaponFirePerformed.AddDynamic(PresentationObserver.Get(), &UfpstrueReloadReentryObserver::HandleFirePerformed);
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	if (!Fixture.TickTestWorld(0.25f)) { Fixture.ForwardErrorMessages(this); return false; }
 	TestEqual(TEXT("Client weapon compatibility APIs cannot bypass GAS to predict firing"), PresentationObserver->FireEventCount, 0);
 	TestEqual(TEXT("Rejected direct client commands do not subtract authoritative ammo"), Weapon->GetCurrentAmmo(), 7);
@@ -686,8 +686,8 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	OwnerState->Ammo = 1;
 	++OwnerState->Revision;
 	Weapon->ProcessEvent(OwnerNotify, nullptr);
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	const float PredictionWait = FMath::Max(0.25f, 120.0f / Weapon->GetWeaponSettings().RoundsPerMinute);
 	if (!Fixture.TickTestWorld(PredictionWait)) { Fixture.ForwardErrorMessages(this); return false; }
 	TestEqual(TEXT("A late one-round estimate cannot authorize direct client firing"), PresentationObserver->FireEventCount, 0);
@@ -2544,7 +2544,7 @@ bool FFpstrueMultiplayerConnectionRevisionTest::RunTest(const FString& Parameter
 	TestEqual(TEXT("An old retry cannot consume another retry attempt"), Instance->RetryCount, 1);
 	const uint32 CancelledRevision = Instance->OperationRevision;
 	Instance->ResumeId = 77;
-	Instance->CancelPvpConnection();
+	Instance->LeavePvp();
 	TestFalse(TEXT("Explicit cancellation disables automatic reconnect"), Instance->bAutoReconnect);
 	TestEqual(TEXT("Cancellation clears the previous accepted identity, not just the cached token"), Instance->ResumeId, INDEX_NONE);
 	TestTrue(TEXT("Cancellation invalidates callbacks carrying the old operation revision"), Instance->OperationRevision != CancelledRevision);
@@ -4251,8 +4251,8 @@ bool FFpstrueMultiplayerRARActionPresentationTest::RunTest(const FString&)
 	}
 	SampleGrip(0.0f);
 	const int32 AmmoBefore = Weapon->GetCurrentAmmo();
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestEqual(TEXT("RAR input uses GAS and spends one authoritative round"), Weapon->GetCurrentAmmo(), AmmoBefore - 1);
 	TestTrue(TEXT("One committed shot starts the body action"), Body->Montage_IsPlaying(Body->FireMontage));
 	TestTrue(TEXT("One committed shot starts the first-person action"), Arms->Montage_IsPlaying(Arms->FireMontage));
@@ -4261,8 +4261,8 @@ bool FFpstrueMultiplayerRARActionPresentationTest::RunTest(const FString&)
 	const int32 Cancelled = Weapon->GetActiveReloadId();
 	TestTrue(TEXT("Reload starts matching body, arms and gun montages"), Body->Montage_IsPlaying(Body->ReloadMontage)
 		&& Arms->Montage_IsPlaying(Arms->ReloadMontage) && Gun->Montage_IsPlaying(Weapon->WeaponReloadMontage));
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	TestEqual(TEXT("Reload mutual exclusion prevents another shot"), Weapon->GetCurrentAmmo(), AmmoBefore - 1);
 	Weapon->CancelReloadForTransaction(Cancelled);
 	TestFalse(TEXT("Cancel closes the authoritative reload transaction"), Weapon->IsReloading());
@@ -4362,8 +4362,8 @@ bool FFpstrueMultiplayerTemplateDeathDropTest::RunTest(const FString&)
 	// Standalone equipment does not need an owning connection; set the production-style owner to verify death clears it.
 	Rifle->SetOwner(Character);
 	TestTrue(TEXT("Death fixture begins with the live player as weapon Actor owner"), Rifle->GetOwner() == Character);
-	Weapon->StartFire();
-	Weapon->StopFire();
+	FpstrueTest::SetFireInput(Weapon, true);
+	FpstrueTest::SetFireInput(Weapon, false);
 	if (!TestTrue(TEXT("A real reload transaction is active when lethal damage arrives"), Weapon->RequestReload())) return false;
 	const int32 OldReloadId = Weapon->GetActiveReloadId();
 	const int32 AmmoBeforeDeath = Weapon->GetCurrentAmmo();

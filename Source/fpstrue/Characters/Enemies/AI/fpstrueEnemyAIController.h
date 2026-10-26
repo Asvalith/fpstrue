@@ -109,7 +109,7 @@ protected:
 	// 只缓存实际黑板资产的 KeyID，不缓存业务值；兼容资产复用保持同一组解析结果。
 	virtual bool InitializeBlackboard(UBlackboardComponent& BlackboardComp, UBlackboardData& BlackboardAsset) override;
 
-	// 可替换为策划配置的行为树；未配置时使用原生默认树。自定义树需要同名 Blackboard 键。
+	// 唯一行为入口；默认引用正式 BT 资产，缺失或黑板不完整则拒绝启动，不在运行时另建树。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI|Behavior Tree")
 	TObjectPtr<UBehaviorTree> BehaviorTreeAsset;
 
@@ -246,7 +246,7 @@ private:
 
 	// 启动唯一行为树；失败会清空 ActiveBehaviorTree 并关闭命令入口。
 	bool StartBehaviorLogic();
-	// 切换黑板资产时重解析；同资产复用不重复名称查找，旧七键 schema 没有战术镜像。
+	// 切换黑板资产时重解析完整契约；同资产复用不重复名称查找。
 	bool CacheDecisionBlackboardKeys(UBlackboardComponent& BlackboardComp);
 	// 单轮准备阶段：处理记忆到期、目标切换和 Manager 解析；外部回调使受控上下文失效时中止本轮。
 	bool PrepareBehaviorDecisionContext();

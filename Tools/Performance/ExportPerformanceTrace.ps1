@@ -6,6 +6,7 @@ param(
     [double]$EndTime,
     [string]$EngineRoot = 'E:/program/ue554/UE_5.5',
     [ValidateRange(5,600)][int]$TimeoutSeconds = 120,
+    [switch]$IncludeGpuEvents,
     [switch]$DryRun
 )
 
@@ -52,11 +53,18 @@ if ($WindowMode) {
     )
 }
 $Exports += @{ Name = 'TimerStatistics'; Command = 'TimingInsights.ExportTimerStatistics'; Options = "-columns=* -threads=* -timers=* $WindowOptions"; Header = $StatsHeader }
+if ($IncludeGpuEvents) {
+    # CPU and GPU use the same source, time window, process ownership and CSV validation.
+    $Exports += @(
+        @{ Name = 'GpuEvents'; Command = 'TimingInsights.ExportTimingEvents'; Options = "-columns=$EventColumns -threads=GPU* -timers=* $WindowOptions"; Header = $EventHeader },
+        @{ Name = 'GpuStatistics'; Command = 'TimingInsights.ExportTimerStatistics'; Options = "-columns=* -threads=GPU* -timers=* $WindowOptions"; Header = $StatsHeader }
+    )
+}
 
 if ($DryRun) {
     [ordered]@{Mode=if($WindowMode){'TimeWindow'}else{'Region'};TraceFile=$TraceFile;OutputDirectory=$OutputDirectory;
         StartTime=if($WindowMode){$StartTime}else{$null};EndTime=if($WindowMode){$EndTime}else{$null};
-        Region=if($WindowMode){$null}else{$Region};Exports=$Exports;
+        Region=if($WindowMode){$null}else{$Region};IncludeGpuEvents=[bool]$IncludeGpuEvents;Exports=$Exports;
         Boundary='No files written or applications launched. Explicit time bounds do not by themselves prove complete-frame alignment.'} | ConvertTo-Json -Depth 6
     return
 }
@@ -67,11 +75,11 @@ $Manifest = [ordered]@{SchemaVersion=2;Mode=if($WindowMode){'TimeWindow'}else{'R
     TraceFile=$TraceFile;TraceSHA256=(Get-FileHash -LiteralPath $TraceFile -Algorithm SHA256).Hash;TraceBytes=$SourceInfo.Length;
     TraceLastWriteUtc=$SourceInfo.LastWriteTimeUtc.ToString('o');Engine=$Insights;TimestampUnits='seconds';
     StartTime=if($WindowMode){$StartTime}else{$null};EndTime=if($WindowMode){$EndTime}else{$null};
-    Region=if($WindowMode){$null}else{$Region};EventColumns=$EventHeader;TimeoutSeconds=$TimeoutSeconds;
+    Region=if($WindowMode){$null}else{$Region};IncludeGpuEvents=[bool]$IncludeGpuEvents;EventColumns=$EventHeader;TimeoutSeconds=$TimeoutSeconds;
     CPUHierarchy=if($WindowMode){'All timer scopes retained for selected CPU threads; no timer-name threshold.'}else{'Legacy render-only hierarchy plus filtered cross-thread candidates.'};
     CompleteFrameAlignment='Not implied by Region or explicit bounds. Supply independently validated complete-frame alignment to the analyzer.';
     SchedulingData='Not exported. Timing scope durations do not establish on-core, ready or OS-blocked time.';
-    GpuTotalFrameTimeAvailable=$false;GpuBoundary='No complete GPU frame timing is established by these CPU exports. Statistics can contain GPU rows even under a CPU filter.';
+    GpuTotalFrameTimeAvailable=$false;GpuBoundary='GPU exports are optional timestamp scopes, not hardware busy intervals. Complete GPU frame alignment still requires independent validation. Statistics can contain GPU rows even under a CPU filter.';
     Exports=@();Valid=$false;Failure=$null;StartedUtc=[datetime]::UtcNow.ToString('o')}
 $ManifestPath = Join-Path $OutputDirectory 'export_manifest.json'
 function Save-ExportManifest { [IO.File]::WriteAllText($ManifestPath,($Manifest | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false)) }
@@ -124,4 +132,4 @@ $Manifest.Valid = $true
     $Manifest.FinishedUtc = [datetime]::UtcNow.ToString('o')
     Save-ExportManifest
 }
-Write-Output "Render wait events exported to $OutputDirectory (seconds; scope wall time, not OS scheduling time)."
+Write-Output "Performance events exported to $OutputDirectory (seconds; scope wall time, not OS scheduling time)."

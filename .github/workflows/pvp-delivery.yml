@@ -1,0 +1,64 @@
+name: PvP delivery acceptance
+
+# Never run arbitrary public PR code on a machine with a licensed UE toolchain.
+on:
+  workflow_dispatch:
+    inputs:
+      shipping:
+        description: Also build and cook Shipping packages (no automated input)
+        type: boolean
+        default: false
+      upload_evidence:
+        description: Upload logs/reports (downloadable to people with repository access; may include local paths)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pvp-delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    if: github.ref == 'refs/heads/codex/multiplayer-fps'
+    runs-on: [self-hosted, Windows, X64, ue55-server]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          clean: true
+          persist-credentials: false
+      - name: Check automation gates without launching Unreal
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\Tools\Networking\BuildPvpDelivery.ps1 -SelfTest
+          & .\Tools\Networking\RunPvpSmoke.ps1 -SelfTest
+          & .\Tools\Networking\RunFpsNetworkMatrix.ps1 -SelfTest
+      - name: Build, test, package and verify
+        shell: powershell
+        env:
+          INCLUDE_SHIPPING: ${{ inputs.shipping }}
+        run: |
+          $options = @{
+            EngineRoot = $env:UE_ROOT
+            Mode = 'Delivery'
+            RequireClean = $true
+          }
+          if ($env:INCLUDE_SHIPPING -eq 'true') { $options.IncludeShipping = $true }
+          & .\Tools\Networking\BuildPvpDelivery.ps1 @options
+      - name: Upload explicitly requested evidence (no symbols or packages)
+        if: always() && inputs.upload_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvp-acceptance-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            Saved/Delivery/**/DeliveryReport.json
+            Saved/Delivery/**/*.log
+            Saved/Delivery/**/Automation/**
+            Saved/Networking/**/Report.json
+          retention-days: 7
+          if-no-files-found: warn

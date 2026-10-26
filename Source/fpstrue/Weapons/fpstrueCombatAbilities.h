@@ -31,9 +31,6 @@ public:
 	virtual bool CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 		const FGameplayTagContainer* SourceTags = nullptr, const FGameplayTagContainer* TargetTags = nullptr,
 		FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
-	// ASC 核对原生激活身份后只把批次交给这一轮能力；去重/重排和结算仍在原武器执行器。
-	void HandleShotInputs(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests);
-	void FinishRemoteShotInputs(bool bCancelled);
 
 protected:
 	// 先建立输入轮次再监听本地松开；连射由 WaitDelay 推进，已经松开时也能完整结束空轮次。
@@ -45,6 +42,9 @@ protected:
 
 private:
 	friend class UfpstrueHealthComponent;
+	// ASC 核对原生激活身份后只把批次交给这一轮能力；去重/重排和结算仍在原武器执行器。
+	void HandleShotInputs(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests);
+	void FinishRemoteShotInputs(bool bCancelled);
 	friend class FFpstrueWeaponShotTransportTest;
 	friend class FFpstrueShotActivationTest;
 	// WaitInputRelease只负责本地松开检测；服务端结束由Weapon的完整轮次控制负责。

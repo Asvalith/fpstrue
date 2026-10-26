@@ -169,10 +169,11 @@ bool CheckLayeredEnemyTree(FAutomationTestBase& Test, const UBehaviorTree& Tree)
 	{
 		const UfpstrueBTDecorator_DecisionFlag* Actual = Child.Decorators.IsValidIndex(Index)
 			? Cast<UfpstrueBTDecorator_DecisionFlag>(Child.Decorators[Index]) : nullptr;
-		UfpstrueBTDecorator_DecisionFlag* Expected = NewObject<UfpstrueBTDecorator_DecisionFlag>();
-		Expected->Configure(Key, bExpected);
+		const FByteProperty* Operation = FindFProperty<FByteProperty>(UfpstrueBTDecorator_DecisionFlag::StaticClass(), TEXT("OperationType"));
 		return Test.TestTrue(FString::Printf(TEXT("Branch owns %s %s condition"), *Key.ToString(), bExpected ? TEXT("set") : TEXT("not set")),
-			Actual != nullptr && Actual->HasSameCondition(*Expected));
+			Actual != nullptr && Operation != nullptr && Actual->GetSelectedBlackboardKey() == Key
+			&& Operation->GetPropertyValue_InContainer(Actual) == static_cast<uint8>(bExpected ? EBasicKeyOperation::Set : EBasicKeyOperation::NotSet)
+			&& Actual->GetFlowAbortMode() == EBTFlowAbortMode::None && !Actual->IsInversed());
 	};
 	const auto CheckAction = [&Test](const FBTCompositeChild& Child, EFPEnemyBehaviorAction Expected, const TCHAR* Label)
 	{
@@ -227,29 +228,7 @@ bool CheckLayeredEnemyTree(FAutomationTestBase& Test, const UBehaviorTree& Tree)
 	return bValid;
 }
 
-// 从默认分层树重现旧版平面资产；复用旧叶子和条件实例，验证迁移而不是重建模板。
-UBTComposite_Selector* MakeFlatEnemyTreeFixture(UBehaviorTree& Tree)
-{
-	UBTCompositeNode* Root = Tree.RootNode;
-	UBTComposite_Selector* Choice = CastChecked<UBTComposite_Selector>(Root->Children[2].ChildComposite);
-	UBTCompositeNode* Retreat = Choice->Children[0].ChildComposite;
-	UBTCompositeNode* Combat = Choice->Children[1].ChildComposite;
-	UBTCompositeNode* Investigation = Choice->Children[2].ChildComposite;
-	UBTCompositeNode* Idle = Choice->Children[3].ChildComposite;
-	FBTCompositeChild NoTarget = Idle->Children[0];
-	NoTarget.Decorators = Choice->Children[3].Decorators;
-	FBTCompositeChild RetreatAction = Retreat->Children[0];
-	RetreatAction.Decorators = Choice->Children[0].Decorators;
-	Choice->Children = {NoTarget, RetreatAction, Combat->Children[0], Combat->Children[1], Combat->Children[2],
-		Combat->Children[3], Investigation->Children[1]};
-	for (UBTCompositeNode* Group : {Retreat, Combat, Investigation, Idle})
-	{
-		Group->Children.Reset();
-		Group->Rename(*MakeUniqueObjectName(GetTransientPackage(), Group->GetClass()).ToString(), GetTransientPackage(),
-			REN_DontCreateRedirectors | REN_DoNotDirty);
-	}
-	return Choice;
-}
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyHearingInvestigationTest,
@@ -410,167 +389,62 @@ bool FFPEnemyHearingInvestigationTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeStructureTest, "fpstrue.AI.BehaviorTree.DefaultStructure",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-// 检查默认树的黑板类型、等待/采样顺序和攻击失败后的站位分支，不把生成树等同于运行验收。
+// 直接检查正式资产及原生默认引用，不再用另一套 C++ 模板证明自身结构正确。
 bool FFPEnemyBehaviorTreeStructureTest::RunTest(const FString& Parameters)
 {
-	UBehaviorTree* Tree = NewObject<UBehaviorTree>();
-	UBlackboardData* Blackboard = NewObject<UBlackboardData>(Tree);
-	const bool bHadEngineSelfKey = Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey;
-	TestTrue(TEXT("Populate an empty editable asset"), UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(Tree, Blackboard));
-	TestEqual(TEXT("Engine default SelfActor key is preserved"), Blackboard->GetKeyID(FBlackboard::KeySelf) != FBlackboard::InvalidKey,
-			  bHadEngineSelfKey);
+	UBehaviorTree* Tree = LoadObject<UBehaviorTree>(nullptr, TEXT("/Game/FirstPerson/AI/BT_FPEnemy.BT_FPEnemy"));
+	if (!TestNotNull(TEXT("The authored project tree exists"), Tree)) return false;
+	const FObjectPropertyBase* TreeProperty = FindFProperty<FObjectPropertyBase>(AfpstrueEnemyAIController::StaticClass(), TEXT("BehaviorTreeAsset"));
+	TestTrue(TEXT("The native controller references the same authored tree"), TreeProperty != nullptr
+		&& TreeProperty->GetObjectPropertyValue_InContainer(GetDefault<AfpstrueEnemyAIController>()) == Tree);
+	UBlackboardData* Blackboard = Tree->BlackboardAsset;
+	if (!TestNotNull(TEXT("The tree references its authored Blackboard"), Blackboard)) return false;
 	TestTrue(TEXT("Required blackboard keys have correct types"), FPHasEnemyBlackboardSchema(Blackboard));
-	TestEqual(TEXT("Default schema includes independent retreat and tactical state"), Blackboard->Keys.Num(), 10);
+	TestEqual(TEXT("The project schema has independent retreat and tactical state"), Blackboard->Keys.Num(), 10);
 	return CheckLayeredEnemyTree(*this, *Tree);
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFPEnemyBehaviorTreeAssetSafetyTest, "fpstrue.AI.BehaviorTree.AssetSafety",
 								 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-// 验证建树工具只填充兼容的空资产，保留设计师内容，并拒绝错误类型或跨敌人共享的状态键。
+// 只在正式黑板的副本上破坏接线，验证启动契约；不再维护退役资产升级器及其自测。
 bool FFPEnemyBehaviorTreeAssetSafetyTest::RunTest(const FString& Parameters)
 {
-	UBehaviorTree* Tree = NewObject<UBehaviorTree>();
-	UBlackboardData* Blackboard = NewObject<UBlackboardData>(Tree);
-	TestFalse(TEXT("Empty blackboard must not pass validation"), FPHasEnemyBlackboardSchema(Blackboard));
-	TestFalse(TEXT("Null input is rejected"), UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(nullptr, Blackboard));
-	TestTrue(TEXT("Initial population succeeds"), UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(Tree, Blackboard));
-	UBTCompositeNode* OriginalRoot = Tree->RootNode;
-	TestFalse(TEXT("Existing designer tree cannot be overwritten"),
-			  UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(Tree, Blackboard));
-	TestTrue(TEXT("Designer root is preserved"), Tree->RootNode == OriginalRoot);
-	UBehaviorTree* AnotherTree = NewObject<UBehaviorTree>();
-	const UBlackboardKeyType* OriginalTargetKey = Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor)].KeyType;
-	TestTrue(TEXT("Another empty tree can reuse an unchanged default Blackboard"),
-			 UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(AnotherTree, Blackboard));
-	TestTrue(TEXT("Reusing a Blackboard preserves original key instances"),
-			 Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor)].KeyType == OriginalTargetKey);
-	// 分别破坏目标类型、独立实例状态和必需键，验证黑板校验覆盖这些实际接线错误。
-	UBlackboardKeyType_Object* TargetType = CastChecked<UBlackboardKeyType_Object>(
-		Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor)].KeyType);
+	const UBlackboardData* Asset = LoadObject<UBlackboardData>(nullptr, TEXT("/Game/FirstPerson/AI/BB_FPEnemy.BB_FPEnemy"));
+	if (!TestNotNull(TEXT("The authored Blackboard exists"), Asset)) return false;
+	UBlackboardData* Blackboard = DuplicateObject<UBlackboardData>(Asset, GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UBlackboardData::StaticClass()));
+	if (!TestNotNull(TEXT("The mutable fixture is an independent asset copy"), Blackboard)) return false;
+	TestFalse(TEXT("Null blackboard is rejected"), FPHasEnemyBlackboardSchema(nullptr));
+	TestFalse(TEXT("An empty Blackboard cannot run the project tree"), FPHasEnemyBlackboardSchema(NewObject<UBlackboardData>()));
+	TestTrue(TEXT("The copied full schema is valid"), FPHasEnemyBlackboardSchema(Blackboard));
+	const auto TargetId = Blackboard->GetKeyID(FPEnemyBlackboard::TargetActor);
+	UBlackboardKeyType_Object* TargetType = CastChecked<UBlackboardKeyType_Object>(Blackboard->Keys[TargetId].KeyType);
+	if (!TestTrue(TEXT("Changing a fixture cannot alter the authored key object"), TargetType != Asset->Keys[Asset->GetKeyID(FPEnemyBlackboard::TargetActor)].KeyType)) return false;
 	UClass* OriginalBaseClass = TargetType->BaseClass;
 	TargetType->BaseClass = AfpstrueEnemyAIController::StaticClass();
 	TestFalse(TEXT("Object key must accept the actual player class"), FPHasEnemyBlackboardSchema(Blackboard));
 	TargetType->BaseClass = OriginalBaseClass;
-	FBlackboardEntry& AttackEntry = Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::Attacking)];
-	AttackEntry.bInstanceSynced = true;
-	TestFalse(TEXT("Per-enemy attack state cannot be instance synchronized"), FPHasEnemyBlackboardSchema(Blackboard));
-	AttackEntry.bInstanceSynced = false;
+	for (const FName Name : {FPEnemyBlackboard::Attacking, FPEnemyBlackboard::Retreating, FPEnemyBlackboard::HasInnerSlot})
+	{
+		FBlackboardEntry& Entry = Blackboard->Keys[Blackboard->GetKeyID(Name)];
+		Entry.bInstanceSynced = true;
+		TestFalse(TEXT("Decision and tactical state cannot be shared across enemies"), FPHasEnemyBlackboardSchema(Blackboard));
+		Entry.bInstanceSynced = false;
+	}
 	FBlackboardEntry& RetreatEntry = Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::Retreating)];
-	RetreatEntry.bInstanceSynced = true;
-	TestFalse(TEXT("Per-enemy retreat state cannot be instance synchronized"), FPHasEnemyBlackboardSchema(Blackboard));
-	RetreatEntry.bInstanceSynced = false;
 	UBlackboardKeyType* OriginalRetreatType = RetreatEntry.KeyType;
 	RetreatEntry.KeyType = NewObject<UBlackboardKeyType_Object>(Blackboard);
 	TestFalse(TEXT("Retreat state must remain a Bool key"), FPHasEnemyBlackboardSchema(Blackboard));
 	RetreatEntry.KeyType = OriginalRetreatType;
-	TestTrue(TEXT("Restored independent schema is valid"), FPHasEnemyBlackboardSchema(Blackboard));
-	TestTrue(TEXT("Upgrading a current default tree is idempotent"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
-	TestTrue(TEXT("Current default upgrade preserves the root instance"), Tree->RootNode == OriginalRoot);
-	FBTCompositeChild& InvestigationBranch = OriginalRoot->Children[2].ChildComposite->Children[2];
-	InvestigationBranch.DecoratorOps = {FBTDecoratorLogic(EBTDecoratorLogic::And, 2),
-		FBTDecoratorLogic(EBTDecoratorLogic::Test, 0), FBTDecoratorLogic(EBTDecoratorLogic::Test, 1)};
-	TestTrue(TEXT("Explicit AND of the two investigation conditions is the same default contract"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
-	InvestigationBranch.DecoratorOps[0].Operation = EBTDecoratorLogic::Or;
-	TestFalse(TEXT("Designer OR logic cannot be silently changed to the default AND eligibility"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(Tree, Blackboard));
-	TestTrue(TEXT("Rejected upgrade preserves the designer's OR logic"),
-		InvestigationBranch.DecoratorOps[0].Operation == EBTDecoratorLogic::Or);
-	InvestigationBranch.DecoratorOps.Reset();
-	Blackboard->Keys.RemoveAt(Blackboard->GetKeyID(FPEnemyBlackboard::Retreating));
-	TestFalse(TEXT("Missing required key is rejected"), FPHasEnemyBlackboardSchema(Blackboard));
-	UBehaviorTree* LegacyTree = NewObject<UBehaviorTree>();
-	UBlackboardData* LegacyBlackboard = NewObject<UBlackboardData>(LegacyTree);
-	if (!TestTrue(TEXT("Legacy fixture starts from the native default template"),
-		UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(LegacyTree, LegacyBlackboard))) return false;
-	UBTComposite_Sequence* LegacyRoot = CastChecked<UBTComposite_Sequence>(LegacyTree->RootNode);
-	UBTComposite_Selector* LegacyChoice = MakeFlatEnemyTreeFixture(*LegacyTree);
-	UBTTaskNode* OriginalSustain = LegacyChoice->Children[2].ChildTask;
-	UBTTaskNode* OriginalPursue = LegacyChoice->Children[6].ChildTask;
-	LegacyChoice->Children.RemoveAt(1);
-	LegacyBlackboard->Keys.RemoveAt(LegacyBlackboard->GetKeyID(FPEnemyBlackboard::Retreating));
-	for (const FName Key : {FPEnemyBlackboard::TacticalRole, FPEnemyBlackboard::TacticalGoal, FPEnemyBlackboard::HasInnerSlot})
-		LegacyBlackboard->Keys.RemoveAt(LegacyBlackboard->GetKeyID(Key));
-	TestEqual(TEXT("Legacy fixture retains the original six-key schema"), LegacyBlackboard->Keys.Num(), 6);
-	TestFalse(TEXT("Legacy schema cannot run the new retreat contract before upgrade"), FPHasEnemyBlackboardSchema(LegacyBlackboard));
-	TestTrue(TEXT("A verified legacy native default tree upgrades in place"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(LegacyTree, LegacyBlackboard));
-	TestTrue(TEXT("Legacy upgrade preserves the original root"), LegacyTree->RootNode == LegacyRoot);
-	TestTrue(TEXT("Legacy upgrade preserves the original choice instance"), LegacyRoot->Children[2].ChildComposite == LegacyChoice);
-	if (!CheckLayeredEnemyTree(*this, *LegacyTree)) return false;
-	const UBTCompositeNode* LegacyCombat = LegacyChoice->Children[1].ChildComposite;
-	const UBTCompositeNode* LegacyInvestigation = LegacyChoice->Children[2].ChildComposite;
-	TestTrue(TEXT("Legacy upgrade preserves the original attack task instance"), LegacyCombat->Children[0].ChildTask == OriginalSustain);
-	TestTrue(TEXT("Legacy upgrade moves the original pursuit task into investigation"), LegacyInvestigation->Children[1].ChildTask == OriginalPursue);
-	TestEqual(TEXT("Legacy upgrade adds independent retreat and tactical keys"), LegacyBlackboard->Keys.Num(), 10);
-	TestTrue(TEXT("The upgraded legacy schema satisfies the full contract"), FPHasEnemyBlackboardSchema(LegacyBlackboard));
-	const UfpstrueBTTask_EnemyAction* LegacyRetreat = Cast<UfpstrueBTTask_EnemyAction>(LegacyChoice->Children[0].ChildComposite->Children[0].ChildTask);
-	TestTrue(TEXT("Legacy upgrade inserts retreat before the existing attack branch"),
-		LegacyRetreat != nullptr && LegacyRetreat->Action == EFPEnemyBehaviorAction::Retreat);
-	// 已有撤退/战术字段的平面版本也只调整层次，不替换现有动作实例。
-	UBehaviorTree* FlatTree = NewObject<UBehaviorTree>();
-	UBlackboardData* FlatBlackboard = NewObject<UBlackboardData>(FlatTree);
-	if (!UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(FlatTree, FlatBlackboard)) return false;
-	UBTComposite_Selector* FlatChoice = MakeFlatEnemyTreeFixture(*FlatTree);
-	UBTTaskNode* FlatRetreat = FlatChoice->Children[1].ChildTask;
-	UBTCompositeNode* FlatNearCombat = FlatChoice->Children[4].ChildComposite;
-	TestTrue(TEXT("The verified current flat default upgrades"), UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(FlatTree, FlatBlackboard));
-	if (!CheckLayeredEnemyTree(*this, *FlatTree)) return false;
-	TestTrue(TEXT("Flat upgrade keeps the retreat action"), FlatChoice->Children[0].ChildComposite->Children[0].ChildTask == FlatRetreat);
-	TestTrue(TEXT("Flat upgrade keeps the existing attack fallback selector"), FlatChoice->Children[1].ChildComposite->Children[2].ChildComposite == FlatNearCombat);
-	// 仅修复已知默认错挂：撤退条件丢到下一条 SustainAttack；其他条件仍必须精确匹配。
-	UBehaviorTree* MisplacedTree = NewObject<UBehaviorTree>();
-	UBlackboardData* MisplacedBlackboard = NewObject<UBlackboardData>(MisplacedTree);
-	if (!UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(MisplacedTree, MisplacedBlackboard)) return false;
-	UBTComposite_Selector* MisplacedChoice = MakeFlatEnemyTreeFixture(*MisplacedTree);
-	UBTTaskNode* MisplacedRetreat = MisplacedChoice->Children[1].ChildTask;
-	UBTDecorator* OriginalRetreatCondition = MisplacedChoice->Children[1].Decorators[0];
-	MisplacedChoice->Children[1].Decorators.Reset();
-	MisplacedChoice->Children[2].Decorators.Insert(OriginalRetreatCondition, 0);
-	TestTrue(TEXT("Only the verified default misplaced retreat condition is repaired"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(MisplacedTree, MisplacedBlackboard));
-	if (!CheckLayeredEnemyTree(*this, *MisplacedTree)) return false;
-	TestTrue(TEXT("Repair preserves the existing retreat action"), MisplacedChoice->Children[0].ChildComposite->Children[0].ChildTask == MisplacedRetreat);
-	TestTrue(TEXT("Repair moves the original retreat condition to the retreat group"), MisplacedChoice->Children[0].Decorators[0] == OriginalRetreatCondition);
-	UBehaviorTree* CustomizedTree = NewObject<UBehaviorTree>();
-	UBlackboardData* CustomizedBlackboard = NewObject<UBlackboardData>(CustomizedTree);
-	if (!TestTrue(TEXT("Custom fixture starts from a valid native template"),
-		UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(CustomizedTree, CustomizedBlackboard))) return false;
-	UBTComposite_Sequence* CustomizedRoot = CastChecked<UBTComposite_Sequence>(CustomizedTree->RootNode);
-	UBTComposite_Selector* CustomizedChoice = CastChecked<UBTComposite_Selector>(CustomizedRoot->Children[2].ChildComposite);
-	UfpstrueBTTask_EnemyAction* CustomizedAction = CastChecked<UfpstrueBTTask_EnemyAction>(CustomizedChoice->Children[0].ChildComposite->Children[0].ChildTask);
-	CustomizedAction->Action = EFPEnemyBehaviorAction::Idle;
-	TestFalse(TEXT("Upgrade refuses a designer-modified behavior branch"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(CustomizedTree, CustomizedBlackboard));
-	TestTrue(TEXT("Rejected upgrade preserves the designer root"), CustomizedTree->RootNode == CustomizedRoot);
-	TestTrue(TEXT("Rejected upgrade preserves the designer action"), CustomizedAction->Action == EFPEnemyBehaviorAction::Idle);
-	TestEqual(TEXT("Rejected upgrade preserves all Blackboard entries"), CustomizedBlackboard->Keys.Num(), 10);
-	UBehaviorTree* CustomConditionTree = NewObject<UBehaviorTree>();
-	UBlackboardData* CustomConditionBlackboard = NewObject<UBlackboardData>(CustomConditionTree);
-	if (!UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(CustomConditionTree, CustomConditionBlackboard)) return false;
-	UBTComposite_Selector* CustomConditionChoice = MakeFlatEnemyTreeFixture(*CustomConditionTree);
-	UBTDecorator* CustomRetreatCondition = CustomConditionChoice->Children[1].Decorators[0];
-	CustomConditionChoice->Children[1].Decorators.Reset();
-	CustomConditionChoice->Children[3].Decorators.Insert(CustomRetreatCondition, 0);
-	TestFalse(TEXT("An arbitrary designer condition move cannot masquerade as the known default repair"),
-		UfpstrueEnemyBehaviorTreeLibrary::UpgradeDefaultTreeForRetreat(CustomConditionTree, CustomConditionBlackboard));
-	TestEqual(TEXT("Rejected condition move preserves the flat designer structure"), CustomConditionChoice->Children.Num(), 7);
-	TestTrue(TEXT("Rejected condition move keeps the designer's condition on the selected branch"),
-		CustomConditionChoice->Children[3].Decorators[0] == CustomRetreatCondition);
-
-	// 已有自定义键的资产不得被默认模板覆盖，拒绝后也不能留下半成品树。
-	UBehaviorTree* UnconfiguredTree = NewObject<UBehaviorTree>();
-	UBlackboardData* DesignerBlackboard = NewObject<UBlackboardData>(UnconfiguredTree);
-	FBlackboardEntry& DesignerKey = DesignerBlackboard->Keys.AddDefaulted_GetRef();
-	DesignerKey.EntryName = TEXT("DesignerAlert");
-	DesignerKey.KeyType = NewObject<UBlackboardKeyType_Bool>(DesignerBlackboard);
-	const int32 OriginalKeyCount = DesignerBlackboard->Keys.Num();
-	TestFalse(TEXT("Existing designer key cannot be overwritten"),
-			  UfpstrueEnemyBehaviorTreeLibrary::PopulateDefaultTree(UnconfiguredTree, DesignerBlackboard));
-	TestEqual(TEXT("Rejected Blackboard retains all keys"), DesignerBlackboard->Keys.Num(), OriginalKeyCount);
-	TestNull(TEXT("Rejected tree has not been partially populated"), UnconfiguredTree->RootNode.Get());
+	FBlackboardEntry& TacticalEntry = Blackboard->Keys[Blackboard->GetKeyID(FPEnemyBlackboard::TacticalGoal)];
+	UBlackboardKeyType* OriginalGoalType = TacticalEntry.KeyType;
+	TacticalEntry.KeyType = NewObject<UBlackboardKeyType_Bool>(Blackboard);
+	TestFalse(TEXT("The tactical destination must remain a Vector key"), FPHasEnemyBlackboardSchema(Blackboard));
+	TacticalEntry.KeyType = OriginalGoalType;
+	TestTrue(TEXT("Restored full contract is valid"), FPHasEnemyBlackboardSchema(Blackboard));
+	Blackboard->Keys.RemoveAt(Blackboard->GetKeyID(FPEnemyBlackboard::HasInnerSlot));
+	TestFalse(TEXT("A missing tactical key no longer enters a legacy schema branch"), FPHasEnemyBlackboardSchema(Blackboard));
+	TestTrue(TEXT("The authored Blackboard remains valid and unchanged"), FPHasEnemyBlackboardSchema(Asset));
 	return true;
 }
 
@@ -2206,8 +2080,14 @@ bool FFPEnemyBehaviorStartupTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Repeated completed stops do not repeat movement cleanup"), Controller->MoveRequestRevision, FailedStopRevision);
 	Controller->UnPossess();
 	Controller->BehaviorTreeAsset = nullptr;
+	AddExpectedError(TEXT("has an incompatible Blackboard; activation rejected"), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedError(TEXT("No valid enemy BehaviorTree is available"), EAutomationExpectedErrorFlags::Contains, 1);
 	Controller->Possess(Enemy);
-	TestTrue(TEXT("A new Possess can start the valid native tree"), Controller->IsBehaviorReady());
+	TestFalse(TEXT("A missing configured asset cannot create a hidden runtime tree"), Controller->IsBehaviorReady());
+	Controller->UnPossess();
+	Controller->BehaviorTreeAsset = GetDefault<AfpstrueEnemyAIController>()->BehaviorTreeAsset;
+	Controller->Possess(Enemy);
+	TestTrue(TEXT("A new Possess starts the authored project tree"), Controller->IsBehaviorReady());
 	Controller->InitializeCombatContext(Target, nullptr);
 	Controller->StopAI();
 	const uint32 CompletedStopRevision = Controller->MoveRequestRevision;

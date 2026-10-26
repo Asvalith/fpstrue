@@ -1,5 +1,14 @@
 # FPS 当前验收与历史迁移记录
 
+## 2026-10-26：删除冗余并收敛入口
+
+- 删除运行时建树/旧树升级和旧黑板兼容；只运行已配置的正式行为树。保留正式资产仍引用的节点类型，不保留旧构造/迁移方法。
+- 删除CancelPvpConnection、无调用的ResetMovementModifiers/RejectNetworkShot及测试专用StartFire/StopFire；统一LeavePvp、真实ASC输入与现有拒绝链。重连和Fire内部步骤收回private。
+- 正常双端驱动迁入既有PlayerSmokeDriver，通过GameState诊断入口按NormalPair启动，删除角色console审计链、单人分支和旧旗标。
+- 删除已完成迁移/修复Editor工具、旧UI场地创建器及34个退役脚本；CPU/GPU导出收为一个工具。已有素材、历史数据、失败证据和用户注释保留。
+- Editor首次已完成C++编译但旧编辑器占用DLL导致链接失败；窗口退出后仅补链接通过。Shipping编译通过；35项受影响回归全部通过（29 clean、6 warned，0 failed/notRun）。没有重跑压测或把旧98项结果写成本轮通过。
+- 当前导航统一README、CONFIGURATION与Tools/README；[本轮摘要](Testing/entry-consolidation-20261026.json)保留报告哈希与边界。原网络实测仍对应3c59c4f，不重新包装为新成绩。
+
 ## 2026-10-26：自适应补发、唯一授权与去过度设计
 
 - 动态RTT复用同一探测，驱动20–60ms有限补发；无有效样本回退40ms。单个客户端Timer、8发窗口、每发6次与400ms可靠收尾，没有自研UDP/RTO。

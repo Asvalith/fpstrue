@@ -1,0 +1,239 @@
+{
+  "SchemaVersion": 1,
+  "Scope": "Entry consolidation only; no new weak-network or performance claims. Previous network evidence remains tied to 3c59c4f.",
+  "EditorBuildPassed": true,
+  "ShippingBuildPassed": true,
+  "AffectedAutomation": {
+    "Clean": 29,
+    "Warned": 6,
+    "Failed": 0,
+    "NotRun": 0,
+    "Total": 35,
+    "ReportSha256": "257D98FCC0B4356868B2E139AE0B9E310DC526D5991514C56EEDF2F788C4B946"
+  },
+  "DeletedTrackedSourceAndToolLines": 9966,
+  "AddedTrackedSourceAndToolLines": 986,
+  "RuntimeOriginalCommentsPreserved": true,
+  "UserFloorSha256": "4C0ECF0AC0702CC2BD355EC050232A61C49E10F102448EFBEB735A51824ADEF6",
+  "Retired": [
+    "runtime BT factory and legacy upgrade library",
+    "optional legacy blackboard schema",
+    "unused input aliases and rejection/movement helpers",
+    "one-time asset/animation/HUD migration commands",
+    "old single-player performance launch chain",
+    "duplicate CPU/GPU exporters",
+    "unreferenced wave statistics and old switch alias"
+  ],
+  "Tests": [
+    {
+      "Name": "fpstrue.AI.BehaviorTree.AssetGraphAndBindings.DefaultProjectAssets",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.AssetSafety",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.BlackboardKeyCache",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.DefaultStructure",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.LowHealthRetreatLifecycle",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.RuntimeLifecycle",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.RemainingCooldownAndShotFact",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ShotPresentationIdentityOnReentry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.StaleTransactionCallbacksIgnored",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.AmmoSnapshotAckReordering",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.BatchFireAuthorizationAndNativeIsolation",
+      "State": "Success",
+      "Warnings": 3,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail",
+      "State": "Success",
+      "Warnings": 1,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.ReloadPlaybackAdoptionAndAuthorityClock",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Reconnect.CancelInvalidatesOldTravelAndRetry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Reconnect.DeferredTravelAndBoundedActiveSlotRetry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Reconnect.HudRebindAndCurrentSnapshot",
+      "State": "Success",
+      "Warnings": 2,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Reconnect.ServerRetentionAndSingleUseClaim",
+      "State": "Success",
+      "Warnings": 2,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState",
+      "State": "Success",
+      "Warnings": 1,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle",
+      "State": "Success",
+      "Warnings": 5,
+      "Errors": 0
+    }
+  ]
+}

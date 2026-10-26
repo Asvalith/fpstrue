@@ -37,7 +37,7 @@ public:
 	// 当前本地玩家连接IP或主机名，可附带端口。
 	UFUNCTION(Exec)
 	void JoinPvp(const FString& Address);
-	UFUNCTION(Exec) void CancelPvpConnection();
+	// 取消连接与主动离场共用这个入口。
 	UFUNCTION(Exec) void LeavePvp();
 	UFUNCTION(Exec) void RetryPvpConnection();
 	// UI 读取本地连接阶段；服务端接纳后仍可能等待必要复制数据到达。

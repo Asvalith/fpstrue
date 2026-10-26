@@ -80,9 +80,7 @@ DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("AI Attack Budget Rejected Count"), S
 									  STATGROUP_fpstruePerformance, FPSTRUE_API);
 
 // 波次生成耗时与数量，主要观察分帧生成是否消除了集中 Spawn 尖峰。
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Wave Spawn Time"), STAT_fpstrueWaveSpawnTime, STATGROUP_fpstruePerformance, FPSTRUE_API);
-
-DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Enemy Spawn Count"), STAT_fpstrueEnemySpawnCount, STATGROUP_fpstruePerformance, FPSTRUE_API);
+// 对应的旧单机统计已退役；保留原注释，生成仅由多人 GameMode 管理。
 
 // 近战窗口的 Sweep 耗时、执行次数和返回命中数，用于证明碰撞查询是否值得继续优化。
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Attack Sweep Time"), STAT_fpstrueAttackSweepTime, STATGROUP_fpstruePerformance, FPSTRUE_API);
