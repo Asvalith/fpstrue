@@ -21,6 +21,7 @@ param(
     [ValidateRange(90,600)][int]$TimeoutSeconds = 300,
     [ValidateSet('30')][string]$ServerTickRate = '30',
     [ValidateSet('System','Respect')][string]$ServerTimerResolutionPolicy = 'System',
+    [ValidateSet('Adaptive','FixedReference')][string]$ShotRetryPolicy = 'Adaptive',
     [string]$BudgetFile = '',
     [switch]$EnableNetTrace,
     [switch]$DropFirstFireActivation,
@@ -162,7 +163,43 @@ function Get-NetworkFingerprint([string]$Root,[string]$MapPackage) {
     $Paths+=@(Get-ChildItem -LiteralPath (Join-Path $Root 'Source'),(Join-Path $Root 'Config') -Recurse -File | Where-Object {$_.Extension -in @('.h','.cpp','.cs','.ini')} | Select-Object -ExpandProperty FullName)
     return @($Paths | Sort-Object -Unique | ForEach-Object {[pscustomobject]@{Path=$_;Sha256=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash}})
 }
-function Test-NetworkCapacity([string]$Directory,[int]$Clients,$Budget,[string]$Profile,[int]$Enemies=160,[string]$TimerPolicy='System') {
+function Get-NetworkRetryPolicyArguments([string]$Policy) {
+    if($Policy -eq 'Adaptive'){return @()}
+    if($Policy -eq 'FixedReference'){return @('-PvpFixedShotRetry')}
+    throw 'Unknown shot retry policy.'
+}
+function Test-NetworkActivationLoss([string]$ServerText,[string]$ClientText,$Latency) {
+    $Failures=[Collections.Generic.List[string]]::new()
+    $Started=@([regex]::Matches($ClientText,'PVP_NET_FAULT\b[^\r\n]*\bKind=FirstFireActivation\b[^\r\n]*\bState=Started\b[^\r\n]*'))
+    $Restored=@([regex]::Matches($ClientText,'PVP_NET_FAULT\b[^\r\n]*\bKind=FirstFireActivation\b[^\r\n]*\bState=Restored\b[^\r\n]*'))
+    $FaultValid=$Started.Count -eq 1 -and $Restored.Count -eq 1
+    if($FaultValid){
+        $StartFields=Read-NetworkFields $Started[0].Value;$EndFields=Read-NetworkFields $Restored[0].Value
+        $FaultValid=$StartFields.Client -eq '1' -and $EndFields.Client -eq '1' -and $StartFields.Loss -eq '100' -and $Restored[0].Index -gt $Started[0].Index
+    }
+    if(-not $FaultValid){$Failures.Add('The requested Client1 first-fire transport fault was not configured and restored exactly once.')}
+    $After=if($Started.Count -eq 1){$Started[0].Index}else{0}
+    $First=@([regex]::Matches($ClientText,'PVP_SMOKE\s+CLIENT_SHOT_SUBMIT\b[^\r\n]*')|Where-Object {$_.Index -gt $After -and (Read-NetworkFields $_.Value).Attempt -eq '1'}|Select-Object -First 1)
+    $Prefix=$null
+    if($First.Count -eq 1){
+        $Fields=Read-NetworkFields $First[0].Value
+        if($Fields.WeaponNetGuid -match '^[1-9]\d*$' -and $Fields.Generation -match '^[1-9]\d*$' -and $Fields.Session -match '^[1-9]\d*$'){
+            $Prefix=$Fields.WeaponNetGuid+'/'+$Fields.Generation+'/'+$Fields.Session+'/'
+        }
+    }
+    $Client=@($Latency.Clients|Where-Object Client -eq 'Client1')
+    $Rows=if($Prefix -and $Client.Count -eq 1){@($Client[0].Shots|Where-Object {$_.Identity.StartsWith($Prefix)})}else{@()}
+    if($Rows.Count -eq 0){$Failures.Add('No actual first fire-stream input ledger was observed after the fault.')}
+    if(@($Rows|Where-Object {-not $_.FinalAck -or $_.Result -ne 0 -or $_.LostInputFinalization -or $_.PredictionCount -ne 1 -or $_.ServerTerminalVerdictCount -ne 1 -or @($_.DiagnosticIssues).Count -gt 0}).Count -gt 0){
+        $Failures.Add('First fire-stream inputs were lost, rejected, unfinished or inconsistently finalized after activation loss.')
+    }
+    $AuthorizationWaits=@([regex]::Matches($ServerText,'PVP_SHOT_LIFECYCLE\s+ROUTE\b[^\r\n]*\bDecision=NoAuthorization\b'))
+    if($AuthorizationWaits.Count -gt 0){$Failures.Add('Unreliable input still waited for native reliable activation authorization.')}
+    return [pscustomobject]@{Passed=$Failures.Count -eq 0;Failures=@($Failures);TransportFaultConfiguredAndRestored=$FaultValid
+        FirstStream=$Prefix;FirstStreamShots=$Rows.Count;FirstStreamAccepted=@($Rows|Where-Object Result -eq 0).Count;NoAuthorizationEvents=$AuthorizationWaits.Count
+        Scope='Requires an actual post-fault first-stream ledger and zero authorization waits/lost inputs/rejections. Native packet trace separately proves which datagrams were dropped; this diagnostic does not certify no-trace capacity.'}
+}
+function Test-NetworkCapacity([string]$Directory,[int]$Clients,$Budget,[string]$Profile,[int]$Enemies=160,[string]$TimerPolicy='System',[string]$RetryPolicy='Adaptive') {
     $Failures=[Collections.Generic.List[string]]::new();$Roles=@{}
     foreach ($Role in @('Server')+@(1..$Clients | ForEach-Object {'Client'+$_})) {
         try {
@@ -204,7 +241,7 @@ function Test-NetworkCapacity([string]$Directory,[int]$Clients,$Budget,[string]$
     }
     $Latency=$null
     try{
-        $Latency=& (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $Directory -SameHostUtc | ConvertFrom-Json
+        $Latency=& (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $Directory -SameHostUtc -ExpectedShotRetryPolicy $RetryPolicy | ConvertFrom-Json
         $ProfileBudget=$Budget.Profiles.$Profile
         foreach($Index in 1..$Clients){
             $Client=@($Latency.Clients | Where-Object Client -eq ('Client'+$Index))
@@ -212,6 +249,8 @@ function Test-NetworkCapacity([string]$Directory,[int]$Clients,$Budget,[string]$
             $Row=$Client[0]
             if($Row.Predicted -lt $Budget.MinimumShotsPerClient){$Failures.Add("Client${Index}: insufficient actual shot input.")}
             if($Row.MissingFinalAck -gt 0 -or $Row.InvalidIdentityEvents -gt 0 -or $Row.OrphanShotIdentities -gt 0 -or $Row.ShotsWithDiagnosticIssues -gt 0){$Failures.Add("Client${Index}: incomplete or inconsistent shot confirmation.")}
+            if($null -eq $Row.RetryPolicyMetadataShots -or $Row.RetryPolicyMetadataShots -ne $Row.Predicted -or
+                $null -eq $Row.RetryPolicyVerifiedShots -or $Row.RetryPolicyVerifiedShots -ne $Row.Predicted -or $Row.RetryPolicyViolations -gt 0){$Failures.Add("Client${Index}: retry policy readback is missing or violates its bounded schedule.")}
             foreach($Percentile in @('P95','P99')){
                 $Value=$Row.('PredictionToAck'+$Percentile+'Ms');$Limit=$ProfileBudget.('MaximumPredictionToAck'+$Percentile+'Ms')
                 if($null -eq $Value -or $Value -gt $Limit){$Failures.Add("Client${Index}: $Percentile input-to-final-ACK exceeds budget or is missing.")}
@@ -221,7 +260,8 @@ function Test-NetworkCapacity([string]$Directory,[int]$Clients,$Budget,[string]$
             if($null -eq $Row.PredictionEvidence -or $Row.PredictionEvidence.ConfirmedReloadsWithoutReplay -lt 1){$Failures.Add("Client${Index}: no confirmed local reload prediction was exercised.")}
         }
     }catch{$Failures.Add('Shot accounting unavailable: '+$_.Exception.Message)}
-    return [pscustomobject]@{Passed=$Failures.Count -eq 0;Failures=@($Failures);Roles=$Roles;ShotLatency=$Latency
+    return [pscustomobject]@{Passed=$Failures.Count -eq 0;Failures=@($Failures);Roles=$Roles;ShotLatency=$Latency;ShotRetryPolicy=$RetryPolicy
+        AdaptiveRttObserved=@($Latency.Clients|Where-Object {'Adaptive' -in $_.RetryPoliciesObserved}).Count -gt 0
         Scope='Same-host all-client safe-space movement/fire workload. Engine connection counters include protocol overhead; no NIC-byte, rendered smoothness, player-hit fairness or public-network claim.'}
 }
 
@@ -266,6 +306,23 @@ PVP_CAPACITY STOP Role=Client Client=1 LocalSeconds=11
     Assert-NetworkSelfTest 'World wall is reported independently without deriving blocked time' ($WallCosts.WorldTickWallSamples -eq 2 -and $WallCosts.WorldTickWallMeanMs -eq 10 -and $WallCosts.WorldTickWallP95Ms -eq 12)
     $Rejected=$false;try{$null=Get-NetworkWindow ($Fixture+"`nPVP_CAPACITY START LocalSeconds=12")}catch{$Rejected=$true}
     Assert-NetworkSelfTest 'Duplicate captures cannot silently merge' $Rejected
+    Assert-NetworkSelfTest 'Adaptive policy keeps the production default without a reference override' (@(Get-NetworkRetryPolicyArguments 'Adaptive').Count -eq 0)
+    Assert-NetworkSelfTest 'Fixed reference has one explicit non-shipping override' ((@(Get-NetworkRetryPolicyArguments 'FixedReference') -join ' ') -eq '-PvpFixedShotRetry')
+    $Rejected=$false;try{$null=Get-NetworkRetryPolicyArguments 'Adaptive,FixedReference'}catch{$Rejected=$true}
+    Assert-NetworkSelfTest 'A policy list cannot silently pool adaptive and reference' $Rejected
+    $FaultClient="PVP_NET_FAULT Kind=FirstFireActivation State=Started Client=1 Frame=10 Loss=100`nPVP_SMOKE CLIENT_SHOT_SUBMIT ShotId=1 Session=1 Generation=1 WeaponNetGuid=16 Attempt=1`nPVP_NET_FAULT Kind=FirstFireActivation State=Restored Client=1 Frame=11 Loss=5"
+    $FaultShot=[pscustomobject]@{Identity='16/1/1/1';Result=0;FinalAck=$true;LostInputFinalization=$false;PredictionCount=1;ServerTerminalVerdictCount=1;DiagnosticIssues=@()}
+    $FaultLedger=[pscustomobject]@{Clients=@([pscustomobject]@{Client='Client1';Shots=@($FaultShot)})}
+    Assert-NetworkSelfTest 'Activation-loss diagnostic requires the real post-fault first-stream ledger' (Test-NetworkActivationLoss '' $FaultClient $FaultLedger).Passed
+    Assert-NetworkSelfTest 'An authorization wait cannot pass after the reliable activation loss' (-not (Test-NetworkActivationLoss 'PVP_SHOT_LIFECYCLE ROUTE Spec=1 Decision=NoAuthorization' $FaultClient $FaultLedger).Passed)
+    Assert-NetworkSelfTest 'Missing first-stream inputs cannot be replaced with another client results' (-not (Test-NetworkActivationLoss '' $FaultClient ([pscustomobject]@{Clients=@([pscustomobject]@{Client='Client2';Shots=@($FaultShot)})})).Passed)
+    Assert-NetworkSelfTest 'Missing fault restoration does not prove a completed fault case' (-not (Test-NetworkActivationLoss '' $FaultClient.Replace('State=Restored','State=Unfinished') $FaultLedger).Passed)
+    $FaultShot.Result=5
+    Assert-NetworkSelfTest 'A stale first-stream rejection is not activation-loss success' (-not (Test-NetworkActivationLoss '' $FaultClient $FaultLedger).Passed)
+    $FaultShot.Result=10;$FaultShot.LostInputFinalization=$true
+    Assert-NetworkSelfTest 'Reliable lost-input finalization cannot disguise an activation-loss pass' (-not (Test-NetworkActivationLoss '' $FaultClient $FaultLedger).Passed)
+    $FaultShot.Result=0;$FaultShot.LostInputFinalization=$false;$FaultShot.FinalAck=$false
+    Assert-NetworkSelfTest 'An unfinished first-stream ledger cannot pass its fault scenario' (-not (Test-NetworkActivationLoss '' $FaultClient $FaultLedger).Passed)
     [pscustomobject]@{Mode='SelfTest';Passed=$true;Checks=$Checks.Count;Scenarios=@($Checks);Scope='Pure parser/units/invalid-evidence checks; no UE processes or network acceptance.'}|ConvertTo-Json -Depth 4
     return
 }
@@ -278,7 +335,7 @@ if($ClientCounts.Count -eq 0 -or $Profiles.Count -eq 0 -or @($ClientCounts | Sel
 if($ServerTimerResolutionPolicy -ne 'System' -and $Suite -ne 'Capacity'){throw 'ServerTimerResolutionPolicy is an isolated Capacity diagnostic; select -Suite Capacity.'}
 if($AnalyzeDirectory){
     if($ClientCounts.Count -ne 1 -or $Profiles.Count -ne 1){throw 'AnalyzeDirectory requires one client count and one profile.'}
-    $Analysis=Test-NetworkCapacity (Resolve-Path -LiteralPath $AnalyzeDirectory).Path $ClientCounts[0] $Budget $Profiles[0] $EnemyPopulation $ServerTimerResolutionPolicy
+    $Analysis=Test-NetworkCapacity (Resolve-Path -LiteralPath $AnalyzeDirectory).Path $ClientCounts[0] $Budget $Profiles[0] $EnemyPopulation $ServerTimerResolutionPolicy $ShotRetryPolicy
     $Analysis | ConvertTo-Json -Depth 14
     if(-not $Analysis.Passed){exit 1}
     return
@@ -300,6 +357,9 @@ $Plan=[pscustomobject]@{Directory=$Run;Cases=$Cases;BudgetFile=[IO.Path]::GetFul
     TraceDiagnostic=[bool]$EnableNetTrace;FormalRepeats=$Repeat -ge $Budget.MinimumFormalRepeats
     WarmupSeconds=$WarmupSeconds;CaptureSeconds=$CaptureSeconds;EnemyPopulation=$EnemyPopulation;ServerTickRate=$ServerTickRate;ClientFrameRateCapHz=60
     ServerTimerResolutionPolicy=$ServerTimerResolutionPolicy
+    ShotRetryPolicy=$ShotRetryPolicy;RetryPolicyArguments=@(Get-NetworkRetryPolicyArguments $ShotRetryPolicy)
+    AdaptiveRetryFormula='clamp(SRTTms + 2 * RTTVARms, 20, 60); only new-input piggyback may use 20ms instead, with the same six-attempt and 400ms sender bounds.'
+    RetryPolicyBoundary='One configured policy per invocation. Adaptive may explicitly fall back without fresh RTT. FixedReference changes only the base interval to 40ms in the same algorithm; it is not the whole previous implementation, is never pooled with adaptive, and cannot certify the production policy.'
     TimerPolicyBoundary='System leaves OS policy unchanged. Respect is server-only diagnostic policy for existing timer-resolution requests; it is not an extra timer-resolution request and requires source Applied=1 readback. Never pool different policies.'
     Boundary='2/4/8 are requested workloads, not claimed supported capacities. Functional correctness, strict experience, illegal-late policy and capacity are separate results. Trace changes cost and cannot certify no-trace performance.'}
 if($DryRun){$Plan|ConvertTo-Json -Depth 8;return}
@@ -317,13 +377,13 @@ foreach($Case in $Cases){
     if($CasePort -gt 65535){throw 'Matrix ports exceed the UDP range.'}
     $CaseDirectory=Join-Path $Run $Case.Name;$null=New-Item -ItemType Directory -Path $CaseDirectory
     $ProfileSettings=$Budget.Profiles.($Case.Profile)
-    $Result=[ordered]@{Name=$Case.Name;Kind=$Case.Kind;Clients=$Case.Clients;Profile=$Case.Profile;Round=$Case.Round;Passed=$false;Failure=$null;Directory=$CaseDirectory;DiagnosticOnly=[bool]($EnableNetTrace -or $DropFirstFireActivation -or $ServerTimerResolutionPolicy -ne 'System');ServerTimerResolutionPolicy=$ServerTimerResolutionPolicy;FaultInjection=$(if($DropFirstFireActivation){'Client1FirstFireOneWorldFlushLoss'}else{'None'})}
+    $Result=[ordered]@{Name=$Case.Name;Kind=$Case.Kind;Clients=$Case.Clients;Profile=$Case.Profile;Round=$Case.Round;Passed=$false;Failure=$null;Directory=$CaseDirectory;DiagnosticOnly=[bool]($EnableNetTrace -or $DropFirstFireActivation -or $ServerTimerResolutionPolicy -ne 'System' -or $ShotRetryPolicy -eq 'FixedReference');ServerTimerResolutionPolicy=$ServerTimerResolutionPolicy;ShotRetryPolicy=$ShotRetryPolicy;FaultInjection=$(if($DropFirstFireActivation){'Client1FirstFireOneWorldFlushLoss'}else{'None'})}
     try{
         if((Get-FileHash -LiteralPath $BudgetFile -Algorithm SHA256).Hash -ne $BudgetHash -or (Get-NetworkFingerprint $ProjectRoot $Map | ConvertTo-Json -Depth 3 -Compress) -cne $FingerprintJson){throw 'Frozen budget or build/source/configuration changed.'}
         if($Case.Kind -ne 'Capacity'){
             $SmokeParams=@{ProjectRoot=$ProjectRoot;EngineRoot=$EngineRoot;Map=$Map;Port=$CasePort;TimeoutSeconds=$TimeoutSeconds
                 PacketLagMs=[int]$ProfileSettings.OutgoingLagMs;PacketLagVarianceMs=[int]$ProfileSettings.LagVarianceMs;PacketLossPercent=[int]$ProfileSettings.LossPercent
-                IncludeReconnect=($Case.Kind -in @('Reconnect','Policy'));DeepChecks=$true;IncludePve=$true;EnableNetTrace=[bool]$EnableNetTrace;TraceMaxMiB=$TraceMaxMiB}
+                IncludeReconnect=($Case.Kind -in @('Reconnect','Policy'));DeepChecks=$true;IncludePve=$true;EnableNetTrace=[bool]$EnableNetTrace;TraceMaxMiB=$TraceMaxMiB;ShotRetryPolicy=$ShotRetryPolicy}
             if($Case.Kind -eq 'Reconnect'){$SmokeParams.ReconnectMode='TransportOutage';$SmokeParams.RenderedClients=[bool]$RenderedReconnect}
             if($Case.Kind -eq 'Policy'){$SmokeParams.WeakPolicyCorrectness=$true}
             # A policy-correct stale rejection never substitutes for this strict run.
@@ -342,6 +402,7 @@ foreach($Case in $Cases){
                 ('-PktLag='+$ProfileSettings.OutgoingLagMs),('-PktLagVariance='+$ProfileSettings.LagVarianceMs),('-PktLoss='+$ProfileSettings.LossPercent),
                 '-ini:Engine:[/Script/OnlineSubsystemUtils.IpNetDriver]:NetServerMaxTickRate=30',
                 ('-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyPopulation='+$EnemyPopulation))
+            $Shared+=@(Get-NetworkRetryPolicyArguments $ShotRetryPolicy)
             try{
                 foreach($RoleIndex in 0..$Case.Clients){
                     $Role=if($RoleIndex -eq 0){'Server'}else{'Client'+$RoleIndex};$Log=Join-Path $CaseDirectory ($Role+'.log')
@@ -395,10 +456,15 @@ foreach($Case in $Cases){
                 $Result['CleanupFailures']=@($CleanupFailures)
             }
             if($CleanupFailures.Count -gt 0){throw ($CleanupFailures -join ' | ')}
-            $Acceptance=Test-NetworkCapacity $CaseDirectory $Case.Clients $Budget $Case.Profile $EnemyPopulation $ServerTimerResolutionPolicy
+            $Acceptance=Test-NetworkCapacity $CaseDirectory $Case.Clients $Budget $Case.Profile $EnemyPopulation $ServerTimerResolutionPolicy $ShotRetryPolicy
             $Result['Acceptance']=$Acceptance;$Result.Passed=[bool]$Acceptance.Passed
             if(-not $Acceptance.Passed){$Result.Failure=$Acceptance.Failures -join ' | '}
-            if($EnableNetTrace){$Result['NoTraceBudgetCertified']=$false;$Result.Passed=$false;$Result.Failure='Trace diagnostic retained; run without trace for capacity acceptance.'}
+            if($DropFirstFireActivation){
+                $FaultEvidence=Test-NetworkActivationLoss (Read-NetworkLog (Join-Path $CaseDirectory 'Server.log')) (Read-NetworkLog (Join-Path $CaseDirectory 'Client1.log')) $Acceptance.ShotLatency
+                $Result['ActivationLossEvidence']=$FaultEvidence
+                if(-not $FaultEvidence.Passed){$Result.Passed=$false;$Result.Failure=($Result.Failure+' '+($FaultEvidence.Failures -join ' | ')).Trim()}
+            }
+            if($EnableNetTrace){$Result['NoTraceBudgetCertified']=$false;$Result.Passed=$false;$Result.Failure=('Trace diagnostic retained; run without trace for capacity acceptance. '+$Result.Failure).Trim()}
         }
     }
     catch{$Result.Passed=$false;$Result.Failure=$_.Exception.Message}
@@ -408,9 +474,9 @@ foreach($Case in $Cases){
     $Results.Add([pscustomobject]$Result);Write-NetworkJson $Result (Join-Path $CaseDirectory 'Result.json')
     Write-Output ($Case.Name+': '+$(if($Result.Passed){'PASS'}else{'FAIL - '+$Result.Failure}))
 }
-$Formal=$Repeat -ge $Budget.MinimumFormalRepeats -and $CaptureSeconds -ge $Budget.MinimumCaptureSeconds -and -not $EnableNetTrace -and $ServerTimerResolutionPolicy -eq 'System'
+$Formal=$Repeat -ge $Budget.MinimumFormalRepeats -and $CaptureSeconds -ge $Budget.MinimumCaptureSeconds -and -not $EnableNetTrace -and $ServerTimerResolutionPolicy -eq 'System' -and $ShotRetryPolicy -eq 'Adaptive'
 $Summary=[pscustomobject]@{Passed=@($Results|Where-Object {-not $_.Passed}).Count -eq 0;FormalCapacityCertified=($Suite -in @('Capacity','All') -and $Formal -and @($Results|Where-Object { $_.Kind -eq 'Capacity' -and -not $_.Passed }).Count -eq 0)
-    Directory=$Run;Plan=$Plan;Results=@($Results);BudgetSha256=$BudgetHash;Scope='Bounded local Editor evidence only; no WAN, Shipping, anticheat, rendered smoothness or dynamic-cover fairness certification.'}
+    Directory=$Run;Plan=$Plan;Results=@($Results);BudgetSha256=$BudgetHash;ShotRetryPolicy=$ShotRetryPolicy;Scope='Bounded local Editor evidence only; no WAN, Shipping, anticheat, rendered smoothness or dynamic-cover fairness certification.'}
 Write-NetworkJson $Summary (Join-Path $Run 'Summary.json')
 $Summary|ConvertTo-Json -Depth 5
 if(-not $Summary.Passed){exit 1}

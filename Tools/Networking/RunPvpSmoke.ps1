@@ -40,6 +40,7 @@ param(
     [ValidateRange(0, 1000)][int]$PacketLagMs = 0,
     [ValidateRange(0, 1000)][int]$PacketLagVarianceMs = 0,
     [ValidateRange(0, 100)][int]$PacketLossPercent = 0,
+    [ValidateSet('Adaptive', 'FixedReference')][string]$ShotRetryPolicy = 'Adaptive',
     [bool]$DeepChecks = $true,
     [bool]$IncludePve = $true,
     [bool]$IncludeReconnect = $true,
@@ -80,6 +81,18 @@ function Get-SmokeTraceArtifact([string]$Role, [string]$Path) {
     # A locked/missing trace is structured incomplete evidence. It must never
     # throw out of finally and prevent the main failed report from being saved.
     return [pscustomobject]$Artifact
+}
+function Get-SmokeRetryPolicyEvidence($Latency, [string]$ExpectedPolicy) {
+    $Active=@($Latency.Clients|Where-Object {$_.Predicted -gt 0})
+    $Observed=@($Active|ForEach-Object {$_.RetryPoliciesObserved}|Sort-Object -Unique)
+    $Allowed=if($ExpectedPolicy -eq 'FixedReference'){@('FixedReference')}else{@('Adaptive','Fallback')}
+    $Wrong=@($Observed|Where-Object {$_ -notin $Allowed})
+    $Missing=@($Active|Where-Object {$null -eq $_.RetryPolicyMetadataShots -or $_.RetryPolicyMetadataShots -ne $_.Predicted -or
+        $null -eq $_.RetryPolicyVerifiedShots -or $_.RetryPolicyVerifiedShots -ne $_.Predicted -or $_.RetryPolicyViolations -gt 0})
+    return [pscustomobject]@{Passed=$Active.Count -gt 0 -and $Observed.Count -gt 0 -and $Wrong.Count -eq 0 -and $Missing.Count -eq 0
+        RequestedPolicy=$ExpectedPolicy;ObservedPolicies=$Observed;AdaptiveRttObserved=('Adaptive' -in $Observed)
+        FallbackObserved=('Fallback' -in $Observed);ActiveClients=$Active.Count
+        Scope='Readback verifies the actual submit policy, interval and bounded sender lifetime. Fallback is usable but is not evidence that fresh RTT drove an adaptive decision.'}
 }
 function Get-SmokeLiveReconnectEvidence([string]$ServerText, [string]$ClientText, [int]$ClientPid, [string]$ResumeId, [int]$ReadyIndex) {
     $PidPattern = [regex]::Escape([string]$ClientPid)
@@ -150,7 +163,7 @@ if ($SelfTest) {
     if ($null -eq $ConfigNode) { throw 'Smoke SelfTest could not find its production scenario configuration.' }
     . ([scriptblock]::Create($ConfigNode.Extent.Text))
     foreach ($FunctionName in @('Get-SmokeShotIdentity', 'Get-SmokeShotLedger', 'Get-SmokeMovingHitEvidence', 'Get-SmokeWeakPolicyEvidence',
-        'Get-SmokeRequiredDeepEvidence', 'Test-SmokeFailureLog', 'Get-SmokeTraceArguments', 'Get-SmokeLiveReconnectEvidence', 'Get-SmokeRecoveryPerformanceText', 'Get-SmokeClientRoleMap', 'Get-SmokeMovingHitIdentity', 'Test-SmokeMovingHealthDecrease', 'Get-SmokeNativeViewAlignment')) {
+        'Get-SmokeRequiredDeepEvidence', 'Test-SmokeFailureLog', 'Get-SmokeTraceArguments', 'Get-SmokeRetryPolicyEvidence', 'Get-SmokeLiveReconnectEvidence', 'Get-SmokeRecoveryPerformanceText', 'Get-SmokeClientRoleMap', 'Get-SmokeMovingHitIdentity', 'Test-SmokeMovingHealthDecrease', 'Get-SmokeNativeViewAlignment')) {
         $FunctionNode = $SelfAst.Find({ param($Node)
             $Node -is [Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $FunctionName
         }, $true)
@@ -330,6 +343,14 @@ if ($SelfTest) {
     Assert-SmokeSelfTest 'Overwriting subsequent predictions with authority ammo fails refund acceptance' (-not (Get-SmokeWeakPolicyEvidence $PolicyServer @($InjectedPolicyClient.Replace('Result=5 BaseAmmo=29 DisplayAmmo=28','Result=5 BaseAmmo=29 DisplayAmmo=29')) $true).Passed)
     $LatencySelfTest = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -SelfTest | ConvertFrom-Json
     Assert-SmokeSelfTest 'Shot latency parser preserves missing/phase/retry evidence' ([bool]$LatencySelfTest.Passed)
+    $RetryReadback=[pscustomobject]@{Clients=@([pscustomobject]@{Predicted=2;RetryPolicyMetadataShots=2;RetryPolicyVerifiedShots=2;RetryPolicyViolations=0;RetryPoliciesObserved=@('Adaptive','Fallback')})}
+    Assert-SmokeSelfTest 'Adaptive readback can retain a bounded fallback without mixing the reference policy' (Get-SmokeRetryPolicyEvidence $RetryReadback 'Adaptive').Passed
+    Assert-SmokeSelfTest 'An adaptive run cannot certify a fixed-reference request' (-not (Get-SmokeRetryPolicyEvidence $RetryReadback 'FixedReference').Passed)
+    $FallbackReadback=[pscustomobject]@{Clients=@([pscustomobject]@{Predicted=1;RetryPolicyMetadataShots=1;RetryPolicyVerifiedShots=1;RetryPolicyViolations=0;RetryPoliciesObserved=@('Fallback')})}
+    $FallbackPolicy=Get-SmokeRetryPolicyEvidence $FallbackReadback 'Adaptive'
+    Assert-SmokeSelfTest 'No fresh RTT remains fallback instead of claiming an observed adaptive RTT decision' ($FallbackPolicy.Passed -and $FallbackPolicy.FallbackObserved -and -not $FallbackPolicy.AdaptiveRttObserved)
+    $LegacyReadback=[pscustomobject]@{Clients=@([pscustomobject]@{Predicted=1})}
+    Assert-SmokeSelfTest 'Missing new policy fields cannot certify a newly launched run' (-not (Get-SmokeRetryPolicyEvidence $LegacyReadback 'Adaptive').Passed)
     [pscustomobject]@{ Mode = 'SelfTest'; Passed = $true; Checks = $SelfChecks.Count; Scenarios = @($SelfChecks)
         ShotLatencyParserChecks = $LatencySelfTest.Checks
         Scope = 'Offline production-parser/options/evidence regression only; no UE, game process, network or disk output. Not gameplay/network acceptance.' } | ConvertTo-Json -Depth 4
@@ -501,6 +522,7 @@ if ($IncludeReconnect) { $SharedArguments += '-PvpSmokeReconnect' }
 if ($IncludeReconnect -and $ReconnectMode -eq 'TransportOutage') { $SharedArguments += '-PvpSmokeLiveReconnect' }
 if ($WeakPolicyCorrectness) { $SharedArguments += '-PvpWeakPolicyCorrectness' }
 if ($MovingHit) { $SharedArguments += '-PvpSmokeMovingHit' }
+if ($ShotRetryPolicy -eq 'FixedReference') { $SharedArguments += '-PvpFixedShotRetry' }
 $ClientSharedArguments = @($SharedArguments)
 if ($RenderedClients) {
     # This removes NullRHI only from clients. RenderOffscreen still renders the
@@ -599,6 +621,7 @@ if ($DryRun) {
         IncludePve = $IncludePve
         IncludeReconnect = $IncludeReconnect
         ReconnectMode = $ReconnectMode
+        ShotRetryPolicy = $ShotRetryPolicy
         Trace = @{ Enabled = [bool]$EnableNetTrace; Paths = $TracePaths; MaxTotalMiB = $TraceMaxMiB; DiagnosticOnly = $true }
         RenderedClients = [bool]$RenderedClients
         VisibleClients = [bool]$VisibleClients
@@ -1767,8 +1790,13 @@ finally {
     }
     $LatencyEvidence = $null
     if (Test-Path -LiteralPath $ServerLog -PathType Leaf) {
-        try { $LatencyEvidence = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $OutputDirectory -SameHostUtc:(!$IsRemote) | ConvertFrom-Json }
+        try { $LatencyEvidence = & (Join-Path $PSScriptRoot 'MeasureFpsShotLatency.ps1') -RunDirectory $OutputDirectory -SameHostUtc:(!$IsRemote) -ExpectedShotRetryPolicy $ShotRetryPolicy | ConvertFrom-Json }
         catch { $LatencyEvidence = @{ Error=$_.Exception.Message; Scope='Latency evidence unavailable; never substitute zero latency.' } }
+    }
+    $RetryPolicyEvidence = Get-SmokeRetryPolicyEvidence $LatencyEvidence $ShotRetryPolicy
+    if ($DeepChecks -and -not $RetryPolicyEvidence.Passed) {
+        $Succeeded = $false
+        $FailureReason = ($FailureReason + ' Shot retry policy readback is missing, mixed, or violates the bounded schedule.').Trim()
     }
     if ($DeepChecks -and $null -ne $LatencyEvidence) {
         $ActivePredictionClients = @($LatencyEvidence.Clients | Where-Object { $_.Predicted -gt 0 })
@@ -1811,6 +1839,8 @@ finally {
         IncludePve = $IncludePve
         IncludeReconnect = $IncludeReconnect
         ReconnectMode = $ReconnectMode
+        ShotRetryPolicy = $ShotRetryPolicy
+        ShotRetryPolicyEvidence = $RetryPolicyEvidence
         RenderedClients = [bool]$RenderedClients
         VisibleClients = [bool]$VisibleClients
         MovingHit = [bool]$MovingHit

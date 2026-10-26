@@ -211,6 +211,29 @@ bool FFpstrueDynamicRoundTripTest::RunTest(const FString&)
 	Receive(MAX_uint32, 0.01, 400.0);
 	TestEqual(TEXT("A pre-wrap late reply cannot rewrite the post-wrap baseline"), Controller->SmoothedRoundTripTime, WrappedSrtt);
 	Controller->ResetTimeSamples();
+	Receive(1, .982);
+	Receive(2, .280);
+	TestTrue(TEXT("A substantially better startup baseline rebuilds both RTT and its standard half-RTT initial variation"),
+		FMath::Abs(Controller->SmoothedRoundTripTime - .280) < .003
+		&& FMath::Abs(Controller->RoundTripVariation - .140) < .003);
+	Receive(3, .268);
+	Receive(4, .284);
+	Receive(5, .292);
+	TestTrue(TEXT("Ordinary samples after the improved baseline converge without the abandoned startup residual"),
+		FMath::Abs(Controller->SmoothedRoundTripTime - .2807890625) < .003
+		&& FMath::Abs(Controller->RoundTripVariation - .064984375) < .003);
+	const double BeforeCongestion = Controller->SmoothedRoundTripTime;
+	const double BeforeCongestionVariation = Controller->RoundTripVariation;
+	const double BeforeCongestionClock = Controller->ServerClockOffset;
+	Receive(6, .9, 99.7);
+	TestTrue(TEXT("A real congestion spike still increases the same RTT estimator"),
+		Controller->SmoothedRoundTripTime > BeforeCongestion && Controller->RoundTripVariation > BeforeCongestionVariation);
+	TestEqual(TEXT("Network congestion observation remains separate from clock quality selection"), Controller->ServerClockOffset, BeforeCongestionClock);
+	const double CongestedSrtt = Controller->SmoothedRoundTripTime;
+	Receive(7, .268);
+	TestTrue(TEXT("Returning to an existing best baseline keeps normal congestion smoothing rather than resetting it away"),
+		FMath::Abs(Controller->SmoothedRoundTripTime - (CongestedSrtt * .875 + .268 * .125)) < .003);
+	Controller->ResetTimeSamples();
 	TestFalse(TEXT("Leaving the controller clears RTT observations"), Controller->HasRoundTripTimeSample());
 	TestFalse(TEXT("Leaving the controller clears the client clock baseline"), Controller->HasServerTimeSample());
 	return true;

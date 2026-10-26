@@ -1218,6 +1218,9 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	LateRequest.ServerFireTime = World->GetTimeSeconds();
 	LateRequest.AimDirection = FVector::UpVector;
 	const TArray<FFPShotRequest> LateBatch{LateRequest};
+	const FFPShotStreamIdentity LateStream{LateRequest.Weapon, LateRequest.EquipmentGeneration, LateRequest.FireSession, 1};
+	// 完整批次现在可以授权远端Fire；先真实取消这轮，才能把随后到达的数据称为迟到旧输入。
+	HealthASC->ServerFinishShotInputs_Implementation(FireSpec->Handle, OldKey, LateStream, {}, true, false);
 	// 不先 AddDelegate 制造缓存；未知、非活动和旧激活键的数据都必须在入口被消费/拒绝。
 	HealthASC->ServerSubmitShotBatch_Implementation(InvalidHandle, OldKey, 1, LateBatch);
 	HealthASC->ServerSetReplicatedTargetData_Implementation(InvalidHandle, OldKey, LateData, FGameplayTag(), FPredictionKey());
@@ -1230,7 +1233,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	ASC->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Aim));
 	if (!TestTrue(TEXT("Old-key check uses a genuinely active production ability"), AimSpec->IsActive())) return false;
 	HealthASC->ServerSubmitShotBatch_Implementation(AimSpec->Handle, OldKey, 1, LateBatch);
-	HealthASC->ServerFinishShotInputs_Implementation(AimSpec->Handle, OldKey, 1, LateBatch, true, false);
+	HealthASC->ServerFinishShotInputs_Implementation(AimSpec->Handle, OldKey, LateStream, LateBatch, true, false);
 	HealthASC->ServerSetReplicatedTargetData_Implementation(AimSpec->Handle, OldKey, LateData, FGameplayTag(), FPredictionKey());
 	TestFalse(TEXT("An old prediction key cannot create data for a different active activation"),
 		ASC->CallReplicatedTargetDataDelegatesIfSet(AimSpec->Handle, OldKey));
@@ -1238,6 +1241,8 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Unknown/inactive/non-Fire batches do not allocate a pending weapon input queue"), Weapon->HasPendingNetworkShots());
 	ASC->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Aim));
 	TestEqual(TEXT("Rejected unknown, inactive and old-key data cannot spend ammunition"), Weapon->GetCurrentAmmo(), AmmoBeforeLateData);
+	// 下一段从新装备输入代际开始，不能复用前段已明确终结的ShotId1制造第二种裁决。
+	Weapon->ResetNetworkInputGeneration();
 	ASC->AddLooseGameplayTag(FpstrueGameplayTags::State_Firing);
 	Weapon->BeginAbilityFire(31);
 	const auto MakeRequest = [&](uint32 ShotId, const FVector& AimPoint)
@@ -1723,7 +1728,8 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 		ReplacementWeapon->AcceptShotRequest(OldWeaponRequest) == EFPShotResult::InvalidIdentity);
 	QueueASC->ServerSubmitShotBatch_Implementation(QueueFireSpec->Handle, OldKey, OldWeaponRequest.ShotId,
 		TArray<FFPShotRequest>{OldWeaponRequest});
-	QueueASC->ServerFinishShotInputs_Implementation(QueueFireSpec->Handle, OldKey, OldWeaponRequest.ShotId,
+	QueueASC->ServerFinishShotInputs_Implementation(QueueFireSpec->Handle, OldKey,
+		FFPShotStreamIdentity{OldWeaponRequest.Weapon, OldWeaponRequest.EquipmentGeneration, OldWeaponRequest.FireSession, OldWeaponRequest.ShotId},
 		TArray<FFPShotRequest>{OldWeaponRequest}, false, true);
 	QueueASC->ServerSetReplicatedTargetData_Implementation(QueueFireSpec->Handle, OldKey, OldWeaponData, FGameplayTag(), FPredictionKey());
 	TestFalse(TEXT("Old weapon ability data cannot recreate a cancelled target-data cache"),

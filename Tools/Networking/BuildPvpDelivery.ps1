@@ -21,7 +21,7 @@ param(
     [switch]$SelfTest,
     [string]$ValidateAutomationReport = '',
     [ValidateRange(1, 65534)][int]$Port = 7797,
-    [ValidateRange(1, 10000)][int]$MinimumTests = 97,
+    [ValidateRange(1, 10000)][int]$MinimumTests = 98,
     [ValidateRange(1, 16)][int]$MaxParallelActions = 4,
     [ValidateRange(1, 2000)][int]$MinimumDeliveryFreeGB = 50
 )
@@ -117,6 +117,7 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Prediction.AmmoSnapshotAckReordering'
     'fpstrue.Multiplayer.Prediction.ReloadPlaybackAdoptionAndAuthorityClock'
     'fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail'
+    'fpstrue.Multiplayer.Prediction.BatchFireAuthorizationAndNativeIsolation'
     'fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState'
     'fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder'
     'fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle'

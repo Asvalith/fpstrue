@@ -5,7 +5,8 @@ intervals are subtracted only within the same shot. Missing evidence stays null.
 This diagnostic never changes gameplay timing budgets or acceptance gates.
 #>
 [CmdletBinding()]
-param([string]$RunDirectory, [switch]$SameHostUtc, [switch]$SelfTest)
+param([string]$RunDirectory, [switch]$SameHostUtc, [switch]$SelfTest,
+    [ValidateSet('', 'Adaptive', 'FixedReference')][string]$ExpectedShotRetryPolicy = '')
 $ErrorActionPreference = 'Stop'
 $culture = [Globalization.CultureInfo]::InvariantCulture
 
@@ -114,7 +115,59 @@ function Get-WeaponPredictionEvidence([string[]]$Lines) {
         Issues=@($Issues);Clean=$Issues.Count -eq 0
         Scope='Observed owning-client prediction/confirmation evidence. Replayed=0 is corroborated by runtime montage-instance tests; this log alone does not prove every mesh retained its animation instance. Unexercised rejection/cancel paths are not certified.'}
 }
-function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [bool]$AllowSameHostUtc) {
+# Only the submitter's own monotonic timestamps can verify pacing. Legacy logs
+# remain readable, but cannot certify a newly requested adaptive/reference run.
+function Get-ShotRetryPolicyEvidence([object[]]$Submits, [string]$ExpectedPolicy = '') {
+    $Issues=[Collections.Generic.List[string]]::new();$Rows=@()
+    $Metadata=@($Submits|Where-Object {$null -ne (Text-Field $_.Line 'Policy')}).Count -gt 0
+    if(-not $Metadata){
+        if($ExpectedPolicy){$Issues.Add('MissingRetryPolicyMetadata')}
+        return [pscustomobject]@{MetadataPresent=$false;Verified=$(if($ExpectedPolicy){$false}else{$null});Policies=@();Submissions=@();Issues=@($Issues)}
+    }
+    $Previous=$null
+    foreach($Event in @($Submits|Sort-Object {Number-Field $_.Line 'Attempt'})){
+        $Line=$Event.Line;$Policy=Text-Field $Line 'Policy'
+        $Attempt=Number-Field $Line 'Attempt';$Limit=Number-Field $Line 'MaxAttempts'
+        $Delay=Number-Field $Line 'RetryDelayMs';$Requested=Number-Field $Line 'RequestedRetryMs'
+        $Age=Number-Field $Line 'InputAgeMs'
+        $Time=Number-Field $Line 'LocalSeconds';$Srtt=Number-Field $Line 'SRTTms';$Variation=Number-Field $Line 'RTTVARms'
+        $Piggyback=Number-Field $Line 'Piggyback'
+        if($Policy -notin @('Adaptive','FixedReference','Fallback')){$Issues.Add('UnknownRetryPolicy')}
+        if($ExpectedPolicy -eq 'Adaptive' -and $Policy -notin @('Adaptive','Fallback')){$Issues.Add('UnexpectedFixedReferencePolicy')}
+        if($ExpectedPolicy -eq 'FixedReference' -and $Policy -ne 'FixedReference'){$Issues.Add('UnexpectedAdaptivePolicy')}
+        if($null -eq $Attempt -or $Attempt -ne [math]::Floor($Attempt) -or $Attempt -lt 1 -or $Attempt -gt 6 -or
+            $null -eq $Limit -or $Limit -ne [math]::Floor($Limit) -or $Limit -lt 1 -or $Limit -gt 6){$Issues.Add('RetryPolicyAttemptBoundInvalid')}
+        if($null -eq $Requested -or $Requested -lt 19.999 -or $Requested -gt 60.001 -or
+            $null -eq $Delay -or $Delay -lt 19.999 -or $Delay -gt 60.001 -or $Delay -gt $Requested+.001){$Issues.Add('RetryPolicyIntervalInvalid')}
+        if($Policy -in @('FixedReference','Fallback') -and $null -ne $Requested -and [math]::Abs($Requested-40) -gt .001){$Issues.Add('RetryPolicyFallbackOrReferenceNotForty')}
+        if($null -eq $Age -or $Age -lt 0 -or
+            $null -eq $Time -or $null -eq $Srtt -or $null -eq $Variation -or $Piggyback -notin @(0,1)){$Issues.Add('RetryPolicyTelemetryMissingOrInvalid')}
+        if($null -ne $Age -and $Age -gt 400.05){$Issues.Add('RetrySentAfterInputExpiry')}
+        if($Policy -eq 'Adaptive' -and ($null -eq $Srtt -or $Srtt -lt 0 -or $null -eq $Variation -or $Variation -lt 0)){$Issues.Add('AdaptiveRetryHasNoRttObservation')}
+        if($Policy -eq 'Adaptive' -and $null -ne $Srtt -and $Srtt -ge 0 -and $null -ne $Variation -and $Variation -ge 0 -and $null -ne $Requested){
+            $ExpectedBase=[math]::Clamp($Srtt+2*$Variation,20.0,60.0)
+            if([math]::Abs($Requested-$ExpectedBase) -gt .01){$Issues.Add('AdaptiveRetryDoesNotMatchRttFormula')}
+        }
+        if($null -ne $Delay -and $null -ne $Requested){
+            if($Piggyback -eq 0 -and [math]::Abs($Delay-$Requested) -gt .01){$Issues.Add('RetryIntervalUnexpectedlyClipped')}
+            if($Piggyback -eq 1 -and ($Attempt -le 1 -or [math]::Abs($Delay-20) -gt .01)){$Issues.Add('RetryPiggybackIntervalInvalid')}
+        }
+        # Initial input is sent immediately. Later attempts must obey the current
+        # decision, not the previous row's interval: RTT can change between wakes.
+        if($Attempt -gt 1){
+            $Interval=if($null -ne $Previous -and $null -ne $Time){Elapsed-Ms $Previous.LocalSeconds $Time 1000}else{$null}
+            if($null -eq $Interval -or ($null -ne $Delay -and $Interval+.05 -lt $Delay)){$Issues.Add('RetrySentBeforeCurrentInterval')}
+        }else{$Interval=$null}
+        $Rows+=[pscustomobject]@{Attempt=$Attempt;Policy=$Policy;RequestedRetryMs=$Requested;EffectiveRetryMs=$Delay
+            InputAgeMs=$Age;LocalSeconds=$Time;ObservedIntervalMs=$Interval
+            SRTTms=$Srtt;RTTVARms=$Variation;Piggyback=$Piggyback}
+        $Previous=$Rows[-1]
+    }
+    $Policies=@($Rows.Policy|Sort-Object -Unique)
+    if('FixedReference' -in $Policies -and @($Policies|Where-Object {$_ -ne 'FixedReference'}).Count -gt 0){$Issues.Add('MixedRetryPoliciesInOneShot')}
+    return [pscustomobject]@{MetadataPresent=$true;Verified=$Issues.Count -eq 0;Policies=$Policies;Submissions=$Rows;Issues=@($Issues|Select-Object -Unique)}
+}
+function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [bool]$AllowSameHostUtc, [string]$ExpectedPolicy = '') {
     $server = @{}; $invalidServer = 0
     foreach ($line in $ServerLines) {
         if ($line -notmatch '\bPVP_SMOKE (SERVER_SHOT_ACCEPT|SERVER_SHOT_REJECT|SHOT_TIME_REJECT|SHOT_ADMISSION|SHOT_EXECUTION|SHOT_ACK_SEND|SHOT_INPUT_HOLE_FINAL)\b') { continue }
@@ -216,6 +269,8 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
                 if ($null -ne $admissionTime -and $null -ne $executionTime -and $executionTime -lt $admissionTime) { $issues += 'ExecutionBeforeAdmissionServerTime' }
                 if ($final -and $verdict -and (Number-Field $final.Line 'Result') -ne (Number-Field $verdict.Line 'Result')) { $issues += 'ServerClientVerdictMismatch' }
                 if ($retryValid -eq $false) { $issues += 'InvalidOrExceededSubmitAttemptBound' }
+                $retryPolicy=Get-ShotRetryPolicyEvidence $submits $ExpectedPolicy
+                $issues+=@($retryPolicy.Issues)
                 if($holes.Count -gt 1){$issues+='RepeatedMissingPayloadFinalization'}
                 if($lostPayload -and $final -and (Result-Field $final.Line) -ne 10){$issues+='MissingPayloadVerdictMismatch'}
                 if (@($acks | Where-Object { $null -eq (Result-Field $_.Line) }).Count -gt 0) { $issues += 'InvalidAcknowledgementResult' }
@@ -250,6 +305,7 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
                     NearestPriorClockSequence=(Number-Field $clock.Line 'Sequence');PriorClockSampleAgeMs=(Elapsed-Ms $clock.Stamp $presentation.Stamp)
                     ObservedSubmitAttempts=$submits.Count;RetryAttemptsObserved=$(if($attempts.Count){[math]::Max(0,($attempts | Measure-Object -Maximum).Maximum-1)}else{$null})
                     DeclaredMaxSubmitAttempts=$retryBound;SubmitAttemptBoundValid=$retryValid
+                    RetryPolicyEvidence=$retryPolicy
                     ObservedRetryDelaysMs=@($submits | Where-Object { (Number-Field $_.Line 'Attempt') -gt 1 } | ForEach-Object { Number-Field $_.Line 'RetryDelayMs' })
                     ConfirmedPerShotRetransmission=$null;ReliableHeadOfLineBlockingConfirmed=$null;ServerFrameStallCausalityConfirmed=$null
                     DiagnosticIssues=$issues
@@ -280,12 +336,16 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
             ExecutionToAckSamples=@($rows | Where-Object { $null -ne $_.ExecutionToAckSameHostWallMs }).Count
             ExplicitSubmitInstrumentationShots=@($rows | Where-Object ObservedSubmitAttempts -gt 0).Count
             RetryBoundViolations=@($rows | Where-Object SubmitAttemptBoundValid -eq $false).Count
+            RetryPoliciesObserved=@($rows|ForEach-Object {$_.RetryPolicyEvidence.Policies}|Sort-Object -Unique)
+            RetryPolicyMetadataShots=@($rows|Where-Object {$_.RetryPolicyEvidence.MetadataPresent}).Count
+            RetryPolicyVerifiedShots=@($rows|Where-Object {$_.RetryPolicyEvidence.Verified -eq $true}).Count
+            RetryPolicyViolations=@($rows|Where-Object {$_.RetryPolicyEvidence.Verified -eq $false}).Count
             PredictionEvidence=(Get-WeaponPredictionEvidence $ClientLines[$client])
             Shots=$rows
         }
     }
     return [pscustomobject]@{
-        SchemaVersion=2;SameHostUtcComparisonEnabled=$AllowSameHostUtc;InvalidServerIdentityEvents=$invalidServer;Clients=$clients
+        SchemaVersion=3;SameHostUtcComparisonEnabled=$AllowSameHostUtc;InvalidServerIdentityEvents=$invalidServer;Clients=$clients;ExpectedShotRetryPolicy=$ExpectedPolicy
         Scope='Prediction-to-ACK is same-client monotonic latency when LocalSeconds exists, otherwise legacy log UTC; not RTT. LocalSeconds is never subtracted across processes. CLIENT_SHOT_SUBMIT Transport=UnreliableBatch is each per-input application submission immediately before the batched RPC call; legacy records without Transport mark request construction. Neither is a socket/NIC send timestamp. Submit may precede PRESENT; negative prediction-to-submit stays null. App redundancy attempts are not extra predictions, executions, ACKs or packet retransmissions. Rejected is the legacy non-accepted-final total and includes Cancelled; Cancelled and LostInputs are explicit subsets, never accepted shots. MissingPayload finalization is lost input even when a reliable cancellation ACK closes the ledger. Cross-process wall intervals require same-host logs and include dispatch/scheduling. Admission-to-execution uses explicit queue duration or same-server world time. FrameDelta is co-occurring frame length, not stall causality. Null means absent, ambiguous or invalid evidence. MissingFinalAck is end-of-run absence, not an instrumented timeout. No gameplay/strict-experience gate is evaluated here.'
     }
 }
@@ -335,6 +395,41 @@ if ($SelfTest) {
     Assert-Latency 'Six unreliable submissions preserve one prediction and one terminal result' ($BatchEvidence.Clients[0].Predicted -eq 1 -and $BatchEvidence.Clients[0].Accepted -eq 1 -and $BatchEvidence.Clients[0].Shots[0].ObservedSubmitAttempts -eq 6 -and $BatchEvidence.Clients[0].Shots[0].SubmitAttemptBoundValid -eq $true -and $BatchEvidence.Clients[0].Shots[0].SubmitTimestampKind -eq 'ImmediatelyBeforeUnreliableBatchRPC')
     $BatchOverflow=Get-LatencyEvidence @($verdict) @{Client1=@($present)+$BatchSubmits+@($BatchSubmits[-1].Replace('Attempt=6','Attempt=7'),$ack)} $false
     Assert-Latency 'Seventh submission exceeds the new six-attempt bound' ($BatchOverflow.Clients[0].RetryBoundViolations -eq 1)
+    $AdaptiveFirst=$submit.Replace('MaxAttempts=3','MaxAttempts=6').Replace('RetryDelayMs=0','RetryDelayMs=60')+
+        ' Transport=UnreliableBatch LocalSeconds=100.000000 Policy=Adaptive RequestedRetryMs=60 InputAgeMs=0.5 SRTTms=100 RTTVARms=5 Piggyback=0'
+    $AdaptiveSecond=$AdaptiveFirst.Replace('Attempt=1','Attempt=2').Replace('RetryDelayMs=60','RetryDelayMs=20').Replace('LocalSeconds=100.000000','LocalSeconds=100.0201').Replace('InputAgeMs=0.5','InputAgeMs=20.6').Replace('Piggyback=0','Piggyback=1')
+    $AdaptiveThird=$AdaptiveFirst.Replace('Attempt=1','Attempt=3').Replace('RetryDelayMs=60','RetryDelayMs=50').Replace('RequestedRetryMs=60','RequestedRetryMs=50').Replace('SRTTms=100','SRTTms=40').Replace('LocalSeconds=100.000000','LocalSeconds=100.0702').Replace('InputAgeMs=0.5','InputAgeMs=70.7')
+    $AdaptiveEvidence=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst,$AdaptiveSecond,$AdaptiveThird,$ack)} $false 'Adaptive'
+    Assert-Latency 'Adaptive intervals use the current decision and preserve one shot identity' ($AdaptiveEvidence.Clients[0].RetryPolicyVerifiedShots -eq 1 -and $AdaptiveEvidence.Clients[0].Predicted -eq 1 -and $AdaptiveEvidence.Clients[0].Accepted -eq 1 -and $AdaptiveEvidence.Clients[0].Shots[0].ObservedSubmitAttempts -eq 3)
+    $EarlyAdaptive=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst,$AdaptiveSecond.Replace('LocalSeconds=100.0201','LocalSeconds=100.0100'),$ack)} $false 'Adaptive'
+    Assert-Latency 'An actual retry earlier than its declared minimum fails' ($EarlyAdaptive.Clients[0].Shots[0].DiagnosticIssues -contains 'RetrySentBeforeCurrentInterval')
+    $LateAdaptive=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst,$AdaptiveSecond.Replace('InputAgeMs=20.6','InputAgeMs=350.5').Replace('LocalSeconds=100.0201','LocalSeconds=100.3500'),$ack)} $false 'Adaptive'
+    Assert-Latency 'Client pacing does not guess remaining server admission time' ($LateAdaptive.Clients[0].Accepted -eq 1 -and $LateAdaptive.Clients[0].RetryPolicyVerifiedShots -eq 1)
+    foreach($BadDelay in @('19','61','nan')){
+        $BadAdaptive=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst.Replace('RetryDelayMs=60',('RetryDelayMs='+$BadDelay)),$ack)} $false 'Adaptive'
+        Assert-Latency ('Adaptive malformed/out-of-range delay '+$BadDelay+' fails') ($BadAdaptive.Clients[0].RetryPolicyViolations -eq 1)
+    }
+    $Fixed=$AdaptiveFirst.Replace('Policy=Adaptive','Policy=FixedReference').Replace('RetryDelayMs=60','RetryDelayMs=40').Replace('RequestedRetryMs=60','RequestedRetryMs=40')
+    $FixedEvidence=Get-LatencyEvidence @($verdict) @{Client1=@($present,$Fixed,$ack)} $false 'FixedReference'
+    Assert-Latency 'Explicit fixed-reference evidence is separate from adaptive' ($FixedEvidence.Clients[0].RetryPolicyVerifiedShots -eq 1 -and $FixedEvidence.ExpectedShotRetryPolicy -eq 'FixedReference')
+    $Mixed=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst,$Fixed.Replace('Attempt=1','Attempt=2').Replace('LocalSeconds=100.000000','LocalSeconds=100.0500'),$ack)} $false 'Adaptive'
+    Assert-Latency 'Reference and adaptive policies cannot be pooled within one shot' ($Mixed.Clients[0].Shots[0].DiagnosticIssues -contains 'MixedRetryPoliciesInOneShot')
+    $Fallback=$Fixed.Replace('Policy=FixedReference','Policy=Fallback').Replace('SRTTms=100 RTTVARms=5','SRTTms=-1 RTTVARms=-1')
+    $FallbackEvidence=Get-LatencyEvidence @($verdict) @{Client1=@($present,$Fallback,$ack)} $false 'Adaptive'
+    Assert-Latency 'Missing fresh RTT retains an explicit bounded adaptive fallback' ($FallbackEvidence.Clients[0].RetryPolicyVerifiedShots -eq 1 -and $FallbackEvidence.Clients[0].RetryPoliciesObserved -contains 'Fallback')
+    $LegacyExpected=Get-LatencyEvidence @($verdict) @{Client1=@($present,$submit,$ack)} $false 'Adaptive'
+    Assert-Latency 'Legacy logs remain readable but cannot certify a requested adaptive run' ($legacy.Clients[0].Shots[0].RetryPolicyEvidence.Verified -eq $null -and $LegacyExpected.Clients[0].Shots[0].DiagnosticIssues -contains 'MissingRetryPolicyMetadata')
+    $MissingFields=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst.Replace('InputAgeMs=0.5','InputAgeMs=nan'),$ack)} $false 'Adaptive'
+    Assert-Latency 'A missing input age cannot certify the bounded sender lifetime' ($MissingFields.Clients[0].RetryPolicyViolations -eq 1)
+    $HalfRttBase=$AdaptiveFirst.Replace('SRTTms=100','SRTTms=40').Replace('RequestedRetryMs=60','RequestedRetryMs=30').Replace('RetryDelayMs=60','RetryDelayMs=30')
+    $HalfRttEvidence=Get-LatencyEvidence @($verdict) @{Client1=@($present,$HalfRttBase,$ack)} $false 'Adaptive'
+    Assert-Latency 'A half-RTT base cannot certify the RTT plus two-deviations policy' ($HalfRttEvidence.Clients[0].Shots[0].DiagnosticIssues -contains 'AdaptiveRetryDoesNotMatchRttFormula')
+    $AfterExpiry=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst,$AdaptiveSecond.Replace('InputAgeMs=20.6','InputAgeMs=400.1').Replace('LocalSeconds=100.0201','LocalSeconds=100.3996'),$ack)} $false 'Adaptive'
+    Assert-Latency 'A final ACK cannot hide a send after the fixed input expiry' ($AfterExpiry.Clients[0].Accepted -eq 1 -and $AfterExpiry.Clients[0].Shots[0].DiagnosticIssues -contains 'RetrySentAfterInputExpiry')
+    $Clipped=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst.Replace('RetryDelayMs=60','RetryDelayMs=30'),$ack)} $false 'Adaptive'
+    Assert-Latency 'A non-piggyback interval cannot retain the removed deadline clipping' ($Clipped.Clients[0].Shots[0].DiagnosticIssues -contains 'RetryIntervalUnexpectedlyClipped')
+    $Unfinished=Get-LatencyEvidence @($verdict) @{Client1=@($present,$AdaptiveFirst,$AdaptiveSecond)} $false 'Adaptive'
+    Assert-Latency 'A valid retry schedule without final ACK remains unfinished' ($Unfinished.Clients[0].MissingFinalAck -eq 1 -and $Unfinished.Clients[0].Accepted -eq 0)
     $LostVerdict=$verdict.Replace('ACCEPT','REJECT').Replace('Result=0','Result=10')
     $Hole='PVP_SMOKE SHOT_INPUT_HOLE_FINAL '+$id+' Result=10 Reason=MissingPayload'
     $HoleEvidence=Get-LatencyEvidence @($LostVerdict,$Hole) @{Client1=@($present,$ack.Replace('Result=0','Result=10'))} $false
@@ -375,6 +470,6 @@ if ([string]::IsNullOrWhiteSpace($RunDirectory)) { throw 'RunDirectory is requir
 $run=(Resolve-Path -LiteralPath $RunDirectory).Path
 $clientLogs=@{}
 foreach ($file in (Get-ChildItem -LiteralPath $run -Filter 'Client*.log' -File)) { $clientLogs[$file.BaseName]=@(Get-Content -LiteralPath $file.FullName) }
-$report=Get-LatencyEvidence @(Get-Content -LiteralPath (Join-Path $run 'Server.log')) $clientLogs ([bool]$SameHostUtc)
+$report=Get-LatencyEvidence @(Get-Content -LiteralPath (Join-Path $run 'Server.log')) $clientLogs ([bool]$SameHostUtc) $ExpectedShotRetryPolicy
 $report | Add-Member -NotePropertyName Directory -NotePropertyValue $run
 $report | ConvertTo-Json -Depth 9
