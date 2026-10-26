@@ -13,6 +13,7 @@ param(
     [string]$ShippingClientExecutable = '',
     [ValidateSet('Client1','Client2')][string]$RenderRole = 'Client1',
     [ValidateSet('Player','Overview')][string]$View = 'Player',
+    [ValidateRange(1,1024)][int]$EnemyCount = 160,
     [ValidateSet('Reference','Tiered')][string]$EnemyReplication = 'Tiered',
     [ValidateSet('Reference','Simple')][string]$EnemyHitProxies = 'Reference',
     [ValidateSet('NativeBox','SharedConvex')][string]$HitProxyGeometry = 'NativeBox',
@@ -115,9 +116,9 @@ for ($Round=1; $Round -le $Repeat; ++$Round) {
 if ($DryRun) {
     [pscustomobject]@{Run=$Run;Map=$Map;Cases=$Cases;Server='Frozen Editor -server';Clients=2;RenderedClients=1;
         Resolution='1600x900';Quality='High / scalability level 2; engine feature defaults retained';WarmupSeconds=20;CaptureSeconds=60;
-        Population=160;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;HitProxyGeometry=$HitProxyGeometry;PresentMon=[bool]$PresentMon;ServerAnimationThreads=$ServerAnimationThreads;
+        Population=$EnemyCount;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;HitProxyGeometry=$HitProxyGeometry;PresentMon=[bool]$PresentMon;ServerAnimationThreads=$ServerAnimationThreads;
         ServerPacing=$PacingPolicy;
-        ContinuousFloorChecks=[bool]$ContinuousFloorChecks;FloorCheckBoundary='Reverse ablation only: Server applies bAlwaysCheckFloor=true once after the full 160 population is ready, before warmup. Default does not write the authored setting. Compare identical six-proxy geometry, build and renderer/pacing settings; never mix another geometry or old two-proxy results into the floor-cache control.';
+        ContinuousFloorChecks=[bool]$ContinuousFloorChecks;FloorCheckBoundary='Reverse ablation only: Server applies bAlwaysCheckFloor=true once after the requested population is ready, before warmup. Default does not write the authored setting. Compare identical six-proxy geometry, build and renderer/pacing settings; never mix another geometry or old two-proxy results into the floor-cache control.';
         ClientOcclusion=$ClientOcclusion;ClientOcclusionBoundary='Rendered client only: Inherited changes nothing; Buffer3 overrides only r.NumBufferedOcclusionQueries=3; HZB overrides only r.HZBOcclusion=1. Native CVar readback must confirm the requested value. These are independent renderer experiments, not AI/network changes.';
         AnimationThreading='Reference adds no engine threading option; Parallel adds -useperfthreads to the Editor dedicated server only. Runtime gates are snapshots, not proof of Worker dispatch.';
         NetworkCounters='Per-role START/STOP parent-connection In/OutTotalBytes/Packets, including engine connection/PacketOverhead accounting; stable identities, no wrap/reset/reconnect concatenation; not NIC/per-Actor traffic.';
@@ -197,7 +198,7 @@ function Stop-SchedulerRecording($Scheduler) {
     if(-not $Scheduler.Started -or $Scheduler.StopAttempted){return}
     $Scheduler.StopAttempted=$true
     $Scheduler.StopQpc=[Diagnostics.Stopwatch]::GetTimestamp()
-    $null=Invoke-SchedulerWpr $Scheduler @('-stop',$Scheduler.ETL,'FPS 160 AI execution and scheduling diagnostic','-skipPdbGen','-compress','-instancename',$Scheduler.Instance) 'stop'
+    $null=Invoke-SchedulerWpr $Scheduler @('-stop',$Scheduler.ETL,('FPS '+$EnemyCount+' AI execution and scheduling diagnostic'),'-skipPdbGen','-compress','-instancename',$Scheduler.Instance) 'stop'
     if(-not (Test-Path -LiteralPath $Scheduler.ETL -PathType Leaf) -or (Get-Item -LiteralPath $Scheduler.ETL).Length -le 0){throw 'WPR reported success without a nonempty owned ETL.'}
     $Status=Invoke-SchedulerWpr $Scheduler @('-status','profiles','collectors','-details','-instancename',$Scheduler.Instance) 'stopped-status'
     if($Status -notmatch 'WPR is not recording'){throw 'The owned WPR instance did not confirm it stopped; leave all other recorders untouched.'}
@@ -290,7 +291,6 @@ function Get-BaselineFingerprint {
     }
     $TerrainDirectory=Split-Path -Parent $MapFile
     $Paths += @(Get-ChildItem -LiteralPath $TerrainDirectory -File -Filter '*.uasset' | ForEach-Object FullName)
-    $Paths += @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'Content/FirstPerson/Animations/FootIK') -File -Filter '*.uasset' | ForEach-Object FullName)
     if ('Shipping' -in $BuildKinds) {
         $Paths += $ShippingClientExecutable
         $PackagedProjectRoot=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $ShippingClientExecutable))
@@ -374,10 +374,11 @@ function Assert-BaselineNetworkCounters($Summary,[string]$Role) {
     return $Network
 }
 function Assert-BaselineHitProxyGeometry($Snapshot,[string]$Role) {
-    $ExpectedQueries=if($Role -eq 'Server'){960}else{0}
+    $ExpectedProxies=$EnemyCount*6
+    $ExpectedQueries=if($Role -eq 'Server'){$ExpectedProxies}else{0}
     $HitProxies=$Snapshot.hitProxyComponents
     if($null -eq $HitProxies -or $HitProxies.schemaVersion -ne 3 -or $HitProxies.geometry -cne $HitProxyGeometry -or
-        $HitProxies.count -ne 960 -or $HitProxies.minPerEnemy -ne 6 -or $HitProxies.maxPerEnemy -ne 6 -or
+        $HitProxies.count -ne $ExpectedProxies -or $HitProxies.minPerEnemy -ne 6 -or $HitProxies.maxPerEnemy -ne 6 -or
         $HitProxies.unexpectedTaggedComponents -ne 0 -or $HitProxies.queryEnabled -ne $ExpectedQueries -or
         $HitProxies.physicsStatesCreated -ne $ExpectedQueries -or $HitProxies.invalidBodySetups -ne 0 -or
         $HitProxies.otherElements -ne 0 -or $Snapshot.mesh.collisionEnabled -ne 0 -or $Snapshot.mesh.validBodyInstances -ne 0){
@@ -385,13 +386,13 @@ function Assert-BaselineHitProxyGeometry($Snapshot,[string]$Role) {
     }
     if($HitProxyGeometry -eq 'NativeBox'){
         # Read-only observation: a non-query client may have no allocated setup.
-        if($HitProxies.nativeBoxComponents -ne 960 -or $HitProxies.staticMeshComponents -ne 0 -or $HitProxies.uniqueHullAssets -ne 0 -or
-            $HitProxies.bodySetupsPresent -lt $ExpectedQueries -or $HitProxies.bodySetupsPresent -gt 960 -or
+        if($HitProxies.nativeBoxComponents -ne $ExpectedProxies -or $HitProxies.staticMeshComponents -ne 0 -or $HitProxies.uniqueHullAssets -ne 0 -or
+            $HitProxies.bodySetupsPresent -lt $ExpectedQueries -or $HitProxies.bodySetupsPresent -gt $ExpectedProxies -or
             $HitProxies.boxElements -ne $HitProxies.bodySetupsPresent -or $HitProxies.convexElements -ne 0){
             throw ('Expected exactly one native box per allocated proxy setup: '+$Role)
         }
-    } elseif($HitProxies.nativeBoxComponents -ne 0 -or $HitProxies.staticMeshComponents -ne 960 -or $HitProxies.uniqueHullAssets -ne 1 -or
-        $HitProxies.bodySetupsPresent -ne 960 -or $HitProxies.boxElements -ne 0 -or $HitProxies.convexElements -ne 960){
+    } elseif($HitProxies.nativeBoxComponents -ne 0 -or $HitProxies.staticMeshComponents -ne $ExpectedProxies -or $HitProxies.uniqueHullAssets -ne 1 -or
+        $HitProxies.bodySetupsPresent -ne $ExpectedProxies -or $HitProxies.boxElements -ne 0 -or $HitProxies.convexElements -ne $ExpectedProxies){
         throw ('Expected exactly one convex element per shared-mesh proxy setup: '+$Role)
     }
 }
@@ -457,12 +458,12 @@ function Assert-BaselineNativeUnits($Summary,[string]$Role,[string]$CaseRoot,$Fr
 $Fingerprint=Get-BaselineFingerprint
 $FingerprintText=$Fingerprint | ConvertTo-Json -Depth 4 -Compress
 $Experiment=[ordered]@{Created=(Get-Date).ToString('o');Map=$Map;Cases=$Cases;Fingerprint=$Fingerprint;WarmupSeconds=20;CaptureSeconds=60;
-    Resolution='1600x900';Quality=2;Population=160;Clients=2;RenderedRole=$RenderRole;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;HitProxyGeometry=$HitProxyGeometry;ServerAnimationThreads=$ServerAnimationThreads;
+    Resolution='1600x900';Quality=2;Population=$EnemyCount;Clients=2;RenderedRole=$RenderRole;Seed=1337;View=$View;EnemyReplication=$EnemyReplication;EnemyHitProxies=$EnemyHitProxies;HitProxyGeometry=$HitProxyGeometry;ServerAnimationThreads=$ServerAnimationThreads;
     AnimationThreading='Reference preserves historical engine defaults; Parallel adds only DS -useperfthreads. No per-instance/CVar forcing; compare actual runtime gate snapshots and independent traces.';
     ServerPacing=$PacingPolicy;
     ContinuousFloorChecks=[bool]$ContinuousFloorChecks;
     ClientOcclusion=$ClientOcclusion;
-    NetworkCounters='Stable parent connections, START/STOP cumulative deltas; engine connection accounting incl. PacketOverhead, not NIC or per-Actor bytes. Server retains all 160 AI relevance. Replication, hit-proxy and threading modes are recorded separately; change one factor per comparison.';
+    NetworkCounters='Stable parent connections, START/STOP cumulative deltas; engine connection accounting incl. PacketOverhead, not NIC or per-Actor bytes. Server retains relevance for the full requested AI population. Replication, hit-proxy and threading modes are recorded separately; change one factor per comparison.';
     Backend='Same Editor dedicated server for Editor and Shipping client cases';
     ExitPolicy='Independent per-role controls; clients COMPLETE + natural exit 0, then server EXIT';
     Diagnostic=$HasDiagnostics;DiagnosticOnly=$HasDiagnostics;FormalBaseline=(-not $HasDiagnostics);CpuDiagnostic=[bool]$CpuDiagnostic;TraceDiagnostic=[bool]$DiagnosticTrace;
@@ -536,12 +537,12 @@ foreach ($Case in $Cases) {
             $Arguments=@()
             if($IsEditor){$Arguments+=('"'+$Project+'"')}
             $Arguments+=@($Travel,'-NoLiveCoding','-NoP4','-NoSplash','-NoSteam','-NoSound','-Unattended','-PvpBaseline',
-                ('-PvpBaselineRole='+$Role),('-PvpBaselineControl="'+$RoleControl+'"'),('-PvpBaselineOutput="'+$CaseRoot+'"'),
-                ('-PvpProfileRoot="'+$OutputRoot+'"'),('-PvpBaselineView='+$View),('-EnemyReplication='+$EnemyReplication),('-EnemyHitProxies='+$EnemyHitProxies),
+                ('-PvpBaselineRole='+$Role),('-PvpBaselineEnemies='+$EnemyCount),('-PvpBaselineControl="'+$RoleControl+'"'),('-PvpBaselineOutput="'+$CaseRoot+'"'),
+                ('-PvpBaselineRoot="'+$OutputRoot+'"'),('-PvpBaselineView='+$View),('-EnemyReplication='+$EnemyReplication),('-EnemyHitProxies='+$EnemyHitProxies),
                 ('-UserDir="'+$User+'"'),('-abslog="'+(Join-Path $CaseRoot ($Role+'.log'))+'"'))
             if($IsEditor){$Arguments+=@('-DDC=InstalledNoZenLocalFallback','-DDC-ForceMemoryCache','-ini:Game:[StartupActions]:bAddPacks=False')}
             if($Role -eq 'Server') {
-                $Arguments+=@('-server','-NullRHI',('-port='+$Port),'-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyPopulation=160',
+                $Arguments+=@('-server','-NullRHI',('-port='+$Port),('-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyPopulation='+$EnemyCount),
                     '-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemySpawnInterval=0.05','-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyRespawnDelay=600')
                 if($Case.ServerAnimationThreads -eq 'Parallel'){$Arguments+='-useperfthreads'}
                 if($null -ne $ServerTickRate){$Arguments+=('-ini:Engine:[/Script/OnlineSubsystemUtils.IpNetDriver]:NetServerMaxTickRate='+$ServerTickRate)}
@@ -571,7 +572,7 @@ foreach ($Case in $Cases) {
                 $Arguments+=@(('-trace='+$Channels),('-tracefile="'+$TracePath+'"'),'-statnamedevents')
                 if(-not $DiagnosticTraceOnly){
                     $Arguments+=@(('-csvCaptureFrames='+$CsvFrames),
-                        '-csvCategories=Animation,AnimationParallelEvaluation,CharacterMovement,CharacterMovementDetailed,ChaosPhysics,ChaosPhysicsSolver,Networking,NavigationSystem,fpstrueAI,fpstrueSignificance,fpstrueEnemyUI',
+                        '-csvCategories=Animation,AnimationParallelEvaluation,CharacterMovement,CharacterMovementDetailed,ChaosPhysics,ChaosPhysicsSolver,Networking,NavigationSystem,fpstrueAI,fpstrueSignificance',
                         '-csvGpuStats','-csvCompression=0')
                 }
                 $DiagnosticInfo.Roles[$Role]=[ordered]@{Trace=$TracePath;TraceEnabled=$true;CpuAccountingRequested=$true;Channels=$Channels;NativeCsvFrames=if($DiagnosticTraceOnly){$null}else{$CsvFrames};UserDirectory=$User}
@@ -583,7 +584,7 @@ foreach ($Case in $Cases) {
         }
         Write-BaselineJson $Launches (Join-Path $CaseRoot 'launch.json')
         if($HasDiagnostics){Write-BaselineJson $DiagnosticInfo $DiagnosticManifestPath}
-        Write-Output ('Baseline '+$Case.Name+' (160 AI, '+$Case.Kind+' rendered client, fixed Editor DS).')
+        Write-Output ('Baseline '+$Case.Name+' ('+$EnemyCount+' AI, '+$Case.Kind+' rendered client, fixed Editor DS).')
         while($true) {
             if(((Get-Date)-$Started).TotalSeconds -gt $TimeoutSeconds){throw ('Timeout in '+$Phase)}
             if(($DiagnosticTrace -or $DiagnosticScheduler) -and (Get-PSDrive -Name C -PSProvider FileSystem).Free -lt 5GB){throw 'Diagnostic disk guard: C fell below 5 GiB; stop and retain invalid partial evidence.'}
@@ -680,7 +681,7 @@ foreach ($Case in $Cases) {
             if($Summary.enemyReplication -cne $EnemyReplication -or $Status.enemyReplication -cne $EnemyReplication){throw ('Native replication A/B mode mismatch: '+$Entry.Role)}
             $Animation=$Summary.animationDiagnostics
             if($null -eq $Animation -or $null -eq $Animation.start -or $null -eq $Animation.stop -or
-                $Animation.start.enemies -ne 160 -or $Animation.stop.enemies -ne 160){throw ('Missing boundary animation diagnostics: '+$Entry.Role)}
+                $Animation.start.enemies -ne $EnemyCount -or $Animation.stop.enemies -ne $EnemyCount){throw ('Missing boundary animation diagnostics: '+$Entry.Role)}
             $ExpectedPerfThreads=$Entry.Role -eq 'Server' -and $Case.ServerAnimationThreads -eq 'Parallel'
             foreach($Snapshot in @($Animation.start,$Animation.stop)){
                 if($null -eq $Snapshot.tacticalManagers){throw ('Missing tactical boundary snapshot: '+$Entry.Role)}
@@ -701,18 +702,18 @@ foreach ($Case in $Cases) {
                     # Outer occupants are also queued for Inner; do not count them twice.
                     $Participants+=$Manager.occupiedInnerSlots+$Manager.queuedEnemies
                 }
-                if($Participants -gt 160){throw 'Tactical participants exceed the fixed live population.'}
+                if($Participants -gt $EnemyCount){throw 'Tactical participants exceed the fixed live population.'}
                 if([bool]$Snapshot.forceUsePerfThreads -ne $ExpectedPerfThreads){throw ('Animation threading launch mismatch: '+$Entry.Role)}
                 if($Entry.Role -eq 'Server' -and ($Snapshot.netMode -ne 1 -or -not $Snapshot.dedicatedServer -or
                     [bool]$Snapshot.shouldUseThreadingForPerformance -ne $ExpectedPerfThreads)){throw 'Dedicated-server threading gate mismatch.'}
                 if($Entry.Role -eq 'Server'){
-                    $ExpectedContinuousFloorEnemies=if($ContinuousFloorChecks){160}else{0}
+                    $ExpectedContinuousFloorEnemies=if($ContinuousFloorChecks){$EnemyCount}else{0}
                     if($null -eq $Snapshot.movement -or $null -eq $Snapshot.movement.alwaysCheckFloorEnemies -or
                         [int]$Snapshot.movement.alwaysCheckFloorEnemies -ne $ExpectedContinuousFloorEnemies){
                         throw 'Actual server continuous-floor-check population does not match this control.'
                     }
                 }
-                $ExpectedSimple=if($EnemyHitProxies -eq 'Simple'){160}else{0}
+                $ExpectedSimple=if($EnemyHitProxies -eq 'Simple'){$EnemyCount}else{0}
                 if($Snapshot.simpleHitProxyEnemies -ne $ExpectedSimple){throw ('Actual enemy hit-proxy mode mismatch: '+$Entry.Role)}
                 if($EnemyHitProxies -eq 'Simple'){
                     Assert-BaselineHitProxyGeometry $Snapshot $Entry.Role
@@ -732,15 +733,15 @@ foreach ($Case in $Cases) {
                 $DiagnosticInfo.Roles[$Entry.Role].CpuAccounting=$Cpu
                 $DiagnosticInfo.Roles[$Entry.Role].ClockAnchors=$Summary.traceAlignment
             }
-            if($Summary.minEnemies -ne 160 -or $Summary.maxEnemies -ne 160 -or $Summary.minPlayers -ne 2 -or $Summary.maxPlayers -ne 2 -or
+            if($Summary.minEnemies -ne $EnemyCount -or $Summary.maxEnemies -ne $EnemyCount -or $Summary.minPlayers -ne 2 -or $Summary.maxPlayers -ne 2 -or
                 $Summary.captureSeconds -lt 59.8 -or $Summary.captureSeconds -gt 75 -or $Summary.actualMapPackage -cne $Map){throw ('Population, duration or map mismatch: '+$Entry.Role)}
             if($Entry.Role -eq 'Server') {
                 $Activity=$Summary.aiActivity
-                if($null -eq $Activity -or $Activity.minControllers -ne 160 -or $Activity.maxControllers -ne 160 -or
-                    $Activity.minBehaviorReady -ne 160 -or $Activity.maxBehaviorReady -ne 160 -or
+                if($null -eq $Activity -or $Activity.minControllers -ne $EnemyCount -or $Activity.maxControllers -ne $EnemyCount -or
+                    $Activity.minBehaviorReady -ne $EnemyCount -or $Activity.maxBehaviorReady -ne $EnemyCount -or
                     $Activity.validationSamples -ne $Summary.validationSamples -or
                     ($Activity.maxMoving -le 0 -and $Activity.maxAttacking -le 0)) {
-                    throw 'Server AI activity invalid: require 160 running behavior controllers throughout and observed movement or attacks.'
+                    throw ('Server AI activity invalid: require '+$EnemyCount+' running behavior controllers throughout and observed movement or attacks.')
                 }
             }
             $Pacing=$Summary.pacingDiagnostics

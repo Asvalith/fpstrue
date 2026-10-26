@@ -4,12 +4,22 @@
 
 #include "Misc/AutomationTest.h"
 #include <limits>
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstrueMultiplayerGameInstance.h"
+#include "GameFramework/GameStateBase.h"
+#include "Game/fpstruePvpGameMode.h"
+#include "Game/fpstruePvpPlayerController.h"
+#include "Game/fpstruePvpPlayerState.h"
+#include "UI/fpstruePvpHUD.h"
 #include "GameMapsSettings.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
+#include "Characters/Player/fpstruePlayerAnimInstance.h"
+#include "Characters/Player/fpstrueCharacterMovementComponent.h"
 #include "Weapons/fpstrueWeaponComponent.h"
+#include "Weapons/fpstrueWeaponActors.h"
+#include "Weapons/fpstruePickUpComponent.h"
 #include "Weapons/fpstrueCombatAbilities.h"
+#include "Abilities/GameplayAbilityTargetTypes.h"
 #include "AbilitySystemInterface.h"
 #include "Animation/AnimClassInterface.h"
 #include "Animation/AnimInstance.h"
@@ -53,6 +63,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Testing/Automation/fpstrueTestObservers.h"
 #include "Engine/World.h"
+#include "Engine/ScopedMovementUpdate.h"
 #include "TimerManager.h"
 #include "Engine/ReplicatedState.h"
 #include "GameFramework/GameModeBase.h"
@@ -88,6 +99,9 @@
 #include "AnimGraphNode_TwoWayBlend.h"
 #include "AnimGraphNode_Root.h"
 #include "K2Node_VariableGet.h"
+#include "K2Node_Event.h"
+#include "K2Node_CallFunction.h"
+#include "EdGraphSchema_K2.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -96,6 +110,20 @@
 // 进程内只固定 Actor 的角色与收到的反射快照，验证权限/提交边界；不替代多进程连接、丢包或 RPC 传输验收。
 namespace
 {
+// 素材/掉落夹具使用实际项目武器蓝图；空原生类型只提供拓扑与规则，不充当表现回退。
+UClass* RARWeaponClass()
+{
+	return LoadClass<AfpstrueRARWeapon>(nullptr, TEXT("/Game/FirstPerson/Blueprints/Weapons/BP_RARWeapon.BP_RARWeapon_C"));
+}
+UClass* TemplateWeaponClass()
+{
+	return LoadClass<AfpstrueTemplateWeapon>(nullptr, TEXT("/Game/FirstPerson/Blueprints/Weapons/BP_TemplateWeapon.BP_TemplateWeapon_C"));
+}
+template<class T> const T* WeaponBlueprintDefaults(UClass* Class)
+{
+	return Class ? Class->GetDefaultObject<T>() : nullptr;
+}
+
 // 按用例选择 GameMode 和 AI 系统，建立进程内测试世界；不在这里创建真实网络连接。
 bool BeginMultiplayerUnitWorld(FTestWorldWrapper& Fixture, FAutomationTestBase& Test, bool bCreateAI = false, UClass* ModeClass = nullptr)
 {
@@ -380,7 +408,7 @@ bool FFpstrueMultiplayerHealthAuthorityTest::RunTest(const FString& Parameters)
 	const FBoolProperty* NativePresentation = FindFProperty<FBoolProperty>(AfpstrueCharacter::StaticClass(), TEXT("bUseTemplatePresentation"));
 	if (!TestNotNull(TEXT("Native damage feedback fixture"), FeedbackPawn) || !TestNotNull(TEXT("Native presentation configuration"), NativePresentation)) return false;
 	NativePresentation->SetPropertyValue_InContainer(FeedbackPawn, true);
-	TestFalse(TEXT("Native fixture has no legacy damage script to notify"), FeedbackPawn->GetClass()->IsFunctionImplementedInScript(TEXT("OnPlayerDamaged")));
+	TestNull(TEXT("Retired owner damage RPC is absent from the actual character class"), FeedbackPawn->FindFunction(TEXT("ClientReceiveDamage")));
 	{
 		TGuardValue<FString> ListenMode(Fixture.GetTestWorld()->NextURL, TEXT("?listen"));
 		if (!TestTrue(TEXT("Damage feedback fixture reaches the real network branch"), FeedbackPawn->GetNetMode() != NM_Standalone)) return false;
@@ -388,7 +416,7 @@ bool FFpstrueMultiplayerHealthAuthorityTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("Authoritative damage still deducts health exactly once"), FeedbackPawn->GetCurrentHealth(), 75.0f);
 	TestEqual(TEXT("Native body hit feedback still dispatches once"), FeedbackPawn->NativeHitRequests, 1);
-	TestEqual(TEXT("No owner damage RPC is dispatched without a Blueprint consumer"), FeedbackPawn->OwnerDamageFeedbackRequests, 0);
+	TestNull(TEXT("Damage cannot dispatch a retired owner feedback interface"), FeedbackPawn->FindFunction(TEXT("OnPlayerDamaged")));
 	return true;
 }
 
@@ -544,8 +572,8 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Aim spec is bound to the configured GAS input"), AimSpec->InputID, static_cast<int32>(EFPCombatAbilityInput::Aim));
 	TestEqual(TEXT("Sprint spec is bound to the configured GAS input"), SprintSpec->InputID, static_cast<int32>(EFPCombatAbilityInput::Sprint));
 	TestEqual(TEXT("Player grants exactly the four combat and movement abilities"), AbilitySystem->GetActivatableAbilities().Num(), 4);
-	TestTrue(TEXT("Reload starts on the server without an owner round trip"),
-		ReloadSpec->Ability->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::ServerInitiated);
+	TestTrue(TEXT("Reload predicts the owning player action through native GAS"),
+		ReloadSpec->Ability->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::LocalPredicted);
 	TestNull(TEXT("Fire does not retain a competing custom server RPC"), Player->FindFunction(TEXT("ServerSetFirePressed")));
 	TestNull(TEXT("Reload does not retain a competing custom server RPC"), Player->FindFunction(TEXT("ServerRequestReload")));
 	TestNull(TEXT("Aim and sprint do not retain competing movement-state RPCs"), Player->FindFunction(TEXT("ServerSetMovementModifiers")));
@@ -679,9 +707,10 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Rejected client reload leaves magazine unchanged"), Weapon->GetCurrentAmmo(), 7);
 	TestEqual(TEXT("Rejected client reload leaves reserve unchanged"), Weapon->GetReserveAmmo(), 32);
 	TestEqual(TEXT("Rejected client commands cannot publish a new network revision"), State->Revision, uint32(11));
-	const UFunction* DamagePresentation = Player->FindFunction(TEXT("ClientReceiveDamage"));
-	if (!TestNotNull(TEXT("Owner damage feedback has a reflected RPC entry"), DamagePresentation)) return false;
-	TestTrue(TEXT("Owner damage feedback is a client RPC"), DamagePresentation->HasAllFunctionFlags(FUNC_Net | FUNC_NetClient));
+	TestNull(TEXT("The retired owner damage RPC no longer exists"), Player->FindFunction(TEXT("ClientReceiveDamage")));
+	const UFunction* DamagePresentation = Player->FindFunction(TEXT("MulticastPresentHit"));
+	if (!TestNotNull(TEXT("Current body hit presentation has its real reflected RPC entry"), DamagePresentation)) return false;
+	TestTrue(TEXT("Confirmed body hits use the current multicast presentation RPC"), DamagePresentation->HasAllFunctionFlags(FUNC_Net | FUNC_NetMulticast));
 	TestFalse(TEXT("Transient damage feedback does not build a reliable retransmission backlog"), DamagePresentation->HasAnyFunctionFlags(FUNC_NetReliable));
 	TestFalse(TEXT("Damage feedback is not an additional server damage request"), DamagePresentation->HasAnyFunctionFlags(FUNC_NetServer));
 	UfpstrueHealthComponent* PlayerHealth = Player->FindComponentByClass<UfpstrueHealthComponent>();
@@ -696,9 +725,9 @@ bool FFpstrueMultiplayerWeaponAuthorityTest::RunTest(const FString& Parameters)
 	int32 FeedbackDamageFacts = 0;
 	const FDelegateHandle FeedbackObserver = PlayerHealth->OnDamageResolved.AddLambda(
 		[&](float, AActor*, AController*, const FFPDamageContext&) { ++FeedbackDamageFacts; });
-	// 直接回放接收实现，不伪装 RPC 已完成传输；当前 AI 控制器使本地表现分支实际可执行。
+	// 回放当前受击表现的接收实现；不伪装 RPC 已传输，不回放已退役的 owner 伤害桥。
 	TestTrue(TEXT("Damage-feedback fixture reaches the locally controlled presentation branch"), Player->IsLocallyControlled());
-	Player->ClientReceiveDamage_Implementation(25.0f, Target, Controller);
+	Player->MulticastPresentHit_Implementation();
 	TestEqual(TEXT("Received damage feedback cannot deduct health a second time"), PlayerHealth->GetHealth(), HealthBeforeFeedback);
 	TestEqual(TEXT("Received damage feedback cannot modify GAS health"), PlayerAttributes->GetHealth(), AttributeHealthBeforeFeedback);
 	TestEqual(TEXT("Received damage feedback cannot modify GAS maximum"), PlayerAttributes->GetMaxHealth(), AttributeMaximumBeforeFeedback);
@@ -973,13 +1002,13 @@ bool FFpstrueMultiplayerHitHistoryTest::RunTest(const FString& Parameters)
 		Target->TraceHistoricalHit(BeforeNextBoneSample, FVector(0.0f, 100.0f, 90.0f), FVector(1000.0f, 100.0f, 90.0f), Hit));
 	TestFalse(TEXT("Shooter-origin tolerance still rejects an implausibly future time"),
 		Target->GetHistoricalViewOrigin(BeforeNextBoneSample + 1.0, LatestViewOrigin));
-	// 静态遮挡仍参与查询，历史目标形状不能让子弹穿过服务器现在明确存在的墙。
+	// 动态遮挡采用当前状态：回溯玩家身体不等于回溯门/平台，也不临时移动真实世界。
 	AActor* Wall = World->SpawnActor<AActor>();
 	if (!TestNotNull(TEXT("Historical hitscan static blocker"), Wall)) return false;
 	UBoxComponent* WallBox = NewObject<UBoxComponent>(Wall);
 	Wall->AddInstanceComponent(WallBox);
 	Wall->SetRootComponent(WallBox);
-	WallBox->SetMobility(EComponentMobility::Static);
+	WallBox->SetMobility(EComponentMobility::Movable);
 	WallBox->SetBoxExtent(FVector(10.0f, 300.0f, 200.0f));
 	WallBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	WallBox->SetCollisionResponseToAllChannels(ECR_Ignore);
@@ -988,23 +1017,149 @@ bool FFpstrueMultiplayerHitHistoryTest::RunTest(const FString& Parameters)
 	WallBox->RegisterComponent();
 	const bool bBlockedTraceHit = AfpstrueCharacter::TraceHistoricalHit(World, nullptr, MiddleTime,
 		HistoricalHeadStart, HistoricalHeadEnd, Hit);
-	TestTrue(TEXT("Global historical trace cannot select the player behind a blocking wall"), !bBlockedTraceHit || Hit.GetActor() != Target);
+	TestTrue(TEXT("A currently closed moving blocker takes precedence over the older player pose"), bBlockedTraceHit && Hit.GetActor() == Wall);
+	const FTransform TargetBeforeQuery = Target->GetActorTransform();
+	const FTransform ClosedDoorTransform = Wall->GetActorTransform();
+	TestFalse(TEXT("An expired global query cannot hit even the current-world blocker"),
+		AfpstrueCharacter::TraceHistoricalHit(World, nullptr, World->GetTimeSeconds() - AfpstrueCharacter::MaxHitHistorySeconds - 0.01,
+			HistoricalHeadStart, HistoricalHeadEnd, Hit));
+	TestFalse(TEXT("An implausibly future global query cannot hit a current-world blocker"),
+		AfpstrueCharacter::TraceHistoricalHit(World, nullptr, World->GetTimeSeconds() + 0.026,
+			HistoricalHeadStart, HistoricalHeadEnd, Hit));
+	Wall->SetActorLocation(FVector(250.0f, 0.0f, 500.0f));
+	TestTrue(TEXT("Opening the same blocker reveals the historical player without changing query time"),
+		AfpstrueCharacter::TraceHistoricalHit(World, nullptr, MiddleTime, HistoricalHeadStart, HistoricalHeadEnd, Hit)
+		&& Hit.GetActor() == Target);
+	Wall->SetActorLocation(FVector(750.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("A moving blocker currently behind the historical target does not conceal it"),
+		AfpstrueCharacter::TraceHistoricalHit(World, nullptr, MiddleTime, HistoricalHeadStart, HistoricalHeadEnd, Hit)
+		&& Hit.GetActor() == Target);
+	Wall->SetActorTransform(ClosedDoorTransform);
+	TestTrue(TEXT("Closing the blocker again immediately blocks that same historical shot"),
+		AfpstrueCharacter::TraceHistoricalHit(World, nullptr, MiddleTime, HistoricalHeadStart, HistoricalHeadEnd, Hit)
+		&& Hit.GetActor() == Wall);
+	TestTrue(TEXT("Historical queries never move the real target or the current dynamic blocker"),
+		Target->GetActorTransform().Equals(TargetBeforeQuery, 0.001f) && Wall->GetActorTransform().Equals(ClosedDoorTransform, 0.001f));
 	Wall->Destroy();
 	TestTrue(TEXT("Removing the wall restores the same historical player query"),
 		AfpstrueCharacter::TraceHistoricalHit(World, nullptr, MiddleTime, HistoricalHeadStart, HistoricalHeadEnd, Hit));
 	TestTrue(TEXT("The unblocked global query resolves the actual target"), Hit.GetActor() == Target);
 	const uint32 PreviousEpoch = Target->GetHitHistoryEpoch();
-	Target->ResetHitHistory();
+	if (!TestTrue(TEXT("The real TeleportTo entry succeeds without collision adjustment in this lifecycle fixture"),
+		Target->TeleportTo(FVector(1000.0f, 500.0f, 0.0f), FRotator::ZeroRotator, false, true))) return false;
 	Target->RecordServerHitHistory();
-	TestTrue(TEXT("Reset advances the historical life/teleport identity"), Target->GetHitHistoryEpoch() != PreviousEpoch);
+	TestTrue(TEXT("TeleportTo advances the historical life/teleport identity"), Target->GetHitHistoryEpoch() != PreviousEpoch);
 	TestFalse(TEXT("A new history epoch cannot interpolate through the previous life"),
 		Target->TraceHistoricalHit(MiddleTime, HistoricalHeadStart, HistoricalHeadEnd, Hit));
+	TestTrue(TEXT("The post-teleport history records only the new location"),
+		Target->TraceHistoricalHit(World->GetTimeSeconds(), FVector(0.0f, 500.0f, 90.0f), FVector(1500.0f, 500.0f, 90.0f), Hit));
 	UGameplayStatics::ApplyDamage(Target, 1000.0f, nullptr, nullptr, nullptr);
 	TestTrue(TEXT("Lethal damage reaches the real health lifecycle"), Target->IsDead());
 	TestFalse(TEXT("A dead target cannot be hit by retained history"),
 		Target->TraceHistoricalHit(SecondTime, FVector(0.0f, 100.0f, 90.0f), FVector(1000.0f, 100.0f, 90.0f), Hit));
 	Target->Destroy();
 	TestEqual(TEXT("EndPlay releases the retained historical shape allocation"), Target->GetHitHistoryAllocatedBytes(), SIZE_T(0));
+	// 使用同一真实 PhysicsAsset 夹具验证采样时点；CMC 的私有 Mesh scope 同样包装 FScopedMovementUpdate。
+	// 这构造可控的 defer/finalize 顺序，不把它冒充本次实机漏判根因已经得到证实。
+	TGuardValue<FString> ListenMode(World->NextURL, TEXT("?listen"));
+	AfpstrueCharacter* FinalPoseTarget = SpawnMultiplayerHistoryTarget(*World, *this, FVector(1500.0f, 0.0f, 0.0f));
+	if (FinalPoseTarget == nullptr) return false;
+	FinalPoseTarget->ResetHitHistory();
+	USkeletalMeshComponent* FinalPoseMesh = FinalPoseTarget->GetMesh();
+	FinalPoseMesh->bEnableAnimation = true;
+	int32 FinalizeCallbacks = 0;
+	const FDelegateHandle FinalizeObserver = FinalPoseMesh->RegisterOnBoneTransformsFinalizedDelegate(
+		FOnBoneTransformsFinalizedMultiCast::FDelegate::CreateLambda([&]()
+		{
+			++FinalizeCallbacks;
+			FVector UnpublishedOrigin;
+			TestFalse(TEXT("Bone finalization inside deferred movement cannot publish intermediate hit history"),
+				FinalPoseTarget->GetHistoricalViewOrigin(World->GetTimeSeconds(), UnpublishedOrigin));
+		}));
+	{
+		FScopedMovementUpdate MeshScope(FinalPoseMesh, EScopedUpdate::DeferredUpdates);
+		FScopedMovementUpdate CapsuleScope(FinalPoseTarget->GetCapsuleComponent(), EScopedUpdate::DeferredUpdates);
+		FinalPoseTarget->SetActorLocation(FVector(1500.0f, 60.0f, 0.0f));
+		FinalPoseMesh->RefreshBoneTransforms();
+		FinalPoseTarget->SetActorLocation(FVector(1500.0f, 120.0f, 0.0f));
+		FinalPoseMesh->RefreshBoneTransforms();
+		TestTrue(TEXT("The real movement scope actually defers child mesh propagation"),
+			!FinalPoseMesh->GetComponentLocation().Equals(FinalPoseTarget->GetActorLocation(), 0.001f));
+	}
+	FinalPoseMesh->UnregisterOnBoneTransformsFinalizedDelegate(FinalizeObserver);
+	TestTrue(TEXT("Real RefreshBoneTransforms reached the finalized-pose delegate during the deferred scope"), FinalizeCallbacks > 0);
+	TestTrue(TEXT("Scope completion publishes the final real head world transform"),
+		FinalPoseMesh->GetBoneTransform(FinalPoseMesh->GetBoneIndex(TEXT("head"))).GetLocation().Equals(FVector(1500.0f, 120.0f, 90.0f), 0.001f));
+	FTestWorldWrapper ForeignFixture;
+	if (!ForeignFixture.CreateTestWorld(EWorldType::Game)) { ForeignFixture.ForwardErrorMessages(this); return false; }
+	FWorldDelegates::OnWorldPostActorTick.Broadcast(ForeignFixture.GetTestWorld(), LEVELTICK_All, 0.02f);
+	FVector UnpublishedOrigin;
+	TestFalse(TEXT("Another world's post-actor event cannot sample this player's geometry"),
+		FinalPoseTarget->GetHistoricalViewOrigin(World->GetTimeSeconds(), UnpublishedOrigin));
+	if (!Fixture.TickTestWorld(0.02f)) { Fixture.ForwardErrorMessages(this); return false; }
+	const double FinalPoseTime = World->GetTimeSeconds();
+	TestTrue(TEXT("The real owning-world post-actor event records the final head geometry"),
+		FinalPoseTarget->TraceHistoricalHit(FinalPoseTime, FVector(1300.0f, 120.0f, 90.0f), FVector(1700.0f, 120.0f, 90.0f), Hit)
+		&& Hit.BoneName == TEXT("head"));
+	TestFalse(TEXT("The published final sample contains no stale pre-scope head position"),
+		FinalPoseTarget->TraceHistoricalHit(FinalPoseTime, FVector(1300.0f, 0.0f, 90.0f), FVector(1700.0f, 0.0f, 90.0f), Hit));
+	// 原生移动快照与这一份最终几何使用同一服务器时钟；60Hz跳过采样不能泄漏原生客户端累计时钟。
+	auto* TimelineMovement = Cast<UfpstrueCharacterMovementComponent>(FinalPoseTarget->GetCharacterMovement());
+	if (!TestNotNull(TEXT("Historical target uses the real project CMC timeline"), TimelineMovement)) return false;
+	TestTrue(TEXT("Network presentation selects native Linear smoothing before movement starts"),
+		TimelineMovement->NetworkSmoothingMode == ENetworkSmoothingMode::Linear && TimelineMovement->bNetworkAlwaysReplicateTransformUpdateTimestamp);
+	TestTrue(TEXT("The published native movement timestamp belongs to the final historical sample"),
+		FMath::IsNearlyEqual(double(TimelineMovement->GetServerLastTransformUpdateTimeStamp()), FinalPoseTime, 0.0001));
+	TimelineMovement->SetServerSnapshotTime(FinalPoseTime + 100.0);
+	if (!Fixture.TickTestWorld(0.001f)) { Fixture.ForwardErrorMessages(this); return false; }
+	TestTrue(TEXT("A sub-sample-rate world tick restores the retained sample timestamp after a native clock overwrite"),
+		FMath::IsNearlyEqual(double(TimelineMovement->GetServerLastTransformUpdateTimeStamp()), FinalPoseTime, 0.0001));
+	double RenderedTime = -1.0;
+	TestFalse(TEXT("Authority geometry cannot masquerade as an observed client presentation sample"), TimelineMovement->GetRenderedServerTime(RenderedTime));
+	const FFloatProperty* PublishedTimeProperty = FindFProperty<FFloatProperty>(ACharacter::StaticClass(), TEXT("ReplicatedServerLastTransformUpdateTimeStamp"));
+	if (!TestNotNull(TEXT("Native character exposes its replicated movement timestamp"), PublishedTimeProperty)) return false;
+	{
+		// 固定接收端角色和原生复制值，再调用真实 SmoothCorrection；不是网络传输或画面相等的实机证明。
+		TGuardValue<FString> ClientMode(World->NextURL, TEXT("127.0.0.1:7777"));
+		FinalPoseTarget->SetRole(ROLE_SimulatedProxy);
+		PublishedTimeProperty->SetPropertyValue_InContainer(FinalPoseTarget, 0.0f);
+		TestFalse(TEXT("A simulated proxy without its first authoritative timestamp has no native view sample"), TimelineMovement->GetRenderedServerTime(RenderedTime));
+		TestEqual(TEXT("An unavailable native sample does not leave a usable timestamp behind"), RenderedTime, 0.0);
+		const float ReceivedServerTime = static_cast<float>(FinalPoseTime);
+		PublishedTimeProperty->SetPropertyValue_InContainer(FinalPoseTarget, ReceivedServerTime);
+		const FVector Position = FinalPoseTarget->GetActorLocation();
+		const FQuat Rotation = FinalPoseTarget->GetActorQuat();
+		TimelineMovement->SmoothCorrection(Position, Rotation, Position + FVector(0.0f, 10.0f, 0.0f), Rotation);
+		TestTrue(TEXT("Real native Linear correction exposes its server-domain presentation time"), TimelineMovement->GetRenderedServerTime(RenderedTime));
+		TestTrue(TEXT("First native correction retains the actual received server timestamp"), FMath::IsNearlyEqual(RenderedTime, double(ReceivedServerTime), 0.0001));
+		FNetworkPredictionData_Client_Character* NativeSmoothing = TimelineMovement->GetPredictionData_Client_Character();
+		NativeSmoothing->SmoothingClientTimeStamp = NativeSmoothing->SmoothingServerTimeStamp + 0.02;
+		TestTrue(TEXT("Native smoothing remains usable when its clock briefly leads the latest published snapshot"), TimelineMovement->GetRenderedServerTime(RenderedTime));
+		TestTrue(TEXT("The conservative view policy never reports an unpublished future pose"), RenderedTime <= NativeSmoothing->SmoothingServerTimeStamp);
+		{
+			TGuardValue<ENetworkSmoothingMode> Exponential(TimelineMovement->NetworkSmoothingMode, ENetworkSmoothingMode::Exponential);
+			TestFalse(TEXT("Exponential smoothing cannot claim a single native Linear presentation timestamp"), TimelineMovement->GetRenderedServerTime(RenderedTime));
+		}
+		const EMovementMode PreviousMovementMode = TimelineMovement->MovementMode;
+		const uint8 PreviousCustomMode = TimelineMovement->CustomMovementMode;
+		TimelineMovement->SetMovementMode(MOVE_Flying);
+		const FVector BeforeProxyMove = FinalPoseTarget->GetActorLocation();
+		const FVector TestVelocity(600.0f, 0.0f, 0.0f);
+		TimelineMovement->MoveSmooth(TestVelocity, 0.1f);
+		TestTrue(TEXT("Native Linear snapshot proxies do not dead-reckon their capsule beyond the received transform"),
+			FinalPoseTarget->GetActorLocation().Equals(BeforeProxyMove, 0.001f));
+		FinalPoseTarget->SetRole(ROLE_AutonomousProxy);
+		TestFalse(TEXT("A locally predicted autonomous pawn cannot claim an observed target view timestamp"), TimelineMovement->GetRenderedServerTime(RenderedTime));
+		TimelineMovement->MoveSmooth(TestVelocity, 0.1f);
+		TestTrue(TEXT("Autonomous movement still performs the real native Flying displacement"),
+			FinalPoseTarget->GetActorLocation().Equals(BeforeProxyMove + TestVelocity * 0.1f, 0.001f));
+		TimelineMovement->SetMovementMode(PreviousMovementMode, PreviousCustomMode);
+		FinalPoseTarget->SetRole(ROLE_Authority);
+	}
+	FinalPoseTarget->Destroy();
+	TestFalse(TEXT("EndPlay removes the player's global post-actor subscription"), FWorldDelegates::OnWorldPostActorTick.IsBoundToObject(FinalPoseTarget));
+	FWorldDelegates::OnWorldPostActorTick.Broadcast(World, LEVELTICK_All, 0.02f);
+	TestEqual(TEXT("A later world event cannot recreate destroyed-player historical allocation"), FinalPoseTarget->GetHitHistoryAllocatedBytes(), SIZE_T(0));
 	return true;
 }
 
@@ -1019,6 +1174,16 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	FTestWorldWrapper Fixture;
 	if (!BeginMultiplayerUnitWorld(Fixture, *this, true)) return false;
 	UWorld* World = Fixture.GetTestWorld();
+	AfpstruePvpGameMode* HitPolicy = World->GetAuthGameMode<AfpstruePvpGameMode>();
+	if (!TestNotNull(TEXT("Shot protocol uses the real server hit-validation policy"), HitPolicy)) return false;
+	{
+		TGuardValue<float> RestoreInterpolationBudget(HitPolicy->TargetInterpolationSeconds, -1.0f);
+		TestEqual(TEXT("Negative target presentation budget is clamped to no extra interpolation"), HitPolicy->GetTargetInterpolationSeconds(), 0.0f);
+		HitPolicy->TargetInterpolationSeconds = 0.025f;
+		TestEqual(TEXT("A supported server presentation budget is preserved"), HitPolicy->GetTargetInterpolationSeconds(), 0.025f);
+		HitPolicy->TargetInterpolationSeconds = 1.0f;
+		TestEqual(TEXT("Target presentation budget cannot exceed the explicit100ms policy cap"), HitPolicy->GetTargetInterpolationSeconds(), 0.1f);
+	}
 	AfpstrueCharacter* Player = nullptr;
 	AAIController* Controller = nullptr;
 	UfpstrueWeaponComponent* Weapon = nullptr;
@@ -1041,22 +1206,36 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 		!TestNotNull(TEXT("Late target-data fixture has its granted Aim ability"), AimSpec)) return false;
 	FPredictionKey OldKey;
 	OldKey.Current = 123;
-	FGameplayAbilityTargetDataHandle LateData(new FGameplayAbilityTargetData_FPShot());
+	// 普通 GAS TargetData 已不承担射击传输；未知/迟到输入不能借它创建旧缓存或第二个执行入口。
+	FGameplayAbilityTargetDataHandle LateData(new FGameplayAbilityTargetData_LocationInfo());
 	FGameplayAbilitySpecHandle InvalidHandle;
 	const int32 AmmoBeforeLateData = Weapon->GetCurrentAmmo();
+	FFPShotRequest LateRequest;
+	LateRequest.Avatar = Player;
+	LateRequest.Weapon = Weapon->GetOwner();
+	LateRequest.EquipmentGeneration = Weapon->EquipmentRevision;
+	LateRequest.FireSession = LateRequest.ShotId = 1;
+	LateRequest.ServerFireTime = World->GetTimeSeconds();
+	LateRequest.AimDirection = FVector::UpVector;
+	const TArray<FFPShotRequest> LateBatch{LateRequest};
 	// 不先 AddDelegate 制造缓存；未知、非活动和旧激活键的数据都必须在入口被消费/拒绝。
+	HealthASC->ServerSubmitShotBatch_Implementation(InvalidHandle, OldKey, 1, LateBatch);
 	HealthASC->ServerSetReplicatedTargetData_Implementation(InvalidHandle, OldKey, LateData, FGameplayTag(), FPredictionKey());
 	TestFalse(TEXT("Unknown ability data cannot create a replicated target-data cache"),
 		ASC->CallReplicatedTargetDataDelegatesIfSet(InvalidHandle, OldKey));
+	HealthASC->ServerSubmitShotBatch_Implementation(FireSpec->Handle, OldKey, 1, LateBatch);
 	HealthASC->ServerSetReplicatedTargetData_Implementation(FireSpec->Handle, OldKey, LateData, FGameplayTag(), FPredictionKey());
 	TestFalse(TEXT("Inactive Fire data cannot recreate a cancelled activation cache"),
 		ASC->CallReplicatedTargetDataDelegatesIfSet(FireSpec->Handle, OldKey));
 	ASC->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Aim));
 	if (!TestTrue(TEXT("Old-key check uses a genuinely active production ability"), AimSpec->IsActive())) return false;
+	HealthASC->ServerSubmitShotBatch_Implementation(AimSpec->Handle, OldKey, 1, LateBatch);
+	HealthASC->ServerFinishShotInputs_Implementation(AimSpec->Handle, OldKey, 1, LateBatch, true, false);
 	HealthASC->ServerSetReplicatedTargetData_Implementation(AimSpec->Handle, OldKey, LateData, FGameplayTag(), FPredictionKey());
 	TestFalse(TEXT("An old prediction key cannot create data for a different active activation"),
 		ASC->CallReplicatedTargetDataDelegatesIfSet(AimSpec->Handle, OldKey));
 	TestTrue(TEXT("Rejecting old target data does not cancel the current activation"), AimSpec->IsActive());
+	TestFalse(TEXT("Unknown/inactive/non-Fire batches do not allocate a pending weapon input queue"), Weapon->HasPendingNetworkShots());
 	ASC->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Aim));
 	TestEqual(TEXT("Rejected unknown, inactive and old-key data cannot spend ammunition"), Weapon->GetCurrentAmmo(), AmmoBeforeLateData);
 	ASC->AddLooseGameplayTag(FpstrueGameplayTags::State_Firing);
@@ -1065,6 +1244,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	{
 		FFPShotRequest Request;
 		Request.Avatar = Player;
+		Request.Weapon = Weapon->GetOwner();
 		Request.EquipmentGeneration = Weapon->EquipmentRevision;
 		Request.FireSession = 1;
 		Request.ShotId = ShotId;
@@ -1093,18 +1273,29 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A second valid shot spends one more round"), Weapon->GetCurrentAmmo(), InitialAmmo - 2);
 	TestEqual(TEXT("Head identity selects critical damage rather than the movement capsule"), Target->GetCurrentHealth(), 160.0f);
 	const int32 AmmoAfterValidShots = Weapon->GetCurrentAmmo();
-	FFPShotRequest Expired = MakeRequest(4, BodyPoint);
-	Expired.ServerFireTime -= AfpstrueCharacter::MaxHitHistorySeconds + 0.1;
-	TestTrue(TEXT("Expired fire time is rejected rather than clamped into the history"), Weapon->AcceptShotRequest(Expired) == EFPShotResult::InvalidTime);
-	FFPShotRequest Future = MakeRequest(5, BodyPoint);
-	Future.ServerFireTime += 1.0;
-	TestTrue(TEXT("An implausibly future fire time is rejected"), Weapon->AcceptShotRequest(Future) == EFPShotResult::InvalidTime);
+	{
+		// 显示缓冲配置不是准入授权：即使超范围配置被夹到最大值，仍拒绝过旧/未来的输入。
+		TGuardValue<float> LargestInterpolationBudget(HitPolicy->TargetInterpolationSeconds, 1.0f);
+		FFPShotRequest Expired = MakeRequest(4, BodyPoint);
+		Expired.ServerFireTime -= AfpstrueCharacter::MaxHitHistorySeconds + 0.1;
+		TestTrue(TEXT("Maximum interpolation budget cannot admit a shot older than the historical window"), Weapon->AcceptShotRequest(Expired) == EFPShotResult::InvalidTime);
+		FFPShotRequest Future = MakeRequest(5, BodyPoint);
+		Future.ServerFireTime += 1.0;
+		TestTrue(TEXT("Maximum interpolation budget cannot authorize an implausibly future shot"), Weapon->AcceptShotRequest(Future) == EFPShotResult::InvalidTime);
+	}
 	FFPShotRequest InvalidAim = MakeRequest(6, BodyPoint);
 	InvalidAim.AimDirection = FVector::ZeroVector;
 	TestTrue(TEXT("A zero direction is rejected before authoritative hitscan"), Weapon->AcceptShotRequest(InvalidAim) == EFPShotResult::InvalidAim);
 	FFPShotRequest WrongAvatar = MakeRequest(7, BodyPoint);
 	WrongAvatar.Avatar = Target;
 	TestTrue(TEXT("A shot cannot name a different shooter avatar"), Weapon->AcceptShotRequest(WrongAvatar) == EFPShotResult::InvalidIdentity);
+	FFPShotRequest WrongWeapon = MakeRequest(7, BodyPoint);
+	WrongWeapon.Weapon = Target;
+	TestTrue(TEXT("Matching generation/session cannot authorize a request naming a different weapon actor"),
+		Weapon->AcceptShotRequest(WrongWeapon) == EFPShotResult::InvalidIdentity);
+	WrongWeapon.Weapon = nullptr;
+	TestTrue(TEXT("A request without the actual weapon identity is rejected"),
+		Weapon->AcceptShotRequest(WrongWeapon) == EFPShotResult::InvalidIdentity);
 	FFPShotRequest MalformedIdentity = MakeRequest(0, BodyPoint);
 	TestTrue(TEXT("Zero ShotId is rejected before admission"), Weapon->AcceptShotRequest(MalformedIdentity) == EFPShotResult::InvalidIdentity);
 	MalformedIdentity.ShotId = static_cast<uint32>(MAX_int32) + 1u;
@@ -1152,6 +1343,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	QueueWeapon->BeginAbilityFire(41);
 	FFPShotRequest QueueFirst;
 	QueueFirst.Avatar = QueuePlayer;
+	QueueFirst.Weapon = QueueWeapon->GetOwner();
 	QueueFirst.EquipmentGeneration = QueueWeapon->EquipmentRevision;
 	QueueFirst.FireSession = 1;
 	QueueFirst.ShotId = 1;
@@ -1209,6 +1401,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	{
 		FFPShotRequest& Request = BatchRequests[Index];
 		Request.Avatar = BatchPlayer;
+		Request.Weapon = BatchWeapon->GetOwner();
 		Request.EquipmentGeneration = BatchWeapon->EquipmentRevision;
 		Request.FireSession = 1;
 		Request.ShotId = Index + 1;
@@ -1274,6 +1467,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	{
 		FFPShotRequest& Request = TimerCaseRequests[Index];
 		Request.Avatar = BatchPlayer;
+		Request.Weapon = BatchWeapon->GetOwner();
 		Request.EquipmentGeneration = BatchWeapon->EquipmentRevision;
 		Request.FireSession = 4;
 		Request.ShotId = 6 + Index;
@@ -1284,7 +1478,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 		BatchWeapon->AcceptShotRequest(TimerCaseRequests[0]) == EFPShotResult::Accepted)
 		|| !TestTrue(TEXT("Timer ownership fixture queues its original cooldown head"),
 		BatchWeapon->AcceptShotRequest(TimerCaseRequests[1]) == EFPShotResult::Queued)) return false;
-	// 第一个真实 Tick 激活 Pending，第二个 Tick 消耗部分等待，但不走到33.3ms截止时间。
+	// 推进两个真实 Tick；NextTick 检查可剩余0秒，真实33.3ms射速截止时间仍未到达。
 	if (!Fixture.TickTestWorld(0.001f) || !Fixture.TickTestWorld(0.01f)) { Fixture.ForwardErrorMessages(this); return false; }
 	FTimerManager& ShotTimers = World->GetTimerManager();
 	const FTimerHandle OriginalHeadTimer = BatchWeapon->NetworkShotTimerHandle;
@@ -1292,8 +1486,8 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	const float HeadRateBeforeTail = ShotTimers.GetTimerRate(OriginalHeadTimer);
 	const double HeadDeadlineBeforeTail = World->GetTimeSeconds() + HeadRemainingBeforeTail;
 	const double CadenceDeadlineBeforeTail = BatchWeapon->NextShotTimeSeconds;
-	if (!TestTrue(TEXT("The real original head timer is active with positive remaining time"),
-		ShotTimers.TimerExists(OriginalHeadTimer) && !ShotTimers.IsTimerPending(OriginalHeadTimer) && HeadRemainingBeforeTail > 0.0f)) return false;
+	if (!TestTrue(TEXT("The original head owns a real check timer while its firing cadence remains unexpired"),
+		ShotTimers.TimerExists(OriginalHeadTimer) && BatchWeapon->GetNextShotDelay(true) > 0.0f)) return false;
 	TestTrue(TEXT("A legal tail request joins the existing cooldown head"),
 		BatchWeapon->AcceptShotRequest(TimerCaseRequests[2]) == EFPShotResult::Queued);
 	TestEqual(TEXT("Tail admission keeps exactly the original head plus one tail"), BatchWeapon->PendingNetworkShots.Num(), 2);
@@ -1302,7 +1496,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 		FMath::IsNearlyEqual(ShotTimers.GetTimerRemaining(BatchWeapon->NetworkShotTimerHandle), HeadRemainingBeforeTail, 0.000001f));
 	TestTrue(TEXT("Tail admission preserves original head timer rate"),
 		FMath::IsNearlyEqual(ShotTimers.GetTimerRate(BatchWeapon->NetworkShotTimerHandle), HeadRateBeforeTail, 0.000001f));
-	TestTrue(TEXT("Tail admission preserves original head absolute deadline"),
+	TestTrue(TEXT("Tail admission preserves the original check timer deadline"),
 		FMath::IsNearlyEqual(World->GetTimeSeconds() + ShotTimers.GetTimerRemaining(BatchWeapon->NetworkShotTimerHandle), HeadDeadlineBeforeTail, 0.000001));
 	TestEqual(TEXT("Tail admission cannot shift the server firing cadence deadline"), BatchWeapon->NextShotTimeSeconds, CadenceDeadlineBeforeTail);
 	TestEqual(TEXT("Tail admission cannot commit another round early"), BatchWeapon->GetCurrentAmmo(), TimerCaseInitialAmmo - 1);
@@ -1400,6 +1594,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	{
 		FFPShotRequest Request;
 		Request.Avatar = ReleasePlayer;
+		Request.Weapon = ReleaseWeapon->GetOwner();
 		Request.EquipmentGeneration = ReleaseWeapon->EquipmentRevision;
 		Request.FireSession = 1;
 		Request.ShotId = Index + 1;
@@ -1445,6 +1640,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 		{
 			FFPShotRequest Request;
 			Request.Avatar = CadencePlayer;
+			Request.Weapon = CadenceWeapon->GetOwner();
 			Request.EquipmentGeneration = CadenceWeapon->EquipmentRevision;
 			Request.FireSession = 1;
 			Request.ShotId = SubmittedRounds + 1;
@@ -1473,6 +1669,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	{
 		FFPShotRequest Request;
 		Request.Avatar = CadencePlayer;
+		Request.Weapon = CadenceWeapon->GetOwner();
 		Request.EquipmentGeneration = CadenceWeapon->EquipmentRevision;
 		Request.FireSession = 1;
 		Request.ShotId = 21 + Index;
@@ -1507,6 +1704,7 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("A different weapon completes its public equipment transaction"), ReplacementWeapon->AttachWeapon(QueuePlayer))) return false;
 	ReplacementWeapon->BeginAbilityFire(42);
 	FFPShotRequest NewWeaponRequest = OldWeaponRequest;
+	NewWeaponRequest.Weapon = ReplacementWeapon->GetOwner();
 	NewWeaponRequest.EquipmentGeneration = ReplacementWeapon->EquipmentRevision;
 	NewWeaponRequest.ServerFireTime = World->GetTimeSeconds();
 	TestTrue(TEXT("Replacement weapon commits its own authoritative request"), ReplacementWeapon->AcceptShotRequest(NewWeaponRequest) == EFPShotResult::Accepted);
@@ -1518,10 +1716,15 @@ bool FFpstrueMultiplayerShotProtocolTest::RunTest(const FString& Parameters)
 	const uint32 FinalizedShotBeforeStaleData = ReplacementWeapon->LastProcessedShotId;
 	const EFPShotResult ResultBeforeStaleData = ReplacementWeapon->LastShotResult;
 	const int32 AmmoBeforeStaleData = ReplacementWeapon->GetCurrentAmmo();
-	FGameplayAbilityTargetDataHandle OldWeaponData(new FGameplayAbilityTargetData_FPShot());
-	static_cast<FGameplayAbilityTargetData_FPShot*>(OldWeaponData.Get(0))->Request = OldWeaponRequest;
+	FGameplayAbilityTargetDataHandle OldWeaponData(new FGameplayAbilityTargetData_LocationInfo());
 	FGameplayAbilitySpec* QueueFireSpec = QueueASC->FindAbilitySpecFromClass(UfpstrueFireAbility::StaticClass());
 	if (!TestNotNull(TEXT("Stale weapon data retains its original granted Fire spec"), QueueFireSpec)) return false;
+	TestTrue(TEXT("A complete request naming the old weapon cannot execute against the replacement actor"),
+		ReplacementWeapon->AcceptShotRequest(OldWeaponRequest) == EFPShotResult::InvalidIdentity);
+	QueueASC->ServerSubmitShotBatch_Implementation(QueueFireSpec->Handle, OldKey, OldWeaponRequest.ShotId,
+		TArray<FFPShotRequest>{OldWeaponRequest});
+	QueueASC->ServerFinishShotInputs_Implementation(QueueFireSpec->Handle, OldKey, OldWeaponRequest.ShotId,
+		TArray<FFPShotRequest>{OldWeaponRequest}, false, true);
 	QueueASC->ServerSetReplicatedTargetData_Implementation(QueueFireSpec->Handle, OldKey, OldWeaponData, FGameplayTag(), FPredictionKey());
 	TestFalse(TEXT("Old weapon ability data cannot recreate a cancelled target-data cache"),
 		QueueASC->CallReplicatedTargetDataDelegatesIfSet(QueueFireSpec->Handle, OldKey));
@@ -1829,13 +2032,7 @@ bool FFpstrueNetworkEnemyPresentationTest::RunTest(const FString& Parameters)
 	Enemy->NetworkPresentation.DeathBone = TEXT("spine_03");
 	Enemy->OnRep_NetworkPresentation();
 	TestTrue(TEXT("Death presentation works before health attributes arrive"), Enemy->IsDead() && Enemy->bDeathEffectsApplied);
-	UWidgetComponent* HealthBar = Enemy->FindComponentByClass<UWidgetComponent>();
-	if (!TestNotNull(TEXT("The client corpse retains its native health-bar anchor component"), HealthBar)) return false;
-	TestTrue(TEXT("A death snapshot hides the health bar before health attributes arrive"), HealthBar->bHiddenInGame);
-	TestNull(TEXT("Death removes the screen widget rather than leaving a stale screen-layer entry"), HealthBar->GetUserWidgetObject());
-	Enemy->HealthComponent->OnHealthChanged.Broadcast(HealthBefore);
-	TestTrue(TEXT("A late pre-death health notification cannot reveal the corpse's health bar"), HealthBar->bHiddenInGame);
-	TestNull(TEXT("A late health notification cannot recreate the removed screen widget"), HealthBar->GetUserWidgetObject());
+	TestNull(TEXT("Enemy presentation never creates a world-space widget"), Enemy->FindComponentByClass<UWidgetComponent>());
 	TestTrue(TEXT("Ragdoll uses the death context from the same snapshot"),
 		Enemy->DeathDamageContext.Location.Equals(FVector(10.0f, 20.0f, 30.0f)) && Enemy->DeathDamageContext.BoneName == TEXT("spine_03"));
 	Enemy->OnRep_NetworkPresentation();
@@ -2077,7 +2274,7 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 	Mode->CompleteConnectionHandshake(Restored, InitialToken);
 	if (!TestTrue(TEXT("A valid disconnected token completes its production claim"), Restored->bConnectionHandshakeComplete)) return false;
 	// 出生补给有自己的有界登记，不能与已经装备/死亡掉落的武器共用强制销毁逻辑。
-	AActor* UnclaimedSupply = World->SpawnActor<AfpstrueTemplateWeapon>(FVector(50000, 50000, 1000), FRotator::ZeroRotator);
+	AActor* UnclaimedSupply = World->SpawnActor<AfpstrueTemplateWeapon>(TemplateWeaponClass(), FVector(50000, 50000, 1000), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Spawn-supply cleanup uses a real unowned pickup"), UnclaimedSupply)) return false;
 	Mode->SpawnPickups.Add(Restored, UnclaimedSupply);
 	Mode->ReleaseUnclaimedSpawnPickup(Restored);
@@ -2219,7 +2416,7 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 	AfpstrueCharacter* DropPawn = World->SpawnActor<AfpstrueCharacter>(Mode->DefaultPawnClass,
 		FTransform(FVector(30000.0f, 0.0f, 1000.0f)), TemplateSpawn);
 	AfpstruePvpPlayerController* DropController = World->SpawnActor<AfpstruePvpPlayerController>();
-	AfpstrueTemplateWeapon* DropRifle = World->SpawnActor<AfpstrueTemplateWeapon>(AfpstrueTemplateWeapon::StaticClass(),
+	AfpstrueTemplateWeapon* DropRifle = World->SpawnActor<AfpstrueTemplateWeapon>(TemplateWeaponClass(),
 		FTransform(FVector(40000.0f, 0.0f, 1000.0f)), TemplateSpawn);
 	APlayerStart* RejoinStart = World->SpawnActor<APlayerStart>(FVector(33000.0f, 0.0f, 1000.0f), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Death reconnect has the currently selected real template Pawn"), DropPawn) ||
@@ -2274,7 +2471,7 @@ bool FFpstrueMultiplayerResumeSessionTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("The independent drop is still reclaimed at its eight-second deadline"), IsValid(DropRifle) && !DropRifle->IsActorBeingDestroyed());
 
 	// 旧保留记录的枪已被其他活玩家持有时，只删旧记录，不能销毁别人正在使用的新装备。
-	AfpstrueTemplateWeapon* LiveRifle = World->SpawnActor<AfpstrueTemplateWeapon>(AfpstrueTemplateWeapon::StaticClass(),
+	AfpstrueTemplateWeapon* LiveRifle = World->SpawnActor<AfpstrueTemplateWeapon>(TemplateWeaponClass(),
 		FTransform(FVector(40000.0f, 0.0f, 1000.0f)), TemplateSpawn);
 	if (!TestNotNull(TEXT("Stale retention cleanup has a distinct living player's rifle"), LiveRifle)) return false;
 	UfpstrueWeaponComponent* LiveWeapon = LiveRifle->FindComponentByClass<UfpstrueWeaponComponent>();
@@ -2430,33 +2627,29 @@ bool FFpstrueMultiplayerHudRebindTest::RunTest(const FString&)
 		|| !SpawnMultiplayerArmedCharacter(*World, *this, Second, SecondController, SecondWeapon)) return false;
 	auto* HUD = World->SpawnActor<AfpstruePvpHUD>();
 	if (!TestNotNull(TEXT("Multiplayer HUD fixture"), HUD)) return false;
-	// 最小控件树使用已审查的原 ingame 名称；只验证事件接线，不把规则测试冒充真实视口绘制。
-	TStrongObjectPtr<UfpstruePvpIngameWidget> Bridge(NewObject<UfpstruePvpIngameWidget>(World));
-	if (!TestNotNull(TEXT("The native original-layout HUD bridge"), Bridge.Get())) return false;
+	// 加载正式网络 Blueprint；真实生成类负责绑定 Designer 控件并执行 SetText/SetPercent 图。
+	UClass* WidgetClass = LoadClass<UfpstruePvpIngameWidget>(nullptr, TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C"));
+	if (!TestNotNull(TEXT("The production network HUD Blueprint loads"), WidgetClass)) return false;
+	TStrongObjectPtr<UfpstruePvpIngameWidget> Bridge(CreateWidget<UfpstruePvpIngameWidget>(World, WidgetClass));
+	if (!TestNotNull(TEXT("The production Blueprint widget initializes"), Bridge.Get())) return false;
 	const FText InitialWeaponName = FText::FromString(TEXT("测试步枪"));
 	Bridge->ApplySnapshot(50.0f, 200.0f, true, 7, 80, InitialWeaponName);
-	TestFalse(TEXT("A missing authored layout is rejected rather than reported as restored"), Bridge->HasAuthoredControls());
+	TestTrue(TEXT("Required BindWidget properties bind the production semantic controls"), Bridge->HasAuthoredControls());
 	TestFalse(TEXT("A cached snapshot before construction is not a rendered HUD"), Bridge->HasPaintedSnapshot());
-	Bridge->WidgetTree = NewObject<UWidgetTree>(Bridge.Get());
-	auto* Root = Bridge->WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("TestIngameRoot"));
-	Bridge->WidgetTree->RootWidget = Root;
-	auto* HealthBar = Bridge->WidgetTree->ConstructWidget<UProgressBar>(UProgressBar::StaticClass(), TEXT("血量组件"));
-	auto* MagazineText = Bridge->WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("当前子弹"));
-	auto* ReserveText = Bridge->WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("剩余子弹"));
-	auto* WeaponNameText = Bridge->WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("TextBlock_2"));
-	auto* MatchHintText = Bridge->WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("TextBlock_65"));
-	auto* AmmoContainer = Bridge->WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("子弹数"));
-	auto* CountdownRow = Bridge->WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("HorizontalBox_327"));
-	UWidget* Controls[] = {HealthBar, MagazineText, ReserveText, WeaponNameText, MatchHintText, AmmoContainer, CountdownRow};
-	for (UWidget* Widget : Controls)
-		Root->AddChildToVerticalBox(Widget);
-	Bridge->ResolveAuthoredControls();
-	Bridge->RefreshControls();
-	TestTrue(TEXT("The exact original layout names resolve all required controls"), Bridge->HasAuthoredControls());
+	const TSharedRef<SWidget> WidgetSlate = Bridge->TakeWidget();
+	if (!TestTrue(TEXT("The real Blueprint runs its construction and presentation event"), Bridge->bPresentationReady)) return false;
+	auto* HealthBar = Bridge->HealthBar.Get();
+	auto* MagazineText = Bridge->MagazineText.Get();
+	auto* ReserveText = Bridge->ReserveText.Get();
+	auto* WeaponNameText = Bridge->WeaponNameText.Get();
+	auto* MatchHintText = Bridge->MatchHintText.Get();
+	auto* AmmoContainer = Bridge->AmmoContainer.Get();
+	auto* CountdownRow = Bridge->CountdownRow.Get();
 	TestEqual(TEXT("Constructing late restores the cached normalized health"), HealthBar->GetPercent(), 0.25f);
 	TestEqual(TEXT("Constructing late restores the cached magazine"), MagazineText->GetText().ToString(), FText::AsNumber(7).ToString());
 	TestEqual(TEXT("Constructing late restores the cached reserve"), ReserveText->GetText().ToString(), FText::AsNumber(80).ToString());
 	TestTrue(TEXT("The weapon label comes from the equipment snapshot rather than the original RU74 text"), WeaponNameText->GetText().EqualTo(InitialWeaponName));
+	TestTrue(TEXT("The real Blueprint applies its authored low-health color"), HealthBar->GetFillColorAndOpacity().Equals(FLinearColor(0.85f, 0.1f, 0.08f, 0.85f)));
 	TestEqual(TEXT("Multiplayer hides the single-player countdown row"), CountdownRow->GetVisibility(), ESlateVisibility::Collapsed);
 	TestTrue(TEXT("The original task label explains multiplayer enemy survival and player damage"),
 		MatchHintText->GetText().ToString().Contains(TEXT("敌人")) && MatchHintText->GetText().ToString().Contains(TEXT("互相伤害")));
@@ -2468,6 +2661,9 @@ bool FFpstrueMultiplayerHudRebindTest::RunTest(const FString&)
 	TestEqual(TEXT("An unarmed snapshot collapses the entire original ammo panel"), AmmoContainer->GetVisibility(), ESlateVisibility::Collapsed);
 	TestEqual(TEXT("An unarmed snapshot clears residual magazine text"), MagazineText->GetText().ToString(), FText::AsNumber(0).ToString());
 	TestTrue(TEXT("An unarmed snapshot clears the old weapon name"), WeaponNameText->GetText().IsEmpty());
+	Bridge->ApplySnapshot(80.0f, 100.0f, true, 5, 80, InitialWeaponName);
+	TestTrue(TEXT("The real Blueprint restores the authored healthy color"), HealthBar->GetFillColorAndOpacity().Equals(FLinearColor(0.104616f, 0.296138f, 0.158961f, 0.701961f)));
+	TestTrue(TEXT("The real Blueprint applies its authored low-ammo color"), MagazineText->GetColorAndOpacity().GetSpecifiedColor().Equals(FLinearColor(0.9f, 0.15f, 0.1f)));
 	FirstWeapon->WeaponDisplayName = FText::FromString(TEXT("第一把步枪"));
 	SecondWeapon->WeaponDisplayName = FText::FromString(TEXT("第二把步枪"));
 	HUD->IngameWidget = Bridge.Get();
@@ -2879,152 +3075,6 @@ bool FFpstrueEnemySimpleHitProxyTest::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerEnemyHealthBarTest,
-	"fpstrue.Multiplayer.PvPvE.EnemyHealthBarAnchorAndHealth",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
-
-// 使用真实敌人蓝图与原生敌人验证世界锚点和事件驱动数值；不冒充屏幕投影观感或网络传输验收。
-bool FFpstrueMultiplayerEnemyHealthBarTest::RunTest(const FString&)
-{
-	FTestWorldWrapper Fixture;
-	if (!BeginMultiplayerUnitWorld(Fixture, *this)) return false;
-	UWorld* World = Fixture.GetTestWorld();
-	UClass* BlueprintClass = LoadClass<AfpstrueEnemyCharacter>(nullptr,
-		TEXT("/Game/FirstPerson/Blueprints/enemy/enemy_BP.enemy_BP_C"));
-	if (!TestNotNull(TEXT("Health-bar fixture loads the actual project enemy Blueprint"), BlueprintClass)) return false;
-	const auto SpawnEnemy = [&](UClass* Class, const FVector& Location, bool bLegacyAnchor)
-	{
-		const FTransform Transform(FRotator::ZeroRotator, Location);
-		AfpstrueEnemyCharacter* Enemy = World->SpawnActorDeferred<AfpstrueEnemyCharacter>(Class, Transform, nullptr, nullptr,
-			ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-		if (Enemy != nullptr)
-		{
-			Enemy->AutoPossessAI = EAutoPossessAI::Disabled;
-			if (bLegacyAnchor)
-			{
-				// 模拟旧 BP 保存的父节点和绝对变换，必须由真实 BeginPlay 修复，不能只测新 native CDO。
-				if (UWidgetComponent* Bar = Enemy->FindComponentByClass<UWidgetComponent>())
-				{
-					Bar->AttachToComponent(Enemy->GetCapsuleComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-					Bar->SetAbsolute(true, true, true);
-					Bar->SetWorldLocationAndRotation(FVector(10000.0f, -5000.0f, 900.0f), FRotator(30.0f, 75.0f, 15.0f));
-					Bar->SetWorldScale3D(FVector(2.0f));
-				}
-			}
-			Enemy->FinishSpawning(Transform);
-			Enemy->GetCharacterMovement()->SetComponentTickEnabled(false);
-			Enemy->SetActorEnableCollision(false);
-		}
-		return Enemy;
-	};
-	AfpstrueEnemyCharacter* BlueprintEnemy = SpawnEnemy(BlueprintClass, FVector(100.0f, 200.0f, 300.0f), true);
-	AfpstrueEnemyCharacter* NativeEnemy = SpawnEnemy(AfpstrueEnemyCharacter::StaticClass(), FVector(-1000.0f, 500.0f, 300.0f), false);
-	if (!TestNotNull(TEXT("Health-bar fixture spawns the real enemy Blueprint"), BlueprintEnemy)
-		|| !TestNotNull(TEXT("Health-bar fixture also covers native component defaults"), NativeEnemy)) return false;
-	TestTrue(TEXT("The project enemy keeps its actual Blueprint class"), BlueprintEnemy->GetClass() == BlueprintClass);
-	UWidgetComponent* BlueprintBar = BlueprintEnemy->FindComponentByClass<UWidgetComponent>();
-	UWidgetComponent* NativeBar = NativeEnemy->FindComponentByClass<UWidgetComponent>();
-	UfpstrueHealthComponent* BlueprintHealth = BlueprintEnemy->FindComponentByClass<UfpstrueHealthComponent>();
-	UfpstrueHealthComponent* NativeHealth = NativeEnemy->FindComponentByClass<UfpstrueHealthComponent>();
-	if (!TestNotNull(TEXT("Project enemy contains its native health-bar component"), BlueprintBar)
-		|| !TestNotNull(TEXT("Native enemy contains its health-bar component"), NativeBar)
-		|| !TestNotNull(TEXT("Project enemy has the real health owner"), BlueprintHealth)
-		|| !TestNotNull(TEXT("Native enemy has its own health owner"), NativeHealth)) return false;
-	for (AfpstrueEnemyCharacter* Enemy : {BlueprintEnemy, NativeEnemy})
-	{
-		UWidgetComponent* Bar = Enemy->FindComponentByClass<UWidgetComponent>();
-		const FVector ExpectedOffset(0.0f, 0.0f, Enemy->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() + 28.0f);
-		const FVector ExpectedWorld = Enemy->GetCapsuleComponent()->GetComponentTransform().TransformPosition(ExpectedOffset);
-		TestTrue(TEXT("The health bar belongs to this enemy and follows its network-smoothed body component without a bone socket"),
-			Bar->GetOwner() == Enemy && Bar->GetAttachParent() == Enemy->GetMesh() && Bar->GetAttachSocketName().IsNone());
-		TestTrue(TEXT("Each enemy initially retains its actual capsule height plus a fixed head clearance, including legacy Blueprint instances"),
-			Bar->GetComponentLocation().Equals(ExpectedWorld, 0.01f));
-		TestTrue(TEXT("BeginPlay removes old absolute transforms so the anchor follows the smoothed mesh"),
-			!Bar->IsUsingAbsoluteLocation() && !Bar->IsUsingAbsoluteRotation() && !Bar->IsUsingAbsoluteScale()
-			&& Bar->GetRelativeScale3D().Equals(FVector::OneVector, 0.001f));
-		TestTrue(TEXT("World-space event drawing starts at a stable local orientation before the local camera billboard tick"),
-			Bar->GetWidgetSpace() == EWidgetSpace::World && Bar->GetManuallyRedraw() && Bar->GetRelativeRotation().IsNearlyZero());
-		TestFalse(TEXT("Only health replicates; the per-client UI component is not replicated"), Bar->GetIsReplicated());
-		TestTrue(TEXT("The health bar adds no gameplay collision"), Bar->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
-		TestTrue(TEXT("The world bar retains its fixed content draw size and centred bottom pivot"),
-			Bar->GetDrawSize().Equals(FVector2D(80.0f, 8.0f)) && Bar->GetPivot().Equals(FVector2D(0.5f, 1.0f)));
-	}
-	UfpstrueEnemyHealthBarWidget* BlueprintWidget = Cast<UfpstrueEnemyHealthBarWidget>(BlueprintBar->GetUserWidgetObject());
-	UfpstrueEnemyHealthBarWidget* NativeWidget = Cast<UfpstrueEnemyHealthBarWidget>(NativeBar->GetUserWidgetObject());
-	// 不为测试手动注入 Widget：若本次 NullRHI/Slate 环境未创建真实对象，就明确报告无法验证数值绑定。
-	if (!TestNotNull(TEXT("The production component initializes the real project-enemy widget in this test environment"), BlueprintWidget)
-		|| !TestNotNull(TEXT("The production component initializes the native-enemy widget without test injection"), NativeWidget)) return false;
-	TestTrue(TEXT("Initial binding immediately reads each enemy's current health"),
-		FMath::IsNearlyEqual(BlueprintWidget->GetHealthFraction(), BlueprintHealth->GetHealthNormalized())
-		&& FMath::IsNearlyEqual(NativeWidget->GetHealthFraction(), NativeHealth->GetHealthNormalized()));
-	TestTrue(TEXT("Two enemies retain separate health-bar widget instances"), BlueprintWidget != NativeWidget);
-	const FVector BeforeViewChange = BlueprintBar->GetComponentLocation();
-	ACameraActor* Camera = World->SpawnActor<ACameraActor>();
-	APlayerController* Viewer = World->SpawnActor<APlayerController>();
-	if (!TestNotNull(TEXT("Anchor fixture has an independent gameplay camera"), Camera)
-		|| !TestNotNull(TEXT("Anchor fixture has an independent viewer Controller"), Viewer)) return false;
-	Viewer->SetViewTarget(Camera);
-	for (const FRotator Rotation : {FRotator(65.0f, 120.0f, 0.0f), FRotator(-50.0f, -160.0f, 0.0f)})
-	{
-		Viewer->SetControlRotation(Rotation);
-		Camera->SetActorRotation(Rotation);
-		Camera->GetCameraComponent()->SetFieldOfView(70.0f);
-		TestTrue(TEXT("Changing another player's view cannot move the enemy's world-space health-bar anchor"),
-			BlueprintBar->GetComponentLocation().Equals(BeforeViewChange, 0.01f));
-	}
-	BlueprintEnemy->SetActorLocationAndRotation(FVector(750.0f, -250.0f, 400.0f), FRotator(0.0f, 135.0f, 0.0f), false, nullptr,
-		ETeleportType::TeleportPhysics);
-	TestTrue(TEXT("Moving and rotating the enemy moves the anchor with its body component"), BlueprintBar->GetComponentLocation().Equals(
-		BlueprintEnemy->GetMesh()->GetComponentTransform().TransformPosition(BlueprintBar->GetRelativeLocation()), 0.01f));
-	TestFalse(TEXT("The anchor does not stay behind at its old screen-associated world position"),
-		BlueprintBar->GetComponentLocation().Equals(BeforeViewChange, 0.01f));
-	const FVector CapsuleBeforeSmoothing = BlueprintEnemy->GetCapsuleComponent()->GetComponentLocation();
-	const FVector BarBeforeSmoothing = BlueprintBar->GetComponentLocation();
-	const FVector OtherBarBeforeSmoothing = NativeBar->GetComponentLocation();
-	const FVector MeshOffsetBeforeSmoothing = BlueprintEnemy->GetMesh()->GetRelativeLocation();
-	const FVector SimulatedSmoothingOffset(45.0f, -25.0f, 12.0f);
-	// CharacterMovement 的网络平滑只偏移 Mesh，不偏移已经校正的 Capsule；这里直接复现该变换边界。
-	BlueprintEnemy->GetMesh()->SetRelativeLocation(MeshOffsetBeforeSmoothing + SimulatedSmoothingOffset);
-	const FVector ExpectedSmoothingDelta = BlueprintEnemy->GetMesh()->GetAttachParent()->GetComponentTransform()
-		.TransformVector(SimulatedSmoothingOffset);
-	TestTrue(TEXT("A simulated network smoothing update leaves the authoritative capsule position unchanged"),
-		BlueprintEnemy->GetCapsuleComponent()->GetComponentLocation().Equals(CapsuleBeforeSmoothing, 0.01f));
-	TestTrue(TEXT("The health-bar anchor follows the same visual mesh offset instead of staying at the corrected capsule"),
-		BlueprintBar->GetComponentLocation().Equals(BarBeforeSmoothing + ExpectedSmoothingDelta, 0.01f));
-	TestTrue(TEXT("Smoothing one enemy cannot move another enemy's health bar"),
-		NativeBar->GetComponentLocation().Equals(OtherBarBeforeSmoothing, 0.01f));
-	BlueprintEnemy->GetMesh()->SetRelativeLocation(MeshOffsetBeforeSmoothing);
-	TestTrue(TEXT("Finishing visual smoothing returns the health bar to the body anchor without a separate UI update"),
-		BlueprintBar->GetComponentLocation().Equals(BarBeforeSmoothing, 0.01f));
-	BlueprintHealth->SetMaxHealthAndReset(200.0f);
-	UGameplayStatics::ApplyDamage(BlueprintEnemy, 50.0f, nullptr, nullptr, nullptr);
-	TestTrue(TEXT("Authoritative damage updates the bound project-enemy health fraction through its real health event"),
-		FMath::IsNearlyEqual(BlueprintWidget->GetHealthFraction(), 0.75f, 0.001f));
-	TestTrue(TEXT("Damage to one enemy does not change the other's displayed health"),
-		FMath::IsNearlyEqual(NativeWidget->GetHealthFraction(), 1.0f));
-	UGameplayStatics::ApplyDamage(NativeEnemy, 20.0f, nullptr, nullptr, nullptr);
-	TestTrue(TEXT("The second enemy also consumes only its own health component's value"),
-		FMath::IsNearlyEqual(NativeWidget->GetHealthFraction(), NativeHealth->GetHealthNormalized(), 0.001f)
-		&& FMath::IsNearlyEqual(BlueprintWidget->GetHealthFraction(), 0.75f, 0.001f));
-	BlueprintWidget->TakeWidget();
-	UProgressBar* Progress = Cast<UProgressBar>(BlueprintWidget->GetWidgetFromName(TEXT("HealthProgress")));
-	if (!TestNotNull(TEXT("The native widget builds a real progress bar rather than a test-only cached value"), Progress)) return false;
-	TestTrue(TEXT("Building the Slate widget applies the latest health to the actual progress bar"),
-		FMath::IsNearlyEqual(Progress->GetPercent(), BlueprintWidget->GetHealthFraction(), 0.001f));
-	TestTrue(TEXT("Health changes reuse the existing per-enemy widget instead of creating new UI objects"),
-		BlueprintBar->GetUserWidgetObject() == BlueprintWidget && NativeBar->GetUserWidgetObject() == NativeWidget);
-	UGameplayStatics::ApplyDamage(BlueprintEnemy, 1000.0f, nullptr, nullptr, nullptr);
-	TestTrue(TEXT("Authoritative death hides the smoothed body's health bar"), BlueprintEnemy->IsDead() && BlueprintBar->bHiddenInGame);
-	TestNull(TEXT("Death removes the screen widget instead of leaving a stale projected health bar"), BlueprintBar->GetUserWidgetObject());
-	BlueprintHealth->OnHealthChanged.Broadcast(BlueprintHealth->GetHealth());
-	TestTrue(TEXT("A late health event cannot reveal a dead enemy's health bar"), BlueprintBar->bHiddenInGame);
-	TestNull(TEXT("A late health event cannot recreate the dead enemy's screen widget"), BlueprintBar->GetUserWidgetObject());
-	TestTrue(TEXT("The surviving enemy keeps its own health bar after another enemy dies"),
-		!NativeBar->bHiddenInGame && NativeBar->GetUserWidgetObject() == NativeWidget
-		&& FMath::IsNearlyEqual(NativeWidget->GetHealthFraction(), NativeHealth->GetHealthNormalized(), 0.001f));
-	return true;
-}
-
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueMultiplayerBodyAnimationDefaultsTest,
 	"fpstrue.Multiplayer.Animation.BodyDefaultsAndViewSeparation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -3041,10 +3091,25 @@ bool FFpstrueMultiplayerBodyAnimationDefaultsTest::RunTest(const FString&)
 		ViewmodelCollection->GetObjectPropertyValue_InContainer(GetDefault<UfpstruePlayerAnimInstance>()));
 	FTestWorldWrapper Fixture;
 	if (!BeginMultiplayerUnitWorld(Fixture, *this)) return false;
-	AfpstrueCharacter* NativeCharacter = Fixture.GetTestWorld()->SpawnActor<AfpstrueCharacter>();
-	if (!TestNotNull(TEXT("Native compatibility fallback is verified after component initialization"), NativeCharacter)) return false;
-	USkeletalMeshComponent* Body = NativeCharacter->GetMesh();
-	const USkeletalMeshComponent* Arms = NativeCharacter->GetMesh1P();
+	AfpstrueCharacter* Unauthored = Fixture.GetTestWorld()->SpawnActor<AfpstrueCharacter>();
+	if (!TestNotNull(TEXT("Unconfigured native character remains available for rules fixtures"), Unauthored)) return false;
+	TestNull(TEXT("Native instances do not load a retired fallback mesh"), Unauthored->GetMesh()->GetSkeletalMeshAsset());
+	TestNull(TEXT("Native instances do not load a retired fallback AnimClass"), Unauthored->GetMesh()->GetAnimClass());
+	Unauthored->Destroy();
+	UClass* AuthoredClass = GetDefault<AfpstruePvpGameMode>()->DefaultPawnClass.Get();
+	AfpstrueCharacter* AuthoredCharacter = Fixture.GetTestWorld()->SpawnActor<AfpstrueCharacter>(AuthoredClass);
+	if (!TestNotNull(TEXT("Production Blueprint presentation is verified after component initialization"), AuthoredCharacter)) return false;
+	const UFunction* CameraEvent = AuthoredCharacter->FindFunction(TEXT("ApplyCameraPresentation"));
+	TestTrue(TEXT("Actual player Blueprint owns camera presentation instead of an empty native event"),
+		CameraEvent && CameraEvent->GetOuterUClass() == AuthoredCharacter->GetClass());
+	AuthoredCharacter->ApplyCameraPresentation(1.0f);
+	TestTrue(TEXT("Actual Blueprint consumes the aim snapshot and configured FOV"),
+		FMath::IsNearlyEqual(AuthoredCharacter->GetFirstPersonCameraComponent()->FieldOfView, AuthoredCharacter->AimFieldOfView));
+	AuthoredCharacter->ApplyCameraPresentation(0.0f);
+	TestTrue(TEXT("Actual Blueprint restores configured hip FOV"),
+		FMath::IsNearlyEqual(AuthoredCharacter->GetFirstPersonCameraComponent()->FieldOfView, AuthoredCharacter->HipFieldOfView));
+	USkeletalMeshComponent* Body = AuthoredCharacter->GetMesh();
+	const USkeletalMeshComponent* Arms = AuthoredCharacter->GetMesh1P();
 	if (!TestNotNull(TEXT("Default character has a third-person body component"), Body)
 		|| !TestNotNull(TEXT("Default character retains its first-person arms component"), Arms)) return false;
 	const USkeletalMesh* Mesh = Body->GetSkeletalMeshAsset();
@@ -3053,10 +3118,10 @@ bool FFpstrueMultiplayerBodyAnimationDefaultsTest::RunTest(const FString&)
 		|| !TestNotNull(TEXT("Third-person body has a configured AnimBlueprint class"), AnimClass)) return false;
 	const IAnimClassInterface* Animation = IAnimClassInterface::GetFromClass(AnimClass);
 	if (!TestNotNull(TEXT("Body animation is a compiled AnimBlueprint, not a reference pose fallback"), Animation)) return false;
-	TestEqual(TEXT("Native compatibility fallback retains its previous lightweight Manny mesh"), Mesh->GetPathName(),
-		FString(TEXT("/Game/InfimaGames/ArtCore/Mannequin/Meshes/SKM_Manny_Simple.SKM_Manny_Simple")));
+	TestEqual(TEXT("Production Blueprint supplies its matching template Manny mesh"), Mesh->GetPathName(),
+		FString(TEXT("/Game/FPSMPT55/Demo/Characters/Mannequins/Meshes/SKM_Manny_Simple.SKM_Manny_Simple")));
 	TestEqual(TEXT("Body uses the migrated locomotion AnimBlueprint"), AnimClass->GetPathName(),
-		FString(TEXT("/Game/InfimaGames/ArtCore/Mannequin/Animations/ABP_Manny.ABP_Manny_C")));
+		FString(TEXT("/Game/FirstPerson/Animations/FPSMPT/ABP_TemplateBody.ABP_TemplateBody_C")));
 	TestNotNull(TEXT("Body mesh retains a real skeleton"), Mesh->GetSkeleton());
 	TestTrue(TEXT("Mesh and AnimBlueprint use the same skeleton"),
 		Mesh->GetSkeleton() != nullptr && Mesh->GetSkeleton() == Animation->GetTargetSkeleton());
@@ -3089,23 +3154,31 @@ bool FFpstrueMultiplayerBodyAnimationDefaultsTest::RunTest(const FString&)
 	TestFalse(TEXT("Template presentation does not inherit RAR-specific FOV or bone compensation"), BlueprintDefaults->UsesRARPresentation());
 	TestTrue(TEXT("Body and first-person mesh share the exact template skeleton"),
 		BlueprintArms->GetSkeletalMeshAsset()->GetSkeleton() == BlueprintBody->GetSkeletalMeshAsset()->GetSkeleton());
-	UClass* OriginalClass = LoadClass<AfpstrueCharacter>(nullptr,
-		TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter.BP_FirstPersonCharacter_C"));
-	if (!TestNotNull(TEXT("Original first-person Blueprint remains available"), OriginalClass)) return false;
-	TestTrue(TEXT("The original single-player damage script remains a valid feedback consumer"),
-		OriginalClass->IsFunctionImplementedInScript(TEXT("OnPlayerDamaged")));
-	TestFalse(TEXT("Current multiplayer Blueprint does not request unused legacy damage feedback"),
-		PawnClass->IsFunctionImplementedInScript(TEXT("OnPlayerDamaged")));
-	const AfpstrueCharacter* OriginalDefaults = OriginalClass->GetDefaultObject<AfpstrueCharacter>();
-	for (const TCHAR* Name : {TEXT("DefaultMappingContext"), TEXT("MoveAction"), TEXT("LookAction"), TEXT("JumpAction"),
-		TEXT("FireAction"), TEXT("AimAction"), TEXT("SprintAction"), TEXT("ReloadAction")})
+	// 身份期望来自本轮正式 Template Blueprint CDO 实际读回；不再依赖旧业务蓝图充当输入配置仓库。
+	const TPair<const TCHAR*, const TCHAR*> ExpectedInputs[] = {
+		{TEXT("DefaultMappingContext"), TEXT("/Game/FirstPerson/Input/IMC_Default.IMC_Default")},
+		{TEXT("MoveAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_Move.IA_Move")},
+		{TEXT("LookAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_Look.IA_Look")},
+		{TEXT("JumpAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_Jump.IA_Jump")},
+		{TEXT("FireAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_Shoot.IA_Shoot")},
+		{TEXT("AimAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_Aim.IA_Aim")},
+		{TEXT("SprintAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_Run.IA_Run")},
+		{TEXT("ReloadAction"), TEXT("/Game/FirstPerson/Input/Actions/IA_reload.IA_reload")},
+	};
+	for (const auto& Input : ExpectedInputs)
 	{
-		const FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(PawnClass, Name);
+		const FObjectPropertyBase* Property = FindFProperty<FObjectPropertyBase>(PawnClass, Input.Key);
 		if (!TestNotNull(TEXT("Template character retains the real input property"), Property)) return false;
 		const UObject* ConfiguredInput = Property->GetObjectPropertyValue_InContainer(BlueprintDefaults);
-		TestNotNull(FString(Name) + TEXT(" remains configured"), ConfiguredInput);
-		TestTrue(FString(Name) + TEXT(" reuses the existing input asset without vendor input rules"),
-			ConfiguredInput == Property->GetObjectPropertyValue_InContainer(OriginalDefaults));
+		TestNotNull(FString(Input.Key) + TEXT(" remains configured"), ConfiguredInput);
+		TestEqual(FString(Input.Key) + TEXT(" preserves the actual production input asset identity"),
+			GetPathNameSafe(ConfiguredInput), FString(Input.Value));
+	}
+	for (const FName Retired : {FName(TEXT("OnAimChanged")), FName(TEXT("OnPlayerHealthChanged")),
+		FName(TEXT("OnPlayerDamaged")), FName(TEXT("OnPlayerDied")), FName(TEXT("ClientReceiveDamage"))})
+	{
+		TestNull(Retired.ToString() + TEXT(" is absent from the native reflection interface"), AfpstrueCharacter::StaticClass()->FindFunctionByName(Retired));
+		TestNull(Retired.ToString() + TEXT(" is absent from the actual production Blueprint"), PawnClass->FindFunctionByName(Retired));
 	}
 	// 占有真实模板后检查引擎最终控制旋转；仅夹动画参数不能代替真正的视角限制。
 	FActorSpawnParameters ViewSpawn;
@@ -3239,7 +3312,7 @@ bool FFpstrueMultiplayerRemoteLocomotionAnimationTest::RunTest(const FString&)
 	if (!TestNotNull(TEXT("Remote animation fixture is the real project character"), Character)) return false;
 	TestTrue(TEXT("Runtime fixture executes the actual configured Blueprint class"), Character->GetClass() == PawnClass);
 	// 不先推进动画：装备完成后的首发必须立即进入身体动画，不能靠夹具提前 Tick 掩盖事件漏绑。
-	AfpstrueRARWeapon* RemoteRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(FVector(5000.0f), FRotator::ZeroRotator);
+	AfpstrueRARWeapon* RemoteRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(RARWeaponClass(), FVector(5000.0f), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Remote fixture has its real paired RAR rifle"), RemoteRifle)) return false;
 	UfpstrueWeaponComponent* RemoteWeapon = RemoteRifle->FindComponentByClass<UfpstrueWeaponComponent>();
 	if (!TestNotNull(TEXT("Remote fixture has its production weapon component"), RemoteWeapon)) return false;
@@ -3397,7 +3470,7 @@ bool FFpstrueMultiplayerRemoteLocomotionAnimationTest::RunTest(const FString&)
 	// 本地只固定 CMC 采样后的 Acceleration/Velocity，覆盖松键惯性；不伪造真实按键或移动距离验收。
 	AfpstrueCharacter* LocalCharacter = Fixture.GetTestWorld()->SpawnActor<AfpstrueCharacter>(PawnClass, FVector(10000.0f, 0.0f, 0.0f), FRotator::ZeroRotator);
 	APlayerController* LocalController = Fixture.GetTestWorld()->SpawnActor<APlayerController>();
-	AfpstrueRARWeapon* LocalRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(FVector(15000.0f), FRotator::ZeroRotator);
+	AfpstrueRARWeapon* LocalRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(RARWeaponClass(), FVector(15000.0f), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Local animation fixture retains the same real character Blueprint"), LocalCharacter)
 		|| !TestNotNull(TEXT("Local animation fixture has a real local Controller"), LocalController)
 		|| !TestNotNull(TEXT("Local animation fixture has its paired RAR rifle"), LocalRifle)) return false;
@@ -3449,7 +3522,7 @@ bool SpawnRARPresentationFixture(UWorld& World, FAutomationTestBase& Test,
 	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	Character = World.SpawnActor<AfpstrueCharacter>(PawnClass, FTransform::Identity, SpawnParameters);
 	AAIController* Controller = World.SpawnActor<AAIController>();
-	AfpstrueRARWeapon* Rifle = World.SpawnActor<AfpstrueRARWeapon>(AfpstrueRARWeapon::StaticClass(),
+	AfpstrueRARWeapon* Rifle = World.SpawnActor<AfpstrueRARWeapon>(RARWeaponClass(),
 		FTransform(FVector(5000.0f, 0.0f, 0.0f)), SpawnParameters);
 	if (!Test.TestNotNull(TEXT("RAR fixture character"), Character)
 		|| !Test.TestNotNull(TEXT("RAR fixture controller"), Controller)
@@ -3460,6 +3533,7 @@ bool SpawnRARPresentationFixture(UWorld& World, FAutomationTestBase& Test,
 	Controller->Possess(Character);
 	Weapon = Rifle->FindComponentByClass<UfpstrueWeaponComponent>();
 	if (!Test.TestNotNull(TEXT("RAR fixture uses the production weapon component"), Weapon)
+		|| !Test.TestTrue(TEXT("The authored muzzle reference is instanced for this rifle, not its class default"), Weapon->MuzzleSource != nullptr && Weapon->MuzzleSource->GetOwner() == Rifle)
 		|| !Test.TestTrue(TEXT("RAR fixture completes the real equipment transaction"), Weapon->AttachWeapon(Character))) return false;
 	for (USkeletalMeshComponent* Mesh : {Character->GetMesh(), Character->GetMesh1P(), static_cast<USkeletalMeshComponent*>(Weapon)})
 	{
@@ -3491,8 +3565,8 @@ bool FFpstrueMultiplayerRARAssetsTest::RunTest(const FString&)
 	TestTrue(TEXT("RAR camera-relative arms rotation and scale retain the authored presentation"),
 		ConfiguredArms->GetRelativeRotation().Equals(FRotator(0.0, -90.0, 0.0), 0.01)
 		&& ConfiguredArms->GetRelativeScale3D().Equals(FVector::OneVector, 0.001));
-	const AfpstrueRARWeapon* Rifle = GetDefault<AfpstrueRARWeapon>();
-	UfpstrueWeaponComponent* Weapon = Rifle->FindComponentByClass<UfpstrueWeaponComponent>();
+	const AfpstrueRARWeapon* Rifle = WeaponBlueprintDefaults<AfpstrueRARWeapon>(RARWeaponClass());
+	UfpstrueWeaponComponent* Weapon = Rifle ? Rifle->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
 	if (!TestNotNull(TEXT("RAR native rifle has a weapon mesh component"), Weapon)) return false;
 	const USkeletalMesh* BodyMesh = Character->GetMesh()->GetSkeletalMeshAsset();
 	if (!TestNotNull(TEXT("RAR character has a full body mesh"), BodyMesh)) return false;
@@ -3570,6 +3644,7 @@ bool FFpstrueMultiplayerRARAssetsTest::RunTest(const FString&)
 	}
 	TestNotNull(TEXT("RAR fire keeps its audible feedback"), Weapon->FireSound.Get());
 	TestNotNull(TEXT("RAR fire keeps its muzzle feedback"), Weapon->MuzzleEffect.Get());
+	TestTrue(TEXT("Authored muzzle references the corresponding default weapon actor"), Weapon->MuzzleSource != nullptr && Weapon->MuzzleSource->GetOwner() == Rifle);
 	TestTrue(TEXT("Gun muzzle comes from a real attachment socket"), Weapon->MuzzleSource != nullptr
 		&& Weapon->MuzzleSource->DoesSocketExist(Weapon->MuzzleSocketName));
 	// 材质只能在真实游戏实例上创建；本地视模与世界模型不能共用一个会投影变形的材质状态。
@@ -3627,7 +3702,7 @@ bool FFpstrueMultiplayerRARAssetsTest::RunTest(const FString&)
 	RuntimeWeapon->RefreshNetworkEquipment();
 	TestEqual(TEXT("Repeated equipment refresh reuses the local gun material instance"), RuntimeWeapon->GetMaterial(0), LocalGunMaterial);
 	// 本用例只检查未持有世界枪的材质；远离无手臂的原生相机夹具，避免拾取 Overlap 干扰这一断言。
-	AfpstrueRARWeapon* WorldRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(FVector(10000.0f), FRotator::ZeroRotator);
+	AfpstrueRARWeapon* WorldRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueRARWeapon>(RARWeaponClass(), FVector(10000.0f), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Unheld world rifle uses a separate real actor instance"), WorldRifle)) return false;
 	TArray<UMeshComponent*> WorldGunMeshes;
 	WorldRifle->GetComponents(WorldGunMeshes);
@@ -3652,8 +3727,8 @@ bool FFpstrueMultiplayerTemplateAssetsTest::RunTest(const FString&)
 		FString(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter.BP_TemplateCharacter_C")));
 	const auto* WeaponClass = FindFProperty<FClassProperty>(Mode->GetClass(), TEXT("DefaultWeaponClass"));
 	if (!TestNotNull(TEXT("The current GameMode exposes its weapon class"), WeaponClass)) return false;
-	TestTrue(TEXT("GameMode selects the native template weapon rather than a supplier weapon Blueprint"),
-		WeaponClass->GetObjectPropertyValue_InContainer(Mode) == AfpstrueTemplateWeapon::StaticClass());
+	TestTrue(TEXT("GameMode selects the actual project-owned weapon Blueprint, not an unconfigured native host or supplier gameplay"),
+		WeaponClass->GetObjectPropertyValue_InContainer(Mode) == TemplateWeaponClass());
 	const auto* Character = PawnClass->GetDefaultObject<AfpstrueCharacter>();
 	TestTrue(TEXT("The template enables native presentation without RAR-specific viewmodel processing"),
 		Character->UsesNativePresentation() && !Character->UsesRARPresentation());
@@ -3804,9 +3879,9 @@ bool FFpstrueMultiplayerTemplateAssetsTest::RunTest(const FString&)
 		&& Character->GetMesh()->bOwnerNoSee && !Character->GetMesh()->bOnlyOwnerSee);
 	TestTrue(TEXT("First-person template geometry remains camera-relative"),
 		Character->GetMesh1P()->GetAttachParent() == Character->GetFirstPersonCameraComponent());
-	const auto* Rifle = GetDefault<AfpstrueTemplateWeapon>();
-	UfpstrueWeaponComponent* Weapon = Rifle->FindComponentByClass<UfpstrueWeaponComponent>();
-	if (!TestNotNull(TEXT("The native template rifle contains the existing gameplay weapon component"), Weapon)
+	const auto* Rifle = WeaponBlueprintDefaults<AfpstrueTemplateWeapon>(TemplateWeaponClass());
+	UfpstrueWeaponComponent* Weapon = Rifle ? Rifle->FindComponentByClass<UfpstrueWeaponComponent>() : nullptr;
+	if (!TestNotNull(TEXT("The actual template weapon Blueprint contains the existing gameplay weapon component"), Weapon)
 		|| !TestNotNull(TEXT("The template gun has its mesh"), Weapon->GetSkeletalMeshAsset())
 		|| !TestNotNull(TEXT("The template gun has its animation class"), Weapon->GetAnimClass())) return false;
 	TestEqual(TEXT("The template gun is the corresponding assault rifle asset"), Weapon->GetSkeletalMeshAsset()->GetPathName(),
@@ -3860,31 +3935,55 @@ bool FFpstrueMultiplayerTemplateAssetsTest::RunTest(const FString&)
 			}
 		}
 	}
-	// 检查真实 Blueprint 编译后的树，不触发 Construct，也不把加载 UMG 类当作画面恢复。
-	UClass* OriginalHud = LoadClass<UUserWidget>(nullptr, TEXT("/Game/FirstPerson/UI/ingame.ingame_C"));
+	// 唯一网络布局必须保留 Designer 并有从真实事件可达的 setter；加载节点本身不算接通。
+	TestFalse(TEXT("The retired single-player ingame asset is not a second HUD entry"),
+		FPackageName::DoesPackageExist(TEXT("/Game/FirstPerson/UI/ingame")));
 	UClass* NetworkHud = LoadClass<UUserWidget>(nullptr, TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C"));
-	if (!TestNotNull(TEXT("The original single-player HUD asset remains available"), OriginalHud)
-		|| !TestNotNull(TEXT("The network copy of the original HUD exists"), NetworkHud)) return false;
-	TestTrue(TEXT("The retained authored layout now uses the single native multiplayer bridge"), OriginalHud->GetSuperClass() == UfpstruePvpIngameWidget::StaticClass());
-	TestTrue(TEXT("The network layout uses the same native event-driven bridge"), NetworkHud->GetSuperClass() == UfpstruePvpIngameWidget::StaticClass());
-	const auto* OriginalHudClass = Cast<UWidgetBlueprintGeneratedClass>(OriginalHud);
+	if (!TestNotNull(TEXT("The sole production network HUD exists"), NetworkHud)) return false;
+	TestTrue(TEXT("The network layout uses the native snapshot/event bridge"), NetworkHud->GetSuperClass() == UfpstruePvpIngameWidget::StaticClass());
 	const auto* NetworkHudClass = Cast<UWidgetBlueprintGeneratedClass>(NetworkHud);
-	if (!TestNotNull(TEXT("The original HUD remains a compiled WidgetBlueprint"), OriginalHudClass)
-		|| !TestNotNull(TEXT("The network HUD remains a compiled WidgetBlueprint"), NetworkHudClass)
-		|| !TestNotNull(TEXT("The original HUD retains its authored widget tree"), OriginalHudClass->GetWidgetTreeArchetype())
-		|| !TestNotNull(TEXT("The network HUD retains the copied authored widget tree"), NetworkHudClass->GetWidgetTreeArchetype())) return false;
-	TestTrue(TEXT("Network HUD uses a separate tree rather than mutating the original"),
-		OriginalHudClass->GetWidgetTreeArchetype() != NetworkHudClass->GetWidgetTreeArchetype());
-	for (const TCHAR* Name : {TEXT("血量组件"), TEXT("当前子弹"), TEXT("剩余子弹"), TEXT("TextBlock_2"), TEXT("TextBlock_65"), TEXT("子弹数"), TEXT("HorizontalBox_327")})
-	{
-		TestNotNull(FString(TEXT("Original authored HUD retains ")) + Name, OriginalHudClass->GetWidgetTreeArchetype()->FindWidget(FName(Name)));
-		TestNotNull(FString(TEXT("Network HUD copy retains ")) + Name, NetworkHudClass->GetWidgetTreeArchetype()->FindWidget(FName(Name)));
-	}
+	if (!TestNotNull(TEXT("The network HUD remains a compiled WidgetBlueprint"), NetworkHudClass)
+		|| !TestNotNull(TEXT("The network HUD retains the authored widget tree"), NetworkHudClass->GetWidgetTreeArchetype())) return false;
+	for (const FName Name : {TEXT("HealthBar"), TEXT("MagazineText"), TEXT("ReserveText"), TEXT("WeaponNameText"),
+		TEXT("MatchHintText"), TEXT("AmmoContainer"), TEXT("CountdownRow")})
+		TestNotNull(FString(TEXT("Network HUD binds semantic control ")) + Name.ToString(), NetworkHudClass->GetWidgetTreeArchetype()->FindWidget(Name));
 	TestEqual(TEXT("The network HUD cannot run old polling bindings over the event-driven values"), NetworkHudClass->Bindings.Num(), 0);
+	UBlueprint* NetworkBlueprint = Cast<UBlueprint>(NetworkHud->ClassGeneratedBy);
+	if (!TestNotNull(TEXT("The real network HUD source graph is available for connection audit"), NetworkBlueprint)) return false;
+	TArray<UEdGraph*> HudGraphs; NetworkBlueprint->GetAllGraphs(HudGraphs);
+	UK2Node_Event* SnapshotEntry = nullptr; int32 HudEvents = 0;
+	for (UEdGraph* Graph : HudGraphs) for (UEdGraphNode* Node : Graph->Nodes)
+		if (auto* Event = Cast<UK2Node_Event>(Node))
+		{
+			++HudEvents;
+			if (Event->EventReference.GetMemberName() == TEXT("PresentSnapshot")) SnapshotEntry = Event;
+		}
+	if (!TestEqual(TEXT("The network HUD has one presentation event without old Construct business"), HudEvents, 1)
+		|| !TestNotNull(TEXT("The one HUD event consumes the native snapshot"), SnapshotEntry)) return false;
+	TSet<UEdGraphNode*> HudReachable; TArray<UEdGraphNode*> HudPending = {SnapshotEntry};
+	TSet<FString> HudSetters;
+	while (!HudPending.IsEmpty())
+	{
+		UEdGraphNode* Node = HudPending.Pop(EAllowShrinking::No);
+		if (HudReachable.Contains(Node)) continue;
+		HudReachable.Add(Node);
+		if (const auto* Call = Cast<UK2Node_CallFunction>(Node))
+		{
+			const UEdGraphPin* Target = Call->FindPin(UEdGraphSchema_K2::PN_Self);
+			const auto* Read = Target && Target->LinkedTo.Num() == 1 ? Cast<UK2Node_VariableGet>(Target->LinkedTo[0]->GetOwningNode()) : nullptr;
+			if (Read) HudSetters.Add(Read->GetVarName().ToString() + TEXT(".") + Call->FunctionReference.GetMemberName().ToString());
+		}
+		for (UEdGraphPin* Pin : Node->Pins)
+			if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+				for (UEdGraphPin* Linked : Pin->LinkedTo) if (Linked) HudPending.Add(Linked->GetOwningNode());
+	}
+	for (const FString Setter : {TEXT("HealthBar.SetPercent"), TEXT("HealthBar.SetFillColorAndOpacity"), TEXT("MagazineText.SetText"),
+		TEXT("MagazineText.SetColorAndOpacity"), TEXT("ReserveText.SetText"), TEXT("WeaponNameText.SetText"), TEXT("AmmoContainer.SetVisibility")})
+		TestTrue(TEXT("PresentSnapshot has a real exec path to ") + Setter, HudSetters.Contains(Setter));
 	const auto* HudClassProperty = FindFProperty<FSoftClassProperty>(AfpstruePvpHUD::StaticClass(), TEXT("IngameWidgetClass"));
 	if (!TestNotNull(TEXT("The native HUD exposes its soft widget-class configuration"), HudClassProperty)) return false;
 	const auto* ConfiguredHud = HudClassProperty->ContainerPtrToValuePtr<TSoftClassPtr<UfpstruePvpIngameWidget>>(GetDefault<AfpstruePvpHUD>());
-	TestEqual(TEXT("PvP HUD selects the network copy rather than replacing the single-player source"), ConfiguredHud->ToSoftObjectPath().ToString(),
+	TestEqual(TEXT("PvP HUD selects the sole network presentation Blueprint"), ConfiguredHud->ToSoftObjectPath().ToString(),
 		FString(TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network_C")));
 	// 真实装备后注入同父级迟到变换；非零作者偏移必须恢复，不能机械清零为 RAR 的规则。
 	FTestWorldWrapper Fixture;
@@ -3892,9 +3991,9 @@ bool FFpstrueMultiplayerTemplateAssetsTest::RunTest(const FString&)
 	FActorSpawnParameters Spawn;
 	Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	auto* RuntimeCharacter = Fixture.GetTestWorld()->SpawnActor<AfpstrueCharacter>(PawnClass, FTransform::Identity, Spawn);
-	auto* RuntimeRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueTemplateWeapon>(AfpstrueTemplateWeapon::StaticClass(), FTransform(FVector(5000, 0, 0)), Spawn);
+	auto* RuntimeRifle = Fixture.GetTestWorld()->SpawnActor<AfpstrueTemplateWeapon>(TemplateWeaponClass(), FTransform(FVector(5000, 0, 0)), Spawn);
 	if (!TestNotNull(TEXT("The template runtime fixture uses the actual selected character Blueprint"), RuntimeCharacter)
-		|| !TestNotNull(TEXT("The template runtime fixture uses its paired native gun"), RuntimeRifle)) return false;
+		|| !TestNotNull(TEXT("The template runtime fixture uses its paired authored weapon Blueprint"), RuntimeRifle)) return false;
 	USkeletalMeshComponent* RuntimeBodyMesh = RuntimeCharacter->GetMesh();
 	auto* RuntimeBodyAnimation = Cast<UfpstruePlayerAnimInstance>(RuntimeBodyMesh->GetAnimInstance());
 	auto* RuntimeArmsAnimation = Cast<UfpstruePlayerAnimInstance>(RuntimeCharacter->GetMesh1P()->GetAnimInstance());
@@ -4222,7 +4321,7 @@ bool FFpstrueMultiplayerTemplateDeathDropTest::RunTest(const FString&)
 	Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	auto* Character = World->SpawnActor<AfpstrueCharacter>(PawnClass, FTransform::Identity, Spawn);
 	auto* Controller = World->SpawnActor<AAIController>();
-	auto* Rifle = World->SpawnActor<AfpstrueTemplateWeapon>(AfpstrueTemplateWeapon::StaticClass(),
+	auto* Rifle = World->SpawnActor<AfpstrueTemplateWeapon>(TemplateWeaponClass(),
 		FTransform(FVector(5000.0f, 0.0f, 0.0f)), Spawn);
 	if (!TestNotNull(TEXT("Death drop has its real template Pawn"), Character)
 		|| !TestNotNull(TEXT("Death drop has a real ability-owning Controller"), Controller)
@@ -4342,7 +4441,7 @@ bool FFpstrueMultiplayerTemplateDeathDropTest::RunTest(const FString&)
 	const auto CheckLateJoinOrder = [&](bool bPhysicsFirst)
 	{
 		const FVector CurrentLocation = bPhysicsFirst ? FVector(20000.0f, 500.0f, 200.0f) : FVector(25000.0f, -500.0f, 200.0f);
-		auto* LateRifle = World->SpawnActor<AfpstrueTemplateWeapon>(AfpstrueTemplateWeapon::StaticClass(), FTransform(CurrentLocation), Spawn);
+		auto* LateRifle = World->SpawnActor<AfpstrueTemplateWeapon>(TemplateWeaponClass(), FTransform(CurrentLocation), Spawn);
 		if (!TestNotNull(TEXT("Late-join order uses a fresh real template rifle"), LateRifle)) return false;
 		auto* LateWeapon = LateRifle->FindComponentByClass<UfpstrueWeaponComponent>();
 		if (!TestNotNull(TEXT("Late-join rifle retains the production component"), LateWeapon)) return false;

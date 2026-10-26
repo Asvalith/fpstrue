@@ -16,7 +16,7 @@
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
 #include "AITypes.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"

@@ -75,6 +75,7 @@ void UfpstrueReloadReentryObserver::HandleReloadEnded(int32 ReloadId, EFPReloadE
 		if (bFireOnReloadEnd) ObservedWeapon->StartFire();
 		if (bRestartReloadOnEnd) bReloadRestartAccepted = ObservedWeapon->RequestReload();
 	}
+	if (OnReloadEnded) OnReloadEnded();
 }
 
 // 响应生产播放命令，用该命令携带的换弹编号播放和绑定测试动画，不临时读取另一次编号。
@@ -88,6 +89,7 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Characters/Player/fpstruePlayerAnimInstance.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
@@ -95,7 +97,8 @@ void UfpstrueReloadReentryObserver::HandleReloadPlaybackRequested(int32 ReloadId
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
+#include "Game/fpstruePvpGameState.h"
 #include "Weapons/fpstrueCombatAbilities.h"
 #include "AIController.h"
 #include "Animation/AnimNotifyQueue.h"
@@ -1014,10 +1017,7 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		AfpstrueCharacter* Player = Weapon->GetOwningCharacter();
 		UAbilitySystemComponent* ASC = Player->GetAbilitySystemComponent();
 		FGameplayAbilitySpec* Fire = ASC->FindAbilitySpecFromClass(UfpstrueFireAbility::StaticClass());
-		const FStructProperty* StateProperty = FindFProperty<FStructProperty>(Weapon->GetClass(), TEXT("NetworkState"));
-		if (!TestNotNull(Label + TEXT("Real fire spec"), Fire) ||
-			!TestNotNull(Label + TEXT("Real network presentation snapshot"), StateProperty)) return false;
-		FFPReplicatedWeaponState* State = StateProperty->ContainerPtrToValuePtr<FFPReplicatedWeaponState>(Weapon);
+		if (!TestNotNull(Label + TEXT("Real fire spec"), Fire)) return false;
 		UBoxComponent* TargetBox = NewObject<UBoxComponent>(Target);
 		Target->AddInstanceComponent(TargetBox);
 		Target->SetRootComponent(TargetBox);
@@ -1043,14 +1043,14 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		{
 			if (Reentries++ != 0) return;
 			OldKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
-			OriginalGeneration = State->EquipmentGeneration;
-			OriginalSession = State->FireSession;
+			OriginalGeneration = Weapon->EquipmentRevision;
+			OriginalSession = Weapon->FireSession;
 			Weapon->StopFire();
 			Weapon->StartFire();
 			ReplacementKey = Fire->GetPrimaryInstance()->GetCurrentActivationInfoRef().GetActivationPredictionKey().Current;
 			TestTrue(Label + TEXT("The replacement ability really activates"), Fire->IsActive());
 			TestNotEqual(Label + TEXT("The replacement owns a different activation key"), ReplacementKey, OldKey);
-			TestEqual(Label + TEXT("A new activation starts before its first shot"), State->FirePresentationShot, 0);
+			TestEqual(Label + TEXT("A new activation starts before its first shot"), Weapon->FirePresentationShot, 0);
 			// 模拟伤害/表现回调改变当前世界；旧射线仍须保留查询时的端点。
 			Player->SetActorLocation(Player->GetActorLocation() + FVector(0.0f, 500.0f, 0.0f));
 		};
@@ -1086,21 +1086,17 @@ bool FFpstrueShotPresentationReentryTest::RunTest(const FString& Parameters)
 		TestTrue(Label + TEXT("The hit stores the complete original ray endpoint, not its impact point"),
 			FMath::IsNearlyEqual((Shot.Hit.TraceEnd - Shot.Hit.TraceStart).Size(),
 				static_cast<double>(Weapon->GetWeaponSettings().LineTraceRange), 0.01));
-		TestEqual(Label + TEXT("The new round keeps its own published key"), State->FirePresentationKey, ReplacementKey);
-		TestEqual(Label + TEXT("The old call stack cannot increment the replacement round"), State->FirePresentationShot, 0);
+		TestEqual(Label + TEXT("The new round keeps its own local key"), Weapon->FirePresentationKey, ReplacementKey);
+		TestEqual(Label + TEXT("The old call stack cannot increment the replacement round"), Weapon->FirePresentationShot, 0);
 		Health->OnDamageResolved.Remove(DamageObserver);
 		Observer->OnTraceReceived = nullptr;
 		Weapon->OnWeaponTraceFinished.RemoveDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleTraceFinished);
 		// 在已恢复 Standalone 的世界推进真正 WaitDelay；验证新轮只有一发、序号从一开始，而非伪造任务回调。
 		if (!Fixture.Advance(60.0f / Weapon->GetWeaponSettings().RoundsPerMinute + 0.03f)) return false;
 		TestEqual(Label + TEXT("Only the replacement task fires the next single shot"), Weapon->GetCurrentAmmo(), AmmoBefore - 2);
-		{
-			// Standalone 不发布网络快照；同步结束能力时临时恢复网络分支，读取真实新轮计数，仍不 Tick 或旅行。
-			TGuardValue<FString> ListenMode(Fixture.GetWorld()->NextURL, TEXT("?listen"));
-			Weapon->StopFire();
-		}
-		TestEqual(Label + TEXT("The replacement shot preserves its own activation key"), State->FirePresentationKey, ReplacementKey);
-		TestEqual(Label + TEXT("The replacement round starts with ordinal one"), State->FirePresentationShot, 1);
+		Weapon->StopFire();
+		TestEqual(Label + TEXT("The replacement shot preserves its own activation key"), Weapon->FirePresentationKey, ReplacementKey);
+		TestEqual(Label + TEXT("The replacement round starts with ordinal one"), Weapon->FirePresentationShot, 1);
 		TestFalse(Label + TEXT("Cleanup ends the replacement fire ability"), Fire->IsActive());
 	}
 	// 无阻挡时没有 ImpactPoint 可代替射线终点；仍经真实 Fire/查询/RPC 分派检查 FHitResult 端点。
@@ -1297,85 +1293,135 @@ bool FFpstrueReloadPlaybackFailureTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponAssetReloadTest, "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
-// 加载真实武器蓝图和配置，覆盖普通/空仓的双 Montage 桥、播放中提交及弹药守恒。
+// 当前 Template/RAR 两套真实角色和武器都覆盖普通/空仓播放、唯一事务结束及弹药守恒。
 bool FFpstrueWeaponAssetReloadTest::RunTest(const FString& Parameters)
 {
 	using namespace FpstrueGameplayBoundaryTests;
-	FGameplayWorld World(*this);
-	if (!World.Initialize()) return false;
-	UClass* WeaponClass = LoadClass<AActor>(nullptr, TEXT("/Game/FirstPerson/Blueprints/weapon/BP_Weapon.BP_Weapon_C"));
-	USkeletalMesh* ArmsAsset = LoadObject<USkeletalMesh>(nullptr, TEXT("/Game/FPS_Assault_Pack/FPS_Arms/Meshes/Arms/SK_Custom_Arms.SK_Custom_Arms"));
-	if (!TestNotNull(TEXT("Real weapon Blueprint class loads"), WeaponClass) || !TestNotNull(TEXT("Real arms skeleton loads"), ArmsAsset)) return false;
-	AfpstrueCharacter* Player = World.SpawnPlayer();
-	if (!Player) return false;
-	USkeletalMeshComponent* Arms = Player->GetMesh1P();
-	Arms->SetSkeletalMeshAsset(ArmsAsset);
-	// This is a gameplay/asset-graph integration fixture, not a pose or visual acceptance test.
-	// Native AnimInstance runs real Montage timing/notifies while unrelated locomotion AnimBP is outside scope.
-	Arms->SetAnimInstanceClass(UAnimInstance::StaticClass());
-	FActorSpawnParameters SpawnParameters;
-	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	AActor* Pickup = World.GetWorld()->SpawnActor<AActor>(WeaponClass, FTransform(FVector(10000.0, 0.0, 0.0)), SpawnParameters);
-	if (!TestNotNull(TEXT("Real weapon Blueprint actor spawns"), Pickup)) return false;
-	Pickup->SetActorEnableCollision(false);
-	UfpstrueWeaponComponent* Weapon = Pickup->FindComponentByClass<UfpstrueWeaponComponent>();
-	if (!TestNotNull(TEXT("Real Blueprint contains its weapon component"), Weapon)) return false;
-	UfpstrueWeaponConfig* Config = LoadObject<UfpstrueWeaponConfig>(nullptr, TEXT("/Game/Config/DA_FPWeapon_RU74.DA_FPWeapon_RU74"));
-	const FObjectProperty* ConfigProperty = FindFProperty<FObjectProperty>(Weapon->GetClass(), TEXT("WeaponConfiguration"));
-	if (!TestNotNull(TEXT("The migrated weapon configuration is shipped"), Config)
-		|| !TestNotNull(TEXT("The real component exposes its configuration binding"), ConfigProperty)) return false;
-	TestTrue(TEXT("The real Blueprint references the migrated asset, not native fallback"), ConfigProperty->GetObjectPropertyValue_InContainer(Weapon) == Config);
-	FString ConfigurationError;
-	TestTrue(TEXT("The shipped weapon tuning passes validation"), Config->Settings.Validate(ConfigurationError));
-	const FObjectProperty* OwnerProperty = FindFProperty<FObjectProperty>(WeaponClass, TEXT("owningactor"));
-	const FIntProperty* AmmoProperty = FindFProperty<FIntProperty>(Weapon->GetClass(), TEXT("CurrentAmmo"));
-	if (!TestNotNull(TEXT("Blueprint presentation owner field exists"), OwnerProperty)
-		|| !TestNotNull(TEXT("Ammo fixture precondition is reflected"), AmmoProperty)) return false;
-	// Establish the same presentation context as pickup, without involving unrelated overlap/input/audio.
-	OwnerProperty->SetObjectPropertyValue_InContainer(Pickup, Player);
-	Weapon->SetAnimInstanceClass(UAnimInstance::StaticClass());
-	if (!TestTrue(TEXT("Real weapon component equips through the production boundary"), Weapon->AttachWeapon(Player))) return false;
-	for (USkeletalMeshComponent* Mesh : {Arms, static_cast<USkeletalMeshComponent*>(Weapon)})
+	for (const bool bRAR : {false, true})
 	{
-		Mesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-		Mesh->bEnableUpdateRateOptimizations = false;
-		Mesh->SetComponentTickEnabled(true);
-	}
-	TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
-	Weapon->OnAmmoChanged.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
-	Weapon->OnWeaponReloadEnded.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleReloadEnded);
-	// 两种弹匣前态必须各自选对手臂/武器资产，且一组双播放仅广播一次事务结束。
-	for (const bool bEmpty : {false, true})
-	{
-		const FString Suffix = bEmpty ? TEXT("Reload_Empty_Montage") : TEXT("Reload_Montage");
-		const FString ArmsPath = TEXT("/Game/FPS_Assault_Pack/Animations/RU74/A_Arms_RU74_") + Suffix;
-		const FString WeaponPath = TEXT("/Game/FPS_Assault_Pack/Animations/RU74/A_RU74_") + Suffix;
-		UAnimMontage* ArmsMontage = LoadObject<UAnimMontage>(nullptr, *ArmsPath);
-		UAnimMontage* WeaponMontage = LoadObject<UAnimMontage>(nullptr, *WeaponPath);
-		if (!TestNotNull(TEXT("Expected real arms reload Montage loads"), ArmsMontage)
-			|| !TestNotNull(TEXT("Expected real weapon reload Montage loads"), WeaponMontage)) return false;
-		AmmoProperty->SetPropertyValue_InContainer(Weapon, bEmpty ? 0 : Weapon->GetMagazineSize() - 1);
-		const int32 TotalBefore = Weapon->GetCurrentAmmo() + Weapon->GetReserveAmmo();
-		Observer->ReloadAnimInstance = Weapon->GetAnimInstance();
-		Observer->ReloadMontage = WeaponMontage;
-		Observer->bAmmoChangedWhileMontageActive = false;
-		const int32 EndCountBefore = Observer->ReloadEndCount;
-		if (!TestTrue(bEmpty ? TEXT("Real Blueprint empty-reload request accepted") : TEXT("Real Blueprint normal-reload request accepted"), Weapon->RequestReload())) return false;
-		FAnimMontageInstance* ArmsPlayback = Arms->GetAnimInstance()->GetActiveInstanceForMontage(ArmsMontage);
-		FAnimMontageInstance* WeaponPlayback = Weapon->GetAnimInstance()->GetActiveInstanceForMontage(WeaponMontage);
-		if (!TestNotNull(TEXT("Blueprint selected and played the expected arms resource"), ArmsPlayback)
-			|| !TestNotNull(TEXT("Blueprint selected and played the expected weapon resource"), WeaponPlayback)) return false;
-		TestTrue(TEXT("The real arms playback has its native completion binding"), ArmsPlayback->OnMontageEnded.IsBound());
-		TestTrue(TEXT("The real weapon playback has its native completion binding"), WeaponPlayback->OnMontageEnded.IsBound());
-		const float Limit = FMath::Max(ArmsMontage->GetPlayLength(), WeaponMontage->GetPlayLength()) + 1.0f;
-		for (int32 Step = 0; Step < FMath::CeilToInt(Limit / 0.01f) && Weapon->IsReloading(); ++Step)
-			if (!World.AdvanceSingleFrame(0.01f)) return false;
-		TestFalse(TEXT("Authority timing clears Reloading without legacy Blueprint callbacks"), Weapon->IsReloading());
-		TestTrue(TEXT("The authority clock commits while the paired visual is active"), Observer->bAmmoChangedWhileMontageActive);
-		TestEqual(TEXT("Real playback reports Completed, not timeout recovery"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
-		TestEqual(TEXT("The paired playbacks emit exactly one transaction end"), Observer->ReloadEndCount, EndCountBefore + 1);
-		TestEqual(TEXT("The real asset reload fills the magazine"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
-		TestEqual(TEXT("Real asset reload conserves total ammunition"), Weapon->GetCurrentAmmo() + Weapon->GetReserveAmmo(), TotalBefore);
+		FGameplayWorld World(*this);
+		if (!World.Initialize()) return false;
+		const TCHAR* Variant = bRAR ? TEXT("RAR") : TEXT("Template");
+		const FString PlayerPath = FString::Printf(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_%sCharacter.BP_%sCharacter_C"), Variant, Variant);
+		const FString PickupPath = FString::Printf(TEXT("/Game/FirstPerson/Blueprints/Weapons/BP_%sWeapon.BP_%sWeapon_C"), Variant, Variant);
+		UClass* PlayerClass = LoadClass<AfpstrueCharacter>(nullptr, *PlayerPath);
+		UClass* WeaponClass = LoadClass<AActor>(nullptr, *PickupPath);
+		if (!TestNotNull(TEXT("Current production character Blueprint class loads"), PlayerClass)
+			|| !TestNotNull(TEXT("Current production weapon Blueprint class loads"), WeaponClass)) return false;
+		FActorSpawnParameters SpawnParameters;
+		SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AfpstrueCharacter* Player = World.GetWorld()->SpawnActor<AfpstrueCharacter>(PlayerClass, FTransform::Identity, SpawnParameters);
+		if (!TestNotNull(TEXT("Current production player spawns with authored mesh and animation"), Player)) return false;
+		Player->SetActorEnableCollision(false);
+		Player->GetCharacterMovement()->SetComponentTickEnabled(false);
+		APlayerController* Controller = World.Spawn<APlayerController>();
+		if (!Controller) return false;
+		Controller->Possess(Player); Controller->SetViewTarget(Player); Controller->SetActorTickEnabled(false);
+		if (!TestTrue(TEXT("The real owning player drives first-person presentation"), Player->IsLocallyControlled())) return false;
+		USkeletalMeshComponent* Arms = Player->GetMesh1P();
+		UfpstruePlayerAnimInstance* ArmsAnimation = Arms ? Cast<UfpstruePlayerAnimInstance>(Arms->GetAnimInstance()) : nullptr;
+		if (!TestNotNull(TEXT("Current authored arms mesh is present"), Arms ? Arms->GetSkeletalMeshAsset() : nullptr)
+			|| !TestNotNull(TEXT("The authored arms AnimBP uses the production presentation bridge"), ArmsAnimation)) return false;
+		// This remains an asset/gameplay integration test, not pose or GPU acceptance. Keep the
+		// production AnimBP and its real bindings; do not rebuild a legacy Blueprint-only owner field.
+		AActor* Pickup = World.GetWorld()->SpawnActor<AActor>(WeaponClass, FTransform(FVector(10000.0, 0.0, 0.0)), SpawnParameters);
+		if (!TestNotNull(TEXT("Current weapon Blueprint actor spawns"), Pickup)) return false;
+		Pickup->SetActorEnableCollision(false);
+		UfpstrueWeaponComponent* Weapon = Pickup->FindComponentByClass<UfpstrueWeaponComponent>();
+		if (!TestNotNull(TEXT("Current Blueprint contains its weapon component"), Weapon)) return false;
+		const FString ConfigPath = FString::Printf(TEXT("/Game/Config/DA_FPWeapon_%s.DA_FPWeapon_%s"), Variant, Variant);
+		UfpstrueWeaponConfig* Config = LoadObject<UfpstrueWeaponConfig>(nullptr, *ConfigPath);
+		const FObjectPropertyBase* ConfigProperty = FindFProperty<FObjectPropertyBase>(Weapon->GetClass(), TEXT("WeaponConfiguration"));
+		const FIntProperty* AmmoProperty = FindFProperty<FIntProperty>(Weapon->GetClass(), TEXT("CurrentAmmo"));
+		if (!TestNotNull(TEXT("Current weapon configuration is shipped"), Config)
+			|| !TestNotNull(TEXT("The component exposes its actual configuration binding"), ConfigProperty)
+			|| !TestNotNull(TEXT("Ammo fixture precondition is reflected"), AmmoProperty)) return false;
+		TestTrue(TEXT("Current Blueprint references its authored DA, not native fallback"), ConfigProperty->GetObjectPropertyValue_InContainer(Weapon) == Config);
+		FString ConfigurationError;
+		TestTrue(TEXT("The shipped weapon tuning passes validation"), Config->Settings.Validate(ConfigurationError));
+		if (!TestTrue(TEXT("Current weapon equips through the production boundary"), Weapon->AttachWeapon(Player))) return false;
+		TestTrue(TEXT("Production equipment ownership is established without a legacy BP owner variable"), Weapon->GetOwningCharacter() == Player);
+		for (USkeletalMeshComponent* Mesh : {Arms, Player->GetMesh(), static_cast<USkeletalMeshComponent*>(Weapon)})
+		{
+			Mesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+			Mesh->bEnableUpdateRateOptimizations = false;
+			Mesh->SetComponentTickEnabled(true);
+		}
+		if (!World.Advance(0.05f)) return false;
+		TStrongObjectPtr<UfpstrueReloadReentryObserver> Observer(NewObject<UfpstrueReloadReentryObserver>());
+		Weapon->OnAmmoChanged.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleAmmoChanged);
+		Weapon->OnWeaponReloadEnded.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleReloadEnded);
+		for (const bool bEmpty : {false, true})
+		{
+			const FString AnimationRoot = bRAR ? TEXT("/Game/FirstPerson/Animations/RAR/") : TEXT("/Game/FirstPerson/Animations/FPSMPT/");
+			const FString ArmsName = bRAR ? (bEmpty ? TEXT("AM_RAR_ReloadEmpty") : TEXT("AM_RAR_Reload")) : TEXT("AM_Template_FP_Reload");
+			const FString WeaponName = FString::Printf(TEXT("AM_%sWeapon_%s"), Variant, bEmpty ? TEXT("ReloadEmpty") : TEXT("Reload"));
+			UAnimMontage* ArmsMontage = LoadObject<UAnimMontage>(nullptr, *(AnimationRoot + ArmsName));
+			UAnimMontage* WeaponMontage = LoadObject<UAnimMontage>(nullptr, *(AnimationRoot + WeaponName));
+			if (!TestNotNull(TEXT("Expected current arms reload Montage loads"), ArmsMontage)
+				|| !TestNotNull(TEXT("Expected current weapon reload Montage loads"), WeaponMontage)) return false;
+			TestTrue(TEXT("The authored arms routing selects the exact normal/empty resource"),
+				(bEmpty ? ArmsAnimation->EmptyReloadMontage.Get() : ArmsAnimation->ReloadMontage.Get()) == ArmsMontage);
+			TestTrue(TEXT("The authored weapon routing selects the exact normal/empty resource"),
+				(bEmpty ? Weapon->WeaponEmptyReloadMontage.Get() : Weapon->WeaponReloadMontage.Get()) == WeaponMontage);
+			AmmoProperty->SetPropertyValue_InContainer(Weapon, bEmpty ? 0 : Weapon->GetMagazineSize() - 1);
+			const int32 AmmoBefore = Weapon->GetCurrentAmmo();
+			const int32 ReserveBefore = Weapon->GetReserveAmmo();
+			const int32 TotalBefore = AmmoBefore + ReserveBefore;
+			Observer->ReloadAnimInstance = Weapon->GetAnimInstance();
+			Observer->ReloadMontage = WeaponMontage;
+			const int32 EndCountBefore = Observer->ReloadEndCount;
+			const double ReloadStartedAt = World.GetWorld()->GetTimeSeconds();
+			if (!TestTrue(bEmpty ? TEXT("Current Blueprint empty-reload request accepted") : TEXT("Current Blueprint normal-reload request accepted"), Weapon->RequestReload())) return false;
+			const double AuthorityDeadline = ReloadStartedAt + Weapon->GetReloadDuration();
+			FAnimMontageInstance* ArmsPlayback = ArmsAnimation->GetActiveInstanceForMontage(ArmsMontage);
+			FAnimMontageInstance* WeaponPlayback = Weapon->GetAnimInstance()->GetActiveInstanceForMontage(WeaponMontage);
+			if (!TestNotNull(TEXT("Production bridge played the expected arms resource"), ArmsPlayback)
+				|| !TestNotNull(TEXT("Production bridge played the expected weapon resource"), WeaponPlayback)) return false;
+			TestTrue(TEXT("Actual arms Montage matches the selected resource"), ArmsPlayback->Montage == ArmsMontage);
+			TestTrue(TEXT("Actual weapon Montage matches the selected resource"), WeaponPlayback->Montage == WeaponMontage);
+			TestTrue(TEXT("The real arms playback has its native completion binding"), ArmsPlayback->OnMontageEnded.IsBound());
+			TestTrue(TEXT("The real weapon playback has its native completion binding"), WeaponPlayback->OnMontageEnded.IsBound());
+			const float Limit = FMath::Max3(ArmsMontage->GetPlayLength(), WeaponMontage->GetPlayLength(), Weapon->GetReloadDuration()) + 1.0f;
+			constexpr float FixtureStep = 0.01f;
+			constexpr double ClockTolerance = KINDA_SMALL_NUMBER;
+			bool bAmmoUnchangedBeforeDeadline = Weapon->GetCurrentAmmo() == AmmoBefore && Weapon->GetReserveAmmo() == ReserveBefore;
+			bool bReloadActiveBeforeDeadline = Weapon->IsReloading();
+			double CommitObservedAt = -1.0, ArmsBlendOutObservedAt = -1.0, WeaponBlendOutObservedAt = -1.0;
+			// IsActive excludes a normal BlendOut in UE. That visual transition must neither
+			// commit ammo early nor finish the authority transaction; compare its own clock.
+			for (int32 Step = 0; Step < FMath::CeilToInt(Limit / FixtureStep) && Weapon->IsReloading(); ++Step)
+			{
+				if (!World.AdvanceSingleFrame(FixtureStep)) return false;
+				const double Now = World.GetWorld()->GetTimeSeconds();
+				if (const FAnimMontageInstance* Visual = ArmsAnimation->GetInstanceForMontage(ArmsMontage))
+					if (ArmsBlendOutObservedAt < 0.0 && Visual->IsStopped()) ArmsBlendOutObservedAt = Now;
+				if (const FAnimMontageInstance* Visual = Weapon->GetAnimInstance()->GetInstanceForMontage(WeaponMontage))
+					if (WeaponBlendOutObservedAt < 0.0 && Visual->IsStopped()) WeaponBlendOutObservedAt = Now;
+				if ((Weapon->GetCurrentAmmo() != AmmoBefore || Weapon->GetReserveAmmo() != ReserveBefore) && CommitObservedAt < 0.0) CommitObservedAt = Now;
+				if (Now < AuthorityDeadline - ClockTolerance)
+				{
+					bAmmoUnchangedBeforeDeadline &= Weapon->GetCurrentAmmo() == AmmoBefore && Weapon->GetReserveAmmo() == ReserveBefore;
+					bReloadActiveBeforeDeadline &= Weapon->IsReloading();
+				}
+			}
+			const double CompletedAt = World.GetWorld()->GetTimeSeconds();
+			TestTrue(TEXT("Visual BlendOut cannot commit ammunition before the authority deadline"), bAmmoUnchangedBeforeDeadline);
+			TestTrue(TEXT("The reload transaction stays active until its authority deadline"), bReloadActiveBeforeDeadline);
+			TestTrue(TEXT("The ammunition commit is observed at or after the authority deadline"), CommitObservedAt >= AuthorityDeadline - ClockTolerance);
+			TestFalse(TEXT("Authority timing clears Reloading without legacy Blueprint callbacks"), Weapon->IsReloading());
+			// AutomationCommon.cpp advances GFrameCounter after TickTestWorld. This request is
+			// between ticks: TimerManager queues it as Pending, activates it at the next tick's
+			// end, then dispatches when InternalTime > ExpireTime. Bound those two quantizations.
+			TestTrue(TEXT("Pending activation and expiry dispatch complete within two fixture ticks"),
+				CompletedAt <= AuthorityDeadline + 2.0 * FixtureStep + ClockTolerance);
+			AddInfo(FString::Printf(TEXT("ReloadClock Variant=%s Empty=%d Start=%.4f Deadline=%.4f ArmsBlendOutObserved=%.4f WeaponBlendOutObserved=%.4f CommitObserved=%.4f Completed=%.4f"),
+				Variant, bEmpty, ReloadStartedAt, AuthorityDeadline, ArmsBlendOutObservedAt, WeaponBlendOutObservedAt, CommitObservedAt, CompletedAt));
+			TestEqual(TEXT("Real playback reports Completed, not timeout recovery"), Observer->LastReloadEndReason, EFPReloadEndReason::Completed);
+			TestEqual(TEXT("The paired playbacks emit exactly one transaction end"), Observer->ReloadEndCount, EndCountBefore + 1);
+			TestEqual(TEXT("The real asset reload fills the magazine"), Weapon->GetCurrentAmmo(), Weapon->GetMagazineSize());
+			TestEqual(TEXT("Real asset reload conserves total ammunition"), Weapon->GetCurrentAmmo() + Weapon->GetReserveAmmo(), TotalBefore);
+		}
 	}
 	return true;
 }

@@ -99,7 +99,7 @@ MovingAnimation=/Game/EnemyWarriorAnimPack/Animations/InPlace/Movement/EnemyWarr
 
 当前固定 160 AI、Editor/Shipping 客户端对照入口为 `Tools/Performance/RunGroupAIBaseline.ps1`。服务端身份、地图、画质、人数、预热与采样窗口按每轮清单核对，不能把 Editor DS 自动称为 Shipping Server。
 
-- 网络世界由 GameState 调用 `StartPvpPerformanceProfile`，优先进入 `PvpBaseline`，旧网络 `PvpProfile` 仅在非 Shipping 下接受显式请求。
+- 网络世界由 GameState 调用 `StartPvpBaseline`，只有显式 `PvpBaseline` 才启动固定场景采集；旧血条 `PvpProfile` 和相关入口已删除。
 - `Testing/Benchmarks/fpstrueBenchmarkRunner.*` 仍保留网络 Profile/Baseline、CSV/Trace 与线程/物理/网络消费者验证，不再包含依赖旧单机 GameMode 的采集组件。
 - 正式玩法开关仍由 `Runtime/fpstrueRuntime.*` 统一解析；采集参数不写回蓝图或玩法 DataAsset。
 - `Tools/Performance/ExperimentProfiles`、`RunRenderCostMatrix`、`AutoBenchmark`、`scene-acceptance.json` 记录旧单机实验口径，不作为当前运行命令。保留原始数据与报告，复现须使用对应历史版本。

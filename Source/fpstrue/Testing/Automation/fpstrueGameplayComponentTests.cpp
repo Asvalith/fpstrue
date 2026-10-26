@@ -8,8 +8,7 @@ void AfpstrueDamagePresentationTestCharacter::ProcessEvent(UFunction* Function, 
 {
 	if (Function != nullptr)
 	{
-		if (Function->GetFName() == TEXT("ClientReceiveDamage")) ++OwnerDamageFeedbackRequests;
-		else if (Function->GetFName() == TEXT("MulticastPresentHit")) ++NativeHitRequests;
+		if (Function->GetFName() == TEXT("MulticastPresentHit")) ++NativeHitRequests;
 	}
 	Super::ProcessEvent(Function, Parameters);
 }

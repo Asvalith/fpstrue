@@ -12,28 +12,17 @@
 #include "Components/SphereComponent.h"
 #include "Components/MeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/WidgetComponent.h"
-#include "Components/ProgressBar.h"
-#include "Blueprint/WidgetTree.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
-#include "EngineGlobals.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Net/UnrealNetwork.h"
-#include "Math/RotationMatrix.h"
 #include "SignificanceManager.h"
-#include "Camera/PlayerCameraManager.h"
-#include "EngineUtils.h"
-#include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
-#include "ProfilingDebugging/CsvProfiler.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-
-CSV_DEFINE_CATEGORY(fpstrueEnemyUI, true);
 
 namespace
 {
@@ -62,323 +51,6 @@ void UfpstrueEnemyMovementComponent::FindFloor(const FVector& CapsuleLocation, F
 	}
 	// 不保存另一份地面、不手写扫掠；仅撤销失效复用资格，由原生查询重新决定 Walking/Falling。
 	Super::FindFloor(CapsuleLocation, OutFloorResult, bCanUseCachedLocation, DownwardSweepResult);
-}
-
-// 没有全局 Tick 或逐帧 Actor 扫描；World 清理事件精确移除对应缓存，弱键也不会保活旧关卡。
-UfpstrueEnemyHealthBarComponent::FViewCache::FViewCache()
-{
-	CleanupHandle = FWorldDelegates::OnWorldCleanup.AddRaw(this, &FViewCache::OnWorldCleanup);
-}
-
-// 缓存退出时解除其唯一原生委托，不等待下一个 World 清理事件。
-UfpstrueEnemyHealthBarComponent::FViewCache::~FViewCache() { FWorldDelegates::OnWorldCleanup.Remove(CleanupHandle); }
-
-void UfpstrueEnemyHealthBarComponent::FViewCache::OnWorldCleanup(UWorld* World, bool, bool) { Worlds.Remove(World); }
-
-UfpstrueEnemyHealthBarComponent::FViewCache& UfpstrueEnemyHealthBarComponent::GetViewCache()
-{
-	static FViewCache Cache;
-	return Cache;
-}
-
-// 相机矩阵、FOV 正切及朝向只与视点有关，不需要由每条血条重复构造。
-UfpstrueEnemyHealthBarComponent::FViewSnapshot UfpstrueEnemyHealthBarComponent::BuildViewSnapshot(
-	const FVector& Location, const FRotator& Rotation, float HorizontalFOV, float AspectRatio)
-{
-	FViewSnapshot View;
-	View.Location = Location;
-	const FRotationMatrix Basis(Rotation);
-	View.Forward = Basis.GetUnitAxis(EAxis::X);
-	View.Right = Basis.GetUnitAxis(EAxis::Y);
-	View.Up = Basis.GetUnitAxis(EAxis::Z);
-	View.HalfFOVTan = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(HorizontalFOV, 5.0f, 170.0f) * 0.5f));
-	View.InverseAspect = 1.0 / FMath::Max(AspectRatio, 0.1f);
-	View.Facing = FRotationMatrix::MakeFromXZ(-View.Forward, View.Up).Rotator();
-	return View;
-}
-
-bool UfpstrueEnemyHealthBarComponent::SampleLocalView(UWorld* World, FViewSnapshot& OutView)
-{
-	APlayerController* Viewer = World != nullptr ? World->GetFirstPlayerController() : nullptr;
-	if (!IsValid(Viewer) || !Viewer->IsLocalController() || !IsValid(Viewer->PlayerCameraManager)) return false;
-	int32 Width = 0, Height = 0;
-	Viewer->GetViewportSize(Width, Height);
-	if (Width <= 0 || Height <= 0) return false;
-	APlayerCameraManager* Camera = Viewer->PlayerCameraManager;
-	OutView = BuildViewSnapshot(Camera->GetCameraLocation(), Camera->GetCameraRotation(), Camera->GetFOVAngle(), static_cast<float>(Width) / Height);
-	OutView.Viewer = Viewer;
-	OutView.CameraManager = Camera;
-	return true;
-}
-
-// ★【缓存边界】仅主线程、同 World、同帧且视点仍有效时复用；失败不缓存，视点迟到或失效后可在同帧立即恢复。
-bool UfpstrueEnemyHealthBarComponent::ResolveViewSnapshot(UWorld* World, uint64 Frame, bool bUseCache,
-	FViewSnapshot& OutView, bool& bCacheHit, TFunctionRef<bool(UWorld*, FViewSnapshot&)> Sampler)
-{
-	check(IsInGameThread());
-	bCacheHit = false;
-	if (!IsValid(World)) return false;
-	if (!bUseCache) return Sampler(World, OutView);
-	FViewCache& Cache = GetViewCache();
-	const TWeakObjectPtr<UWorld> Key(World);
-	if (const FViewCache::FEntry* Entry = Cache.Worlds.Find(Key); Entry != nullptr && Entry->Frame == Frame)
-	{
-		APlayerController* Viewer = Entry->View.Viewer.Get();
-		APlayerCameraManager* Camera = Entry->View.CameraManager.Get();
-		if (IsValid(Viewer) && Viewer->IsLocalController() && IsValid(Camera) && Viewer->GetWorld() == World && Camera->GetWorld() == World
-			&& Viewer->PlayerCameraManager == Camera)
-		{
-			OutView = Entry->View;
-			bCacheHit = true;
-			return true;
-		}
-	}
-	if (!Sampler(World, OutView))
-	{
-		Cache.Worlds.Remove(Key);
-		return false;
-	}
-	FViewCache::FEntry& Entry = Cache.Worlds.FindOrAdd(Key);
-	Entry.Frame = Frame;
-	Entry.View = OutView;
-	return true;
-}
-
-UfpstrueEnemyHealthBarComponent::UfpstrueEnemyHealthBarComponent()
-{
-	SetWidgetSpace(EWidgetSpace::World);
-	SetManuallyRedraw(true);
-	SetRedrawTime(0.0f);
-	SetTickMode(ETickMode::Enabled);
-	// 自己的视锥决定是否重绘；不再等待上次 RenderTime，避免屏外返回后延迟恢复。
-	SetTickWhenOffscreen(true);
-	SetBlendMode(EWidgetBlendMode::Masked);
-	SetTwoSided(true);
-	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
-}
-
-EFPEnemyHealthBarMode UfpstrueEnemyHealthBarComponent::GetConfiguredMode()
-{
-#if !UE_BUILD_SHIPPING
-	static const EFPEnemyHealthBarMode Configured = []
-	{
-		FString Value;
-		FParse::Value(FCommandLine::Get(), TEXT("EnemyHealthBars="), Value);
-		if (Value.Equals(TEXT("Off"), ESearchCase::IgnoreCase)) return EFPEnemyHealthBarMode::Off;
-		if (Value.Equals(TEXT("Screen"), ESearchCase::IgnoreCase)) return EFPEnemyHealthBarMode::Screen;
-		if (Value.Equals(TEXT("WorldAlways"), ESearchCase::IgnoreCase)) return EFPEnemyHealthBarMode::WorldAlways;
-		return EFPEnemyHealthBarMode::WorldEvent;
-	}();
-	return Configured;
-#else
-	return EFPEnemyHealthBarMode::WorldEvent;
-#endif
-}
-
-const TCHAR* UfpstrueEnemyHealthBarComponent::GetModeName(EFPEnemyHealthBarMode InMode)
-{
-	switch (InMode)
-	{
-	case EFPEnemyHealthBarMode::Off: return TEXT("Off");
-	case EFPEnemyHealthBarMode::Screen: return TEXT("Screen");
-	case EFPEnemyHealthBarMode::WorldAlways: return TEXT("WorldAlways");
-	default: return TEXT("WorldEvent");
-	}
-}
-
-void UfpstrueEnemyHealthBarComponent::Configure(EFPEnemyHealthBarMode InMode)
-{
-	ReleasePresentation();
-	Mode = GetNetMode() == NM_DedicatedServer ? EFPEnemyHealthBarMode::Off : InMode;
-	if (Mode == EFPEnemyHealthBarMode::Off) return;
-	bReleased = false;
-	LastFraction = -1.0f;
-	SetWidgetSpace(Mode == EFPEnemyHealthBarMode::Screen ? EWidgetSpace::Screen : EWidgetSpace::World);
-	SetManuallyRedraw(Mode == EFPEnemyHealthBarMode::WorldEvent);
-	SetTickMode(ETickMode::Enabled);
-	SetComponentTickEnabled(true);
-	SetHiddenInGame(false);
-	SetVisibility(true);
-	// ReleaseResources 会销毁 World Widget 的 Renderer；沿引擎注册路径重建，不能只重建 UObject 而留下空白贴片。
-	if (IsRegistered()) ReregisterComponent();
-	SetWidgetClass(UfpstrueEnemyHealthBarWidget::StaticClass());
-	InitWidget();
-	if (GetUserWidgetObject() != nullptr) ++Created;
-}
-
-void UfpstrueEnemyHealthBarComponent::SetHealthFraction(float Fraction)
-{
-	if (bReleased) return;
-	const float SafeFraction = FMath::IsFinite(Fraction) ? FMath::Clamp(Fraction, 0.0f, 1.0f) : 0.0f;
-	if (FMath::IsNearlyEqual(LastFraction, SafeFraction)) return;
-	LastFraction = SafeFraction;
-	if (auto* HealthWidget = Cast<UfpstrueEnemyHealthBarWidget>(GetUserWidgetObject()))
-	{
-		HealthWidget->SetHealthFraction(SafeFraction);
-		++ValueUpdates;
-		CSV_CUSTOM_STAT(fpstrueEnemyUI, ValueUpdates, 1, ECsvCustomStatOp::Accumulate);
-		RequestEventRedraw();
-	}
-}
-
-void UfpstrueEnemyHealthBarComponent::RequestEventRedraw()
-{
-	if (bReleased || Mode != EFPEnemyHealthBarMode::WorldEvent) return;
-	++RedrawRequests;
-	RequestRenderUpdate();
-	CSV_CUSTOM_STAT(fpstrueEnemyUI, RedrawRequests, 1, ECsvCustomStatOp::Accumulate);
-}
-
-void UfpstrueEnemyHealthBarComponent::ReleasePresentation()
-{
-	bReleased = true;
-	bInLocalView = false;
-	SetHiddenInGame(true);
-	SetVisibility(false);
-	SetWidgetClass(nullptr);
-	ReleaseResources();
-	RenderTarget = nullptr;
-	UpdateMaterialInstanceParameters();
-	MarkRenderStateDirty();
-	SetTickMode(ETickMode::Disabled);
-	SetComponentTickEnabled(false);
-}
-
-void UfpstrueEnemyHealthBarComponent::UpdateForView(const FVector& CameraLocation, const FRotator& CameraRotation,
-	float HorizontalFOV, float AspectRatio)
-{
-	if (bReleased) return;
-	UpdateForView(BuildViewSnapshot(CameraLocation, CameraRotation, HorizontalFOV, AspectRatio));
-}
-
-void UfpstrueEnemyHealthBarComponent::UpdateForView(const FViewSnapshot& View)
-{
-	if (bReleased) return;
-	// 位置仍从每个血条自己的平滑 Mesh 读取，缓存不冻结敌人，也不降低转镜头时的刷新频率。
-	const FVector Delta = GetComponentLocation() - View.Location;
-	const double Depth = FVector::DotProduct(Delta, View.Forward);
-	const double HalfWidth = FMath::Max(0.0, Depth) * View.HalfFOVTan;
-	// 保守包含血条矩形，不把“中心在视锥内”冒充真实无遮挡/屏幕像素可见。
-	const bool bInsideView = Depth > 0.0 &&
-		FMath::Abs(FVector::DotProduct(Delta, View.Right)) <= HalfWidth + 40.0 &&
-		FMath::Abs(FVector::DotProduct(Delta, View.Up)) <= HalfWidth * View.InverseAspect + 8.0;
-	const bool bReturnedToView = bInsideView && !bInLocalView;
-	bInLocalView = bInsideView;
-	if (Mode != EFPEnemyHealthBarMode::Screen)
-	{
-		SetVisibility(bInsideView);
-		// 四边形平行于真实视平面，保留相机的上轴；逐位置 look-at 在俯视下会让血条径向倾斜。
-		// 只旋转表现组件，仍使用 World 深度测试，不改变敌人/平滑 Mesh 的朝向与位置。
-		if (bInsideView)
-			SetWorldRotation(View.Facing);
-	}
-	if (bReturnedToView) RequestEventRedraw();
-}
-
-void UfpstrueEnemyHealthBarComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
-{
-	if (bReleased) return;
-	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyUI_ViewAndWidgetTick);
-	CSV_SCOPED_TIMING_STAT(fpstrueEnemyUI, ViewAndWidgetTick);
-	// 同 DLL 的公平 A/B：回退只改变视点采样策略，不改变血条模式、Gameplay 或网络规则。
-#if !UE_BUILD_SHIPPING
-	static const bool bUseSharedView = !FParse::Param(FCommandLine::Get(), TEXT("EnemyUIViewPerComponent"));
-#else
-	constexpr bool bUseSharedView = true;
-#endif
-	FViewSnapshot View;
-	bool bCacheHit = false;
-	const bool bHasView = ResolveViewSnapshot(GetWorld(), GFrameCounter, bUseSharedView, View, bCacheHit, &SampleLocalView);
-	if (bCacheHit)
-	{
-		++ViewCacheHits;
-		CSV_CUSTOM_STAT(fpstrueEnemyUI, ViewCacheHits, 1, ECsvCustomStatOp::Accumulate);
-	}
-	else
-	{
-		++ViewSamples;
-		CSV_CUSTOM_STAT(fpstrueEnemyUI, ViewSamples, 1, ECsvCustomStatOp::Accumulate);
-	}
-	if (bHasView) UpdateForView(View);
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-}
-
-bool UfpstrueEnemyHealthBarComponent::ShouldDrawWidget() const
-{
-	return !bReleased && bInLocalView && Super::ShouldDrawWidget();
-}
-
-void UfpstrueEnemyHealthBarComponent::DrawWidgetToRenderTarget(float DeltaTime)
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(FpstrueEnemyUI_RenderTargetRedraw);
-	CSV_SCOPED_TIMING_STAT(fpstrueEnemyUI, RenderTargetRedrawTime);
-	Super::DrawWidgetToRenderTarget(DeltaTime);
-	// NullRHI 没有真实 RT 绘制；只统计有实际 RenderTarget 的调用，不以请求数冒充重绘数。
-	if (!GUsingNullRHI && SlateWindow.IsValid() && WidgetRenderer != nullptr && GetRenderTarget() != nullptr)
-	{
-		++RenderTargetDraws;
-		CSV_CUSTOM_STAT(fpstrueEnemyUI, RenderTargetDraws, 1, ECsvCustomStatOp::Accumulate);
-	}
-}
-
-void UfpstrueEnemyHealthBarComponent::AppendMetrics(FFPEnemyHealthBarMetrics& Metrics) const
-{
-	++Metrics.Components;
-	if (GetUserWidgetObject() != nullptr)
-	{
-		++Metrics.Widgets;
-		if (bInLocalView && !bReleased) ++Metrics.FrustumVisible;
-		if (GetWidgetSpace() == EWidgetSpace::Screen) ++Metrics.ScreenWidgets;
-		else
-		{
-			++Metrics.WorldWidgets;
-			if (GetManuallyRedraw()) ++Metrics.ManualWorldWidgets;
-		}
-	}
-	Metrics.Created += Created;
-	Metrics.ValueUpdates += ValueUpdates;
-	Metrics.RedrawRequests += RedrawRequests;
-	Metrics.RenderTargetDraws += RenderTargetDraws;
-	Metrics.ViewSamples += ViewSamples;
-	Metrics.ViewCacheHits += ViewCacheHits;
-}
-
-FFPEnemyHealthBarMetrics UfpstrueEnemyHealthBarComponent::CollectMetrics(UWorld* World)
-{
-	FFPEnemyHealthBarMetrics Metrics;
-	if (World != nullptr)
-		for (TActorIterator<AfpstrueEnemyCharacter> It(World); It; ++It)
-			if (const auto* Bar = It->FindComponentByClass<UfpstrueEnemyHealthBarComponent>()) Bar->AppendMetrics(Metrics);
-	return Metrics;
-}
-
-// 不接受鼠标/键盘输入；交互与焦点仍由玩家自己的 HUD 管理。
-UfpstrueEnemyHealthBarWidget::UfpstrueEnemyHealthBarWidget(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
-	SetVisibility(ESlateVisibility::HitTestInvisible);
-	SetIsFocusable(false);
-}
-
-// 仅设置已结算数值的显示比例；在 WidgetTree 尚未创建时保留最后一份有效值。
-void UfpstrueEnemyHealthBarWidget::SetHealthFraction(float Fraction)
-{
-	HealthFraction = FMath::IsFinite(Fraction) ? FMath::Clamp(Fraction, 0.0f, 1.0f) : 0.0f;
-	if (HealthProgress != nullptr) HealthProgress->SetPercent(HealthFraction);
-}
-
-// 原生构建一个无输入、无逐帧数值绑定的血条，不改动原 HUD 或新增蓝图资产。
-TSharedRef<SWidget> UfpstrueEnemyHealthBarWidget::RebuildWidget()
-{
-	if (WidgetTree == nullptr) WidgetTree = NewObject<UWidgetTree>(this, TEXT("WidgetTree"));
-	if (HealthProgress == nullptr)
-	{
-		HealthProgress = WidgetTree->ConstructWidget<UProgressBar>(UProgressBar::StaticClass(), TEXT("HealthProgress"));
-		HealthProgress->SetFillColorAndOpacity(FLinearColor(0.12f, 0.85f, 0.22f, 1.0f));
-		WidgetTree->RootWidget = HealthProgress;
-	}
-	HealthProgress->SetPercent(HealthFraction);
-	return Super::RebuildWidget();
 }
 
 /*
@@ -447,18 +119,6 @@ AfpstrueEnemyCharacter::AfpstrueEnemyCharacter(const FObjectInitializer& ObjectI
 		Proxy->BodyInstance.bAutoWeld = false;
 		Proxy->PrimaryComponentTick.bCanEverTick = false;
 	}
-	HealthBar = CreateDefaultSubobject<UfpstrueEnemyHealthBarComponent>(TEXT("EnemyHealthBar"));
-	HealthBar->SetupAttachment(GetMesh());
-	HealthBar->SetRelativeLocation(GetMesh()->GetRelativeTransform().InverseTransformPosition(
-		FVector(0.0f, 0.0f, GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() + 28.0f)));
-	HealthBar->SetWidgetSpace(EWidgetSpace::World);
-	HealthBar->SetDrawSize(FVector2D(80.0f, 8.0f));
-	HealthBar->SetPivot(FVector2D(0.5f, 1.0f));
-	HealthBar->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	HealthBar->SetWindowFocusable(false);
-	HealthBar->SetCastShadow(false);
-	HealthBar->SetVisibleInRayTracing(false);
-	// WidgetClass 留到有画面的端再设置，专用服务器不创建纯 UI 对象。
 }
 
 // 旧蓝图可覆盖构造默认值；在实例组件就绪后重申无敌人后处理，并监听后续主动画重新初始化。
@@ -541,26 +201,6 @@ void AfpstrueEnemyCharacter::BeginPlay()
 	{
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
 		HealthComponent->OnDamageResolved.AddUObject(this, &AfpstrueEnemyCharacter::HandleDamageResolved);
-		if (GetNetMode() != NM_DedicatedServer)
-		{
-			// ★【网络表现边界】胶囊体先应用权威位置，身体 Mesh 才做网络平滑；血条跟随 Mesh，不能提前跳到胶囊体的新位置。
-			// 初始化仍保留原来的胶囊顶 +28cm 高度；不绑具体头骨，避免不同骨架和动作造成额外跳动。
-			const FVector AnchorWorld = GetCapsuleComponent()->GetComponentTransform().TransformPosition(
-				FVector(0.0f, 0.0f, GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() + 28.0f));
-			const FVector AnchorInMesh = GetMesh()->GetComponentTransform().InverseTransformPosition(AnchorWorld);
-			// 旧蓝图可能保存胶囊体父节点或绝对变换；必须在组件实例就绪后显式纠正，不能只依赖 C++ 构造默认值。
-			HealthBar->AttachToComponent(GetMesh(), FAttachmentTransformRules::KeepRelativeTransform);
-			HealthBar->SetAbsolute(false, false, false);
-			HealthBar->SetRelativeLocationAndRotation(AnchorInMesh, FRotator::ZeroRotator);
-			HealthBar->SetRelativeScale3D(FVector::OneVector);
-			CastChecked<UfpstrueEnemyHealthBarComponent>(HealthBar)->Configure(UfpstrueEnemyHealthBarComponent::GetConfiguredMode());
-			HealthComponent->OnHealthChanged.AddUniqueDynamic(this, &ThisClass::RefreshHealthBar);
-			RefreshHealthBar(HealthComponent->GetHealth());
-		}
-		else
-		{
-			CastChecked<UfpstrueEnemyHealthBarComponent>(HealthBar)->ReleasePresentation();
-		}
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -752,23 +392,9 @@ void AfpstrueEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		HealthComponent->OnDeath.RemoveDynamic(this, &AfpstrueEnemyCharacter::HandleDeath);
 		HealthComponent->OnDamageResolved.RemoveAll(this);
-		HealthComponent->OnHealthChanged.RemoveDynamic(this, &ThisClass::RefreshHealthBar);
 	}
-	CastChecked<UfpstrueEnemyHealthBarComponent>(HealthBar)->ReleasePresentation();
 
 	Super::EndPlay(EndPlayReason);
-}
-
-// ★【UI/复制边界】只读本敌人的最新比例，不依赖可能丢包的受击多播，也不根据镜头方向更新世界位置。
-void AfpstrueEnemyCharacter::RefreshHealthBar(float)
-{
-	if (GetNetMode() == NM_DedicatedServer || HealthBar == nullptr || HealthComponent == nullptr) return;
-	if (bDeathEffectsApplied || IsDead())
-	{
-		CastChecked<UfpstrueEnemyHealthBarComponent>(HealthBar)->ReleasePresentation();
-		return;
-	}
-	CastChecked<UfpstrueEnemyHealthBarComponent>(HealthBar)->SetHealthFraction(HealthComponent->GetHealthNormalized());
 }
 
 // ==================== 状态查询与玩法接口 ====================
@@ -945,10 +571,6 @@ void AfpstrueEnemyCharacter::HandleDeath()
 	DisableHitProxies();
 	DisableEnemyPostProcessAnimation();
 	ApplyNetworkReplicationPolicy(); // 死亡退出存活分档，恢复原始频率；死亡快照仍在下方强制调度。
-	HealthBar->SetHiddenInGame(true);
-	// Screen 血条必须先从本地屏幕层移除，再禁用 Tick；否则可能留下死亡前最后一帧的悬空 UI。
-	// World 与诊断 Screen 模式共用释放入口，同时清除纹理重绘和视图更新资格。
-	CastChecked<UfpstrueEnemyHealthBarComponent>(HealthBar)->ReleasePresentation();
 	if (HasAuthority() && GetNetMode() != NM_Standalone)
 	{
 		NetworkPresentation.bDead = true;
@@ -1204,6 +826,17 @@ bool AfpstrueEnemyCharacter::IsReferenceReplicationRequested(const TCHAR* Comman
 		Value.Equals(TEXT("Reference"), ESearchCase::IgnoreCase);
 }
 
+float AfpstrueEnemyCharacter::GetNetPriority(const FVector& ViewPos, const FVector& ViewDir,
+	AActor* Viewer, AActor* ViewTarget, UActorChannel* InChannel, float Time, bool bLowBandwidth)
+{
+	const float Base = Super::GetNetPriority(ViewPos, ViewDir, Viewer, ViewTarget, InChannel, Time, bLowBandwidth);
+	if (bReferenceEnemyReplication || IsDead()) return Base;
+	// Super 已有距离、视向和距上次复制时间的权重，不再重做一份相关性判断。
+	// 只为当前连接所见角色的直接威胁加权；其他连接不会因另一玩家被围攻而全部提升。
+	// 不把低优先级设成零：原生 Time 持续增长，拥塞缓解后仍可补齐远端状态。
+	return ViewTarget != nullptr && GetCombatTarget() == ViewTarget ? Base * (IsAttacking() ? 4.0f : 2.0f) : Base;
+}
+
 // ★【网络预算边界】只收紧网络权威端Actor级频率；近任意有效玩家的Gameplay最高重要性保护所有连接。
 void AfpstrueEnemyCharacter::ApplyNetworkReplicationPolicy()
 {
@@ -1455,11 +1088,6 @@ void AfpstrueEnemyCharacter::RefreshRenderBudgetMeshes()
 	// 普通 Attach 不转移所有权，否则两名敌人交换挂件时会互相覆盖缓存的原始资格。
 	// ★【重要边界】[资源所有权] 只管理本 Actor/ChildActor 拥有的 Mesh，保存原始许可；外部 Actor 仅 Attach 不自动进入该敌人的预算。
 	GetComponents(CurrentMeshes, true);
-	// UI不进入表现预算；命中盒体不是Mesh，不会成为额外渲染消费者。
-	CurrentMeshes.RemoveAll([this](const UMeshComponent* CandidateMesh)
-	{
-		return CandidateMesh == HealthBar.Get() || CandidateMesh->ComponentHasTag(TEXT("EnemyHitProxy"));
-	});
 	RenderBudgetMeshes.RemoveAllSwap(
 		[&CurrentMeshes](const FRenderBudgetMesh& Entry)
 		{

@@ -15,6 +15,7 @@
 #include "BehaviorTree/Decorators/BTDecorator_Blackboard.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "HAL/IConsoleManager.h"
@@ -27,6 +28,7 @@
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UnrealType.h"
+#include "WidgetBlueprint.h"
 
 namespace FpstrueGameplayContractAudit
 {
@@ -46,6 +48,14 @@ void AuditBlueprint(UBlueprint& Blueprint, int32& CompileFailures)
 	UPackage* Package = Blueprint.GetOutermost();
 	UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT BLUEPRINT Asset=%s Parent=%s DirtyBefore=%d ParentReview=%s"),
 		*Blueprint.GetPathName(), *GetPathNameSafe(Blueprint.ParentClass), Package->IsDirty(), *ReviewTags(GetPathNameSafe(Blueprint.ParentClass)));
+	if (const UWidgetBlueprint* Widget = Cast<UWidgetBlueprint>(&Blueprint))
+	{
+		UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT WIDGET_BINDINGS Asset=%s Count=%d"),
+			*Blueprint.GetPathName(), Widget->Bindings.Num());
+		for (const FDelegateEditorBinding& Binding : Widget->Bindings)
+			UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT WIDGET_BINDING Asset=%s Object=\"%s\" Property=\"%s\" Function=\"%s\""),
+				*Blueprint.GetPathName(), *Binding.ObjectName, *Binding.PropertyName.ToString(), *Binding.FunctionName.ToString());
+	}
 	TArray<UEdGraph*> Graphs;
 	Blueprint.GetAllGraphs(Graphs);
 	for (UEdGraph* Graph : Graphs)
@@ -54,6 +64,9 @@ void AuditBlueprint(UBlueprint& Blueprint, int32& CompileFailures)
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
 			if (Node == nullptr) continue;
+			UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT NODE Asset=%s Graph=%s Node=%s Class=%s Title=\"%s\""),
+				*Blueprint.GetPathName(), *Graph->GetName(), *Node->NodeGuid.ToString(), *Node->GetClass()->GetPathName(),
+				*Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
 			FString Reference = Node->GetClass()->GetPathName() + TEXT(" ") + Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
 			if (const UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(Node))
 			{
@@ -75,10 +88,28 @@ void AuditBlueprint(UBlueprint& Blueprint, int32& CompileFailures)
 					*(Property != nullptr ? Property->GetPathName() : Set->GetVarName().ToString()), Owner != nullptr && Owner->HasAnyClassFlags(CLASS_Native));
 			}
 			for (const UEdGraphPin* Pin : Node->Pins)
-				if (Pin != nullptr)
-					Reference += FString::Printf(TEXT(" %s %s %s %s %s"), *Pin->PinName.ToString(), *Pin->DefaultValue,
-						*GetPathNameSafe(Pin->DefaultObject), *GetPathNameSafe(Pin->PinType.PinSubCategoryObject.Get()),
-						*GetPathNameSafe(Pin->PinType.PinValueType.TerminalSubCategoryObject.Get()));
+			{
+				if (Pin == nullptr) continue;
+				Reference += FString::Printf(TEXT(" %s %s %s %s %s"), *Pin->PinName.ToString(), *Pin->DefaultValue,
+					*GetPathNameSafe(Pin->DefaultObject), *GetPathNameSafe(Pin->PinType.PinSubCategoryObject.Get()),
+					*GetPathNameSafe(Pin->PinType.PinValueType.TerminalSubCategoryObject.Get()));
+				// 同时记录零连接 pin，事件节点存在不能代替其执行出口已经接通的证据。
+				UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT PIN Asset=%s Graph=%s Node=%s Pin=\"%s\" Direction=%s Exec=%d Category=%s Links=%d Default=\"%s\" DefaultObject=%s"),
+					*Blueprint.GetPathName(), *Graph->GetName(), *Node->NodeGuid.ToString(), *Pin->PinName.ToString(),
+					Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"), Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec,
+					*Pin->PinType.PinCategory.ToString(), Pin->LinkedTo.Num(), *Pin->DefaultValue, *GetPathNameSafe(Pin->DefaultObject));
+				for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+				{
+					if (LinkedPin == nullptr) continue;
+					const UEdGraphNode* LinkedNode = LinkedPin->GetOwningNode();
+					UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT LINK Asset=%s Graph=%s Node=%s Pin=\"%s\" Direction=%s Exec=%d ToGraph=%s ToNode=%s ToPin=\"%s\" ToDirection=%s ToExec=%d"),
+						*Blueprint.GetPathName(), *Graph->GetName(), *Node->NodeGuid.ToString(), *Pin->PinName.ToString(),
+						Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"), Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec,
+						LinkedNode != nullptr ? *GetNameSafe(LinkedNode->GetGraph()) : TEXT("-"),
+						LinkedNode != nullptr ? *LinkedNode->NodeGuid.ToString() : TEXT("-"), *LinkedPin->PinName.ToString(),
+						LinkedPin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"), LinkedPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
+				}
+			}
 			const FString Tags = ReviewTags(Reference);
 			if (!Tags.IsEmpty())
 				UE_LOG(LogTemp, Display, TEXT("FP_CONTRACT_AUDIT REVIEW Asset=%s Graph=%s Node=%s Tags=%s Reference=%s"),

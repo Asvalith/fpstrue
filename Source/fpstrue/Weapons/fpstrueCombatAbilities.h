@@ -4,30 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "Abilities/GameplayAbility.h"
-#include "Abilities/GameplayAbilityTargetTypes.h"
 #include "Weapons/fpstrueWeaponComponent.h"
 #include "fpstrueCombatAbilities.generated.h"
 
 class UAbilityTask_WaitDelay;
-
-// 使用 ASC 同一 Actor 通道传送逐发输入；不发送客户端命中结论，也不复用 LocationInfo 偷藏字段。
-// 【设计取舍】只适配射击所需的业务字段，能力激活、目标数据传输和松开事件继续复用 GAS；
-// 本结构不承担可靠重传、连接管理或网络时间校正，避免形成第二套网络栈。
-USTRUCT()
-struct FGameplayAbilityTargetData_FPShot : public FGameplayAbilityTargetData
-{
-	GENERATED_BODY()
-	UPROPERTY() FFPShotRequest Request;
-	// GAS 用真实结构类型识别逐发 TargetData，消费端不猜测其他 TargetData 的内存布局。
-	virtual UScriptStruct* GetScriptStruct() const override { return StaticStruct(); }
-	// 只序列化 Avatar 引用、逐发身份、时间与量化方向；不序列化命中或伤害结论。
-	bool NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess);
-};
-
-template<> struct TStructOpsTypeTraits<FGameplayAbilityTargetData_FPShot> : TStructOpsTypeTraitsBase2<FGameplayAbilityTargetData_FPShot>
-{
-	enum { WithNetSerializer = true, WithCopy = true };
-};
 
 // Enhanced Input 只传按下/松开；InputID 与服务器授予的 AbilitySpec 对应。
 enum class EFPCombatAbilityInput : uint8
@@ -51,6 +31,9 @@ public:
 	virtual bool CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 		const FGameplayTagContainer* SourceTags = nullptr, const FGameplayTagContainer* TargetTags = nullptr,
 		FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
+	// ASC 核对原生激活身份后只把批次交给这一轮能力；去重/重排和结算仍在原武器执行器。
+	void HandleShotInputs(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests);
+	void FinishRemoteShotInputs(bool bCancelled);
 
 protected:
 	// 先建立松开任务，再开始射击；连射由能力自己的 WaitDelay 任务推进，同步失败可以立即结束能力。
@@ -61,22 +44,21 @@ protected:
 		FGameplayAbilityActivationInfo ActivationInfo, bool bReplicateEndAbility, bool bWasCancelled) override;
 
 private:
+	friend class UfpstrueHealthComponent;
+	friend class FFpstrueWeaponShotTransportTest;
 	// WaitInputRelease 自带客户端到服务器的释放事件，不另造一套释放 RPC。
 	UFUNCTION()
 	void HandleInputReleased(float TimeHeld);
 	// 每次只结算/表现一发；空仓或失去执行资格时结束能力，等待下一发的任务与能力同生共灭。
 	UFUNCTION()
 	void Pulse();
-	// 逐发 TargetData 消费后立即清缓存；能力只负责准入，武器排空已经授权的有界执行队列。
-	void HandleShotData(const FGameplayAbilityTargetDataHandle& Data, FGameplayTag ApplicationTag);
 	// 远端拥有者停止发送有效逐发输入时，服务器释放 Firing。
 	UFUNCTION()
-	void HandleShotDataTimeout();
+	void HandleShotInputTimeout();
 
 	TWeakObjectPtr<UfpstrueWeaponComponent> ActiveWeapon;
-	FDelegateHandle ShotDataHandle;
 	UPROPERTY()
-	TObjectPtr<UAbilityTask_WaitDelay> ShotDataTimeoutTask;
+	TObjectPtr<UAbilityTask_WaitDelay> ShotInputTimeoutTask;
 	// 外部通知可同步结束并重新激活同一个能力实例，旧 Pulse 不能替新动作安排任务。
 	uint32 ActivationRevision = 0;
 	bool bEnding = false;
@@ -89,7 +71,7 @@ class FPSTRUE_API UfpstrueReloadAbility : public UGameplayAbility
 	GENERATED_BODY()
 
 public:
-	// 换弹取消开火、瞄准和冲刺；ServerInitiated 让手动请求与服务器空仓共用同一能力，补弹与完成时刻由服务器裁决。
+	// 手动换弹本地预测动作；服务器主动空仓仍进入同一能力，只有权威事务能装弹。
 	UfpstrueReloadAbility();
 	// 弹匣已满、无备弹、角色失效或已经换弹时，激活前直接拒绝。
 	virtual bool CanActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
@@ -97,7 +79,7 @@ public:
 		FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
 
 protected:
-	// 服务器订阅事务结束后才请求换弹；客户端等待服务器复制能力结束。
+	// 服务器订阅真实事务结束；客户端预测一次播放，并由同 key 快照接管播放编号。
 	virtual void ActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 		FGameplayAbilityActivationInfo ActivationInfo, const FGameplayEventData* TriggerEventData) override;
 	// 取消只作用于保存的 ReloadId；解绑先于取消，防止结束事件同步重入。

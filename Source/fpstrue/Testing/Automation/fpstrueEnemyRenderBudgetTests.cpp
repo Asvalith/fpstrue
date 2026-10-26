@@ -9,7 +9,8 @@
 #include "Characters/Enemies/AI/fpstrueSurroundManager.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
+#include "Game/fpstruePvpGameState.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
 #include "Components/ChildActorComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -727,6 +728,33 @@ bool FFpstrueEnemyReplicationTieringTest::RunTest(const FString& Parameters)
 	if (!ObserveRenderCombatParticipant(*this, *Controller, *Target)) return false;
 	AfpstrueSurroundManager* Manager = Controller->GetSurroundManager();
 	if (!TestNotNull(TEXT("Replication target owns a real manager"), Manager)) return false;
+	// 实际感知给出的目标只影响该观察者的排序；不更改基础相关性、频率或另一连接的优先级。
+	auto* OtherViewTarget = World->SpawnActor<AfpstrueCharacter>(FVector(0.0f, 1500.0f, 0.0f), FRotator::ZeroRotator);
+	if (!TestNotNull(TEXT("Replication priority has a distinct second observer"), OtherViewTarget)) return false;
+	OtherViewTarget->SetActorEnableCollision(false);
+	OtherViewTarget->GetCharacterMovement()->SetComponentTickEnabled(false);
+	const FVector ViewPosition(1000.0f, 0.0f, 0.0f), ViewDirection(-1.0f, 0.0f, 0.0f);
+	const auto Priority = [&](AActor* ViewTarget, float Time)
+	{
+		return Enemy->GetNetPriority(ViewPosition, ViewDirection, Target->GetController(), ViewTarget, nullptr, Time, false);
+	};
+	const auto NativePriority = [&](AActor* ViewTarget, float Time)
+	{
+		return Enemy->ACharacter::GetNetPriority(ViewPosition, ViewDirection, Target->GetController(), ViewTarget, nullptr, Time, false);
+	};
+	TestTrue(TEXT("A perceived direct threat has twice the native priority for its target observer"),
+		FMath::IsNearlyEqual(Priority(Target, 0.25f), NativePriority(Target, 0.25f) * 2.0f));
+	TestTrue(TEXT("Another observer keeps exactly the native priority"),
+		FMath::IsNearlyEqual(Priority(OtherViewTarget, 0.25f), NativePriority(OtherViewTarget, 0.25f)));
+	TestTrue(TEXT("A missing view target cannot grant a threat boost"),
+		FMath::IsNearlyEqual(Priority(nullptr, 0.25f), NativePriority(nullptr, 0.25f)));
+	TestTrue(TEXT("An unrelated connection remains nonzero and gains priority while waiting"),
+		Priority(OtherViewTarget, 0.25f) > 0.0f && Priority(OtherViewTarget, 1.0f) > Priority(OtherViewTarget, 0.25f));
+	{
+		TGuardValue<bool> ReferencePriority(Enemy->bReferenceEnemyReplication, true);
+		TestTrue(TEXT("Reference bypasses the direct-threat extension even with a valid combat target"),
+			FMath::IsNearlyEqual(Priority(Target, 0.25f), NativePriority(Target, 0.25f)));
+	}
 	Manager->ApproachQueryId = INDEX_NONE;
 	++Manager->PositionQueryRevision;
 	Manager->PublishedTargetLocation = Manager->CachedTargetLocation;
@@ -737,6 +765,10 @@ bool FFpstrueEnemyReplicationTieringTest::RunTest(const FString& Parameters)
 		Controller->GetTacticalAssignmentRevision()))) return false;
 	if (!TestTrue(TEXT("Protection starts a real attack transaction"), Enemy->GetCombatComponent()->TryAttackTarget())) return false;
 	TestEqual(TEXT("Attack immediately restores the Full replication cap"), Enemy->GetNetUpdateFrequency(), 30.0f);
+	TestTrue(TEXT("An actually attacking enemy gets four times the native priority only for its target"),
+		FMath::IsNearlyEqual(Priority(Target, 0.25f), NativePriority(Target, 0.25f) * 4.0f)
+		&& FMath::IsNearlyEqual(Priority(OtherViewTarget, 0.25f), NativePriority(OtherViewTarget, 0.25f)));
+	TestTrue(TEXT("Combat weighting preserves the native waiting-time compensation"), Priority(Target, 1.0f) > Priority(Target, 0.25f));
 	Enemy->GetCombatComponent()->ResetCombat();
 	TestEqual(TEXT("Attack cleanup returns to the unchanged natural Background tier"), Enemy->GetNetUpdateFrequency(), 5.0f);
 	UGameplayStatics::ApplyDamage(Enemy, 1.0f, nullptr, Target, UDamageType::StaticClass());
@@ -759,6 +791,8 @@ bool FFpstrueEnemyReplicationTieringTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Authority in a listen-server world can resume policy"), Enemy->GetNetUpdateFrequency(), 30.0f);
 	UGameplayStatics::ApplyDamage(Enemy, 10000.0f, nullptr, Target, UDamageType::StaticClass());
 	TestTrue(TEXT("Actual death leaves the live-enemy replication budget"), Enemy->IsDead());
+	TestTrue(TEXT("A dead enemy returns to native priority for its final state"),
+		FMath::IsNearlyEqual(Priority(Target, 0.25f), NativePriority(Target, 0.25f)));
 	TestEqual(TEXT("Death restores authored replication scheduling for its final state"), Enemy->GetNetUpdateFrequency(), 100.0f);
 	TestEqual(TEXT("Death also restores the authored adaptive minimum"), Enemy->GetMinNetUpdateFrequency(), 20.0f);
 	TestTrue(TEXT("Death does not hide the final replicated Actor state"), Enemy->GetIsReplicated());

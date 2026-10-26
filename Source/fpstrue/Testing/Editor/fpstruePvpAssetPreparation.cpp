@@ -5,10 +5,12 @@
 #if WITH_EDITOR
 
 #include "Weapons/fpstrueWeaponComponent.h"
+#include "Weapons/fpstrueWeaponActors.h"
 #include "Weapons/fpstrueCombatAbilities.h"
 #include "AbilitySystemComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Characters/Shared/fpstrueFootIK.h"
+#include "Characters/Player/fpstruePlayerAnimInstance.h"
+#include "Characters/Player/fpstrueCharacterMovementComponent.h"
 #include "Animation/Skeleton.h"
 #include "Editor.h"
 #include "EdGraph/EdGraph.h"
@@ -18,6 +20,7 @@
 #include "Animation/AnimBlueprint.h"
 #include "Engine/Level.h"
 #include "Engine/LevelScriptBlueprint.h"
+#include "Engine/LevelScriptActor.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SkeletalMesh.h"
@@ -44,7 +47,6 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
-#include "Components/WidgetComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "EngineUtils.h"
 #include "DrawDebugHelpers.h"
@@ -65,7 +67,6 @@
 #include "UnrealClient.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
-#include "UObject/MetaData.h"
 #include "UObject/UnrealType.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
@@ -81,7 +82,6 @@
 #include "AnimGraphNode_RotateRootBone.h"
 #include "AnimGraphNode_ComponentToLocalSpace.h"
 #include "AnimGraphNode_LayeredBoneBlend.h"
-#include "AnimGraphNode_LinkedInputPose.h"
 #include "AnimGraphNode_LocalToComponentSpace.h"
 #include "AnimGraphNode_ModifyBone.h"
 #include "AnimGraphNode_Root.h"
@@ -95,7 +95,9 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Factories/AnimBlueprintFactory.h"
 #include "Kismet/KismetMathLibrary.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
+#include "Game/fpstruePvpPlayerController.h"
+#include "UI/fpstruePvpHUD.h"
 #include "GameFramework/WorldSettings.h"
 #include "K2Node_InputKey.h"
 #include "K2Node_MacroInstance.h"
@@ -104,6 +106,9 @@
 #include "Components/Button.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
+#include "Components/ProgressBar.h"
+#include "Animation/WidgetAnimation.h"
+#include "Kismet/KismetTextLibrary.h"
 #include "Containers/Ticker.h"
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
@@ -131,8 +136,6 @@ constexpr const TCHAR* MapPackages[] = {
 	TEXT("/Game/PerformanceCandidates/Nanite_HardSurface20260929/Demonstration_Nanite"),
 	TEXT("/Game/FactoryDistrict/Maps/Demonstration"),
 	TEXT("/Game/FirstPerson/Maps/FirstPersonMap")};
-constexpr const TCHAR* HUDObjects[] = {TEXT("/Game/FirstPerson/UI/ingame_network.ingame_network"),
-	TEXT("/Game/FirstPerson/UI/ingame.ingame")};
 
 bool Fail(const FString& Reason)
 {
@@ -176,6 +179,40 @@ bool Compile(UBlueprint* Blueprint)
 		*Blueprint->GetPathName(), Results.NumErrors, Results.NumWarnings);
 	return Results.NumErrors == 0 && Blueprint->Status != BS_Error;
 }
+
+// 地图合并/重存可能遗留同一个 Level Blueprint 的多个 Actor。只保留 ULevel 正式登记的对象。
+// 默认只读；Apply 备份当前地图后删除同类副本，不按名字后缀猜测谁是主对象。
+void RepairDuplicateLevelScripts(const TArray<FString>& Args)
+{
+	const bool bApply = Args.Num() == 1 && Args[0] == TEXT("Apply");
+	if (!GEditor || GEditor->PlayWorld || (Args.Num() && !bApply)) return;
+	UWorld* World = GEditor->GetEditorWorldContext().World();
+	ULevel* Level = World ? World->PersistentLevel : nullptr;
+	ALevelScriptActor* Official = Level ? Level->GetLevelScriptActor() : nullptr;
+	if (!Official) { Fail(TEXT("Current editor map has no registered LevelScriptActor.")); return; }
+	TArray<ALevelScriptActor*> Duplicates;
+	for (TActorIterator<ALevelScriptActor> It(World); It; ++It)
+		if (It->GetLevel() == Level && *It != Official)
+		{
+			if (It->GetClass() != Official->GetClass()) { Fail(TEXT("Different script classes require manual review; no map edited.")); return; }
+			Duplicates.Add(*It);
+		}
+	UE_LOG(LogTemp, Display, TEXT("LEVEL_SCRIPT_REPAIR Map=%s Official=%s Duplicates=%d Apply=%d"),
+		*World->GetOutermost()->GetName(), *Official->GetPathName(), Duplicates.Num(), bApply);
+	if (!bApply || Duplicates.IsEmpty()) return;
+	const FString Filename = FPackageName::LongPackageNameToFilename(World->GetOutermost()->GetName(), FPackageName::GetMapPackageExtension());
+	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/LevelScripts") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	if (!BackupAsset(Filename, Backup)) return;
+	for (ALevelScriptActor* Extra : Duplicates)
+		if (!World->EditorDestroyActor(Extra, true)) { Fail(TEXT("Editor refused duplicate script removal; map not saved.")); return; }
+	if (Level->GetLevelScriptActor() != Official) { Fail(TEXT("Registered script changed; map not saved.")); return; }
+	World->MarkPackageDirty();
+	if (!UEditorLoadingAndSavingUtils::SavePackages({World->GetOutermost()}, false)) { Fail(TEXT("Script repair save failed; backup retained.")); return; }
+	UE_LOG(LogTemp, Display, TEXT("LEVEL_SCRIPT_REPAIR SAVED Removed=%d Backup=%s"), Duplicates.Num(), *Backup);
+}
+FAutoConsoleCommand RepairLevelScriptsCommand(TEXT("fp.RepairDuplicateLevelScripts"),
+	TEXT("Check duplicate level scripts in the current editor map. Apply preserves the ULevel-registered actor, backs up and saves only this map."),
+	FConsoleCommandWithArgsDelegate::CreateStatic(&RepairDuplicateLevelScripts));
 
 struct FLegacyGraphPlan
 {
@@ -336,16 +373,6 @@ bool InspectMap(UWorld& World, FLegacyGraphPlan& Plan)
 	return Plan.bSafe;
 }
 
-bool InspectNetworkHUD(UWidgetBlueprint& HUD, FLegacyGraphPlan& Plan)
-{
-	Plan = InspectLegacyGraphs(HUD);
-	for (const FDelegateEditorBinding& Binding : HUD.Bindings)
-		UE_LOG(LogTemp, Display, TEXT("MP_ONLY HUD_BINDING Object=%s Property=%s Function=%s"),
-			*Binding.ObjectName, *Binding.PropertyName.ToString(), *Binding.FunctionName.ToString());
-	UE_LOG(LogTemp, Display, TEXT("MP_ONLY HUD Parent=%s Bindings=%d LayoutUnchanged=1"), *GetPathNameSafe(HUD.ParentClass.Get()), HUD.Bindings.Num());
-	return Plan.bSafe;
-}
-
 void Run(const TArray<FString>& Args)
 {
 	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
@@ -354,19 +381,7 @@ void Run(const TArray<FString>& Args)
 	{ Fail(TEXT("Usage: fp.MigrateMultiplayerOnly [Check|Apply], outside PIE.")); return; }
 	UWorld* Previous = GEditor->GetEditorWorldContext().World();
 	if (Previous && Previous->GetOutermost()->IsDirty()) { Fail(TEXT("Current map has unsaved edits.")); return; }
-	TArray<TStrongObjectPtr<UWidgetBlueprint>> HUDs;
-	TArray<bool> NeedsHUD;
 	bool bSafe = true;
-	for (const TCHAR* Object : HUDObjects)
-	{
-		TStrongObjectPtr<UWidgetBlueprint> HUD(LoadObject<UWidgetBlueprint>(nullptr, Object));
-		if (!HUD.IsValid() || HUD->GetOutermost()->IsDirty()) { Fail(FString(TEXT("Saved HUD is missing or dirty: ")) + Object); return; }
-		FLegacyGraphPlan Plan;
-		bSafe &= InspectNetworkHUD(*HUD.Get(), Plan);
-		NeedsHUD.Add(!Plan.Nodes.IsEmpty() || !Plan.Variables.IsEmpty() || !HUD->Bindings.IsEmpty() ||
-			HUD->ParentClass != UfpstruePvpIngameWidget::StaticClass());
-		HUDs.Add(MoveTemp(HUD));
-	}
 	TArray<FString> ChangedMaps;
 	for (const TCHAR* Package : MapPackages)
 	{
@@ -378,16 +393,12 @@ void Run(const TArray<FString>& Args)
 		if (World->GetWorldSettings()->DefaultGameMode != AfpstruePvpGameMode::StaticClass() || !Plan.Nodes.IsEmpty() || !Plan.Variables.IsEmpty())
 			ChangedMaps.Add(Package);
 	}
-	int32 ChangedHUDs = 0;
-	for (const bool bNeeds : NeedsHUD) if (bNeeds) ++ChangedHUDs;
-	UE_LOG(LogTemp, Display, TEXT("MP_ONLY CHECK_COMPLETE Safe=%d MapsToChange=%d HUDsToChange=%d NoAssetsSaved=1"), bSafe, ChangedMaps.Num(), ChangedHUDs);
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY CHECK_COMPLETE Safe=%d MapsToChange=%d NoAssetsSaved=1"), bSafe, ChangedMaps.Num());
 	if (!bApply) return;
 	if (!bSafe) { Fail(TEXT("Unrecognized scene logic touches the old UI chain. Review Check output; no assets changed.")); return; }
 	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/MultiplayerOnly") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	for (const FString& Package : ChangedMaps)
 		if (!BackupAsset(FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension()), Backup)) return;
-	for (int32 Index = 0; Index < HUDs.Num(); ++Index)
-		if (NeedsHUD[Index] && !BackupAsset(FPackageName::LongPackageNameToFilename(HUDs[Index]->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
 	for (const FString& Package : ChangedMaps)
 	{
 		UWorld* World = UEditorLoadingAndSavingUtils::LoadMap(FPackageName::LongPackageNameToFilename(Package, FPackageName::GetMapPackageExtension()));
@@ -404,27 +415,11 @@ void Run(const TArray<FString>& Args)
 		World->MarkPackageDirty();
 		if (!UEditorLoadingAndSavingUtils::SaveMap(World, Package)) { Fail(TEXT("Map save failed. Backup=") + Backup); return; }
 	}
-	for (int32 Index = 0; Index < HUDs.Num(); ++Index)
-	{
-		if (!NeedsHUD[Index]) continue;
-		UWidgetBlueprint* HUD = HUDs[Index].Get();
-		// LoadMap 可触发蓝图重建；应用前重新解析，不能使用加载地图前的节点指针。
-		FLegacyGraphPlan CurrentPlan;
-		if (!InspectNetworkHUD(*HUD, CurrentPlan)) { Fail(TEXT("HUD changed since inspection. Backup=") + Backup); return; }
-		RemoveLegacyGraphs(*HUD, CurrentPlan);
-		if (!InspectLegacyGraphs(*HUD).Nodes.IsEmpty()) { Fail(TEXT("HUD still references a removed gameplay entry. Backup=") + Backup); return; }
-		HUD->ParentClass = UfpstruePvpIngameWidget::StaticClass();
-		HUD->Bindings.Reset();
-		if (!Compile(HUD)) { Fail(TEXT("HUD compile failed; no save. Backup=") + Backup); return; }
-		HUD->MarkPackageDirty();
-		if (!UEditorLoadingAndSavingUtils::SavePackages({HUD->GetOutermost()}, false)) { Fail(TEXT("HUD save failed. Backup=") + Backup); return; }
-	}
-	UE_LOG(LogTemp, Display, TEXT("MP_ONLY APPLIED Maps=%d HUDs=%d Backup=%s UnrelatedSceneLogicAndWidgetLayoutRetained=1"),
-		ChangedMaps.Num(), ChangedHUDs, *Backup);
+	UE_LOG(LogTemp, Display, TEXT("MP_ONLY APPLIED Maps=%d Backup=%s UnrelatedSceneLogicRetained=1"), ChangedMaps.Num(), *Backup);
 }
 
 FAutoConsoleCommand PreparePvpAssets(TEXT("fp.PreparePvpAssets"),
-	TEXT("Check/Apply multiplayer-only migration of fixed map GameModes, legacy level UI chains and network HUD graphs."),
+	TEXT("Check/Apply multiplayer-only migration of fixed map GameModes and legacy level UI chains; network HUD uses fp.PrepareNetworkHUD."),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
 FAutoConsoleCommand MigrateMultiplayerOnly(TEXT("fp.MigrateMultiplayerOnly"),
 	TEXT("Check logs all level/HUD nodes. Apply backs up exact packages and removes only recognized legacy UI chains."),
@@ -676,18 +671,7 @@ FAutoConsoleCommand PrepareRARBodyCommand(
 namespace FpstrueRARPresentation
 {
 const FString Root = TEXT("/Game/FirstPerson/Animations/RAR/");
-const FString CharacterArt = TEXT("/Game/InfimaGames/RealisticAssaultRifle/Art/Character/Animations/");
-const FString WeaponArt = TEXT("/Game/InfimaGames/RealisticAssaultRifle/Art/Weapon/Animations/");
-const FString MannyArt = TEXT("/Game/InfimaGames/ArtCore/Mannequin/Animations/Manny/");
-const FString TppArt = TEXT("/Game/FPS/Animations/TPP/Locomotion/RootLocomotion/");
 constexpr const TCHAR* PlayerPackage = TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_RARCharacter");
-
-struct FClip
-{
-	FName Key;
-	FString Source;
-	bool bAdditive;
-};
 
 // 记录表现资源工具的具体失败原因，并将失败交还当前构造/检查流程。
 bool Error(const FString& Message)
@@ -700,36 +684,6 @@ bool Error(const FString& Message)
 template <typename T> T* Load(const FString& Package)
 {
 	return LoadObject<T>(nullptr, *(Package + TEXT(".") + FPackageName::GetShortName(Package)));
-}
-
-// 比较实际原始骨名、父子关系和参考变换，不能用资源名称或兼容列表代替骨架一致性。
-bool SameReferencePose(const USkeletalMesh* OldMesh, const USkeletalMesh* NewMesh)
-{
-	const FReferenceSkeleton& A = OldMesh->GetRefSkeleton();
-	const FReferenceSkeleton& B = NewMesh->GetRefSkeleton();
-	if (A.GetRawBoneNum() != B.GetRawBoneNum()) return Error(TEXT("Manny raw bone counts differ."));
-	for (int32 Index = 0; Index < A.GetRawBoneNum(); ++Index)
-	{
-		const FTransform& X = A.GetRawRefBonePose()[Index];
-		const FTransform& Y = B.GetRawRefBonePose()[Index];
-		if (A.GetBoneName(Index) != B.GetBoneName(Index) || A.GetParentIndex(Index) != B.GetParentIndex(Index)
-			|| !X.GetTranslation().Equals(Y.GetTranslation(), 0.001)
-			|| !X.GetScale3D().Equals(Y.GetScale3D(), 0.0001)
-			|| FMath::RadiansToDegrees(X.GetRotation().AngularDistance(Y.GetRotation())) > 0.05)
-			return Error(FString::Printf(TEXT("Manny raw reference pose differs at %s."), *A.GetBoneName(Index).ToString()));
-	}
-	return true;
-}
-
-// 在调用方已完成路径不存在检查后创建项目资产，登记待保存包；此 helper 本身不写盘。
-template <typename T> T* NewAsset(const FString& Package, TArray<UPackage*>& Packages)
-{
-	UPackage* Outer = CreatePackage(*Package);
-	T* Asset = NewObject<T>(Outer, *FPackageName::GetShortName(Package), RF_Public | RF_Standalone | RF_Transactional);
-	Packages.AddUnique(Outer);
-	FAssetRegistryModule::AssetCreated(Asset);
-	Asset->MarkPackageDirty();
-	return Asset;
 }
 
 // OptionalPin 必须在分配后显式显示；在任何连线之前重建，不破坏作者或已连好的引脚。
@@ -861,22 +815,6 @@ struct FGraphBuilder
 	}
 };
 
-// 用指定原生父类和实际网格骨架创建新 AnimBP，交调用方建图、编译并决定保存。
-UAnimBlueprint* AnimBlueprint(const FString& Name, UClass* Parent, USkeletalMesh* Mesh, TArray<UPackage*>& Packages, const FString& DestinationRoot = Root)
-{
-	const FString Path = DestinationRoot + Name;
-	UPackage* Package = CreatePackage(*Path);
-	UAnimBlueprintFactory* Factory = NewObject<UAnimBlueprintFactory>();
-	Factory->ParentClass = Parent;
-	Factory->TargetSkeleton = Mesh->GetSkeleton();
-	Factory->PreviewSkeletalMesh = Mesh;
-	auto* Blueprint = Cast<UAnimBlueprint>(Factory->FactoryCreateNew(UAnimBlueprint::StaticClass(), Package,
-		*Name, RF_Public | RF_Standalone | RF_Transactional, nullptr, GWarn));
-	if (Blueprint == nullptr) return nullptr;
-	Packages.AddUnique(Package); FAssetRegistryModule::AssetCreated(Blueprint);
-	return Blueprint;
-}
-
 // 解析蓝图的 AnimGraph 与 K2 Schema，返回仅作用于该图的构造上下文。
 FGraphBuilder Builder(UAnimBlueprint* Blueprint)
 {
@@ -886,277 +824,6 @@ FGraphBuilder Builder(UAnimBlueprint* Blueprint)
 	if (Result.Graph != nullptr) Result.Schema = Cast<UEdGraphSchema_K2>(Result.Graph->GetSchema());
 	Result.bOK = Result.Graph != nullptr && Result.Schema != nullptr;
 	return Result;
-}
-
-// 把最终姿态接到工厂生成的 Root；缺少 Root 则标记构造失败。
-void FinishGraph(FGraphBuilder& B, UEdGraphNode* Result)
-{
-	for (UEdGraphNode* Node : B.Graph->Nodes)
-		if (Cast<UAnimGraphNode_Root>(Node) != nullptr) { B.Pose(Result, Node, TEXT("Result")); return; }
-	B.bOK = Error(TEXT("Factory did not create an AnimGraph result node."));
-}
-
-// Body 与 Arms 使用相同持枪基准和增量；身体另与移动腿部做分骨骼混合。
-UEdGraphNode* UpperBody(FGraphBuilder& B, const TMap<FName, UAnimSequence*>& Clips)
-{
-	auto* NormalDelta = B.Blend(B.Sequence(Clips[TEXT("IdleLoop")]), B.Sequence(Clips[TEXT("WalkLoop")], true, true), TEXT("MovementAlpha"));
-	auto* AimedDelta = B.Blend(B.Sequence(Clips[TEXT("AimIdle")]), B.Sequence(Clips[TEXT("AimWalk")], true, true), TEXT("MovementAlpha"));
-	// ADS 增量基于 Aim_Pose 而不是 Idle_Pose；先各自还原完整姿态再混合，避免瞄准只剩轻微抖动。
-	auto* Normal = B.Add(B.Sequence(Clips[TEXT("IdlePose")]), NormalDelta);
-	auto* Aimed = B.Add(B.Sequence(Clips[TEXT("AimPose")]), AimedDelta);
-	auto* Aiming = B.Blend(Normal, Aimed, TEXT("AimAlpha"));
-	auto* Sprinting = B.Add(B.Sequence(Clips[TEXT("IdlePose")]), B.Sequence(Clips[TEXT("Sprint")], true, true));
-	auto* Full = B.Blend(Aiming, Sprinting, TEXT("SprintAlpha"));
-	return B.AddMesh(B.Slot(Full), B.Hit(Clips[TEXT("Hit")]), TEXT("HitAlpha"));
-}
-
-// 第一人称手臂只输出统一持枪上半身链，不生成移动、伤害或装备逻辑。
-bool BuildArms(UAnimBlueprint* Blueprint, const TMap<FName, UAnimSequence*>& Clips)
-{
-	FGraphBuilder B = Builder(Blueprint);
-	if (!B.bOK) return Error(TEXT("Arms factory is missing AnimGraph."));
-	FinishGraph(B, UpperBody(B, Clips));
-	return B.bOK;
-}
-
-// 全身图把真实四向移动/起落与持枪上身分层，再应用复制瞄准对应的本地骨骼表现。
-bool BuildBody(UAnimBlueprint* Blueprint, UBlendSpace* Directions, UBlendSpace* Unarmed, const TMap<FName, UAnimSequence*>& Clips)
-{
-	FGraphBuilder B = Builder(Blueprint);
-	if (!B.bOK) return Error(TEXT("Body factory is missing AnimGraph."));
-	auto* ArmedMovement = B.Node<UAnimGraphNode_BlendSpacePlayer>(TEXT("按本地前/右速度采样四向走跑，侧移不再播放正向走路。"));
-	ArmedMovement->Node.SetBlendSpace(Directions); ArmedMovement->AllocateDefaultPins();
-	B.Value(TEXT("ForwardSpeed"), ArmedMovement, TEXT("X")); B.Value(TEXT("RightSpeed"), ArmedMovement, TEXT("Y"));
-	auto* UnarmedMovement = B.Node<UAnimGraphNode_BlendSpacePlayer>(TEXT("空手保留 Manny 基础走跑；拾取后才切换持枪移动姿态。"));
-	UnarmedMovement->Node.SetBlendSpace(Unarmed); UnarmedMovement->AllocateDefaultPins();
-	B.Value(TEXT("GroundSpeed"), UnarmedMovement, TEXT("X"));
-	auto* Grounded = B.Select(ArmedMovement, UnarmedMovement, TEXT("bArmed"));
-	auto* GroundCache = B.Node<UAnimGraphNode_SaveCachedPose>(TEXT("缓存本帧地面姿态，落地增量与普通移动共用同一计算结果，避免姿态引脚一接多造成原连接被断开。"));
-	GroundCache->CacheName = TEXT("RARGrounded"); GroundCache->Node.CachePoseName = TEXT("RARGrounded");
-	GroundCache->AllocateDefaultPins(); B.Pose(Grounded, GroundCache, TEXT("Pose"));
-	auto* GroundForLanding = B.Node<UAnimGraphNode_UseCachedPose>(TEXT("落地以当前地面移动为基准，而非把 MM_Land 增量当作完整姿态。"));
-	GroundForLanding->SaveCachedPoseNode = GroundCache; GroundForLanding->Node.CachePoseName = TEXT("RARGrounded"); GroundForLanding->AllocateDefaultPins();
-	auto* GroundForMovement = B.Node<UAnimGraphNode_UseCachedPose>(TEXT("非落地阶段直接使用相同地面缓存。"));
-	GroundForMovement->SaveCachedPoseNode = GroundCache; GroundForMovement->Node.CachePoseName = TEXT("RARGrounded"); GroundForMovement->AllocateDefaultPins();
-	auto* InAir = B.Select(B.Sequence(Clips[TEXT("Jump")], false), B.Sequence(Clips[TEXT("Fall")] ), TEXT("bJumpRising"));
-	auto* LandPose = B.Add(GroundForLanding, B.Sequence(Clips[TEXT("Land")], false));
-	auto* Landing = B.Select(LandPose, GroundForMovement, TEXT("bLanding"));
-	auto* LowerBody = B.Select(InAir, Landing, TEXT("bFalling"));
-	auto* Layer = B.Node<UAnimGraphNode_LayeredBoneBlend>(TEXT("只覆盖持枪上半身与独立 ik_hand_root 枪链；腿部继续真实方向移动/起落。"));
-	FBranchFilter Spine; Spine.BoneName = TEXT("spine_01"); Spine.BlendDepth = 1;
-	FBranchFilter Gun; Gun.BoneName = TEXT("ik_hand_root"); Gun.BlendDepth = 1;
-	Layer->Node.LayerSetup[0].BranchFilters = {Spine, Gun};
-	Layer->Node.bMeshSpaceRotationBlend = true;
-	Layer->AllocateDefaultPins();
-	B.Pose(LowerBody, Layer, TEXT("BasePose")); B.Pose(UpperBody(B, Clips), Layer, TEXT("BlendPoses_0"));
-	auto* ArmedWeight = B.Node<UK2Node_CallFunction>(TEXT("装备布尔值仅转为分层权重，不回写任何玩法状态。"));
-	ArmedWeight->SetFromFunction(UKismetMathLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_BoolToDouble")));
-	ArmedWeight->AllocateDefaultPins(); B.Value(TEXT("bArmed"), ArmedWeight, TEXT("InBool"));
-	B.Link(ArmedWeight->FindPin(UEdGraphSchema_K2::PN_ReturnValue), Layer->FindPin(TEXT("BlendWeights_0")));
-	auto* ToComponent = B.Node<UAnimGraphNode_LocalToComponentSpace>(TEXT("骨骼控制前显式转换姿态空间。"));
-	ToComponent->AllocateDefaultPins(); B.Pose(Layer, ToComponent, TEXT("LocalPose"));
-	auto* Aim = B.Node<UAnimGraphNode_ModifyBone>(TEXT("视角俯仰只改变脊柱表现；不改移动、控制旋转或服务器命中历史。"));
-	Aim->Node.BoneToModify.BoneName = TEXT("spine_03");
-	Aim->Node.RotationMode = BMM_Additive; Aim->Node.RotationSpace = BCS_ComponentSpace;
-	Aim->Node.TranslationMode = BMM_Ignore; Aim->Node.ScaleMode = BMM_Ignore;
-	Aim->AllocateDefaultPins(); B.Pose(ToComponent, Aim, TEXT("ComponentPose")); B.Value(TEXT("AimRotation"), Aim, TEXT("Rotation"));
-	auto* GunAim = B.Node<UAnimGraphNode_ModifyBone>(TEXT("独立 ik_hand_root 枪链以同一 ComponentSpace 旋转并补偿绕脊柱支点的平移，维持枪与双手共同俯仰。"));
-	GunAim->Node.BoneToModify.BoneName = TEXT("ik_hand_root");
-	GunAim->Node.RotationMode = BMM_Additive; GunAim->Node.RotationSpace = BCS_ComponentSpace;
-	GunAim->Node.TranslationMode = BMM_Additive; GunAim->Node.TranslationSpace = BCS_ComponentSpace;
-	GunAim->Node.ScaleMode = BMM_Ignore;
-	GunAim->AllocateDefaultPins(); B.Pose(Aim, GunAim, TEXT("ComponentPose"));
-	B.Value(TEXT("AimRotation"), GunAim, TEXT("Rotation")); B.Value(TEXT("GunAimTranslation"), GunAim, TEXT("Translation"));
-	auto* ToLocal = B.Node<UAnimGraphNode_ComponentToLocalSpace>(TEXT("骨骼控制后转换回本地姿态，供最终动画输出。"));
-	ToLocal->AllocateDefaultPins(); B.Pose(GunAim, ToLocal, TEXT("ComponentPose"));
-	FinishGraph(B, ToLocal);
-	return B.bOK;
-}
-
-// 以单个安全序列创建单动作槽 Montage，移除构造器空轨道和通知；此处不承担业务结算。
-UAnimMontage* Montage(const FString& Name, UAnimSequence* Clip, TArray<UPackage*>& Packages, const FString& DestinationRoot = Root, FName SlotName = TEXT("RARAction"))
-{
-	auto* Result = NewAsset<UAnimMontage>(DestinationRoot + Name, Packages);
-	Result->SetSkeleton(Clip->GetSkeleton());
-	// UAnimMontage 构造器已有空 DefaultSlot；本项目只使用 RARAction，不能保留第二条空轨道。
-	Result->SlotAnimTracks.Reset();
-	FSlotAnimationTrack& Slot = Result->SlotAnimTracks.AddDefaulted_GetRef(); Slot.SlotName = SlotName;
-	FAnimSegment& Segment = Slot.AnimTrack.AnimSegments.AddDefaulted_GetRef();
-	Segment.SetAnimReference(Clip); Segment.AnimStartTime = 0.0f; Segment.AnimEndTime = Clip->GetPlayLength();
-	Segment.AnimPlayRate = 1.0f; Segment.LoopingCount = 1; Segment.StartPos = 0.0f;
-	Result->SetCompositeLength(Clip->GetPlayLength()); Result->AddAnimCompositeSection(TEXT("Default"), 0.0f);
-	Result->BlendIn.SetBlendTime(0.06f); Result->BlendOut.SetBlendTime(0.08f);
-	Result->Notifies.Reset(); Result->RefreshCacheData();
-	return Result;
-}
-
-// 该命令只允许固定目的路径：首次生成全部通过后再保存；再次运行不覆盖已经生成或用户编辑过的资产。
-void Run(const TArray<FString>& Args)
-{
-	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
-	if ((Args.Num() > 0 && !bApply) || GEditor == nullptr || GEditor->PlayWorld != nullptr)
-	{ Error(TEXT("Usage: fp.PrepareRARPresentation [Apply], no active PIE.")); return; }
-	USkeletalMesh* Body = Load<USkeletalMesh>(TEXT("/Game/InfimaGames/ArtCore/Mannequin/Meshes/SKM_Manny_Simple"));
-	USkeletalMesh* Arms = Load<USkeletalMesh>(TEXT("/Game/InfimaGames/ArtCore/Characters/Meshes/SK_IG_FP_Arms"));
-	USkeletalMesh* Gun = Load<USkeletalMesh>(TEXT("/Game/InfimaGames/RealisticAssaultRifle/Art/Weapon/Meshes/SK_RAR_AssaultRifle"));
-	USkeletalMesh* OldBody = Load<USkeletalMesh>(TEXT("/Game/FPS/Demo/Characters/Mannequins/Meshes/SKM_Manny_Simple"));
-	UBlueprint* OldPlayer = Load<UBlueprint>(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_FirstPersonCharacter"));
-	UfpstrueWeaponConfig* OldWeaponConfig = Load<UfpstrueWeaponConfig>(TEXT("/Game/Config/DA_FPWeapon_RU74"));
-	UBlendSpace* Unarmed = Load<UBlendSpace>(MannyArt + TEXT("BS_MM_WalkRun"));
-	if (Body == nullptr || Arms == nullptr || Gun == nullptr || OldBody == nullptr || Unarmed == nullptr
-		|| OldPlayer == nullptr || OldWeaponConfig == nullptr || OldPlayer->GeneratedClass == nullptr || Body->GetSkeleton() != Arms->GetSkeleton()
-		|| !SameReferencePose(OldBody, Body)) { Error(TEXT("Missing source resources or incompatible body/arms/reference skeleton.")); return; }
-	const TArray<FClip> Definitions = {
-		{TEXT("IdlePose"), CharacterArt + TEXT("Poses/A_RAR_FP_PCH_AssaultRifle_Idle_Pose"), false},
-		{TEXT("AimPose"), CharacterArt + TEXT("Poses/A_RAR_FP_PCH_AssaultRifle_Aim_Pose"), false},
-		{TEXT("IdleLoop"), CharacterArt + TEXT("Movement/A_RAR_FP_PCH_AssaultRifle_Idle_Loop"), true},
-		{TEXT("WalkLoop"), CharacterArt + TEXT("Movement/A_RAR_FP_PCH_AssaultRifle_Walk_F_Loop"), true},
-		{TEXT("AimIdle"), CharacterArt + TEXT("Movement/A_RAR_FP_PCH_AssaultRifle_Idle_Loop_Aimed"), true},
-		{TEXT("AimWalk"), CharacterArt + TEXT("Movement/A_RAR_FP_PCH_AssaultRifle_Walk_F_Loop_Aimed"), true},
-		{TEXT("Sprint"), CharacterArt + TEXT("Movement/A_RAR_FP_PCH_AssaultRifle_Sprint_F_Loop"), true},
-		{TEXT("Fire"), CharacterArt + TEXT("Actions/A_RAR_FP_PCH_AssaultRifle_Fire"), true},
-		{TEXT("FireAimed"), CharacterArt + TEXT("Actions/A_RAR_FP_PCH_AssaultRifle_Fire_Aimed"), true},
-		{TEXT("Reload"), CharacterArt + TEXT("Actions/A_RAR_FP_PCH_AssaultRifle_Reload"), true},
-		{TEXT("ReloadEmpty"), CharacterArt + TEXT("Actions/A_RAR_FP_PCH_AssaultRifle_Reload_Empty"), true},
-		{TEXT("Equip"), CharacterArt + TEXT("Actions/A_RAR_FP_PCH_AssaultRifle_Equip"), true},
-		{TEXT("GunIdle"), WeaponArt + TEXT("A_RAR_FP_WEP_AssaultRifle_Reference"), false},
-		{TEXT("GunFire"), WeaponArt + TEXT("A_RAR_FP_WEP_AssaultRifle_Fire"), false},
-		{TEXT("GunReload"), WeaponArt + TEXT("A_RAR_FP_WEP_AssaultRifle_Reload"), false},
-		{TEXT("GunReloadEmpty"), WeaponArt + TEXT("A_RAR_FP_WEP_AssaultRifle_Reload_Empty"), false},
-		{TEXT("Jump"), MannyArt + TEXT("MM_Jump"), false},
-		{TEXT("Fall"), MannyArt + TEXT("MM_Fall_Loop"), false},
-		{TEXT("Land"), MannyArt + TEXT("MM_Land"), true},
-		{TEXT("MannyIdle"), MannyArt + TEXT("MM_Idle"), false},
-		{TEXT("Hit"), TEXT("/Game/FPS/Animations/TPP/HitReact/A_MM_HitReact_Front_Med_01_Additive"), true},
-		{TEXT("WalkF"), TppArt + TEXT("A_TPP_SMG_Walk_Fwd"), false},
-		{TEXT("WalkB"), TppArt + TEXT("A_TPP_SMG_Walk_Bwd"), false},
-		{TEXT("WalkL"), TppArt + TEXT("A_TPP_SMG_Walk_Left"), false},
-		{TEXT("WalkR"), TppArt + TEXT("A_TPP_SMG_Walk_Right"), false},
-		{TEXT("JogF"), TppArt + TEXT("A_TPP_SMG_Jog_Fwd"), false},
-		{TEXT("JogB"), TppArt + TEXT("A_TPP_SMG_Jog_Bwd"), false},
-		{TEXT("JogL"), TppArt + TEXT("A_TPP_SMG_Jog_Left"), false},
-		{TEXT("JogR"), TppArt + TEXT("A_TPP_SMG_Jog_Right"), false}
-	};
-	TMap<FName, UAnimSequence*> Sources;
-	TArray<FString> Destinations = {Root + TEXT("ABP_RARBody"), Root + TEXT("ABP_RARArms"), Root + TEXT("ABP_RARWeapon"), Root + TEXT("BS_RARDirections"), PlayerPackage, TEXT("/Game/Config/DA_FPWeapon_RAR")};
-	for (const FClip& Definition : Definitions)
-	{
-		UAnimSequence* Sequence = Load<UAnimSequence>(Definition.Source);
-		if (Sequence == nullptr || Sequence->IsValidAdditive() != Definition.bAdditive)
-		{ Error(TEXT("Missing source or wrong additive mode: ") + Definition.Source); return; }
-		Sources.Add(Definition.Key, Sequence); Destinations.Add(Root + TEXT("Clips/A_RAR_") + Definition.Key.ToString());
-		UE_LOG(LogTemp, Display, TEXT("RAR_PRESENTATION SOURCE Key=%s Path=%s Additive=%d Notifies=%d"),
-			*Definition.Key.ToString(), *Sequence->GetPathName(), Sequence->IsValidAdditive(), Sequence->Notifies.Num());
-	}
-	const TArray<FName> BodyActions = {TEXT("Fire"), TEXT("FireAimed"), TEXT("Reload"), TEXT("ReloadEmpty"), TEXT("Equip")};
-	const TArray<FName> GunActions = {TEXT("Fire"), TEXT("Reload"), TEXT("ReloadEmpty")};
-	for (FName Name : BodyActions) Destinations.Add(Root + TEXT("AM_RAR_") + Name.ToString());
-	for (FName Name : GunActions) Destinations.Add(Root + TEXT("AM_RARWeapon_") + Name.ToString());
-	int32 Existing = 0;
-	for (const FString& Path : Destinations)
-	{
-		// 启动时对尚未生成资源的静默加载会留下空 Package；空壳不是用户资产，不能阻止首次生成。
-		UPackage* ExistingPackage = FindPackage(nullptr, *Path);
-		const bool bHasAssetObject = ExistingPackage != nullptr
-			&& FindObjectFast<UObject>(ExistingPackage, *FPackageName::GetShortName(Path)) != nullptr;
-		if (FPackageName::DoesPackageExist(Path) || bHasAssetObject) { ++Existing; UE_LOG(LogTemp, Display, TEXT("RAR_PRESENTATION EXISTING %s"), *Path); }
-	}
-	UE_LOG(LogTemp, Display, TEXT("RAR_PRESENTATION AUDIT Mode=%s Sources=%d Outputs=%d Existing=%d ReferencePoseMatch=true"),
-		bApply ? TEXT("Apply") : TEXT("Check"), Sources.Num(), Destinations.Num(), Existing);
-	if (!bApply) { UE_LOG(LogTemp, Display, TEXT("RAR_PRESENTATION PASS Read-only preflight; no assets changed.")); return; }
-	if (Existing > 0) { Error(TEXT("Output paths already exist; refusing to overwrite authored or previously generated assets.")); return; }
-	USkeleton* Skeleton = Body->GetSkeleton(); USkeleton* GunSkeleton = Gun->GetSkeleton();
-	if (Skeleton == nullptr || GunSkeleton == nullptr || Skeleton->GetOutermost()->IsDirty() || GunSkeleton->GetOutermost()->IsDirty())
-	{ Error(TEXT("Source skeleton is missing or has unsaved changes.")); return; }
-	const FString BackupDirectory = FPaths::ProjectSavedDir() / TEXT("Backups/RARPresentation")
-		/ (FDateTime::UtcNow().ToString(TEXT("%Y%m%d_%H%M%S")) + TEXT("_") + FGuid::NewGuid().ToString(EGuidFormats::Digits));
-	for (USkeleton* Value : {Skeleton, GunSkeleton})
-		if (!FpstruePvpAssetPreparation::BackupAsset(FPackageName::LongPackageNameToFilename(Value->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), BackupDirectory)) return;
-	TArray<UPackage*> Packages;
-	Skeleton->Modify(); Skeleton->AddCompatibleSkeleton(OldBody->GetSkeleton());
-	for (USkeleton* Value : {Skeleton, GunSkeleton})
-	{
-		Value->Modify(); Value->RegisterSlotNode(TEXT("RARAction")); Value->SetSlotGroupName(TEXT("RARAction"), FAnimSlotGroup::DefaultGroupName);
-		Value->MarkPackageDirty(); Packages.AddUnique(Value->GetOutermost());
-	}
-	TMap<FName, UAnimSequence*> Clips;
-	for (const FClip& Definition : Definitions)
-	{
-		const FString Path = Root + TEXT("Clips/A_RAR_") + Definition.Key.ToString();
-		UPackage* Package = CreatePackage(*Path);
-		auto* Copy = DuplicateObject<UAnimSequence>(Sources[Definition.Key], Package, *FPackageName::GetShortName(Path));
-		Copy->SetFlags(RF_Public | RF_Standalone | RF_Transactional); Copy->Notifies.Reset(); Copy->RefreshCacheData();
-		Copy->MarkPackageDirty(); FAssetRegistryModule::AssetCreated(Copy); Packages.AddUnique(Package); Clips.Add(Definition.Key, Copy);
-	}
-	// 配置沿用现有战斗调参，只修改新骨架挂点与成套换弹时长；运行弹药仍在各自武器实例中。
-	auto* WeaponConfig = NewAsset<UfpstrueWeaponConfig>(TEXT("/Game/Config/DA_FPWeapon_RAR"), Packages);
-	WeaponConfig->Settings = OldWeaponConfig->Settings;
-	WeaponConfig->Settings.GripSocketName = TEXT("SOCKET_Weapon");
-	WeaponConfig->Settings.ReloadDuration = Clips[TEXT("Reload")]->GetPlayLength();
-	WeaponConfig->Settings.EmptyReloadDuration = Clips[TEXT("ReloadEmpty")]->GetPlayLength();
-	FString ConfigurationError;
-	if (!WeaponConfig->Settings.Validate(ConfigurationError)) { Error(ConfigurationError); return; }
-	auto* Directions = NewAsset<UBlendSpace>(Root + TEXT("BS_RARDirections"), Packages); Directions->SetSkeleton(Skeleton);
-	FProperty* Parameters = FindFProperty<FProperty>(Directions->GetClass(), TEXT("BlendParameters"));
-	if (Parameters == nullptr) { Error(TEXT("BlendSpace axis property is unavailable; no assets saved.")); return; }
-	for (int32 Axis = 0; Axis < 2; ++Axis)
-	{
-		FBlendParameter* Parameter = Parameters->ContainerPtrToValuePtr<FBlendParameter>(Directions, Axis);
-		Parameter->DisplayName = Axis == 0 ? TEXT("Forward speed") : TEXT("Right speed");
-		Parameter->Min = -600.0f; Parameter->Max = 600.0f; Parameter->GridNum = 8;
-	}
-	Directions->AddSample(Clips[TEXT("MannyIdle")], FVector::ZeroVector);
-	const FName WalkKeys[] = {TEXT("WalkF"), TEXT("WalkB"), TEXT("WalkL"), TEXT("WalkR")};
-	const FName JogKeys[] = {TEXT("JogF"), TEXT("JogB"), TEXT("JogL"), TEXT("JogR")};
-	const FVector Axes[] = {FVector(1,0,0), FVector(-1,0,0), FVector(0,-1,0), FVector(0,1,0)};
-	for (int32 Index = 0; Index < 4; ++Index) { Directions->AddSample(Clips[WalkKeys[Index]], Axes[Index] * 300.0); Directions->AddSample(Clips[JogKeys[Index]], Axes[Index] * 600.0); }
-	Directions->ValidateSampleData(); Directions->ResampleData();
-	TMap<FName, UAnimMontage*> Actions;
-	for (FName Name : BodyActions) Actions.Add(Name, Montage(TEXT("AM_RAR_") + Name.ToString(), Clips[Name], Packages));
-	for (FName Name : GunActions) Montage(TEXT("AM_RARWeapon_") + Name.ToString(), Clips[FName(*(TEXT("Gun") + Name.ToString()))], Packages);
-	UAnimBlueprint* BodyBP = AnimBlueprint(TEXT("ABP_RARBody"), UfpstruePlayerAnimInstance::StaticClass(), Body, Packages);
-	UAnimBlueprint* ArmsBP = AnimBlueprint(TEXT("ABP_RARArms"), UfpstruePlayerAnimInstance::StaticClass(), Arms, Packages);
-	UAnimBlueprint* WeaponBP = AnimBlueprint(TEXT("ABP_RARWeapon"), UAnimInstance::StaticClass(), Gun, Packages);
-	if (BodyBP == nullptr || ArmsBP == nullptr || WeaponBP == nullptr || !BuildBody(BodyBP, Directions, Unarmed, Clips) || !BuildArms(ArmsBP, Clips))
-	{ Error(TEXT("Could not construct the presentation graphs; no assets saved.")); return; }
-	FGraphBuilder WeaponGraph = Builder(WeaponBP);
-	if (!WeaponGraph.bOK) { Error(TEXT("Weapon factory is missing AnimGraph.")); return; }
-	FinishGraph(WeaponGraph, WeaponGraph.Slot(WeaponGraph.Sequence(Clips[TEXT("GunIdle")])));
-	if (!WeaponGraph.bOK) return;
-	for (UAnimBlueprint* Blueprint : {BodyBP, ArmsBP, WeaponBP})
-	{
-		if (!FpstruePvpAssetPreparation::Compile(Blueprint)) { Error(TEXT("AnimBP compile failed; no assets saved.")); return; }
-		if (auto* Defaults = Cast<UfpstruePlayerAnimInstance>(Blueprint->GeneratedClass->GetDefaultObject()))
-		{
-			Defaults->FireMontage = Actions[TEXT("Fire")]; Defaults->AimedFireMontage = Actions[TEXT("FireAimed")];
-			Defaults->ReloadMontage = Actions[TEXT("Reload")]; Defaults->EmptyReloadMontage = Actions[TEXT("ReloadEmpty")]; Defaults->EquipMontage = Actions[TEXT("Equip")];
-		}
-	}
-	UPackage* PlayerOuter = CreatePackage(PlayerPackage);
-	UBlueprint* Player = FKismetEditorUtilities::CreateBlueprint(AfpstrueCharacter::StaticClass(), PlayerOuter, TEXT("BP_RARCharacter"),
-		BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(), TEXT("FpstrueRARPresentation"));
-	if (Player == nullptr) { Error(TEXT("Cannot create native-based RAR player blueprint.")); return; }
-	Packages.AddUnique(PlayerOuter); FAssetRegistryModule::AssetCreated(Player);
-	if (!FpstruePvpAssetPreparation::Compile(Player)) return;
-	auto* Defaults = Cast<AfpstrueCharacter>(Player->GeneratedClass->GetDefaultObject());
-	const UObject* OldDefaults = OldPlayer->GeneratedClass->GetDefaultObject();
-	for (const TCHAR* Name : {TEXT("DefaultMappingContext"), TEXT("JumpAction"), TEXT("MoveAction"), TEXT("LookAction"), TEXT("FireAction"), TEXT("ReloadAction"), TEXT("SprintAction"), TEXT("AimAction"), TEXT("WalkSpeed"), TEXT("SprintSpeed"), TEXT("AimWalkSpeed")})
-	{
-		FProperty* Property = FindFProperty<FProperty>(AfpstrueCharacter::StaticClass(), Name);
-		if (Property == nullptr) { Error(FString(TEXT("Missing native input/config property ")) + Name); return; }
-		Property->CopyCompleteValue_InContainer(Defaults, OldDefaults);
-	}
-	FBoolProperty* UseRAR = FindFProperty<FBoolProperty>(AfpstrueCharacter::StaticClass(), TEXT("bUseRARPresentation"));
-	if (UseRAR == nullptr) { Error(TEXT("Native character lacks bUseRARPresentation.")); return; }
-	UseRAR->SetPropertyValue_InContainer(Defaults, true);
-	Defaults->GetMesh()->SetSkeletalMesh(Body); Defaults->GetMesh()->SetAnimInstanceClass(BodyBP->GeneratedClass);
-	Defaults->GetMesh1P()->SetSkeletalMesh(Arms); Defaults->GetMesh1P()->SetAnimInstanceClass(ArmsBP->GeneratedClass);
-	// 源相机挂在手臂 head 的 SOCKET_Camera；反转源 Idle/Aim 的相机变换，等效到本项目 Camera 为父的布局（忽略约 0.00046 度误差）。
-	Defaults->GetMesh1P()->SetRelativeLocationAndRotation(FVector(-0.66443537, 0.0, -162.57509561), FRotator(0.0, -90.0, 0.0));
-	for (UPackage* Package : Packages) Package->MarkPackageDirty();
-	if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, false)) { Error(TEXT("Save did not complete; skeleton backups retained at ") + BackupDirectory); return; }
-	UE_LOG(LogTemp, Display, TEXT("RAR_PRESENTATION PASS Packages=%d NewPlayer=%s SkeletonBackup=%s OriginalBlueprintsAndCommentsUntouched=true"),
-		Packages.Num(), PlayerPackage, *BackupDirectory);
 }
 
 // 检查输入是否唯一来自本 AnimInstance 的指定原生属性读取，不修改节点。
@@ -1432,7 +1099,6 @@ void AuditWorld(UWorld* World)
 		const auto* Blackboard = Controller != nullptr ? Controller->GetBlackboardComponent() : nullptr;
 		const auto* Perception = Controller != nullptr ? Controller->GetPerceptionComponent() : nullptr;
 		const auto* Movement = Enemy->GetCharacterMovement();
-		const auto* Bar = Enemy->FindComponentByClass<UWidgetComponent>();
 		TArray<AActor*> Visible;
 		if (Perception != nullptr) Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), Visible);
 		const AfpstrueCharacter* Nearest = nullptr;
@@ -1445,15 +1111,14 @@ void AuditWorld(UWorld* World)
 		}
 		const FVector Direction = Nearest != nullptr ? (Nearest->GetActorLocation() - Enemy->GetActorLocation()).GetSafeNormal2D() : FVector::ZeroVector;
 		const double Angle = Nearest != nullptr ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Enemy->GetActorForwardVector(), Direction), -1.0, 1.0))) : -1.0;
-		UE_LOG(LogTemp, Display, TEXT("AI_WORLD Enemy=%s NetMode=%d Pos=%s Yaw=%.1f Dead=%d Controller=%s BrainRunning=%d Accepting=%d SightEnabled=%d Visible=%d Target=%s BBHasTarget=%d AIState=%d MoveStatus=%d MoveMode=%d MovementTick=%d Speed=%.1f MaxSpeed=%.1f Nearest=%s DistanceCm=%.1f ViewAngle=%.1f BarParent=%s BarPos=%s BarHidden=%d Widget=%s"),
+		UE_LOG(LogTemp, Display, TEXT("AI_WORLD Enemy=%s NetMode=%d Pos=%s Yaw=%.1f Dead=%d Controller=%s BrainRunning=%d Accepting=%d SightEnabled=%d Visible=%d Target=%s BBHasTarget=%d AIState=%d MoveStatus=%d MoveMode=%d MovementTick=%d Speed=%.1f MaxSpeed=%.1f Nearest=%s DistanceCm=%.1f ViewAngle=%.1f"),
 			*Enemy->GetName(), static_cast<int32>(World->GetNetMode()), *Enemy->GetActorLocation().ToCompactString(), Enemy->GetActorRotation().Yaw, Enemy->IsDead(),
 			*GetNameSafe(Controller), Brain != nullptr && Brain->IsRunning(), Controller != nullptr && Controller->AcceptsCombatCommands(),
 			Perception != nullptr && Perception->IsSenseEnabled(UAISense_Sight::StaticClass()), Visible.Num(), *GetNameSafe(Controller != nullptr ? Controller->GetTargetCharacter() : nullptr),
 			Blackboard != nullptr && Blackboard->GetValueAsBool(TEXT("HasTarget")), Controller != nullptr ? static_cast<int32>(Controller->GetAIState()) : -1,
 			Controller != nullptr ? static_cast<int32>(Controller->GetMoveStatus()) : -1, Movement != nullptr ? static_cast<int32>(Movement->MovementMode) : -1,
 			Movement != nullptr && Movement->IsComponentTickEnabled(), Enemy->GetVelocity().Size(), Movement != nullptr ? Movement->MaxWalkSpeed : 0.0f,
-			*GetNameSafe(Nearest), Nearest != nullptr ? FMath::Sqrt(DistanceSquared) : -1.0, Angle, *GetNameSafe(Bar != nullptr ? Bar->GetAttachParent() : nullptr),
-			Bar != nullptr ? *Bar->GetComponentLocation().ToCompactString() : TEXT("None"), Bar != nullptr && Bar->bHiddenInGame, *GetNameSafe(Bar != nullptr ? Bar->GetUserWidgetObject() : nullptr));
+			*GetNameSafe(Nearest), Nearest != nullptr ? FMath::Sqrt(DistanceSquared) : -1.0, Angle);
 		DrawDebugString(World, FVector(0.0f, 0.0f, 115.0f), TEXT("MELEE AI"), Enemy, FColor::Yellow, 60.0f, true);
 		++Enemies;
 	}
@@ -1464,9 +1129,6 @@ FAutoConsoleCommandWithWorld WorldAuditCommand(TEXT("fp.AuditRARWorld"),
 	TEXT("Inspect actual player equipment, visibility and hand/socket/world-gun positions; temporarily label players and melee AI without changing gameplay."),
 	FConsoleCommandWithWorldDelegate::CreateStatic(&AuditWorld));
 
-FAutoConsoleCommand Command(TEXT("fp.PrepareRARPresentation"),
-	TEXT("Check RAR presentation sources. Add Apply to create project-only safe clips, montages, AnimBPs and native-based player BP without overwriting existing assets."),
-	FConsoleCommandWithArgsDelegate::CreateStatic(&Run));
 }
 
 // UE5.5 成套素材的项目表现适配及窄修复；Apply 只写明示目标，原供应方玩法蓝图不参与运行。
@@ -1478,202 +1140,7 @@ const FString Destination = TEXT("/Game/FirstPerson/Animations/FPSMPT/");
 const FString Art = TEXT("/Game/FPSMPT55/Animations/");
 constexpr const TCHAR* PlayerPath = TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter");
 
-// 同套 FP/TP 素材保留原始骨架和叠加类型；生成图只消费本项目的移动快照与已授权动作。
-bool BuildPlayer(UAnimBlueprint* Blueprint, const TMap<FName, UAnimSequence*>& C, UBlendSpace* Directions, UBlendSpace* Unarmed, UBlendSpace* AimOffset, bool bFirstPerson)
-{
-	FGraphBuilder B = Builder(Blueprint);
-	if (!B.bOK) return Error(TEXT("Template AnimGraph factory failed."));
-	const FString Prefix = bFirstPerson ? TEXT("FP") : TEXT("TP");
-	const auto Clip = [&C, &Prefix](const TCHAR* Name) { return C[FName(*(Prefix + Name))]; };
-	UEdGraphNode* Upper = B.Sequence(Clip(TEXT("Idle")));
-	if (bFirstPerson)
-		Upper = B.Blend(Upper, B.Sequence(C[TEXT("FPWalk")], true, true), TEXT("MovementAlpha"));
-	Upper = B.Blend(Upper, B.Sequence(Clip(TEXT("Aim"))), TEXT("AimAlpha"));
-	Upper = B.Blend(Upper, B.Sequence(Clip(TEXT("Sprint")), true, true), TEXT("SprintAlpha"));
-	if (bFirstPerson)
-	{
-		auto* Air = B.Select(B.Sequence(C[TEXT("FPJump")], false), B.Sequence(C[TEXT("FPFall")]), TEXT("bJumpRising"));
-		Upper = B.Select(Air, Upper, TEXT("bFalling"));
-		FinishGraph(B, B.AddMesh(B.Slot(Upper, TEXT("TemplateAction")), B.Hit(C[TEXT("Hit")]), TEXT("HitAlpha")));
-		return B.bOK;
-	}
-	// 身体下半身保留四向移动与跳跃，持枪/换弹只覆盖脊柱上半身，不让双腿滑着播放待机。
-	auto* Armed = B.Node<UAnimGraphNode_BlendSpacePlayer>(TEXT("按实际本地前/右速度播放配套四向走跑。"));
-	Armed->Node.SetBlendSpace(Directions); Armed->AllocateDefaultPins();
-	B.Value(TEXT("ForwardSpeed"), Armed, TEXT("X")); B.Value(TEXT("RightSpeed"), Armed, TEXT("Y"));
-	auto* Empty = B.Node<UAnimGraphNode_BlendSpacePlayer>(TEXT("空手状态没有枪、不播放持枪上半身。"));
-	Empty->Node.SetBlendSpace(Unarmed); Empty->AllocateDefaultPins(); B.Value(TEXT("GroundSpeed"), Empty, TEXT("X"));
-	auto* Ground = B.Select(Armed, Empty, TEXT("bArmed"));
-	auto* Cache = B.Node<UAnimGraphNode_SaveCachedPose>(TEXT("地面姿态仅计算一次，落地叠加与正常移动共用。"));
-	Cache->CacheName = TEXT("TemplateGround"); Cache->Node.CachePoseName = TEXT("TemplateGround");
-	Cache->AllocateDefaultPins(); B.Pose(Ground, Cache, TEXT("Pose"));
-	const auto Cached = [&B, Cache]()
-	{
-		auto* Use = B.Node<UAnimGraphNode_UseCachedPose>(TEXT("读取本帧地面姿态缓存。"));
-		Use->SaveCachedPoseNode = Cache; Use->Node.CachePoseName = TEXT("TemplateGround"); Use->AllocateDefaultPins(); return Use;
-	};
-	auto* Air = B.Select(B.Sequence(C[TEXT("TPJump")], false), B.Sequence(C[TEXT("TPFall")]), TEXT("bJumpRising"));
-	auto* Landing = B.Select(B.Add(Cached(), B.Sequence(C[TEXT("TPLand")], false)), Cached(), TEXT("bLanding"));
-	auto* Lower = B.Select(Air, Landing, TEXT("bFalling"));
-	auto* Layer = B.Node<UAnimGraphNode_LayeredBoneBlend>(TEXT("下半身走跑，上半身使用同套 AR 姿态；枪直接跟随真实 hand_r，不借用 RAR 独立枪链。"));
-	FBranchFilter Spine; Spine.BoneName = TEXT("spine_01"); Spine.BlendDepth = 1;
-	Layer->Node.LayerSetup[0].BranchFilters = {Spine}; Layer->Node.bMeshSpaceRotationBlend = true;
-	Layer->AllocateDefaultPins(); B.Pose(Lower, Layer, TEXT("BasePose"));
-	auto* Action = B.Slot(Upper, TEXT("TemplateAction"));
-	auto* Aim = B.Node<UAnimGraphNode_RotationOffsetBlendSpace>(TEXT("使用同骨架作者 AimOffset 跟随复制俯仰，避免手工旋脊柱后枪链留在原处。"));
-	Aim->Node.SetBlendSpace(AimOffset); Aim->AllocateDefaultPins(); B.Pose(Action, Aim, TEXT("BasePose"));
-	B.Value(TEXT("AimPitch"), Aim, TEXT("Y")); B.Pose(Aim, Layer, TEXT("BlendPoses_0"));
-	auto* Weight = B.Node<UK2Node_CallFunction>(TEXT("只读装备镜像转换为持枪上半身权重。"));
-	Weight->SetFromFunction(UKismetMathLibrary::StaticClass()->FindFunctionByName(TEXT("Conv_BoolToDouble")));
-	Weight->AllocateDefaultPins(); B.Value(TEXT("bArmed"), Weight, TEXT("InBool"));
-	B.Link(Weight->FindPin(UEdGraphSchema_K2::PN_ReturnValue), Layer->FindPin(TEXT("BlendWeights_0")));
-	// 受击是角色已发生的事实，不属于持枪姿态；空手也必须能播放，且不能叠加两次。
-	FinishGraph(B, B.AddMesh(Layer, B.Hit(C[TEXT("Hit")]), TEXT("HitAlpha")));
-	return B.bOK;
-}
 
-// 只对新命名空间创建一次；保留旧 RAR、原始 HUD 及所有用户蓝图注释，重复运行不会覆盖编辑成果。
-void Prepare(const TArray<FString>& Args)
-{
-	const bool bApply = Args.Num() == 1 && Args[0] == TEXT("Apply");
-	if (GEditor == nullptr || GEditor->PlayWorld != nullptr || (Args.Num() && !bApply)) return;
-	auto* Body = Load<USkeletalMesh>(TEXT("/Game/FPSMPT55/Demo/Characters/Mannequins/Meshes/SKM_Manny_Simple"));
-	auto* Gun = Load<USkeletalMesh>(TEXT("/Game/FPSMPT55/Weapons/AssaultRifle/SKM_AssaultRifle"));
-	auto* OldPlayer = Load<UBlueprint>(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_RARCharacter"));
-	auto* OldConfig = Load<UfpstrueWeaponConfig>(TEXT("/Game/Config/DA_FPWeapon_RAR"));
-	auto* Unarmed = Load<UBlendSpace>(TEXT("/Game/InfimaGames/ArtCore/Mannequin/Animations/Manny/BS_MM_WalkRun"));
-	auto* AimOffset = Load<UBlendSpace>(Art + TEXT("TPP/AR/AO_TPP_AR"));
-	if (!Body || !Gun || !OldPlayer || !OldPlayer->GeneratedClass || !OldConfig || !Unarmed || !AimOffset)
-	{ Error(TEXT("Template preflight: required source assets missing.")); return; }
-	const TArray<FClip> Definitions = {
-		{TEXT("FPIdle"), Art + TEXT("FPP/AR/A_FPP_AR_Idle"), false},
-		{TEXT("FPWalk"), Art + TEXT("FPP/AR/A_FPP_AR_Walk"), false},
-		{TEXT("FPAim"), Art + TEXT("FPP/AR/A_FPP_AR_Ironsight_Pose"), false},
-		{TEXT("FPSprint"), Art + TEXT("FPP/AR/A_FPP_AR_Tactical_Sprint"), false},
-		{TEXT("FPFire"), Art + TEXT("FPP/AR/A_FPP_AR_Shot"), true},
-		{TEXT("FPFireAimed"), Art + TEXT("FPP/AR/A_FPP_AR_Ironsight_Shot"), true},
-		{TEXT("FPReload"), Art + TEXT("FPP/AR/A_FPP_AR_Reload"), true},
-		{TEXT("FPEquip"), Art + TEXT("FPP/AR/A_FPP_AR_Equip"), false},
-		{TEXT("FPJump"), Art + TEXT("FPP/AR/A_FPP_AR_Jump_Start"), false},
-		{TEXT("FPFall"), Art + TEXT("FPP/AR/A_FPP_AR_Jump_loop"), false},
-		{TEXT("TPIdle"), Art + TEXT("TPP/AR/A_TPP_AR_Idle"), false},
-		{TEXT("TPAim"), Art + TEXT("TPP/AR/A_TPP_AR_Ironsight"), false},
-		{TEXT("TPSprint"), Art + TEXT("TPP/AR/A_TPP_Ar_Tactical_Sprint"), false},
-		{TEXT("TPFire"), Art + TEXT("TPP/AR/A_TPP_AR_Shot"), true},
-		{TEXT("TPReload"), Art + TEXT("TPP/AR/A_TPP_AR_Fast_Reload"), false},
-		{TEXT("TPJump"), Art + TEXT("TPP/Locomotion/Jump/A_TPP_Jump_Start"), false},
-		{TEXT("TPFall"), Art + TEXT("TPP/Locomotion/Jump/A_TPP_Jump_Loop"), false},
-		{TEXT("TPLand"), Art + TEXT("TPP/Locomotion/Jump/A_TPP_Jump_End"), true},
-		{TEXT("Hit"), Art + TEXT("TPP/HitReact/A_MM_HitReact_Front_Med_01_Additive"), true},
-		{TEXT("WalkF"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Walk_Fwd"), false},
-		{TEXT("WalkB"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Walk_Bwd"), false},
-		{TEXT("WalkL"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Walk_Left"), false},
-		{TEXT("WalkR"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Walk_Right"), false},
-		{TEXT("JogF"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Jog_Fwd"), false},
-		{TEXT("JogB"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Jog_Bwd"), false},
-		{TEXT("JogL"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Jog_Left"), false},
-		{TEXT("JogR"), Art + TEXT("TPP/Locomotion/RootLocomotion/A_TPP_SMG_Jog_Right"), false},
-		{TEXT("GunFire"), Art + TEXT("WeaponAnimations/AssaultRifle/A_AR_Shot"), false},
-		{TEXT("GunReload"), Art + TEXT("WeaponAnimations/AssaultRifle/A_AR_Reload"), false}
-	};
-	TMap<FName, UAnimSequence*> Clips;
-	for (const FClip& D : Definitions)
-	{
-		auto* Clip = Load<UAnimSequence>(D.Source);
-		if (!Clip || Clip->IsValidAdditive() != D.bAdditive || Clip->Notifies.Num() != 0)
-		{ Error(TEXT("Template clip missing/unsafe/additive mismatch: ") + D.Source); return; }
-		Clips.Add(D.Key, Clip);
-	}
-	// 空手 BlendSpace 使用旧同骨架数据的序列前必须验证实际参考骨骼兼容，不用字符串同名冒充兼容。
-	if (!Body->GetSkeleton()->IsCompatibleForEditor(Unarmed->GetSkeleton()))
-	{
-		auto* ExistingBody = Load<USkeletalMesh>(TEXT("/Game/InfimaGames/ArtCore/Mannequin/Meshes/SKM_Manny_Simple"));
-		if (!ExistingBody || !SameReferencePose(Body, ExistingBody)) return;
-	}
-	if (!bApply) { UE_LOG(LogTemp, Display, TEXT("TEMPLATE_PRESENTATION PASS SourceClips=%d ReadOnly=true"), Clips.Num()); return; }
-	TArray<FString> Outputs = {PlayerPath, TEXT("/Game/Config/DA_FPWeapon_Template")};
-	for (const TCHAR* Name : {TEXT("ABP_TemplateBody"), TEXT("ABP_TemplateArms"), TEXT("ABP_TemplateWeapon"), TEXT("BS_TemplateDirections"),
-		TEXT("AM_Template_FP_Fire"), TEXT("AM_Template_FP_FireAimed"), TEXT("AM_Template_FP_Reload"), TEXT("AM_Template_FP_Equip"),
-		TEXT("AM_Template_TP_Fire"), TEXT("AM_Template_TP_Reload"), TEXT("AM_TemplateWeapon_Fire"), TEXT("AM_TemplateWeapon_Reload"), TEXT("AM_TemplateWeapon_ReloadEmpty")})
-		Outputs.Add(Destination + Name);
-	for (const FString& Path : Outputs)
-		if (FPackageName::DoesPackageExist(Path)) { Error(TEXT("Template output exists; refusing overwrite: ") + Path); return; }
-	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/TemplatePresentation") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	for (USkeleton* Skeleton : {Body->GetSkeleton(), Gun->GetSkeleton()})
-	{
-		if (Skeleton->GetOutermost()->IsDirty()) { Error(TEXT("Template skeleton has unsaved changes.")); return; }
-		if (!FpstruePvpAssetPreparation::BackupAsset(FPackageName::LongPackageNameToFilename(Skeleton->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
-	}
-	TArray<UPackage*> Packages;
-	Body->GetSkeleton()->AddCompatibleSkeleton(Unarmed->GetSkeleton());
-	for (USkeleton* Skeleton : {Body->GetSkeleton(), Gun->GetSkeleton()})
-	{
-		Skeleton->RegisterSlotNode(TEXT("TemplateAction")); Skeleton->SetSlotGroupName(TEXT("TemplateAction"), FAnimSlotGroup::DefaultGroupName);
-		Skeleton->MarkPackageDirty(); Packages.AddUnique(Skeleton->GetOutermost());
-	}
-	auto* Config = NewAsset<UfpstrueWeaponConfig>(TEXT("/Game/Config/DA_FPWeapon_Template"), Packages);
-	Config->Settings = OldConfig->Settings; Config->Settings.GripSocketName = TEXT("hand_r");
-	Config->Settings.ReloadDuration = Clips[TEXT("FPReload")]->GetPlayLength();
-	Config->Settings.EmptyReloadDuration = Config->Settings.ReloadDuration;
-	auto* Directions = NewAsset<UBlendSpace>(Destination + TEXT("BS_TemplateDirections"), Packages); Directions->SetSkeleton(Body->GetSkeleton());
-	auto* Parameters = FindFProperty<FProperty>(Directions->GetClass(), TEXT("BlendParameters"));
-	if (!Parameters) { Error(TEXT("BlendSpace parameters unavailable.")); return; }
-	for (int32 Axis = 0; Axis < 2; ++Axis)
-	{
-		auto* P = Parameters->ContainerPtrToValuePtr<FBlendParameter>(Directions, Axis);
-		P->DisplayName = Axis == 0 ? TEXT("Forward speed") : TEXT("Right speed"); P->Min = -600; P->Max = 600; P->GridNum = 8;
-	}
-	Directions->AddSample(Clips[TEXT("TPIdle")], FVector::ZeroVector);
-	const FName Walk[] = {TEXT("WalkF"), TEXT("WalkB"), TEXT("WalkL"), TEXT("WalkR")};
-	const FName Jog[] = {TEXT("JogF"), TEXT("JogB"), TEXT("JogL"), TEXT("JogR")};
-	const FVector Axes[] = {FVector(1,0,0), FVector(-1,0,0), FVector(0,-1,0), FVector(0,1,0)};
-	for (int32 I = 0; I < 4; ++I) { Directions->AddSample(Clips[Walk[I]], Axes[I] * 300); Directions->AddSample(Clips[Jog[I]], Axes[I] * 600); }
-	Directions->ValidateSampleData(); Directions->ResampleData();
-	auto* FP = AnimBlueprint(TEXT("ABP_TemplateArms"), UfpstruePlayerAnimInstance::StaticClass(), Body, Packages, Destination);
-	auto* TP = AnimBlueprint(TEXT("ABP_TemplateBody"), UfpstruePlayerAnimInstance::StaticClass(), Body, Packages, Destination);
-	auto* WP = AnimBlueprint(TEXT("ABP_TemplateWeapon"), UAnimInstance::StaticClass(), Gun, Packages, Destination);
-	if (!FP || !TP || !WP || !BuildPlayer(FP, Clips, Directions, Unarmed, AimOffset, true)
-		|| !BuildPlayer(TP, Clips, Directions, Unarmed, AimOffset, false)) return;
-	FGraphBuilder W = Builder(WP);
-	auto* Idle = W.Node<UAnimGraphNode_SequenceEvaluator>(TEXT("枪械常态固定在完整换弹序列的最后装配姿态，不循环换弹，也不发通知。"));
-	Idle->Node.SetSequence(Clips[TEXT("GunReload")]); Idle->Node.SetShouldLoop(false);
-	Idle->Node.SetExplicitTime(Clips[TEXT("GunReload")]->GetPlayLength()); Idle->AllocateDefaultPins();
-	FinishGraph(W, W.Slot(Idle, TEXT("TemplateAction")));
-	for (UAnimBlueprint* BP : {FP, TP, WP}) if (!FpstruePvpAssetPreparation::Compile(BP)) return;
-	for (UAnimBlueprint* BP : {FP, TP})
-	{
-		const bool bFP = BP == FP; const FString Prefix = bFP ? TEXT("FP") : TEXT("TP");
-		auto* D = Cast<UfpstruePlayerAnimInstance>(BP->GeneratedClass->GetDefaultObject());
-		D->FireMontage = Montage(TEXT("AM_Template_") + Prefix + TEXT("_Fire"), Clips[FName(*(Prefix + TEXT("Fire")))], Packages, Destination, TEXT("TemplateAction"));
-		D->AimedFireMontage = bFP ? Montage(TEXT("AM_Template_FP_FireAimed"), Clips[TEXT("FPFireAimed")], Packages, Destination, TEXT("TemplateAction")) : D->FireMontage.Get();
-		D->ReloadMontage = Montage(TEXT("AM_Template_") + Prefix + TEXT("_Reload"), Clips[FName(*(Prefix + TEXT("Reload")))], Packages, Destination, TEXT("TemplateAction"));
-		D->EmptyReloadMontage = D->ReloadMontage;
-		D->EquipMontage = bFP ? Montage(TEXT("AM_Template_FP_Equip"), Clips[TEXT("FPEquip")], Packages, Destination, TEXT("TemplateAction")) : nullptr;
-	}
-	for (const TCHAR* Name : {TEXT("Fire"), TEXT("Reload"), TEXT("ReloadEmpty")})
-		Montage(FString(TEXT("AM_TemplateWeapon_")) + Name, Clips[FString(Name) == TEXT("Fire") ? TEXT("GunFire") : TEXT("GunReload")], Packages, Destination, TEXT("TemplateAction"));
-	UPackage* Outer = CreatePackage(PlayerPath);
-	auto* Player = FKismetEditorUtilities::CreateBlueprint(AfpstrueCharacter::StaticClass(), Outer, TEXT("BP_TemplateCharacter"), BPTYPE_Normal,
-		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(), TEXT("FpstrueTemplatePresentation"));
-	if (!Player || !FpstruePvpAssetPreparation::Compile(Player)) return;
-	Packages.AddUnique(Outer); FAssetRegistryModule::AssetCreated(Player);
-	auto* D = Cast<AfpstrueCharacter>(Player->GeneratedClass->GetDefaultObject());
-	for (const TCHAR* Name : {TEXT("DefaultMappingContext"), TEXT("JumpAction"), TEXT("MoveAction"), TEXT("LookAction"), TEXT("FireAction"), TEXT("ReloadAction"), TEXT("SprintAction"), TEXT("AimAction"), TEXT("WalkSpeed"), TEXT("SprintSpeed"), TEXT("AimWalkSpeed")})
-	{
-		auto* P = FindFProperty<FProperty>(AfpstrueCharacter::StaticClass(), Name);
-		if (!P) return; P->CopyCompleteValue_InContainer(D, OldPlayer->GeneratedClass->GetDefaultObject());
-	}
-	FindFProperty<FBoolProperty>(AfpstrueCharacter::StaticClass(), TEXT("bUseTemplatePresentation"))->SetPropertyValue_InContainer(D, true);
-	D->GetMesh()->SetSkeletalMesh(Body); D->GetMesh()->SetAnimInstanceClass(TP->GeneratedClass);
-	D->GetMesh()->SetRelativeLocationAndRotation(FVector(0,0,-90.556555), FRotator(0,-90,0));
-	D->GetMesh1P()->SetSkeletalMesh(Body); D->GetMesh1P()->SetAnimInstanceClass(FP->GeneratedClass);
-	D->GetMesh1P()->SetRelativeLocationAndRotation(FVector(-0.663123,0,-162.575101), FRotator(0,-90,0));
-	for (UPackage* Package : Packages) Package->MarkPackageDirty();
-	if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, false)) { Error(TEXT("Template save failed.")); return; }
-	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_PRESENTATION PASS Generated=%d Player=%s"), Packages.Num(), PlayerPath);
-}
-
-FAutoConsoleCommand Command(TEXT("fp.PrepareTemplatePresentation"), TEXT("Check UE5.5 art; Apply creates native-based FP/TP presentation without importing supplier gameplay."), FConsoleCommandWithArgsDelegate::CreateStatic(&Prepare));
 
 // 只读实测已保存的模板，不重新生成蓝图、不编译或保存素材；足骨高度不冒充鞋底高度。
 void AuditGrounding(const TArray<FString>& Args)
@@ -2184,43 +1651,260 @@ FAutoConsoleCommand GroundCalibrationCommand(TEXT("fp.CalibrateTemplateGrounding
 	TEXT("Read-only CPU sole and authored-step-speed calibration. Apply backs up and modifies only saved Template BP mesh Z and Directions sample rates."),
 	FConsoleCommandWithArgsDelegate::CreateStatic(&CalibrateGrounding));
 
-// 网络 HUD 由原生事件驱动：保留控件布局，删除已识别的旧 GameMode 链，不再复制并遗留不可达节点。
+// 网络 HUD 的 Designer 和执行图是唯一表现来源；这里只离线维护一个白名单包。
+bool ValidateNetworkHUD(UWidgetBlueprint& HUD)
+{
+	using namespace FpstruePvpAssetPreparation;
+	if (HUD.GetOutermost()->GetName() != TEXT("/Game/FirstPerson/UI/ingame_network")
+		|| HUD.ParentClass != UfpstruePvpIngameWidget::StaticClass() || !HUD.WidgetTree || !HUD.Bindings.IsEmpty())
+		return Error(TEXT("Network HUD package, parent, tree or zero-binding contract failed."));
+	for (const FName Name : {TEXT("HealthBar"), TEXT("MagazineText"), TEXT("ReserveText"), TEXT("WeaponNameText"),
+		TEXT("MatchHintText"), TEXT("AmmoContainer"), TEXT("CountdownRow")})
+		if (!HUD.WidgetTree->FindWidget(Name)) return Error(TEXT("Network HUD missing bound widget: ") + Name.ToString());
+	if (!Cast<UProgressBar>(HUD.WidgetTree->FindWidget(TEXT("HealthBar"))))
+		return Error(TEXT("Network HealthBar must be a ProgressBar."));
+	for (const FName Name : {TEXT("MagazineText"), TEXT("ReserveText"), TEXT("WeaponNameText"), TEXT("MatchHintText")})
+		if (!Cast<UTextBlock>(HUD.WidgetTree->FindWidget(Name))) return Error(TEXT("Network text widget has wrong type: ") + Name.ToString());
+	if (HUD.WidgetTree->FindWidget(TEXT("CountdownRow"))->GetVisibility() != ESlateVisibility::Collapsed)
+		return Error(TEXT("Network HUD Designer must hide the retired countdown row."));
+	const auto* Hint = CastChecked<UTextBlock>(HUD.WidgetTree->FindWidget(TEXT("MatchHintText")));
+	if (!Hint->GetText().ToString().Contains(TEXT("敌人")) || !Hint->GetText().ToString().Contains(TEXT("互相伤害")))
+		return Error(TEXT("Network HUD Designer survival hint is missing."));
+	TArray<UEdGraph*> Graphs; HUD.GetAllGraphs(Graphs);
+	UK2Node_Event* Entry = nullptr;
+	for (UEdGraph* Graph : Graphs) for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (!Node) continue;
+		if (ReferencesLegacy(*Node)) return Error(TEXT("Network HUD still references a retired gameplay entry."));
+		if (auto* Event = Cast<UK2Node_Event>(Node))
+		{
+			if (Entry || Event->EventReference.GetMemberName() != TEXT("PresentSnapshot"))
+				return Error(TEXT("Network HUD must have exactly one presentation event and no old Construct business."));
+			Entry = Event;
+		}
+		if (const auto* Write = Cast<UK2Node_VariableSet>(Node); Write && Write->GetVarName() != TEXT("bPlayedFadeIn"))
+			return Error(TEXT("Network HUD can only write its own fade presentation flag."));
+	}
+	if (!Entry) return Error(TEXT("Network HUD PresentSnapshot event is missing."));
+	TSet<UEdGraphNode*> Reachable;
+	TArray<UEdGraphNode*> Pending = {Entry};
+	while (!Pending.IsEmpty())
+	{
+		UEdGraphNode* Node = Pending.Pop(EAllowShrinking::No);
+		if (Reachable.Contains(Node)) continue;
+		Reachable.Add(Node);
+		for (UEdGraphPin* Pin : Node->Pins)
+			if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+				for (UEdGraphPin* Linked : Pin->LinkedTo) if (Linked) Pending.Add(Linked->GetOwningNode());
+	}
+	TMap<FString, int32> Setters;
+	int32 FadeCalls = 0;
+	for (UEdGraph* Graph : Graphs) for (UEdGraphNode* Node : Graph->Nodes)
+		if (const auto* Call = Cast<UK2Node_CallFunction>(Node))
+		{
+			const UFunction* Function = Call->GetTargetFunction();
+			if (!Function) return Error(TEXT("Network HUD contains an unresolved call."));
+			const UClass* Owner = Function->GetOwnerClass();
+			if (!Owner->IsChildOf(UWidget::StaticClass()) && Owner != UKismetMathLibrary::StaticClass()
+				&& Owner != UKismetTextLibrary::StaticClass())
+				return Error(TEXT("Network HUD call is outside presentation libraries: ") + Function->GetPathName());
+			if (Function->HasAnyFunctionFlags(FUNC_BlueprintPure)) continue;
+			if (!Reachable.Contains(Node)) return Error(TEXT("Network HUD contains an unreachable setter/playback call."));
+			const FName FunctionName = Function->GetFName();
+			if (FunctionName == TEXT("PlayAnimation"))
+			{
+				const UEdGraphPin* AnimationPin = Call->FindPin(TEXT("InAnimation"));
+				const auto* AnimationRead = AnimationPin && AnimationPin->LinkedTo.Num() == 1
+					? Cast<UK2Node_VariableGet>(AnimationPin->LinkedTo[0]->GetOwningNode()) : nullptr;
+				if (!AnimationRead || !HUD.Animations.ContainsByPredicate([AnimationRead](const UWidgetAnimation* Animation)
+					{ return Animation && Animation->GetFName() == AnimationRead->GetVarName(); }))
+					return Error(TEXT("Network HUD fade playback is not wired to its authored animation."));
+				++FadeCalls; continue;
+			}
+			const UEdGraphPin* Self = Call->FindPin(UEdGraphSchema_K2::PN_Self);
+			const auto* Target = Self && Self->LinkedTo.Num() == 1 ? Cast<UK2Node_VariableGet>(Self->LinkedTo[0]->GetOwningNode()) : nullptr;
+			if (!Target) return Error(TEXT("Network HUD setter target is not a bound-widget property."));
+			const FString Key = Target->GetVarName().ToString() + TEXT(".") + FunctionName.ToString();
+			if (Key == TEXT("HealthBar.SetPercent") && !ReadsNativeValue(Call->FindPin(TEXT("InPercent")), TEXT("HealthFraction")))
+				return Error(TEXT("Network health setter must read the normalized snapshot."));
+			if (FunctionName == TEXT("SetText"))
+			{
+				const UEdGraphPin* Input = Call->FindPin(TEXT("InText"));
+				if (Target->GetVarName() == TEXT("WeaponNameText"))
+				{
+					if (!ReadsNativeValue(Input, TEXT("CurrentWeaponName"))) return Error(TEXT("Network weapon name must read the equipment snapshot."));
+				}
+				else
+				{
+					const auto* Conversion = Input && Input->LinkedTo.Num() == 1 ? Cast<UK2Node_CallFunction>(Input->LinkedTo[0]->GetOwningNode()) : nullptr;
+					const FName Source = Target->GetVarName() == TEXT("MagazineText") ? TEXT("CurrentAmmo") : TEXT("ReserveAmmo");
+					if (!Conversion || Conversion->FunctionReference.GetMemberName() != TEXT("Conv_IntToText")
+						|| !ReadsNativeValue(Conversion->FindPin(TEXT("Value")), Source))
+						return Error(TEXT("Network ammo text must format its current snapshot value."));
+				}
+			}
+			++Setters.FindOrAdd(Key);
+		}
+	const TMap<FString, int32> Expected = {{TEXT("HealthBar.SetPercent"), 1}, {TEXT("HealthBar.SetFillColorAndOpacity"), 2},
+		{TEXT("MagazineText.SetText"), 1}, {TEXT("MagazineText.SetColorAndOpacity"), 2},
+		{TEXT("ReserveText.SetText"), 1}, {TEXT("WeaponNameText.SetText"), 1}, {TEXT("AmmoContainer.SetVisibility"), 2}};
+	if (Setters.Num() != Expected.Num() || FadeCalls != 1) return Error(TEXT("Network HUD presentation setter/playback set differs."));
+	for (const auto& Pair : Expected)
+		if (Setters.FindRef(Pair.Key) != Pair.Value) return Error(TEXT("Network HUD reachable setter count differs: ") + Pair.Key);
+	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD GRAPH_PASS Asset=%s Entry=PresentSnapshot ReachableExecNodes=%d SetterKinds=%d FadeCalls=%d Bindings=0 OldGameplayReferences=0"),
+		*HUD.GetPathName(), Reachable.Num(), Setters.Num(), FadeCalls);
+	return true;
+}
+
 void PrepareHUD(const TArray<FString>& Args)
 {
+	using namespace FpstruePvpAssetPreparation;
 	const bool bApply = Args.Num() == 1 && Args[0] == TEXT("Apply");
-	if (GEditor == nullptr || GEditor->PlayWorld != nullptr || (Args.Num() && !bApply)) return;
+	if (!GEditor || GEditor->PlayWorld || (Args.Num() && !bApply))
+	{ Error(TEXT("Usage: fp.PrepareNetworkHUD [Apply], outside PIE.")); return; }
 	const FString Target = TEXT("/Game/FirstPerson/UI/ingame_network");
-	const bool bExists = FPackageName::DoesPackageExist(Target);
-	auto* Copy = Load<UWidgetBlueprint>(bExists ? Target : TEXT("/Game/FirstPerson/UI/ingame"));
-	if (!Copy || Copy->GetOutermost()->IsDirty()) { Error(TEXT("Saved HUD is missing or has unsaved edits.")); return; }
-	FpstruePvpAssetPreparation::FLegacyGraphPlan Plan;
-	if (!FpstruePvpAssetPreparation::InspectNetworkHUD(*Copy, Plan))
-	{ Error(TEXT("HUD contains an unrecognized old UI chain; inspect the node audit before Apply.")); return; }
-	if (!bApply) { UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS ReadOnly=true ExistingNetworkHUD=%d"), bExists); return; }
+	auto* HUD = Load<UWidgetBlueprint>(Target);
+	if (!HUD || HUD->GetOutermost()->GetName() != Target || HUD->GetOutermost()->IsDirty() || !HUD->WidgetTree)
+	{ Error(TEXT("Saved network HUD is missing, dirty or outside the package whitelist.")); return; }
+	if (!bApply) { ValidateNetworkHUD(*HUD); return; }
+	// 只备份、保存联网副本；原 ingame 和其他 UI 包均不修改。
 	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/NetworkHUD") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	if (bExists)
+	if (!BackupAsset(FPackageName::LongPackageNameToFilename(Target, FPackageName::GetAssetPackageExtension()), Backup)) return;
+	UWidgetAnimation* Fade = nullptr;
+	for (UWidgetAnimation* Animation : HUD->Animations)
+		if (Animation && Animation->GetName().StartsWith(TEXT("淡入"))) { Fade = Animation; break; }
+	if (!Fade) { Error(TEXT("Network HUD authored fade-in animation is missing; no save.")); return; }
+	HUD->Modify(); HUD->WidgetTree->Modify();
+	// 网络副本原有的绑定函数和 Construct 链已经由 Native 取代；现在完整改为单一快照表现图。
+	TArray<UEdGraph*> OldGraphs; HUD->GetAllGraphs(OldGraphs);
+	for (UEdGraph* Graph : OldGraphs) FBlueprintEditorUtils::RemoveGraph(HUD, Graph, EGraphRemoveFlags::None);
+	TArray<FName> OldVariables; for (const auto& Variable : HUD->NewVariables) OldVariables.Add(Variable.VarName);
+	for (FName Name : OldVariables) FBlueprintEditorUtils::RemoveMemberVariable(HUD, Name);
+	HUD->Bindings.Reset();
+	HUD->ParentClass = UfpstruePvpIngameWidget::StaticClass();
+	const TPair<FName, FName> Names[] = {{TEXT("血量组件"), TEXT("HealthBar")}, {TEXT("当前子弹"), TEXT("MagazineText")},
+		{TEXT("剩余子弹"), TEXT("ReserveText")}, {TEXT("TextBlock_2"), TEXT("WeaponNameText")},
+		{TEXT("TextBlock_65"), TEXT("MatchHintText")}, {TEXT("子弹数"), TEXT("AmmoContainer")}, {TEXT("HorizontalBox_327"), TEXT("CountdownRow")}};
+	for (const auto& Pair : Names)
 	{
-		if (!FpstruePvpAssetPreparation::BackupAsset(FPackageName::LongPackageNameToFilename(Copy->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
+		UWidget* Widget = HUD->WidgetTree->FindWidget(Pair.Value);
+		if (!Widget) Widget = HUD->WidgetTree->FindWidget(Pair.Key);
+		if (!Widget) { Error(TEXT("Network HUD source control missing: ") + Pair.Key.ToString()); return; }
+		Widget->Modify(); Widget->bIsVariable = true;
+		if (Widget->GetFName() != Pair.Value)
+		{
+			if (!Widget->Rename(*Pair.Value.ToString(), nullptr, REN_DontCreateRedirectors))
+			{ Error(TEXT("Network HUD widget rename failed; no save.")); return; }
+			for (UWidgetAnimation* Animation : HUD->Animations)
+				if (Animation) for (FWidgetAnimationBinding& Binding : Animation->AnimationBindings)
+					if (Binding.WidgetName == Pair.Key) { Animation->Modify(); Binding.WidgetName = Pair.Value; }
+		}
 	}
-	else
+	CastChecked<UTextBlock>(HUD->WidgetTree->FindWidget(TEXT("MatchHintText")))->SetText(
+		NSLOCTEXT("fpstrue", "PvpSurvivalHint", "联机生存：抵御敌人，玩家之间可互相伤害"));
+	HUD->WidgetTree->FindWidget(TEXT("CountdownRow"))->SetVisibility(ESlateVisibility::Collapsed);
+	const auto CompileHUD = [HUD]()
 	{
-		UPackage* NewPackage = CreatePackage(*Target);
-		Copy = DuplicateObject<UWidgetBlueprint>(Copy, NewPackage, TEXT("ingame_network"));
-		Copy->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
-		FAssetRegistryModule::AssetCreated(Copy);
-		Plan = FpstruePvpAssetPreparation::InspectLegacyGraphs(*Copy);
-		if (!Plan.bSafe) { Error(TEXT("Copied HUD graph differs from the inspected source; no save.")); return; }
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(HUD);
+		FCompilerResultsLog Results;
+		FKismetEditorUtilities::CompileBlueprint(HUD, EBlueprintCompileOptions::SkipSave | EBlueprintCompileOptions::SkipGarbageCollection, &Results);
+		UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD COMPILE Asset=%s Errors=%d Warnings=%d SaveOnCompile=0"),
+			*HUD->GetPathName(), Results.NumErrors, Results.NumWarnings);
+		return Results.NumErrors == 0 && HUD->Status != BS_Error;
+	};
+	FEdGraphPinType FlagType; FlagType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+	if (!FBlueprintEditorUtils::AddMemberVariable(HUD, TEXT("bPlayedFadeIn"), FlagType, TEXT("false")) || !CompileHUD()) return;
+	FGraphBuilder B;
+	B.Graph = FBlueprintEditorUtils::CreateNewGraph(HUD, TEXT("NetworkPresentation"), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+	FBlueprintEditorUtils::AddUbergraphPage(HUD, B.Graph);
+	B.Schema = GetDefault<UEdGraphSchema_K2>();
+	const auto Call = [&B](UClass* Owner, FName FunctionName)
+	{
+		auto* Node = B.Node<UK2Node_CallFunction>(TEXT("只消费当前显示快照，不查询或修改 Gameplay 状态。"));
+		UFunction* Function = Owner->FindFunctionByName(FunctionName);
+		if (!Function) { B.bOK = false; return Node; }
+		Node->SetFromFunction(Function); Node->AllocateDefaultPins(); return Node;
+	};
+	const auto Value = [&B](FName Name)
+	{
+		auto* Read = B.Node<UK2Node_VariableGet>(TEXT("只读 Native 快照或已绑定的作者控件。"));
+		Read->VariableReference.SetSelfMember(Name); Read->AllocateDefaultPins(); return Read->FindPin(Name);
+	};
+	const auto Setter = [&B, &Call, &Value](UClass* Owner, FName FunctionName, FName Widget)
+	{
+		auto* Node = Call(Owner, FunctionName); B.Link(Value(Widget), Node->FindPin(UEdGraphSchema_K2::PN_Self)); return Node;
+	};
+	const auto Default = [&B](UEdGraphNode* Node, FName Name, const FString& Text)
+	{
+		if (UEdGraphPin* Pin = Node->FindPin(Name)) B.Schema->TrySetDefaultValue(*Pin, Text);
+		else B.bOK = false;
+	};
+	const auto Exec = [&B](UEdGraphPin* Out, UEdGraphNode* In) { B.Link(Out, In->FindPin(UEdGraphSchema_K2::PN_Execute)); };
+	const auto Then = [](UEdGraphNode* Node) { return Node->FindPin(UEdGraphSchema_K2::PN_Then); };
+	auto* Entry = B.Node<UK2Node_Event>(TEXT("唯一入口：HUD 已提交快照或 Widget 刚完成构建。"));
+	Entry->EventReference.SetExternalMember(TEXT("PresentSnapshot"), UfpstruePvpIngameWidget::StaticClass());
+	Entry->bOverrideFunction = true; Entry->AllocateDefaultPins();
+	auto* Percent = Setter(UProgressBar::StaticClass(), TEXT("SetPercent"), TEXT("HealthBar"));
+	B.Link(Value(TEXT("HealthFraction")), Percent->FindPin(TEXT("InPercent"))); Exec(Then(Entry), Percent);
+	UEdGraphPin* Tail = Then(Percent);
+	for (const auto& Pair : {TPair<FName, FName>(TEXT("CurrentAmmo"), TEXT("MagazineText")), TPair<FName, FName>(TEXT("ReserveAmmo"), TEXT("ReserveText"))})
+	{
+		auto* Text = Call(UKismetTextLibrary::StaticClass(), TEXT("Conv_IntToText")); B.Link(Value(Pair.Key), Text->FindPin(TEXT("Value")));
+		auto* Set = Setter(UTextBlock::StaticClass(), TEXT("SetText"), Pair.Value);
+		B.Link(Text->FindPin(UEdGraphSchema_K2::PN_ReturnValue), Set->FindPin(TEXT("InText"))); Exec(Tail, Set); Tail = Then(Set);
 	}
-	FpstruePvpAssetPreparation::RemoveLegacyGraphs(*Copy, Plan);
-	Copy->ParentClass = UfpstruePvpIngameWidget::StaticClass();
-	Copy->Bindings.Reset();
-	if (!FpstruePvpAssetPreparation::Compile(Copy)) return;
-	UPackage* Package = Copy->GetOutermost();
-	Package->MarkPackageDirty();
-	if (!UEditorLoadingAndSavingUtils::SavePackages({Package}, false)) { Error(TEXT("HUD copy save failed.")); return; }
-	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS Copy=%s LegacyGameModeNodesRemoved=1 LayoutUnchanged=1 Backup=%s"), *Target, *Backup);
+	auto* Name = Setter(UTextBlock::StaticClass(), TEXT("SetText"), TEXT("WeaponNameText"));
+	B.Link(Value(TEXT("CurrentWeaponName")), Name->FindPin(TEXT("InText"))); Exec(Tail, Name);
+	const auto ColorBranch = [&B, &Call, &Value, &Setter, &Default, &Exec, &Then](const TArray<UEdGraphPin*>& Before, bool bHealth)
+	{
+		auto* Compare = Call(UKismetMathLibrary::StaticClass(), bHealth ? TEXT("LessEqual_DoubleDouble") : TEXT("LessEqual_IntInt"));
+		B.Link(Value(bHealth ? TEXT("HealthFraction") : TEXT("CurrentAmmo")), Compare->FindPin(TEXT("A")));
+		Default(Compare, TEXT("B"), bHealth ? TEXT("0.3") : TEXT("5"));
+		auto* Branch = B.Node<UK2Node_IfThenElse>(bHealth ? TEXT("作者低血阈值与颜色。") : TEXT("作者低弹阈值与颜色。")); Branch->AllocateDefaultPins();
+		B.Link(Compare->FindPin(UEdGraphSchema_K2::PN_ReturnValue), Branch->GetConditionPin());
+		for (UEdGraphPin* Output : Before) Exec(Output, Branch);
+		TArray<UEdGraphPin*> Outputs;
+		for (int32 Low = 1; Low >= 0; --Low)
+		{
+			auto* Set = Setter(bHealth ? UProgressBar::StaticClass() : UTextBlock::StaticClass(),
+				bHealth ? TEXT("SetFillColorAndOpacity") : TEXT("SetColorAndOpacity"), bHealth ? TEXT("HealthBar") : TEXT("MagazineText"));
+			const FLinearColor Color = bHealth ? (Low ? FLinearColor(0.85f,0.1f,0.08f,0.85f) : FLinearColor(0.104616f,0.296138f,0.158961f,0.701961f))
+				: (Low ? FLinearColor(0.9f,0.15f,0.1f) : FLinearColor(0.651406f,0.617207f,0.473532f));
+			FString Text;
+			if (bHealth) TBaseStructure<FLinearColor>::Get()->ExportText(Text, &Color, nullptr, nullptr, PPF_None, nullptr);
+			else { const FSlateColor Slate(Color); FSlateColor::StaticStruct()->ExportText(Text, &Slate, nullptr, nullptr, PPF_None, nullptr); }
+			Default(Set, bHealth ? TEXT("InColor") : TEXT("InColorAndOpacity"), Text);
+			Exec(Branch->FindPin(Low ? UEdGraphSchema_K2::PN_Then : UEdGraphSchema_K2::PN_Else), Set); Outputs.Add(Then(Set));
+		}
+		return Outputs;
+	};
+	const TArray<UEdGraphPin*> HealthOutputs = ColorBranch({Then(Name)}, true);
+	// 分支汇合只改变显示；两个互斥颜色出口均通向同一个后续入口。
+	auto* AmmoGate = B.Node<UK2Node_IfThenElse>(TEXT("弹药区仅在存在装备时显示。")); AmmoGate->AllocateDefaultPins();
+	B.Link(Value(TEXT("bHasEquipment")), AmmoGate->GetConditionPin());
+	const TArray<UEdGraphPin*> AmmoColorOutputs = ColorBranch(HealthOutputs, false);
+	for (UEdGraphPin* Output : AmmoColorOutputs) Exec(Output, AmmoGate);
+	TArray<UEdGraphPin*> VisibleOutputs;
+	for (int32 Equipped = 1; Equipped >= 0; --Equipped)
+	{
+		auto* Set = Setter(UWidget::StaticClass(), TEXT("SetVisibility"), TEXT("AmmoContainer"));
+		Default(Set, TEXT("InVisibility"), Equipped ? TEXT("SelfHitTestInvisible") : TEXT("Collapsed"));
+		Exec(AmmoGate->FindPin(Equipped ? UEdGraphSchema_K2::PN_Then : UEdGraphSchema_K2::PN_Else), Set); VisibleOutputs.Add(Then(Set));
+	}
+	auto* FadeGate = B.Node<UK2Node_IfThenElse>(TEXT("作者淡入只在此 Widget 实例首次表现时播放。")); FadeGate->AllocateDefaultPins();
+	B.Link(Value(TEXT("bPlayedFadeIn")), FadeGate->GetConditionPin());
+	for (UEdGraphPin* Output : VisibleOutputs) Exec(Output, FadeGate);
+	auto* Played = B.Node<UK2Node_VariableSet>(TEXT("只保存本 Widget 的一次淡入标记，不是 Gameplay 状态。"));
+	Played->VariableReference.SetSelfMember(TEXT("bPlayedFadeIn")); Played->AllocateDefaultPins(); Default(Played, TEXT("bPlayedFadeIn"), TEXT("true"));
+	Exec(FadeGate->GetElsePin(), Played);
+	auto* Play = Call(UUserWidget::StaticClass(), TEXT("PlayAnimation"));
+	B.Link(Value(Fade->GetFName()), Play->FindPin(TEXT("InAnimation"))); Exec(Then(Played), Play);
+	if (!B.bOK || !CompileHUD() || !ValidateNetworkHUD(*HUD)) { Error(TEXT("Network HUD graph failed; no save. Backup=") + Backup); return; }
+	HUD->MarkPackageDirty();
+	if (!UEditorLoadingAndSavingUtils::SavePackages({HUD->GetOutermost()}, false)) { Error(TEXT("Network HUD save failed. Backup=") + Backup); return; }
+	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HUD PASS Copy=%s PackagesSaved=1 BlueprintPresentation=1 Bindings=0 LayoutRetained=1 Backup=%s"), *Target, *Backup);
 }
-FAutoConsoleCommand HUDCommand(TEXT("fp.PrepareNetworkHUD"), TEXT("Check/Apply native network HUD graphs while retaining layout and removing recognized legacy GameMode chains."), FConsoleCommandWithArgsDelegate::CreateStatic(&PrepareHUD));
+FAutoConsoleCommand HUDCommand(TEXT("fp.PrepareNetworkHUD"), TEXT("Check/Apply the single network HUD Blueprint presentation graph; only ingame_network is saved."), FConsoleCommandWithArgsDelegate::CreateStatic(&PrepareHUD));
 
 // 已生成的身体图只移动现有受击节点，不删除节点/注释、不重生成其他资产；改动前保留可恢复备份。
 void RepairUnarmedHit(const TArray<FString>& Args)
@@ -2266,289 +1950,6 @@ void RepairUnarmedHit(const TArray<FString>& Args)
 	UE_LOG(LogTemp, Display, TEXT("TEMPLATE_HIT PASS Repaired=true OriginalNodesAndCommentsRetained=true Backup=%s"), *Backup);
 }
 FAutoConsoleCommand HitCommand(TEXT("fp.RepairTemplateUnarmedHit"), TEXT("Move the existing template body hit additive after the armed-only layer; Apply backs up and saves this AnimBP only."), FConsoleCommandWithArgsDelegate::CreateStatic(&RepairUnarmedHit));
-}
-
-// 玩家后处理图的离线鞋底标定：检查实际骨链/蒙皮，Apply 仅创建或更新项目玩家 IK 包，不处理敌人。
-namespace FpstrueFootIKPreparation
-{
-using namespace FpstrueRARPresentation;
-using FpstrueRARPresentation::Error;
-const FString FootIKDirectory = TEXT("/Game/FirstPerson/Animations/FootIK/");
-constexpr const TCHAR* CalibrationKey = TEXT("fpstrueFootIKCalibration");
-constexpr const TCHAR* CalibrationVersion = TEXT("WeightedSoleLOD0_Idle_v3_Toe");
-constexpr const TCHAR* PreviousCalibrationVersion = TEXT("WeightedSoleLOD0_Idle_v1");
-constexpr const TCHAR* FootprintCalibrationVersion = TEXT("WeightedSoleLOD0_Idle_v2_3x3");
-
-struct FSoleCalibration
-{
-	FVector Offset[2] = {FVector::ZeroVector, FVector::ZeroVector};
-	FVector Normal[2] = {FVector::UpVector, FVector::UpVector};
-	TArray<int32> Vertices[2];
-	TArray<FVector> Probes[2];
-	TArray<FVector> ToeProbes[2];
-};
-
-// 两套骨架分别校验实际骨链，不因同名或带有 ik_foot 骨就推断它们可互换。
-bool InspectLegChains(const USkeletalMesh* Mesh)
-{
-	if (!Mesh || !Mesh->GetSkeleton()) return Error(TEXT("Foot IK requires the actual body mesh and skeleton."));
-	const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
-	if (Ref.GetRawBoneNum() == 0 || Ref.GetBoneName(0) != TEXT("root")) return Error(TEXT("Foot IK requires the expected root bone."));
-	for (const TCHAR* Side : {TEXT("l"), TEXT("r")})
-	{
-		FName Parent = TEXT("pelvis");
-		for (const TCHAR* Prefix : {TEXT("thigh_"), TEXT("calf_"), TEXT("foot_"), TEXT("ball_")})
-		{
-			const FName Bone(*(FString(Prefix) + Side));
-			const int32 Index = Ref.FindBoneIndex(Bone), ParentIndex = Ref.FindBoneIndex(Parent);
-			if (Index == INDEX_NONE || ParentIndex == INDEX_NONE || Ref.GetParentIndex(Index) != ParentIndex)
-				return Error(FString::Printf(TEXT("Foot IK expected %s -> %s in %s."), *Parent.ToString(), *Bone.ToString(), *Mesh->GetPathName()));
-			UE_LOG(LogTemp, Display, TEXT("FOOT_IK CHAIN Mesh=%s Bone=%s Parent=%s BoneIndex=%d"), *Mesh->GetPathName(), *Bone.ToString(), *Parent.ToString(), Index);
-			Parent = Bone;
-		}
-	}
-	return true;
-}
-
-// 从禁用后处理的真实 Idle 蒙皮鞋底标定；保存的顶点只用于验收，运行时 IK 不遍历网格。
-bool MeasureSoles(USkeletalMesh* Mesh, UAnimSequence* Idle, FSoleCalibration& Result)
-{
-	if (!InspectLegChains(Mesh) || !Idle || Idle->IsValidAdditive() || Idle->GetSkeleton() != Mesh->GetSkeleton())
-		return Error(TEXT("Foot IK sole calibration needs the body's own non-additive idle sequence."));
-	const FSkeletalMeshRenderData* RenderData = Mesh->GetResourceForRendering();
-	if (!RenderData || !RenderData->LODRenderData.IsValidIndex(0)) return Error(TEXT("Foot IK LOD0 render data unavailable."));
-	FTestWorldWrapper Preview;
-	if (!Preview.CreateTestWorld(EWorldType::EditorPreview)) return Error(TEXT("Foot IK sole preview world creation failed."));
-	auto* Pose = NewObject<USkeletalMeshComponent>(Preview.GetTestWorld(), NAME_None, RF_Transient);
-	Pose->SetSkeletalMesh(Mesh); Pose->SetDisablePostProcessBlueprint(true);
-	Pose->SetCollisionEnabled(ECollisionEnabled::NoCollision); Pose->SetAnimationMode(EAnimationMode::AnimationSingleNode);
-	Pose->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-	Pose->RegisterComponentWithWorld(Preview.GetTestWorld());
-	ON_SCOPE_EXIT { Pose->DestroyComponent(); };
-	Pose->SetAnimation(Idle); Pose->SetPosition(0.0f, false);
-	Pose->TickAnimation(0.0f, false); Pose->RefreshBoneTransforms();
-	const FSkeletalMeshLODRenderData& LOD = RenderData->LODRenderData[0];
-	FSkinWeightVertexBuffer* Weights = Pose->GetSkinWeightBuffer(0);
-	TArray<FMatrix44f> Matrices; Pose->GetCurrentRefToLocalMatrices(Matrices, 0);
-	if (!Weights || !Weights->GetDataVertexBuffer()->GetWeightData() || LOD.GetNumVertices() == 0
-		|| Weights->GetNumVertices() != LOD.GetNumVertices() || Matrices.Num() != Mesh->GetRefBasesInvMatrix().Num())
-		return Error(TEXT("Foot IK CPU skin data unavailable; ankle height is not used as a substitute for shoe soles."));
-	const FReferenceSkeleton& Ref = Mesh->GetRefSkeleton();
-	const int32 Feet[] = {Ref.FindBoneIndex(TEXT("foot_l")), Ref.FindBoneIndex(TEXT("foot_r"))};
-	const int32 Balls[] = {Ref.FindBoneIndex(TEXT("ball_l")), Ref.FindBoneIndex(TEXT("ball_r"))};
-	struct FSoleVertex { int32 Index; FVector Position; };
-	TArray<FSoleVertex> Candidates[2];
-	TArray<FSoleVertex> ToeCandidates[2];
-	for (uint32 Vertex = 0; Vertex < LOD.GetNumVertices(); ++Vertex)
-	{
-		int32 SectionIndex = INDEX_NONE, LocalVertex = INDEX_NONE;
-		LOD.GetSectionFromVertexIndex(static_cast<int32>(Vertex), SectionIndex, LocalVertex);
-		if (!LOD.RenderSections.IsValidIndex(SectionIndex)) return Error(TEXT("Foot IK sole vertex section invalid."));
-		const auto& BoneMap = LOD.RenderSections[SectionIndex].BoneMap;
-		uint32 WeightOffset = 0, InfluenceCount = 0;
-		Weights->GetVertexInfluenceOffsetCount(Vertex, WeightOffset, InfluenceCount);
-		uint32 TotalWeight = 0, FootWeight[2] = {}, BallWeight[2] = {};
-		for (uint32 Influence = 0; Influence < InfluenceCount; ++Influence)
-		{
-			const uint32 Weight = Weights->GetBoneWeight(Vertex, Influence);
-			if (Weight == 0) continue;
-			const uint32 BoneInSection = Weights->GetBoneIndex(Vertex, Influence);
-			if (!BoneMap.IsValidIndex(static_cast<int32>(BoneInSection))) return Error(TEXT("Foot IK vertex influence references an invalid section bone."));
-			const int32 Bone = BoneMap[BoneInSection]; TotalWeight += Weight;
-			for (int32 Side = 0; Side < 2; ++Side)
-			{
-				if (Bone == Feet[Side] || Bone == Balls[Side]) FootWeight[Side] += Weight;
-				if (Bone == Balls[Side]) BallWeight[Side] += Weight;
-			}
-		}
-		if (Vertex == 2376 || Vertex == 8172 || Vertex == 19550)
-		{
-			const FVector Position(USkinnedMeshComponent::GetSkinnedVertexPosition(Pose, Vertex, LOD, *Weights, Matrices));
-			for (int32 Side = 0; Side < 2; ++Side)
-			{
-				const FTransform Foot = Pose->GetSocketTransform(Side == 0 ? TEXT("foot_l") : TEXT("foot_r"), RTS_Component);
-				const FTransform Ball = Pose->GetSocketTransform(Side == 0 ? TEXT("ball_l") : TEXT("ball_r"), RTS_Component);
-				const double Denominator = FMath::Max(1.0, static_cast<double>(TotalWeight));
-				UE_LOG(LogTemp, Display, TEXT("FOOT_IK VERTEX_WEIGHT Mesh=%s Vertex=%u Side=%s TotalWeight=%u FootOnlyFraction=%.6f BallFraction=%.6f CombinedSoleFraction=%.6f SourcePositionCS=%s FootLocal=%s BallLocal=%s"),
-					*Mesh->GetPathName(), Vertex, Side == 0 ? TEXT("L") : TEXT("R"), TotalWeight,
-					(FootWeight[Side] - BallWeight[Side]) / Denominator, BallWeight[Side] / Denominator, FootWeight[Side] / Denominator,
-					*Position.ToString(), *Foot.InverseTransformPosition(Position).ToString(), *Ball.InverseTransformPosition(Position).ToString());
-			}
-		}
-		for (int32 Side = 0; Side < 2; ++Side)
-		{
-			if (TotalWeight == 0 || FootWeight[Side] * 2 < TotalWeight) continue;
-			const FVector Position(USkinnedMeshComponent::GetSkinnedVertexPosition(Pose, Vertex, LOD, *Weights, Matrices));
-			if (Position.ContainsNaN()) return Error(TEXT("Foot IK sole skin position is non-finite."));
-			Candidates[Side].Add({static_cast<int32>(Vertex), Position});
-			if (BallWeight[Side] * 2 >= TotalWeight) ToeCandidates[Side].Add({static_cast<int32>(Vertex), Position});
-		}
-	}
-	for (int32 Side = 0; Side < 2; ++Side)
-	{
-		auto& Points = Candidates[Side];
-		if (Points.Num() < 3) return Error(TEXT("Foot IK could not isolate enough foot-weighted shoe vertices."));
-		Points.Sort([](const FSoleVertex& A, const FSoleVertex& B)
-		{ return A.Position.Z != B.Position.Z ? A.Position.Z < B.Position.Z : A.Index < B.Index; });
-		const double LowestZ = Points[0].Position.Z;
-		int32 BottomCount = 0; FBox BottomBox(ForceInit);
-		while (Points.IsValidIndex(BottomCount) && Points[BottomCount].Position.Z <= LowestZ + 0.35)
-		{ BottomBox += Points[BottomCount].Position; ++BottomCount; }
-		if (BottomCount < 3) return Error(TEXT("Foot IK shoe bottom has fewer than three measurable vertices."));
-		FVector SoleCenter = BottomBox.GetCenter(); SoleCenter.Z = LowestZ;
-		const FName FootName = Side == 0 ? TEXT("foot_l") : TEXT("foot_r");
-		const FTransform Foot = Pose->GetSocketTransform(FootName, RTS_Component);
-		Result.Offset[Side] = Foot.InverseTransformPosition(SoleCenter);
-		// 踝骨自身轴向不一定垂直鞋底；记录实际标定鞋底平面法线，避免保留原 foot pitch 后再次叠斜坡旋转。
-		Result.Normal[Side] = Foot.InverseTransformVectorNoScale(FVector::UpVector).GetSafeNormal();
-		// 在真实最低鞋底薄层的投影范围内取九点（含中心），运行时只探测这些标定点，不再读取蒙皮顶点。
-		for (int32 Row = 0; Row < 3; ++Row)
-			for (int32 Column = 0; Column < 3; ++Column)
-			{
-				const FVector SolePoint(FMath::Lerp(BottomBox.Min.X, BottomBox.Max.X, Column * 0.5),
-					FMath::Lerp(BottomBox.Min.Y, BottomBox.Max.Y, Row * 0.5), LowestZ);
-				Result.Probes[Side].Add(Foot.InverseTransformPosition(SolePoint));
-			}
-		// 趾部只使用 ball 主导的底部薄层，不能把整只鞋跟随趾骨弯折；缺失权重时也不虚构鞋长。
-		auto& ToePoints = ToeCandidates[Side];
-		FBox ToeBox(ForceInit); int32 ToeBottomCount = 0;
-		if (!ToePoints.IsEmpty())
-		{
-			ToePoints.Sort([](const FSoleVertex& A, const FSoleVertex& B)
-			{ return A.Position.Z != B.Position.Z ? A.Position.Z < B.Position.Z : A.Index < B.Index; });
-			const double ToeLowestZ = ToePoints[0].Position.Z;
-			while (ToePoints.IsValidIndex(ToeBottomCount) && ToePoints[ToeBottomCount].Position.Z <= ToeLowestZ + 0.35)
-			{ ToeBox += ToePoints[ToeBottomCount].Position; ++ToeBottomCount; }
-			const FTransform Ball = Pose->GetSocketTransform(Side == 0 ? TEXT("ball_l") : TEXT("ball_r"), RTS_Component);
-			if (ToeBottomCount >= 3)
-				for (int32 Row = 0; Row < 3; ++Row)
-					for (int32 Column = 0; Column < 3; ++Column)
-					{
-						const FVector ToePoint(FMath::Lerp(ToeBox.Min.X, ToeBox.Max.X, Column * 0.5),
-							FMath::Lerp(ToeBox.Min.Y, ToeBox.Max.Y, Row * 0.5), ToeLowestZ);
-						Result.ToeProbes[Side].Add(Ball.InverseTransformPosition(ToePoint));
-					}
-			else
-				for (int32 Index = 0; Index < ToeBottomCount; ++Index)
-					Result.ToeProbes[Side].Add(Ball.InverseTransformPosition(ToePoints[Index].Position));
-		}
-		UE_LOG(LogTemp, Display, TEXT("FOOT_IK TOE_PATCH Mesh=%s Side=%s BallDominantCandidates=%d BottomVertices=%d ToeProbes=%d MinCS=%s MaxCS=%s BindBone=%s NoGuessedDimensions=true"),
-			*Mesh->GetPathName(), Side == 0 ? TEXT("L") : TEXT("R"), ToePoints.Num(), ToeBottomCount, Result.ToeProbes[Side].Num(),
-			ToeBottomCount > 0 ? *ToeBox.Min.ToString() : TEXT("None"), ToeBottomCount > 0 ? *ToeBox.Max.ToString() : TEXT("None"),
-			Side == 0 ? TEXT("ball_l") : TEXT("ball_r"));
-		const int32 Stored = FMath::Min(48, BottomCount);
-		for (int32 Index = 0; Index < Stored; ++Index)
-			Result.Vertices[Side].Add(Points[Index * (BottomCount - 1) / FMath::Max(1, Stored - 1)].Index);
-		UE_LOG(LogTemp, Display, TEXT("FOOT_IK SOLE Mesh=%s Idle=%s Foot=%s FootLocation=%s SoleCenterCS=%s SoleOffsetFootLocal=%s SoleNormalFootLocal=%s WeightedCandidates=%d BottomVertices=%d StoredDebugVertices=%d SoleProbes=%d SoleProjectionMinCS=%s SoleProjectionMaxCS=%s BottomThicknessCm=0.35 CPUSkinned=true AnkleNotSole=true MorphClothExcluded=true"),
-			*Mesh->GetPathName(), *Idle->GetPathName(), *FootName.ToString(), *Foot.GetLocation().ToString(), *SoleCenter.ToString(),
-			*Result.Offset[Side].ToString(), *Result.Normal[Side].ToString(), Points.Num(), BottomCount, Stored,
-			Result.Probes[Side].Num(), *BottomBox.Min.ToString(), *BottomBox.Max.ToString());
-	}
-	return true;
-}
-
-// 后处理图只传递主图的当前帧姿态；IK 由共享原生 Proxy 在本帧姿态上计算，不重建原主动画图。
-bool InspectPassThrough(UAnimBlueprint* Blueprint, USkeletalMesh* Mesh)
-{
-	if (!Blueprint || Blueprint->ParentClass != UfpstrueFootIKAnimInstance::StaticClass() || !Blueprint->GeneratedClass
-		|| Blueprint->TargetSkeleton != Mesh->GetSkeleton() || Blueprint->GetOutermost()->IsDirty()
-		|| (Blueprint->GetOutermost()->GetMetaData()->GetValue(Blueprint, CalibrationKey) != CalibrationVersion
-			&& Blueprint->GetOutermost()->GetMetaData()->GetValue(Blueprint, CalibrationKey) != PreviousCalibrationVersion
-			&& Blueprint->GetOutermost()->GetMetaData()->GetValue(Blueprint, CalibrationKey) != FootprintCalibrationVersion))
-		return Error(TEXT("Foot IK refuses an unknown, unsaved or differently parented existing output."));
-	FGraphBuilder Graph = Builder(Blueprint);
-	if (!Graph.bOK || Graph.Graph->Nodes.Num() != 2) return Error(TEXT("Foot IK expected the project passthrough graph only."));
-	UAnimGraphNode_LinkedInputPose* Input = nullptr; UAnimGraphNode_Root* Output = nullptr;
-	for (UEdGraphNode* Node : Graph.Graph->Nodes)
-	{
-		if (auto* Pose = Cast<UAnimGraphNode_LinkedInputPose>(Node)) Input = Pose;
-		if (auto* RootNode = Cast<UAnimGraphNode_Root>(Node)) Output = RootNode;
-	}
-	if (!Input || !Output || Input->Node.Name != FAnimNode_LinkedInputPose::DefaultInputPoseName
-		|| FpstrueTemplatePresentation::SinglePoseSource(Output->FindPin(TEXT("Result"))) != Input
-		|| !PoseOutput(Input) || PoseOutput(Input)->LinkedTo.Num() != 1)
-		return Error(TEXT("Foot IK existing output no longer has its known LinkedInputPose -> Root connection."));
-	return true;
-}
-
-// 仅维护玩家的薄后处理图；敌人不生成、不绑定脚部IK资产。
-void Prepare(const TArray<FString>& Args)
-{
-	const bool bApply = Args.Num() == 1 && Args[0].Equals(TEXT("Apply"), ESearchCase::IgnoreCase);
-	if ((Args.Num() > 0 && !bApply) || !GEditor || GEditor->PlayWorld)
-	{ Error(TEXT("Usage: fp.PrepareFootIK [Apply], no active PIE.")); return; }
-	TStrongObjectPtr<UBlueprint> Player(Load<UBlueprint>(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter")));
-	auto* PlayerDefaults = Player.IsValid() && Player->GeneratedClass ? Cast<AfpstrueCharacter>(Player->GeneratedClass->GetDefaultObject()) : nullptr;
-	USkeletalMesh* Mesh = PlayerDefaults ? PlayerDefaults->GetMesh()->GetSkeletalMeshAsset() : nullptr;
-	TStrongObjectPtr<UAnimSequence> Idle(Load<UAnimSequence>(TEXT("/Game/FPSMPT55/Animations/TPP/AR/A_TPP_AR_Idle")));
-	FSoleCalibration Calibration;
-	if (!MeasureSoles(Mesh, Idle.Get(), Calibration)) return;
-	const TCHAR* Name = TEXT("ABP_PlayerFootIK");
-	const FString Path = FootIKDirectory + Name;
-	const bool bMissing = !FPackageName::DoesPackageExist(Path);
-	TStrongObjectPtr<UAnimBlueprint> Blueprint(bMissing ? nullptr : Load<UAnimBlueprint>(Path));
-	bool bNeedsCalibration = bMissing;
-	if (!bMissing)
-	{
-		if (!InspectPassThrough(Blueprint.Get(), Mesh)) return;
-		const auto* Defaults = Cast<UfpstrueFootIKAnimInstance>(Blueprint->GeneratedClass->GetDefaultObject());
-		if (!Defaults) { Error(TEXT("Player Foot IK output CDO is not the native class.")); return; }
-		const auto SameProbes = [](const TArray<FVector>& A, const TArray<FVector>& B)
-		{
-			if (A.Num() != B.Num()) return false;
-			for (int32 Index = 0; Index < A.Num(); ++Index) if (!A[Index].Equals(B[Index], 0.01)) return false;
-			return true;
-		};
-		bNeedsCalibration = Blueprint->GetOutermost()->GetMetaData()->GetValue(Blueprint.Get(), CalibrationKey) != CalibrationVersion
-			|| !Defaults->LeftSoleOffset.Equals(Calibration.Offset[0], 0.01)
-			|| !Defaults->RightSoleOffset.Equals(Calibration.Offset[1], 0.01)
-			|| !Defaults->LeftSoleNormal.Equals(Calibration.Normal[0], 0.001)
-			|| !Defaults->RightSoleNormal.Equals(Calibration.Normal[1], 0.001)
-			|| !SameProbes(Defaults->LeftSoleProbes, Calibration.Probes[0])
-			|| !SameProbes(Defaults->RightSoleProbes, Calibration.Probes[1])
-			|| !SameProbes(Defaults->LeftToeProbes, Calibration.ToeProbes[0])
-			|| !SameProbes(Defaults->RightToeProbes, Calibration.ToeProbes[1])
-			|| Defaults->LeftSoleVertices != Calibration.Vertices[0] || Defaults->RightSoleVertices != Calibration.Vertices[1];
-	}
-	if (!bApply || !bNeedsCalibration)
-	{
-		UE_LOG(LogTemp, Display, TEXT("FOOT_IK PREPARE_PASS Mode=%s NeedsRepair=%d Missing=%d AssetsSaved=false PlayerOnly=true MainGraphsAndThirdPartyAssetsUntouched=true"),
-			bApply ? TEXT("Apply") : TEXT("Check"), bNeedsCalibration, bMissing);
-		return;
-	}
-	const FString Backup = FPaths::ProjectSavedDir() / TEXT("Backups/FootIKCalibration") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	if (Blueprint.IsValid() && !FpstruePvpAssetPreparation::BackupAsset(
-		FPackageName::LongPackageNameToFilename(Blueprint->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension()), Backup)) return;
-	TArray<UPackage*> Packages;
-	if (!Blueprint.IsValid())
-	{
-		Blueprint.Reset(AnimBlueprint(Name, UfpstrueFootIKAnimInstance::StaticClass(), Mesh, Packages, FootIKDirectory));
-		if (!Blueprint.IsValid()) { Error(TEXT("Player Foot IK AnimBP creation failed; no assets saved.")); return; }
-		FGraphBuilder Graph = Builder(Blueprint.Get());
-		if (!Graph.bOK) { Error(TEXT("Player Foot IK generated AnimGraph unavailable.")); return; }
-		auto* Input = Graph.Node<UAnimGraphNode_LinkedInputPose>(TEXT("接收玩家主动画图最终姿态；原生Proxy在当前帧输入姿态上修正腿部。"));
-		Input->AllocateDefaultPins(); FinishGraph(Graph, Input);
-		if (!Graph.bOK || !FpstruePvpAssetPreparation::Compile(Blueprint.Get()))
-		{ Error(TEXT("Player Foot IK passthrough graph compile failed; no assets saved.")); return; }
-	}
-	auto* Defaults = Cast<UfpstrueFootIKAnimInstance>(Blueprint->GeneratedClass->GetDefaultObject());
-	if (!Defaults) { Error(TEXT("Player Foot IK generated CDO missing; no assets saved.")); return; }
-	Blueprint->Modify(); Defaults->Modify();
-	Defaults->LeftSoleOffset = Calibration.Offset[0]; Defaults->RightSoleOffset = Calibration.Offset[1];
-	Defaults->LeftSoleNormal = Calibration.Normal[0]; Defaults->RightSoleNormal = Calibration.Normal[1];
-	Defaults->LeftSoleProbes = Calibration.Probes[0]; Defaults->RightSoleProbes = Calibration.Probes[1];
-	Defaults->LeftToeProbes = Calibration.ToeProbes[0]; Defaults->RightToeProbes = Calibration.ToeProbes[1];
-	Defaults->LeftSoleVertices = Calibration.Vertices[0]; Defaults->RightSoleVertices = Calibration.Vertices[1];
-	Blueprint->GetOutermost()->GetMetaData()->SetValue(Blueprint.Get(), CalibrationKey, CalibrationVersion);
-	Packages.AddUnique(Blueprint->GetOutermost());
-	for (UPackage* Package : Packages) Package->MarkPackageDirty();
-	if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, false)) { Error(TEXT("Player Foot IK save failed. Backup: ") + Backup); return; }
-	UE_LOG(LogTemp, Display, TEXT("FOOT_IK PREPARE_PASS Mode=Apply PackagesSaved=%d Created=%d Backup=%s PlayerOnly=true MainGraphsAndThirdPartyAssetsUntouched=true"),
-		Packages.Num(), bMissing, *Backup);
-}
-FAutoConsoleCommand Command(TEXT("fp.PrepareFootIK"),
-	TEXT("Check player leg chains and CPU-skinned sole calibration. Apply maintains only the player passthrough FootIK AnimBP."),
-	FConsoleCommandWithArgsDelegate::CreateStatic(&Prepare));
 }
 
 // 正常联网客户端的显式输入驱动验收：空手 -> 行走拾取 -> 双端动作 -> 可选战斗/死亡/重生；不保存资源。
@@ -3211,8 +2612,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			{
 				Local->SetControlRotation(FRotator(0, PairMovementYaw + (PairActionPhase == 9 ? 180.0f : 0.0f), 0));
 				PairMovementPeak = FMath::Max(PairMovementPeak, static_cast<float>(Character->GetVelocity().Size2D()));
-				const bool bFootIKReview = FParse::Param(FCommandLine::Get(), TEXT("PvpFootIKReview"));
-				const double MovementDuration = PairActionPhase == 7 ? (bFootIKReview ? 1.4 : 0.9) : (bFootIKReview ? 0.8 : 0.5);
+				const double MovementDuration = PairActionPhase == 7 ? 0.9 : 0.5;
 				if (Now - PairActionAt < MovementDuration) return;
 				SetForwardKey(false);
 				if (PairMovementPeak < Character->GetCharacterMovement()->MaxWalkSpeed * 0.95f)
@@ -3297,5 +2697,9 @@ FAutoConsoleCommandWithWorld PickupWalkCommand(TEXT("fp.AuditPickupWalk"),
 	TEXT("Normal rendered client only: walk through CharacterMovement to the nearest replicated template pickup, verify real overlap/HUD, and capture empty/equipped views. Does not test EnhancedInput bindings."),
 	FConsoleCommandWithWorldDelegate::CreateStatic(&Start));
 }
+
+#include "Testing/Editor/fpstruePlayerPresentationMigration.inl"
+
+#include "Testing/Editor/fpstrueWeaponPresentationMigration.inl"
 
 #endif // WITH_EDITOR
