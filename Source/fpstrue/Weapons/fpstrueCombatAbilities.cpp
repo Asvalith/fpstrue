@@ -23,7 +23,7 @@ UfpstrueFireAbility::UfpstrueFireAbility()
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 	bRetriggerInstancedAbility = false;
 	bReplicateInputDirectly = false;
-	// 正常松开走输入释放事件；强取消由服务器裁决。
+	// 正常松开走带完整轮次身份的结束控制；强取消由服务器裁决。
 	bServerRespectsRemoteAbilityCancellation = false;
 	SetAssetTags(FGameplayTagContainer(FpstrueGameplayTags::Ability_Fire));
 	ActivationOwnedTags.AddTag(FpstrueGameplayTags::State_Firing);
@@ -40,7 +40,7 @@ bool UfpstrueFireAbility::CanActivateAbility(FGameplayAbilitySpecHandle Handle, 
 	return IsValid(Character) && IsValid(Weapon) && Weapon->CanExecuteShot();
 }
 
-// 松开任务同时运行于拥有者和服务器；远端观察者的枪口/弹道仍由武器表现同步。
+// 拥有者先建立轮次身份再监听松开；远端服务器只接收带完整身份的批次和结束控制。
 void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 	FGameplayAbilityActivationInfo ActivationInfo, const FGameplayEventData*)
 {
@@ -77,13 +77,17 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 		return;
 	}
 	ActiveWeapon = Weapon;
-	UAbilityTask_WaitInputRelease* ReleaseTask = UAbilityTask_WaitInputRelease::WaitInputRelease(this, true);
-	ReleaseTask->OnRelease.AddDynamic(this, &ThisClass::HandleInputReleased);
-	ReleaseTask->ReadyForActivation();
-	// ReadyForActivation 会立即处理已松开的输入；返回时能力可能已经结束。
-	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
 	const FPredictionKey ActivationKey = ActivationInfo.GetActivationPredictionKey();
 	Weapon->BeginAbilityFire(ActivationKey.Current);
+	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
+	if (ActorInfo->IsLocallyControlled())
+	{
+		UAbilityTask_WaitInputRelease* ReleaseTask = UAbilityTask_WaitInputRelease::WaitInputRelease(this, true);
+		ReleaseTask->OnRelease.AddDynamic(this, &ThisClass::HandleInputReleased);
+		ReleaseTask->ReadyForActivation();
+		// 本地任务可立即消费已经松开的输入；远端服务器只接收有扩展身份的结束控制。
+		if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
+	}
 	if (!ActorInfo->IsLocallyControlled())
 	{
 		// 服务器只接受同一原生激活下的不可靠输入窗，不订阅另一条可靠 TargetData 射击路径。
@@ -141,10 +145,10 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 	if (IsValid(Weapon)) Weapon->PublishNetworkState();
 }
 
-// 松开只结束本次能力，释放事件已由 WaitInputRelease 同步给服务器。
+// 本地松开进入统一结束出口；Weapon用完整轮次身份通知服务器，不依赖原生key-only释放事件。
 void UfpstrueFireAbility::HandleInputReleased(float)
 {
-	// EndAbility 先阻止旧调用栈并移除 TargetData 订阅，不再维护第二份“已松开”状态。
+	// EndAbility先关闭本轮任务并发送完整身份，不再维护第二份“已松开”状态。
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 }
 
@@ -376,7 +380,7 @@ bool UfpstrueAimAbility::CanActivateAbility(FGameplayAbilitySpecHandle Handle, c
 	return IsValid(Character) && IsValid(Weapon) && Weapon->CanExecuteShot();
 }
 
-// 与开火一样，WaitInputRelease 覆盖正常松开、输入取消和释放早于服务器激活的情况。
+// 瞄准仍使用原生WaitInputRelease同步，覆盖正常松开、输入取消和释放早于服务器激活的情况。
 void UfpstrueAimAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 	FGameplayAbilityActivationInfo ActivationInfo, const FGameplayEventData*)
 {

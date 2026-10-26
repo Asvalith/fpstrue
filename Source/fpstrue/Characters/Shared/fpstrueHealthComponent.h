@@ -135,14 +135,29 @@ public:
 	virtual void ServerSetReplicatedTargetData_Implementation(FGameplayAbilitySpecHandle AbilityHandle,
 		FPredictionKey AbilityOriginalPredictionKey, const FGameplayAbilityTargetDataHandle& TargetData,
 		FGameplayTag ApplicationTag, FPredictionKey CurrentPredictionKey) override;
-	// GAS 可靠激活负责授权；逐发批次走不可靠窗，未激活时只等待客户端的有限重发。
-	// 激活晚过输入截止点会退款，不能补算一次过旧命中；本入口没有消除激活控制链的等待。
+	// Fire 的远端授权只从有完整轮次身份的批次进入原生 validator；晚到原生激活/结束不再控制它。
+	virtual void InternalServerTryActivateAbility(FGameplayAbilitySpecHandle Handle, bool InputPressed,
+		const FPredictionKey& Key, const FGameplayEventData* TriggerEventData) override;
+	virtual void ServerEndAbility_Implementation(FGameplayAbilitySpecHandle Handle,
+		FGameplayAbilityActivationInfo ActivationInfo, FPredictionKey Key) override;
+	virtual void ServerCancelAbility_Implementation(FGameplayAbilitySpecHandle Handle,
+		FGameplayAbilityActivationInfo ActivationInfo) override;
+	virtual void ServerSetReplicatedEvent_Implementation(EAbilityGenericReplicatedEvent::Type EventType,
+		FGameplayAbilitySpecHandle Handle, FPredictionKey OriginalKey, FPredictionKey CurrentKey) override;
+	virtual void ServerSetReplicatedEventWithPayload_Implementation(EAbilityGenericReplicatedEvent::Type EventType,
+		FGameplayAbilitySpecHandle Handle, FPredictionKey OriginalKey, FPredictionKey CurrentKey,
+		FVector_NetQuantize100 VectorPayload) override;
+	virtual void ServerSetReplicatedTargetDataCancelled_Implementation(FGameplayAbilitySpecHandle Handle,
+		FPredictionKey OriginalKey, FPredictionKey CurrentKey) override;
+	virtual void ServerSetInputPressed_Implementation(FGameplayAbilitySpecHandle Handle) override;
+	virtual void ServerSetInputReleased_Implementation(FGameplayAbilitySpecHandle Handle) override;
+	// 高频输入不等待另一条可靠激活消息；真实能力条件、费用和结算仍由原生 GAS 与武器检查。
 	UFUNCTION(Server, Unreliable)
 	void ServerSubmitShotBatch(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, uint32 FirstShotId,
 		const TArray<FFPShotRequest>& Requests);
-	// 每次结束/明确超时至多一条控制消息；正常松开携带尾部，取消/过期绝不结算伤害。
+	// 即使尾部已全部确认，结束控制也携带原轮次身份；过期只终结指定输入，不结束按住中的新输入。
 	UFUNCTION(Server, Reliable)
-	void ServerFinishShotInputs(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, uint32 FirstShotId,
+	void ServerFinishShotInputs(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, const FFPShotStreamIdentity& Stream,
 		const TArray<FFPShotRequest>& Requests, bool bCancelled, bool bExpired);
 	void RememberClosedShotStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
 		UfpstrueWeaponComponent* Weapon, bool bCancelled);
@@ -216,6 +231,7 @@ protected:
 private:
 	friend class UfpstrueHealthAttributeSet;
 	friend class FFpstrueWeaponShotTransportTest;
+	friend class FFpstrueShotActivationTest;
 	struct FClosedShotStream
 	{
 		FGameplayAbilitySpecHandle Handle;
@@ -224,11 +240,30 @@ private:
 		TWeakObjectPtr<UfpstrueWeaponComponent> Weapon;
 		uint32 Generation = 0;
 		uint32 Session = 0;
+		uint32 FirstShotId = 0;
 		double ClosedAt = 0.0;
 		bool bCancelled = false;
 	};
 	TArray<FClosedShotStream, TInlineAllocator<8>> ClosedShotStreams;
-	void RouteShotInputBatch(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, uint32 FirstShotId,
+	// 每个当前装备/控制连接只保留一个单调新鲜度栅栏。结束或真正拒绝的轮次不因回执淘汰而复活。
+	// 16 位预测键可回绕，新旧由装备代际、32 位轮次/首发与 PackageMap 归属共同区分。
+	enum class EFireStreamPhase : uint8 { Authorizing, Active, Closed };
+	struct FFireStreamFence
+	{
+		FGameplayAbilitySpecHandle Handle;
+		FPredictionKey Key;
+		TWeakObjectPtr<AActor> Avatar;
+		TWeakObjectPtr<AController> Controller;
+		TWeakObjectPtr<UfpstrueWeaponComponent> Weapon;
+		uint32 Generation = 0;
+		uint32 Session = 0;
+		uint32 FirstShotId = 0;
+		uint32 ActivationRevision = 0;
+		EFireStreamPhase Phase = EFireStreamPhase::Closed;
+	} FireStreamFence;
+	bool IsFireAbility(FGameplayAbilitySpecHandle Handle) const;
+	bool HasCurrentPredictionConnection(const FPredictionKey& Key) const;
+	void RouteShotInputBatch(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, const FFPShotStreamIdentity& Stream,
 		const TArray<FFPShotRequest>& Requests, bool bControl, bool bCancelled, bool bExpired);
 	// 属性集以所属 Actor 为 Outer，ASC 只登记它；不能把 AttributeSet 嵌套在组件下面。
 	void EnsureHealthAttributes();

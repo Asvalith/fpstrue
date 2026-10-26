@@ -10,23 +10,101 @@
 #include "Weapons/fpstrueCombatAbilities.h"
 #include "Weapons/fpstrueWeaponComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
+#include "Engine/NetConnection.h"
 #include "Engine/World.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "ProfilingDebugging/MiscTrace.h"
+#include "UObject/ObjectKey.h"
 
-// 保留原生缓存边界保护；Fire 已迁到唯一输入批次入口，旧 TargetData 不再执行或积压。
+bool UfpstrueHealthComponent::IsFireAbility(FGameplayAbilitySpecHandle Handle) const
+{
+	const FGameplayAbilitySpec* Spec = FindAbilitySpecFromHandle(Handle);
+	return Spec != nullptr && Spec->Ability != nullptr && Spec->Ability->IsA<UfpstrueFireAbility>();
+}
+
+bool UfpstrueHealthComponent::HasCurrentPredictionConnection(const FPredictionKey& Key) const
+{
+	if (!Key.IsLocalClientKey()) return false;
+	const APawn* Avatar = Cast<APawn>(GetAvatarActor());
+	if (Avatar == nullptr || Avatar->GetController() == nullptr) return false;
+	const UNetConnection* Connection = Avatar->GetNetConnection();
+	// 没有网络连接的权威本地调用没有 PackageMap；真实远端 RPC 必须属于当前拥有连接。
+	// FPredictionKey::operator== 不比较连接，所以不能只比较16位Current。
+	if (Connection == nullptr) return Key.GetPredictiveConnectionKey() == 0;
+	return Connection->PackageMap != nullptr && Key.GetPredictiveConnectionKey()
+		== BitCast<uint64>(FObjectKey(Connection->PackageMap));
+}
+
+// Fire只由含武器/代际/轮次/首发的批次授权。原生可靠Activate晚到不执行、不发重复失败。
+// 其他能力继续完整使用原生路径；本地authority的Fire也仍由InternalTryActivateAbility正常激活。
+void UfpstrueHealthComponent::InternalServerTryActivateAbility(FGameplayAbilitySpecHandle Handle, bool InputPressed,
+	const FPredictionKey& Key, const FGameplayEventData* TriggerEventData)
+{
+	if (IsFireAbility(Handle))
+	{
+#if !UE_BUILD_SHIPPING
+		if (FParse::Param(FCommandLine::Get(), TEXT("PvpShotLifecycleTrace")))
+			UE_LOG(LogTemp, Display, TEXT("PVP_SHOT_LIFECYCLE NATIVE_ACTIVATE_IGNORED Spec=%u Key=%d"), GetTypeHash(Handle), Key.Current);
+#endif
+		return;
+	}
+	Super::InternalServerTryActivateAbility(Handle, InputPressed, Key, TriggerEventData);
+}
+
+// key-only的原生结束/取消/输入不能驱动Fire新轮次，尤其不能SetRemoteInstanceHasEnded取消新任务。
+void UfpstrueHealthComponent::ServerEndAbility_Implementation(FGameplayAbilitySpecHandle Handle,
+	FGameplayAbilityActivationInfo ActivationInfo, FPredictionKey Key)
+{
+	if (!IsFireAbility(Handle)) Super::ServerEndAbility_Implementation(Handle, ActivationInfo, Key);
+}
+
+void UfpstrueHealthComponent::ServerCancelAbility_Implementation(FGameplayAbilitySpecHandle Handle,
+	FGameplayAbilityActivationInfo ActivationInfo)
+{
+	if (!IsFireAbility(Handle)) Super::ServerCancelAbility_Implementation(Handle, ActivationInfo);
+}
+
+void UfpstrueHealthComponent::ServerSetReplicatedEvent_Implementation(EAbilityGenericReplicatedEvent::Type EventType,
+	FGameplayAbilitySpecHandle Handle, FPredictionKey OriginalKey, FPredictionKey CurrentKey)
+{
+	if (!IsFireAbility(Handle)) Super::ServerSetReplicatedEvent_Implementation(EventType, Handle, OriginalKey, CurrentKey);
+}
+
+void UfpstrueHealthComponent::ServerSetReplicatedEventWithPayload_Implementation(EAbilityGenericReplicatedEvent::Type EventType,
+	FGameplayAbilitySpecHandle Handle, FPredictionKey OriginalKey, FPredictionKey CurrentKey, FVector_NetQuantize100 VectorPayload)
+{
+	if (!IsFireAbility(Handle)) Super::ServerSetReplicatedEventWithPayload_Implementation(EventType, Handle, OriginalKey, CurrentKey, VectorPayload);
+}
+
+void UfpstrueHealthComponent::ServerSetInputPressed_Implementation(FGameplayAbilitySpecHandle Handle)
+{
+	if (!IsFireAbility(Handle)) Super::ServerSetInputPressed_Implementation(Handle);
+}
+
+void UfpstrueHealthComponent::ServerSetInputReleased_Implementation(FGameplayAbilitySpecHandle Handle)
+{
+	if (!IsFireAbility(Handle)) Super::ServerSetInputReleased_Implementation(Handle);
+}
+
+void UfpstrueHealthComponent::ServerSetReplicatedTargetDataCancelled_Implementation(FGameplayAbilitySpecHandle Handle,
+	FPredictionKey OriginalKey, FPredictionKey CurrentKey)
+{
+	if (!IsFireAbility(Handle)) Super::ServerSetReplicatedTargetDataCancelled_Implementation(Handle, OriginalKey, CurrentKey);
+}
+
+// Fire没有第二条TargetData执行/缓存入口；其它能力保留原有的活动身份检查。
 void UfpstrueHealthComponent::ServerSetReplicatedTargetData_Implementation(FGameplayAbilitySpecHandle AbilityHandle,
 	FPredictionKey AbilityOriginalPredictionKey, const FGameplayAbilityTargetDataHandle& TargetData,
 	FGameplayTag ApplicationTag, FPredictionKey CurrentPredictionKey)
 {
+	if (IsFireAbility(AbilityHandle)) return;
 	FGameplayAbilitySpec* Spec = FindAbilitySpecFromHandle(AbilityHandle);
 	UGameplayAbility* Instance = Spec != nullptr ? Spec->GetPrimaryInstance() : nullptr;
 	const bool bCurrent = Instance != nullptr && Instance->IsActive()
 		&& Instance->GetCurrentActivationInfo().GetActivationPredictionKey() == AbilityOriginalPredictionKey;
-	if (!bCurrent || IsDead() || (Spec->Ability != nullptr && Spec->Ability->IsA<UfpstrueFireAbility>()))
+	if (!bCurrent || IsDead())
 	{
-		// 当前项目均为同 ASC 通道的实例化能力；未知/非活动能力不能借目标数据 RPC 占用旧缓存。
 		ConsumeAllReplicatedData(AbilityHandle, AbilityOriginalPredictionKey);
 		return;
 	}
@@ -38,128 +116,282 @@ void UfpstrueHealthComponent::RememberClosedShotStream(FGameplayAbilitySpecHandl
 	UfpstrueWeaponComponent* Weapon, bool bCancelled)
 {
 	if (!HasHealthAuthority() || !IsValid(Weapon) || Weapon->Character.Get() != GetAvatarActor() || GetWorld() == nullptr) return;
+	const FGameplayAbilitySpec* Spec = FindAbilitySpecFromHandle(Handle);
+	const auto* Fire = Spec != nullptr ? Cast<UfpstrueFireAbility>(Spec->GetPrimaryInstance()) : nullptr;
+	const bool bFenceMatches = FireStreamFence.Handle == Handle && FireStreamFence.Key == Key
+		&& FireStreamFence.Key.GetPredictiveConnectionKey() == Key.GetPredictiveConnectionKey()
+		&& FireStreamFence.Weapon.Get() == Weapon && FireStreamFence.Generation == Weapon->EquipmentRevision
+		&& Fire != nullptr && Fire->ActivationRevision == FireStreamFence.ActivationRevision;
+	const uint32 Session = Weapon->InputWindowSession != 0 ? Weapon->InputWindowSession
+		: (Weapon->FireSession != 0 ? Weapon->FireSession : (bFenceMatches ? FireStreamFence.Session : 0));
+	const uint32 First = Weapon->InputWindowFirstShotId != 0 ? Weapon->InputWindowFirstShotId
+		: (bFenceMatches ? FireStreamFence.FirstShotId : 0);
+	if (bFenceMatches) FireStreamFence.Phase = EFireStreamPhase::Closed;
+	if (Session == 0 || First == 0) return; // 未建立过扩展身份的动作没有可转让的尾发执行权。
 	ClosedShotStreams.RemoveAll([this, Handle, Key](const FClosedShotStream& Stream)
-		{ return GetWorld()->GetTimeSeconds() - Stream.ClosedAt > 2.0 || (Stream.Handle == Handle && Stream.Key == Key); });
+		{ return GetWorld()->GetTimeSeconds() - Stream.ClosedAt > 2.0
+			|| (Stream.Handle == Handle && Stream.Key == Key
+				&& Stream.Key.GetPredictiveConnectionKey() == Key.GetPredictiveConnectionKey()); });
 	if (ClosedShotStreams.Num() == 8) ClosedShotStreams.RemoveAt(0, 1, EAllowShrinking::No);
 	ClosedShotStreams.Add({Handle, Key, GetAvatarActor(), Weapon, Weapon->EquipmentRevision,
-		Weapon->InputWindowSession != 0 ? Weapon->InputWindowSession : Weapon->FireSession, GetWorld()->GetTimeSeconds(), bCancelled});
+		Session, First, GetWorld()->GetTimeSeconds(), bCancelled});
 }
 
 void UfpstrueHealthComponent::ServerSubmitShotBatch_Implementation(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
 	uint32 FirstShotId, const TArray<FFPShotRequest>& Requests)
 {
-	RouteShotInputBatch(Handle, Key, FirstShotId, Requests, false, false, false);
+	if (Requests.IsEmpty()) return;
+	const FFPShotRequest& Header = Requests[0];
+	const FFPShotStreamIdentity Stream{Header.Weapon, Header.EquipmentGeneration, Header.FireSession, FirstShotId};
+	RouteShotInputBatch(Handle, Key, Stream, Requests, false, false, false);
 }
 
 void UfpstrueHealthComponent::ServerFinishShotInputs_Implementation(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
-	uint32 FirstShotId, const TArray<FFPShotRequest>& Requests, bool bCancelled, bool bExpired)
+	const FFPShotStreamIdentity& Stream, const TArray<FFPShotRequest>& Requests, bool bCancelled, bool bExpired)
 {
-	RouteShotInputBatch(Handle, Key, FirstShotId, Requests, true, bCancelled, bExpired);
+	RouteShotInputBatch(Handle, Key, Stream, Requests, true, bCancelled, bExpired);
 }
 
 void UfpstrueHealthComponent::RouteShotInputBatch(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
-	uint32 FirstShotId, const TArray<FFPShotRequest>& Requests, bool bControl, bool bCancelled, bool bExpired)
+	const FFPShotStreamIdentity& Stream, const TArray<FFPShotRequest>& Requests, bool bControl, bool bCancelled, bool bExpired)
 {
-	if (!HasHealthAuthority() || GetWorld() == nullptr || Requests.IsEmpty() || Requests.Num() > 8
-		|| FirstShotId == 0 || FirstShotId > MAX_int32 || !Key.IsValidKey()) return;
+	if (bEndingHealthPlay || !HasHealthAuthority() || GetWorld() == nullptr || Requests.Num() > 8
+		|| (!bControl && Requests.IsEmpty()) || Stream.FirstShotId == 0 || Stream.FirstShotId > MAX_int32
+		|| Stream.FireSession == 0 || Stream.EquipmentGeneration == 0 || !IsValid(Stream.Weapon)
+		|| !HasCurrentPredictionConnection(Key)) return;
 	FGameplayAbilitySpec* Spec = FindAbilitySpecFromHandle(Handle);
 	if (Spec == nullptr || Spec->Ability == nullptr || !Spec->Ability->IsA<UfpstrueFireAbility>()) return;
-	const FFPShotRequest& Header = Requests[0];
-	if (Header.Avatar != GetAvatarActor() || !IsValid(Header.Weapon) || Header.FireSession == 0 || Header.EquipmentGeneration == 0) return;
+	auto* Avatar = Cast<AfpstrueCharacter>(GetAvatarActor());
+	UfpstrueWeaponComponent* Weapon = Stream.Weapon->FindComponentByClass<UfpstrueWeaponComponent>();
+	if (!IsValid(Avatar) || !IsValid(Weapon) || Weapon->Character.Get() != Avatar
+		|| Avatar->GetEquippedWeaponComponent() != Weapon || Stream.Weapon->GetOwner() != Avatar
+		|| Weapon->EquipmentRevision != Stream.EquipmentGeneration) return;
 	for (const FFPShotRequest& Request : Requests)
-		if (Request.Avatar != Header.Avatar || Request.Weapon != Header.Weapon || Request.EquipmentGeneration != Header.EquipmentGeneration
-			|| Request.FireSession != Header.FireSession || Request.ShotId < FirstShotId || Request.ShotId > MAX_int32) return;
+		if (Request.Avatar != Avatar || Request.Weapon != Stream.Weapon || Request.EquipmentGeneration != Stream.EquipmentGeneration
+			|| Request.FireSession != Stream.FireSession || Request.ShotId < Stream.FirstShotId || Request.ShotId > MAX_int32) return;
+
 	auto* Fire = Cast<UfpstrueFireAbility>(Spec->GetPrimaryInstance());
 #if !UE_BUILD_SHIPPING
-	const auto TraceRoute = [this, Handle, Key, FirstShotId, &Requests, &Header, Fire, bControl, bCancelled, bExpired](const TCHAR* Decision)
+	const auto TraceRoute = [this, Handle, Key, &Stream, &Requests, &Fire, bControl, bCancelled, bExpired](const TCHAR* Decision)
 	{
 		if (!FParse::Param(FCommandLine::Get(), TEXT("PvpShotLifecycleTrace"))) return;
 		const bool bActive = Fire != nullptr && Fire->IsActive();
 		const int32 ActiveKey = Fire != nullptr ? Fire->GetCurrentActivationInfo().GetActivationPredictionKey().Current : 0;
 		TRACE_BOOKMARK(TEXT("FPShotLifecycle Route Spec=%u Key=%d First=%u Count=%d Active=%d ActiveKey=%d Decision=%s Generation=%u Session=%u"),
-			GetTypeHash(Handle), Key.Current, FirstShotId, Requests.Num(), bActive, ActiveKey, Decision, Header.EquipmentGeneration, Header.FireSession);
+			GetTypeHash(Handle), Key.Current, Stream.FirstShotId, Requests.Num(), bActive, ActiveKey, Decision, Stream.EquipmentGeneration, Stream.FireSession);
 		UE_LOG(LogTemp, Display, TEXT("PVP_SHOT_LIFECYCLE ROUTE Spec=%u Key=%d First=%u Count=%d HeaderShot=%u LastShot=%u Active=%d ActiveKey=%d Decision=%s Generation=%u Session=%u Weapon=%s Control=%d Cancelled=%d Expired=%d ServerTime=%.6f LocalSeconds=%.9f"),
-			GetTypeHash(Handle), Key.Current, FirstShotId, Requests.Num(), Header.ShotId, Requests.Last().ShotId, bActive, ActiveKey,
-			Decision, Header.EquipmentGeneration, Header.FireSession, *GetNameSafe(Header.Weapon), bControl, bCancelled, bExpired,
-			GetWorld()->GetTimeSeconds(), FPlatformTime::Seconds());
+			GetTypeHash(Handle), Key.Current, Stream.FirstShotId, Requests.Num(), Requests.IsEmpty() ? 0 : Requests[0].ShotId,
+			Requests.IsEmpty() ? 0 : Requests.Last().ShotId, bActive, ActiveKey, Decision, Stream.EquipmentGeneration,
+			Stream.FireSession, *GetNameSafe(Stream.Weapon), bControl, bCancelled, bExpired, GetWorld()->GetTimeSeconds(), FPlatformTime::Seconds());
 	};
 	TraceRoute(TEXT("Entry"));
 #endif
-	if (Fire != nullptr && Fire->IsActive() && Fire->GetCurrentActivationInfo().GetActivationPredictionKey() == Key)
+	const auto SameFenceScope = [this, Avatar, Weapon, &Stream, Key]()
+	{
+		return FireStreamFence.Avatar.Get() == Avatar && FireStreamFence.Controller.Get() == Avatar->GetController()
+			&& FireStreamFence.Weapon.Get() == Weapon && FireStreamFence.Generation == Stream.EquipmentGeneration
+			&& FireStreamFence.Key.GetPredictiveConnectionKey() == Key.GetPredictiveConnectionKey();
+	};
+	const auto SameFence = [this, Handle, Key, &Stream, &SameFenceScope]()
+	{
+		return SameFenceScope() && FireStreamFence.Handle == Handle && FireStreamFence.Key == Key
+			&& FireStreamFence.Session == Stream.FireSession && FireStreamFence.FirstShotId == Stream.FirstShotId;
+	};
+	const auto CommitFence = [this, Handle, Key, Avatar, Weapon, &Stream]()
+	{
+		FireStreamFence = {Handle, Key, Avatar, Avatar->GetController(), Weapon, Stream.EquipmentGeneration,
+			Stream.FireSession, Stream.FirstShotId, 0, EFireStreamPhase::Closed};
+	};
+	const double Now = GetWorld()->GetTimeSeconds();
+	const auto FinalizeOne = [this, Weapon, Now](const FFPShotRequest& Request, EFPShotResult Result,
+		bool bRequireExpired, bool bKnownUnadmitted = false)
+	{
+		if (!IsValid(Weapon) || !Weapon->MatchesShotEquipment(Request) || Weapon->Character.Get() != GetAvatarActor()) return;
+		if (bRequireExpired && (!FMath::IsFinite(Request.ServerFireTime)
+			|| Now - Request.ServerFireTime <= UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds)) return;
+		// 原已准入的执行承诺不被结束/重复控制改写。这里只终结没有执行权的输入。
+		if ((!bKnownUnadmitted && Request.ShotId <= Weapon->LastExecutedShotId)
+			|| Weapon->PendingNetworkShots.ContainsByPredicate([&Request](const UfpstrueWeaponComponent::FPendingNetworkShot& Pending)
+			{ return Pending.Request.ShotId == Request.ShotId && Pending.Request.FireSession == Request.FireSession
+				&& Pending.Request.EquipmentGeneration == Request.EquipmentGeneration; })) return;
+		Weapon->RejectShotRequest(Request, Result);
+	};
+	const auto FinalizeAll = [&Requests, &FinalizeOne](EFPShotResult Result, bool bRequireExpired = false, bool bKnownUnadmitted = false)
+	{
+		for (const FFPShotRequest& Request : Requests) FinalizeOne(Request, Result, bRequireExpired, bKnownUnadmitted);
+	};
+	const auto RouteActive = [this, Handle, Key, &Stream, &Requests, Weapon, bControl, bCancelled, bExpired](UfpstrueFireAbility* ActiveFire)
+	{
+		const uint32 ActivationRevision = ActiveFire->ActivationRevision;
+		if (bControl && (bCancelled || bExpired)) Weapon->ReceiveShotInputBatch(Stream.FirstShotId, Requests, false, bCancelled, bExpired);
+		else if (!Requests.IsEmpty()) ActiveFire->HandleShotInputs(Stream.FirstShotId, Requests);
+		// 同步伤害/通知可重启同一个实例；旧结束控制不能结束通知里启动的新轮次。
+		if (bControl && !bExpired && ActiveFire->IsActive() && ActiveFire->ActivationRevision == ActivationRevision
+			&& ActiveFire->GetCurrentAbilitySpecHandle() == Handle && ActiveFire->GetCurrentActivationInfo().GetActivationPredictionKey() == Key
+			&& ActiveFire->ActiveWeapon.Get() == Weapon)
+		{
+			if (FGameplayAbilitySpec* Current = FindAbilitySpecFromHandle(Handle);
+				Current != nullptr && Current->GetPrimaryInstance() == ActiveFire) Current->InputPressed = false;
+			ActiveFire->FinishRemoteShotInputs(bCancelled);
+		}
+	};
+	// Commit可同步广播；同轮次重入的批次只等外层完成，不能提前退款或再次进入validator。
+	if (SameFence() && FireStreamFence.Phase == EFireStreamPhase::Authorizing)
+	{
+		if (bControl && !bExpired)
+		{
+			FireStreamFence.Phase = EFireStreamPhase::Closed;
+			if (Fire != nullptr)
+			{
+				if (FGameplayAbilitySpec* Current = FindAbilitySpecFromHandle(Handle);
+					Current != nullptr && Current->GetPrimaryInstance() == Fire) Current->InputPressed = false;
+				Fire->FinishRemoteShotInputs(bCancelled);
+			}
+			FScopedPredictionWindow PredictionClosure(this, Key);
+			FinalizeAll(EFPShotResult::Cancelled);
+		}
+		return;
+	}
+	const bool bMatchingActive = Fire != nullptr && Fire->IsActive() && !Fire->bEnding && Fire->ActiveWeapon.Get() == Weapon
+		&& Fire->GetCurrentActivationInfo().GetActivationPredictionKey() == Key
+		&& Fire->GetCurrentActivationInfo().GetActivationPredictionKey().GetPredictiveConnectionKey() == Key.GetPredictiveConnectionKey()
+		&& (Weapon->InputWindowSession == 0 || (Weapon->InputWindowSession == Stream.FireSession && Weapon->InputWindowFirstShotId == Stream.FirstShotId))
+		&& (!SameFenceScope() || (SameFence() && FireStreamFence.Phase == EFireStreamPhase::Active));
+	if (bMatchingActive)
 	{
 #if !UE_BUILD_SHIPPING
 		TraceRoute(TEXT("Active"));
 #endif
-		UfpstrueWeaponComponent* Weapon = Fire->ActiveWeapon.Get();
-		if (!IsValid(Weapon) || !Weapon->MatchesShotEquipment(Header)) return;
-		const uint32 ActivationRevision = Fire->ActivationRevision;
-		if (bControl && (bCancelled || bExpired)) Weapon->ReceiveShotInputBatch(FirstShotId, Requests, false, bCancelled, bExpired);
-		else Fire->HandleShotInputs(FirstShotId, Requests);
-		// 出手/伤害通知可在同一调用栈取消并重启同一个 GA 对象；旧结束控制只拥有进入时的那轮。
-		if (bControl && !bExpired && Fire->IsActive() && Fire->ActivationRevision == ActivationRevision
-			&& Fire->GetCurrentAbilitySpecHandle() == Handle && Fire->GetCurrentActivationInfo().GetActivationPredictionKey() == Key
-			&& Fire->ActiveWeapon.Get() == Weapon) Fire->FinishRemoteShotInputs(bCancelled);
+		RouteActive(Fire);
 		return;
 	}
-	// 激活前的包不占缓存，随后只能靠拥有者的有限重发；可靠激活过晚时，本轮仍可能失去有效出手机会。
-	const double Now = GetWorld()->GetTimeSeconds();
-	auto FinalizeWithoutExecution = [&Requests, Now](UfpstrueWeaponComponent* Weapon, EFPShotResult Result, bool bRequireExpired)
+
+	ClosedShotStreams.RemoveAll([Now](const FClosedShotStream& Closed) { return Now - Closed.ClosedAt > 2.0; });
+	FClosedShotStream* Closed = ClosedShotStreams.FindByPredicate([this, Handle, Key, &Stream](const FClosedShotStream& Entry)
 	{
+		return Entry.Handle == Handle && Entry.Key == Key && Entry.Key.GetPredictiveConnectionKey() == Key.GetPredictiveConnectionKey()
+			&& Entry.Avatar.Get() == GetAvatarActor() && Entry.Weapon.IsValid() && Entry.Weapon->GetOwner() == Stream.Weapon
+			&& Entry.Generation == Stream.EquipmentGeneration && Entry.Session == Stream.FireSession
+			&& Entry.FirstShotId == Stream.FirstShotId;
+	});
+	if (Closed != nullptr)
+	{
+#if !UE_BUILD_SHIPPING
+		TraceRoute(TEXT("Closed"));
+#endif
+		Closed->bCancelled |= bCancelled;
+		const bool bCannotExecute = Closed->bCancelled || bCancelled || bExpired || IsDead()
+			|| HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading) || HasMatchingGameplayTag(FpstrueGameplayTags::State_Dead)
+			|| Weapon->FirePresentationKey != Key.Current || Now - Closed->ClosedAt > UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds;
+		if (bCannotExecute)
+		{
+			if (!bExpired && Weapon->FirePresentationKey == Key.Current && Weapon->InputWindowSession == Closed->Session)
+				Weapon->CancelOrderedShotInputs();
+			FinalizeAll(bExpired || Now - Closed->ClosedAt > UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds
+				? EFPShotResult::InvalidTime : EFPShotResult::Cancelled);
+			return;
+		}
+		Weapon->InputClosedServerSeconds = Closed->ClosedAt;
+		if (!Requests.IsEmpty()) Weapon->ReceiveShotInputBatch(Stream.FirstShotId, Requests, true);
+		return;
+	}
+
+	// 单发过期只收账，不消费整个held stream的授权；后续同轮次仍可带来新的合法输入。
+	if (bExpired) { FinalizeAll(EFPShotResult::InvalidTime, true); return; }
+	const bool bFresh = (!SameFenceScope() || (Stream.FireSession > FireStreamFence.Session && Stream.FirstShotId >= FireStreamFence.FirstShotId))
+		&& Stream.FirstShotId > Weapon->LastReceivedShotId && Stream.FireSession > Weapon->LastRemoteFireSession;
+	if (!bFresh)
+	{
+#if !UE_BUILD_SHIPPING
+		TraceRoute(TEXT("OldOrFinished"));
+#endif
+		FinalizeAll(EFPShotResult::InvalidContext);
+		return;
+	}
+	// 真正结束/取消没有任何新射击也要关闭轮次，并收口本地预测key，不能伪激活一次Fire。
+	if (bControl && (bCancelled || Requests.IsEmpty()))
+	{
+		CommitFence();
+		FScopedPredictionWindow PredictionClosure(this, Key);
+		// 旧结束可能仍堵在可靠队列里。较新空轮次已明确松开，正常结束旧Fire，保留其已准入事实。
+		// 状态先写，End回调可以开启新轮次；返回后不再修改新Fence或新Spec输入。
+		if (Fire != nullptr && Fire->IsActive())
+		{
+			if (FGameplayAbilitySpec* Current = FindAbilitySpecFromHandle(Handle);
+				Current != nullptr && Current->GetPrimaryInstance() == Fire) Current->InputPressed = false;
+			Fire->FinishRemoteShotInputs(false);
+		}
+		FinalizeAll(bCancelled ? EFPShotResult::Cancelled : EFPShotResult::InvalidContext, false, true);
+		return;
+	}
+
+	const uint32 FirstPendingShotId = Weapon->SkipFinalizedShotPrefix(Stream.FirstShotId);
+	const auto PreviewInput = [Weapon, FirstPendingShotId, Now](const FFPShotRequest& Request)
+	{
+		if (Request.ShotId < FirstPendingShotId || Request.ShotId - FirstPendingShotId >= UfpstrueWeaponComponent::ShotInputWindowSize)
+			return EFPShotResult::InvalidIdentity;
+		double AllowedAge = 0.0;
+		if (!Weapon->IsShotRequestTimeValid(Request, Now, AllowedAge)) return EFPShotResult::InvalidTime;
+		const EFPShotResult Views = Weapon->ValidateRenderedViews(Request, Now);
+		if (Views != EFPShotResult::Accepted) return Views;
+		if (Request.AimDirection.ContainsNaN() || !FVector(Request.AimDirection).IsNormalized()) return EFPShotResult::InvalidAim;
+		return EFPShotResult::Accepted;
+	};
+	bool bHasFreshInput = false;
+	for (const FFPShotRequest& Request : Requests)
+		if (Request.ShotId > Weapon->LastReceivedShotId && !Weapon->FinalizedShotInputs.Contains(Request.ShotId)
+			&& PreviewInput(Request) == EFPShotResult::Accepted) { bHasFreshInput = true; break; }
+	if (!bHasFreshInput)
+	{
+		// 过旧首发只退款自己。不能推进LastReceived阻断同轮次后续新鲜输入，也不能创造授权。
 		for (const FFPShotRequest& Request : Requests)
 		{
-			if (!Weapon->MatchesShotEquipment(Request)) continue;
-			if (bRequireExpired && (!FMath::IsFinite(Request.ServerFireTime)
-				|| Now - Request.ServerFireTime <= UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds)) continue;
-			// 已执行/已准入的原结果仍由同一个执行器和可靠重传负责，取消收据不能改写承诺。
-			if (Request.ShotId <= Weapon->LastExecutedShotId || Weapon->PendingNetworkShots.ContainsByPredicate([&Request](const UfpstrueWeaponComponent::FPendingNetworkShot& Pending)
-				{ return Pending.Request.ShotId == Request.ShotId && Pending.Request.FireSession == Request.FireSession
-					&& Pending.Request.EquipmentGeneration == Request.EquipmentGeneration; })) continue;
-			Weapon->AcknowledgeShot(Request, Result);
+			const EFPShotResult Preview = PreviewInput(Request);
+			double AllowedAge = 0.0;
+			if (!Weapon->IsShotRequestTimeValid(Request, Now, AllowedAge))
+				Weapon->ReportShotTimeRejection(Request, TEXT("Admission"), Now, AllowedAge);
+			FinalizeOne(Request, Preview == EFPShotResult::Accepted ? EFPShotResult::Duplicate : Preview, false);
 		}
-	};
-	ClosedShotStreams.RemoveAll([Now](const FClosedShotStream& Stream) { return Now - Stream.ClosedAt > 2.0; });
-	FClosedShotStream* Closed = ClosedShotStreams.FindByPredicate([this, Handle, Key, &Header](const FClosedShotStream& Stream)
-	{
-		return Stream.Handle == Handle && Stream.Key == Key && Stream.Avatar.Get() == GetAvatarActor()
-			&& Stream.Weapon.IsValid() && Stream.Weapon->GetOwner() == Header.Weapon && Stream.Generation == Header.EquipmentGeneration
-			&& (Stream.Session == 0 || Stream.Session == Header.FireSession);
-	});
-	if (Closed == nullptr)
-	{
-#if !UE_BUILD_SHIPPING
-		TraceRoute(TEXT("NoAuthorization"));
-#endif
-		// 执行授权已过期/被有界回执淘汰，不代表允许把本端账永远悬空。
-		// 只接受当前真实持有者的过期控制作终结；未知新键/新鲜输入仍不回复，更不执行。
-		UfpstrueWeaponComponent* Weapon = Header.Weapon->FindComponentByClass<UfpstrueWeaponComponent>();
-		if (bControl && IsValid(Weapon) && Weapon->MatchesShotEquipment(Header)
-			&& Weapon->GetOwner()->GetOwner() == GetAvatarActor() && Weapon->Character.IsValid()
-			&& Weapon->Character->GetEquippedWeaponComponent() == Weapon)
-			FinalizeWithoutExecution(Weapon, EFPShotResult::InvalidTime, true);
 		return;
 	}
-#if !UE_BUILD_SHIPPING
-	TraceRoute(TEXT("Closed"));
-#endif
-	// 可能整批均在原生激活前丢失；同 key 第一次关闭消息固定未解析的会话，之后不能更换。
-	if (Closed->Session == 0) Closed->Session = Header.FireSession;
-	Closed->bCancelled |= bCancelled;
-	UfpstrueWeaponComponent* Weapon = Closed->Weapon.Get();
-	if (!Weapon->MatchesShotEquipment(Header) || Weapon->GetOwner()->GetOwner() != GetAvatarActor()
-		|| !Weapon->Character.IsValid() || Weapon->Character->GetEquippedWeaponComponent() != Weapon) return;
-	const bool bCannotExecute = Closed->bCancelled || bCancelled || bExpired || IsDead()
-		|| HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading) || HasMatchingGameplayTag(FpstrueGameplayTags::State_Dead)
-		|| Weapon->FirePresentationKey != Key.Current || Now - Closed->ClosedAt > UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds;
-	if (bCannotExecute)
+
+	// 先占用新鲜身份再调用外部生命周期；native拒绝后也不能等条件变好，用同轮次再试一次。
+	CommitFence();
+	FireStreamFence.Phase = EFireStreamPhase::Authorizing;
+	if (Fire != nullptr && Fire->IsActive()) Fire->FinishRemoteShotInputs(false);
+	if (!SameFence() || FireStreamFence.Phase != EFireStreamPhase::Authorizing || !IsValid(Weapon) || Weapon->Character.Get() != GetAvatarActor()
+		|| Avatar->GetEquippedWeaponComponent() != Weapon || !HasCurrentPredictionConnection(Key))
 	{
-		if (!bExpired && Weapon->FirePresentationKey == Key.Current && Weapon->InputWindowSession == Closed->Session)
-			Weapon->CancelOrderedShotInputs();
-		FinalizeWithoutExecution(Weapon,
-			bExpired || Now - Closed->ClosedAt > UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds ? EFPShotResult::InvalidTime : EFPShotResult::Cancelled, false);
+		FinalizeAll(EFPShotResult::Cancelled, false, true);
 		return;
 	}
-	Weapon->InputClosedServerSeconds = Closed->ClosedAt;
-	Weapon->ReceiveShotInputBatch(FirstShotId, Requests, true);
+	// 唯一授权入口仍是原生validator：安全策略、CanActivate、费用、Commit和成功/失败通知全部保留。
+	Spec = FindAbilitySpecFromHandle(Handle);
+	Fire = Spec != nullptr ? Cast<UfpstrueFireAbility>(Spec->GetPrimaryInstance()) : nullptr;
+	FireStreamFence.ActivationRevision = Fire != nullptr ? Fire->ActivationRevision + 1 : 1;
+	Super::InternalServerTryActivateAbility(Handle, true, Key, nullptr);
+	Spec = FindAbilitySpecFromHandle(Handle);
+	Fire = Spec != nullptr ? Cast<UfpstrueFireAbility>(Spec->GetPrimaryInstance()) : nullptr;
+	if (!SameFence() || FireStreamFence.Phase != EFireStreamPhase::Authorizing
+		|| !IsValid(Weapon) || Avatar->GetEquippedWeaponComponent() != Weapon)
+	{
+		// 本批在调用validator前严格晚于旧LastReceived，尚未准入；新回调即使推进水位也不能遗失旧账。
+		FinalizeAll(EFPShotResult::Cancelled, false, true);
+		return;
+	}
+	if (Fire == nullptr || !Fire->IsActive() || Fire->bEnding || Fire->ActiveWeapon.Get() != Weapon
+		|| Fire->GetCurrentActivationInfo().GetActivationPredictionKey() != Key
+		|| Fire->ActivationRevision != FireStreamFence.ActivationRevision)
+	{
+		FireStreamFence.Phase = EFireStreamPhase::Closed;
+		FinalizeAll(EFPShotResult::InvalidContext, false, true);
+		return;
+	}
+	FireStreamFence.Phase = EFireStreamPhase::Active;
+#if !UE_BUILD_SHIPPING
+	TraceRoute(TEXT("BatchAuthorized"));
+#endif
+	RouteActive(Fire);
 }
 
 namespace FpstrueGameplayTags

@@ -289,7 +289,7 @@ void UfpstrueWeaponComponent::PublishNetworkState()
 	NetworkState.EquipmentGeneration = EquipmentRevision;
 	NetworkState.bDroppedOnDeath = bDroppedOnDeath;
 	++NetworkState.Revision;
-	// 同一次提交派生两个受众的结果；弹药不再向旁观连接发送，逐发裁决只走可靠 ACK。
+	// 同一次提交派生公共/拥有者快照；逐发裁决另用近期快速窗口与可靠兜底，不塞进公共快照。
 	OwnerState.EquipmentGeneration = EquipmentRevision;
 	OwnerState.Revision = NetworkState.Revision;
 	OwnerState.Ammo = CurrentAmmo;
@@ -510,6 +510,22 @@ bool UfpstrueWeaponComponent::MatchesShotEquipment(const FFPShotRequest& Request
 	return Request.Avatar == Character.Get() && Request.Weapon == GetOwner() && Request.EquipmentGeneration == EquipmentRevision;
 }
 
+bool UfpstrueWeaponComponent::IsShotRequestTimeValid(const FFPShotRequest& Request, double ServerNow, double& OutAllowedAge) const
+{
+	const APlayerState* PlayerState = Character.IsValid() ? Character->GetPlayerState() : nullptr;
+	const double OneWayDelay = PlayerState != nullptr ? PlayerState->GetPingInMilliseconds() * 0.0005 : 0.0;
+	OutAllowedAge = FMath::Clamp(OneWayDelay * 1.5 + 0.05, 0.10, MaxNetworkShotAgeSeconds);
+	return IsShotTimeWithinWindow(Request.ServerFireTime, ServerNow, OutAllowedAge);
+}
+
+void UfpstrueWeaponComponent::ReportShotTimeRejection(const FFPShotRequest& Request, const TCHAR* Stage, double Now,
+	double AllowedAge, const TCHAR* SpecificReason) const
+{
+#if !UE_BUILD_SHIPPING
+	LogShotTimeRejection(Request, Character.Get(), GetOwner(), Stage, Now, AllowedAge, SpecificReason);
+#endif
+}
+
 EFPShotResult UfpstrueWeaponComponent::ValidateRenderedViews(const FFPShotRequest& Request, double ServerNow) const
 {
 	if (Request.RenderedViews.Num() > FFPShotRequest::MaxRenderedViews) return EFPShotResult::InvalidIdentity;
@@ -549,7 +565,7 @@ void UfpstrueWeaponComponent::BeginAbilityFire(int32 PredictionKey)
 	FireSession = ++LocalFireSessionSerial;
 	FirstPredictedShotForCurrentFire = LocalShotSerial + 1;
 	if (PredictedPresentations.Num() == 8) PredictedPresentations.RemoveAt(0);
-	PredictedPresentations.Add({PredictionKey, EquipmentRevision, FireSession, 0});
+	PredictedPresentations.Add({PredictionKey, EquipmentRevision, FireSession, 0, FirstPredictedShotForCurrentFire});
 	bPredictingFire = true;
 	// GA 决定何时生成下一发输入；服务器唯一队列 Timer 只执行已经合法准入的请求。
 }
@@ -662,19 +678,68 @@ void UfpstrueWeaponComponent::SubmitShotInput(const FFPShotRequest& Request, FGa
 	SendPendingShotInputs();
 }
 
-// 最多8发/6次，重用批次缓冲；没有可靠逐发调用，更不会每帧追加可靠积压。
+// 同一批探测只影响本地发送安排；服务器仍独立检查年龄、射速、装备和能力授权。
+UfpstrueWeaponComponent::FShotRetryTiming UfpstrueWeaponComponent::GetShotRetryTiming() const
+{
+	FShotRetryTiming Timing;
+#if !UE_BUILD_SHIPPING
+	// 单变量实验共用发送及400ms收尾，仅把请求间隔固定为40ms。
+	Timing.bFixedReference = FParse::Param(FCommandLine::Get(), TEXT("PvpFixedShotRetry"));
+#endif
+	const auto* Controller = Character.IsValid() ? Cast<AfpstruePvpPlayerController>(Character->GetController()) : nullptr;
+	if (Controller != nullptr && Controller->HasRoundTripTimeSample())
+	{
+		const double RoundTrip = Controller->GetSmoothedRoundTripTimeSeconds();
+		const double Variation = Controller->GetRoundTripVariationSeconds();
+		if (FMath::IsFinite(RoundTrip) && FMath::IsFinite(Variation) && RoundTrip >= 0.0 && Variation >= 0.0)
+		{
+			Timing.RoundTripSeconds = RoundTrip;
+			Timing.VariationSeconds = Variation;
+			if (!Timing.bFixedReference)
+				// 等待的是往返确认；用一份RTT加波动预留，仍受实时输入20–60ms预算限制，并非UE传输RTO。
+				Timing.IntervalSeconds = FMath::Clamp(RoundTrip + Variation * 2.0, MinShotRetryInterval, MaxShotRetryInterval);
+		}
+	}
+	return Timing;
+}
+
+// 单次Timer唤醒最近的发送/过期点；WorldTime早醒只重排，不补跑多次，也不忙轮询。
+void UfpstrueWeaponComponent::ScheduleShotInputRetry(double Now, const FShotRetryTiming& Timing)
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr) return;
+	double NextWake = TNumericLimits<double>::Max();
+	for (const FClientShotInput& Input : ClientShotInputs)
+	{
+		if (Input.bExpirationSent) continue;
+		NextWake = FMath::Min(NextWake, Input.CreatedSeconds + ShotInputExpireSeconds);
+		if (Input.Attempts >= MaxShotInputAttempts) continue;
+		const double NextSend = Input.Attempts == 0 ? Now : Input.LastSentSeconds + Timing.IntervalSeconds;
+		NextWake = FMath::Min(NextWake, NextSend);
+	}
+	if (NextWake == TNumericLimits<double>::Max()) World->GetTimerManager().ClearTimer(ShotRetryTimerHandle);
+	else World->GetTimerManager().SetTimer(ShotRetryTimerHandle, this, &ThisClass::SendPendingShotInputs,
+		static_cast<float>(FMath::Max(NextWake - Now, .001)), false);
+}
+
+// 最多8发/6次。新输入可顺带尚未终结的旧输入；无新输入时按RTT策略独立补发。
 void UfpstrueWeaponComponent::SendPendingShotInputs()
 {
 	UWorld* World = GetWorld();
 	auto* ASC = Character.IsValid() ? Cast<UfpstrueHealthComponent>(Character->GetAbilitySystemComponent()) : nullptr;
 	if (World == nullptr || ASC == nullptr || GetOwner() == nullptr || GetOwner()->HasAuthority()) return;
-	// 只属于拥有者的传输账本与真实出手同用单调时间；World Timer早醒/补发回调不能加速重发或过期。
 	const double Now = FPlatformTime::Seconds();
+	const FShotRetryTiming Timing = GetShotRetryTiming();
 	TArray<int32, TInlineAllocator<ShotInputWindowSize>> Grouped;
 	for (int32 Index = 0; Index < ClientShotInputs.Num(); ++Index)
 	{
 		if (Grouped.Contains(Index)) continue;
 		const FClientShotInput Header = ClientShotInputs[Index];
+		const bool bHasNewInput = ClientShotInputs.ContainsByPredicate([&Header](const FClientShotInput& Input)
+		{
+			return Input.Handle == Header.Handle && Input.Key == Header.Key && Input.FirstShotId == Header.FirstShotId
+				&& Input.Attempts == 0 && !Input.bExpirationSent;
+		});
 		ShotInputScratch.Reset();
 		TArray<FFPShotRequest, TInlineAllocator<ShotInputWindowSize>> Expired;
 		for (int32 Peer = Index; Peer < ClientShotInputs.Num(); ++Peer)
@@ -688,8 +753,12 @@ void UfpstrueWeaponComponent::SendPendingShotInputs()
 				if (!Input.bExpirationSent) { Input.bExpirationSent = true; Expired.Add(Input.Request); }
 				continue;
 			}
-			if (Input.Attempts >= MaxShotInputAttempts) continue;
-			if (Input.Attempts > 0 && Now - Input.LastSentSeconds + UE_DOUBLE_SMALL_NUMBER < ShotRetryInterval) continue;
+			if (Input.bExpirationSent || Input.Attempts >= MaxShotInputAttempts) continue;
+			const bool bFirstSend = Input.Attempts == 0;
+			double RetryInterval = Timing.IntervalSeconds;
+			const bool bPiggyback = !bFirstSend && bHasNewInput && Now - Input.LastSentSeconds + UE_DOUBLE_SMALL_NUMBER >= MinShotRetryInterval;
+			if (bPiggyback) RetryInterval = MinShotRetryInterval;
+			if (!bFirstSend && Now - Input.LastSentSeconds + UE_DOUBLE_SMALL_NUMBER < RetryInterval) continue;
 			++Input.Attempts;
 			Input.LastSentSeconds = Now;
 			ShotInputScratch.Add(Input.Request);
@@ -697,8 +766,12 @@ void UfpstrueWeaponComponent::SendPendingShotInputs()
 			TRACE_BOOKMARK(TEXT("FPShot Submit Weapon=%llu Generation=%u Session=%u ShotId=%u Attempt=%d"),
 				GetWeaponShotNetGuid(GetOwner()), Input.Request.EquipmentGeneration, Input.Request.FireSession, Input.Request.ShotId, Input.Attempts);
 			if (ShouldLogShotProtocol())
-				UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_SUBMIT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu Attempt=%d MaxAttempts=%d RetryDelayMs=40 LocalSeconds=%.9f Transport=UnreliableBatch"),
-					Input.Request.ShotId, Input.Request.FireSession, Input.Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), Input.Attempts, MaxShotInputAttempts, FPlatformTime::Seconds());
+				UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLIENT_SHOT_SUBMIT ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu Attempt=%d MaxAttempts=%d RetryDelayMs=%.3f LocalSeconds=%.9f Transport=UnreliableBatch Policy=%s RequestedRetryMs=%.3f InputAgeMs=%.3f SRTTms=%.3f RTTVARms=%.3f Piggyback=%d"),
+					Input.Request.ShotId, Input.Request.FireSession, Input.Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()), Input.Attempts, MaxShotInputAttempts,
+					RetryInterval * 1000.0, Now, Timing.bFixedReference ? TEXT("FixedReference") : Timing.RoundTripSeconds >= 0.0 ? TEXT("Adaptive") : TEXT("Fallback"),
+					Timing.IntervalSeconds * 1000.0, (Now - Input.CreatedSeconds) * 1000.0,
+					Timing.RoundTripSeconds >= 0.0 ? Timing.RoundTripSeconds * 1000.0 : -1.0,
+					Timing.VariationSeconds >= 0.0 ? Timing.VariationSeconds * 1000.0 : -1.0, bPiggyback);
 			if (FParse::Param(FCommandLine::Get(), TEXT("PvpShotLifecycleTrace")))
 			{
 				TRACE_BOOKMARK(TEXT("FPShotLifecycle Submit Spec=%u Key=%d First=%u ShotId=%u Attempt=%d Generation=%u Session=%u Weapon=%llu"),
@@ -706,7 +779,7 @@ void UfpstrueWeaponComponent::SendPendingShotInputs()
 					Input.Request.EquipmentGeneration, Input.Request.FireSession, GetWeaponShotNetGuid(GetOwner()));
 				UE_LOG(LogTemp, Display, TEXT("PVP_SHOT_LIFECYCLE SUBMIT Spec=%u Key=%d First=%u ShotId=%u Attempt=%d Generation=%u Session=%u WeaponNetGuid=%llu LocalSeconds=%.9f"),
 					GetTypeHash(Input.Handle), Input.Key.Current, Input.FirstShotId, Input.Request.ShotId, Input.Attempts,
-					Input.Request.EquipmentGeneration, Input.Request.FireSession, GetWeaponShotNetGuid(GetOwner()), FPlatformTime::Seconds());
+					Input.Request.EquipmentGeneration, Input.Request.FireSession, GetWeaponShotNetGuid(GetOwner()), Now);
 			}
 #endif
 		}
@@ -715,31 +788,47 @@ void UfpstrueWeaponComponent::SendPendingShotInputs()
 		{
 			ShotInputScratch.Reset();
 			for (const FFPShotRequest& Request : Expired) ShotInputScratch.Add(Request);
-			ASC->ServerFinishShotInputs(Header.Handle, Header.Key, Header.FirstShotId, ShotInputScratch, false, true);
+			FFPShotStreamIdentity Stream;
+			Stream.Weapon = Header.Request.Weapon;
+			Stream.EquipmentGeneration = Header.Request.EquipmentGeneration;
+			Stream.FireSession = Header.Request.FireSession;
+			Stream.FirstShotId = Header.FirstShotId;
+			ASC->ServerFinishShotInputs(Header.Handle, Header.Key, Stream, ShotInputScratch, false, true);
 #if !UE_BUILD_SHIPPING
 			if (ShouldLogShotProtocol()) UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_INPUT_EXPIRE_CONTROL Count=%d Key=%d"), Expired.Num(), Header.Key.Current);
 #endif
 		}
 	}
-	const bool bNeedsRetry = ClientShotInputs.ContainsByPredicate([](const FClientShotInput& Input) { return !Input.bExpirationSent; });
-	if (bNeedsRetry && !World->GetTimerManager().TimerExists(ShotRetryTimerHandle))
-		World->GetTimerManager().SetTimer(ShotRetryTimerHandle, this, &ThisClass::SendPendingShotInputs, ShotRetryInterval, true);
-	else if (!bNeedsRetry) World->GetTimerManager().ClearTimer(ShotRetryTimerHandle);
+	ScheduleShotInputRetry(Now, Timing);
 }
 
 void UfpstrueWeaponComponent::FinishShotInputStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, bool bCancelled)
 {
 	auto* ASC = Character.IsValid() ? Cast<UfpstrueHealthComponent>(Character->GetAbilitySystemComponent()) : nullptr;
 	if (ASC == nullptr || GetOwner() == nullptr || GetOwner()->HasAuthority()) return;
+	// 按GA传入的旧预测键捕获自己的轮次。终结ACK可能已清空尾发，不能因此漏发结束控制。
+	const FPredictedFirePresentation* Presentation = PredictedPresentations.FindByPredicate([this, Key](const FPredictedFirePresentation& P)
+		{ return P.Key == Key.Current && P.Generation == EquipmentRevision; });
+	if (Presentation == nullptr || Presentation->FirstShotId == 0) return;
+	FFPShotStreamIdentity Stream;
+	Stream.Weapon = GetOwner();
+	Stream.EquipmentGeneration = Presentation->Generation;
+	Stream.FireSession = Presentation->Session;
+	Stream.FirstShotId = Presentation->FirstShotId;
 	ShotInputScratch.Reset();
-	uint32 FirstShotId = 0;
 	for (const FClientShotInput& Input : ClientShotInputs)
-		if (Input.Handle == Handle && Input.Key == Key)
-		{
-			FirstShotId = Input.FirstShotId;
+		if (Input.Handle == Handle && Input.Key == Key && Input.Request.EquipmentGeneration == Stream.EquipmentGeneration
+			&& Input.Request.FireSession == Stream.FireSession && Input.FirstShotId == Stream.FirstShotId)
 			ShotInputScratch.Add(Input.Request);
-		}
-	if (!ShotInputScratch.IsEmpty()) ASC->ServerFinishShotInputs(Handle, Key, FirstShotId, ShotInputScratch, bCancelled, false);
+	ASC->ServerFinishShotInputs(Handle, Key, Stream, ShotInputScratch, bCancelled, false);
+}
+
+// 已退款的连续前缀不再占8发接收窗口；只跳过真实终结记录，不把没收到的输入当作丢失。
+uint32 UfpstrueWeaponComponent::SkipFinalizedShotPrefix(uint32 FirstShotId) const
+{
+	uint32 Next = FirstShotId;
+	for (int32 Skipped = 0; Skipped < FinalizedShotInputs.Num() && FinalizedShotInputs.Contains(Next); ++Skipped) ++Next;
+	return Next;
 }
 
 bool UfpstrueWeaponComponent::ReceiveShotInputBatch(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests,
@@ -756,6 +845,7 @@ bool UfpstrueWeaponComponent::ReceiveShotInputBatch(uint32 FirstShotId, const TA
 		InputWindowSession = Header.FireSession;
 	}
 	if (InputWindowFirstShotId != FirstShotId || InputWindowSession != Header.FireSession) return false;
+	NextOrderedShotId = SkipFinalizedShotPrefix(NextOrderedShotId);
 	bReleasedInputWindow |= bReleasedAuthorization;
 	bool bReceived = false;
 	for (const FFPShotRequest& Request : Requests)
@@ -841,72 +931,72 @@ void UfpstrueWeaponComponent::CancelOrderedShotInputs()
 	}
 }
 
+// 只复用拒绝终结与诊断，不增加另一套规则或结算；ACK仍拒绝覆盖已经准入的事实。
+EFPShotResult UfpstrueWeaponComponent::RejectShotRequest(const FFPShotRequest& Request, EFPShotResult Result)
+{
+#if !UE_BUILD_SHIPPING
+	TRACE_BOOKMARK(TEXT("FPShot Admission Weapon=%llu Generation=%u Session=%u ShotId=%u Result=%d"),
+		GetWeaponShotNetGuid(GetOwner()), Request.EquipmentGeneration, Request.FireSession, Request.ShotId, static_cast<int32>(Result));
+	const int32 AmmoBefore = CurrentAmmo, ReserveBefore = ReserveAmmo;
+	const uint32 ExecutedBefore = LastExecutedShotId;
+#endif
+	AcknowledgeShot(Request, Result);
+#if !UE_BUILD_SHIPPING
+	if (ShouldLogShotProtocol())
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_REJECT_BOUNDARY ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu AmmoBefore=%d AmmoAfter=%d ReserveBefore=%d ReserveAfter=%d ExecutedBefore=%u ExecutedAfter=%u"),
+			Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()),
+			AmmoBefore, CurrentAmmo, ReserveBefore, ReserveAmmo, ExecutedBefore, LastExecutedShotId);
+#endif
+	return Result;
+}
+
 // 准入：验证新输入并入队；只有 ExecuteNetworkShot 能把它交给 Fire 提交。
 // 【设计取舍】准入与执行是两个时点，不是重复结算：有界队列吸收射速节拍与到包时机的差异，
 // 等待期间仍可能死亡、换枪或换弹，所以执行前必须复核；只有 Fire 扣弹和施加伤害。
 EFPShotResult UfpstrueWeaponComponent::AcceptShotRequest(const FFPShotRequest& Request, bool bReleasedAuthorization)
 {
-	auto Reject = [this, &Request](EFPShotResult Result)
-	{
-#if !UE_BUILD_SHIPPING
-		TRACE_BOOKMARK(TEXT("FPShot Admission Weapon=%llu Generation=%u Session=%u ShotId=%u Result=%d"),
-			GetWeaponShotNetGuid(GetOwner()), Request.EquipmentGeneration, Request.FireSession, Request.ShotId, static_cast<int32>(Result));
-		const int32 AmmoBefore = CurrentAmmo, ReserveBefore = ReserveAmmo;
-		const uint32 ExecutedBefore = LastExecutedShotId;
-#endif
-		AcknowledgeShot(Request, Result);
-#if !UE_BUILD_SHIPPING
-		if (ShouldLogShotProtocol())
-			UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE SHOT_REJECT_BOUNDARY ShotId=%u Session=%u Generation=%u WeaponNetGuid=%llu AmmoBefore=%d AmmoAfter=%d ReserveBefore=%d ReserveAfter=%d ExecutedBefore=%u ExecutedAfter=%u"),
-				Request.ShotId, Request.FireSession, Request.EquipmentGeneration, GetWeaponShotNetGuid(GetOwner()),
-				AmmoBefore, CurrentAmmo, ReserveBefore, ReserveAmmo, ExecutedBefore, LastExecutedShotId);
-#endif
-		return Result;
-	};
 	const UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr;
 	const bool bValidReleasedInput = bReleasedAuthorization && GetWorld() != nullptr
 		&& GetWorld()->GetTimeSeconds() - InputClosedServerSeconds <= MaxNetworkShotAgeSeconds
 		&& Request.ServerFireTime <= InputClosedServerSeconds + MaxShotFutureSeconds;
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || !CanExecuteShot() || ASC == nullptr
 		|| ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Reloading) || ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Dead)
-		|| (!ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing) && !bValidReleasedInput)) return Reject(EFPShotResult::InvalidContext);
+		|| (!ASC->HasMatchingGameplayTag(FpstrueGameplayTags::State_Firing) && !bValidReleasedInput)) return RejectShotRequest(Request, EFPShotResult::InvalidContext);
 	if (!MatchesShotEquipment(Request) || Request.EquipmentGeneration == 0 || Request.FireSession == 0 || Request.ShotId == 0
-		|| Request.ShotId > MAX_int32) return Reject(EFPShotResult::InvalidIdentity);
+		|| Request.ShotId > MAX_int32) return RejectShotRequest(Request, EFPShotResult::InvalidIdentity);
 	if (Request.ShotId <= LastReceivedShotId)
 	{
 		// 同一请求仍在 GA 冷却等待时，重复输入不是原请求的终结结果，不能提前释放它的弹药估计。
 		if (PendingNetworkShots.ContainsByPredicate([&Request](const FPendingNetworkShot& Pending)
 			{ return Pending.Request.ShotId == Request.ShotId && Pending.Request.FireSession == Request.FireSession; })) return EFPShotResult::Queued;
-		return Reject(EFPShotResult::Duplicate);
+		return RejectShotRequest(Request, EFPShotResult::Duplicate);
 	}
 	if ((FireSession != 0 && Request.FireSession != FireSession)
-		|| (FireSession == 0 && Request.FireSession <= LastRemoteFireSession)) return Reject(EFPShotResult::InvalidIdentity);
+		|| (FireSession == 0 && Request.FireSession <= LastRemoteFireSession)) return RejectShotRequest(Request, EFPShotResult::InvalidIdentity);
 	// 即使本发随后被拒绝也消费编号；重复包不能等冷却结束后再次提交。
 	LastReceivedShotId = Request.ShotId;
 	const double Now = GetWorld()->GetTimeSeconds();
-	const APlayerState* PlayerState = Character->GetPlayerState();
-	const double OneWayDelay = PlayerState != nullptr ? PlayerState->GetPingInMilliseconds() * 0.0005 : 0.0;
-	const double MaxRequestAge = FMath::Clamp(OneWayDelay * 1.5 + 0.05, 0.10, MaxNetworkShotAgeSeconds);
-	if (!IsShotTimeWithinWindow(Request.ServerFireTime, Now, MaxRequestAge))
+	double MaxRequestAge = 0.0;
+	if (!IsShotRequestTimeValid(Request, Now, MaxRequestAge))
 	{
 #if !UE_BUILD_SHIPPING
-		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Admission"), Now, MaxRequestAge);
+		ReportShotTimeRejection(Request, TEXT("Admission"), Now, MaxRequestAge);
 #endif
-		return Reject(EFPShotResult::InvalidTime);
+		return RejectShotRequest(Request, EFPShotResult::InvalidTime);
 	}
 	const EFPShotResult ViewValidation = ValidateRenderedViews(Request, Now);
-	if (ViewValidation != EFPShotResult::Accepted) return Reject(ViewValidation);
+	if (ViewValidation != EFPShotResult::Accepted) return RejectShotRequest(Request, ViewValidation);
 	const FVector Aim = Request.AimDirection;
-	if (Aim.ContainsNaN() || !Aim.IsNormalized()) return Reject(EFPShotResult::InvalidAim);
+	if (Aim.ContainsNaN() || !Aim.IsNormalized()) return RejectShotRequest(Request, EFPShotResult::InvalidAim);
 	const double Interval = 60.0 / Settings.RoundsPerMinute;
 	if (LastSubmittedFireTime >= 0.0 && Request.ServerFireTime - LastSubmittedFireTime < Interval * 0.9)
-		return Reject(EFPShotResult::RateLimited);
+		return RejectShotRequest(Request, EFPShotResult::RateLimited);
 	if (FireSession == 0) { FireSession = Request.FireSession; LastRemoteFireSession = FireSession; }
 	LastSubmittedFireTime = Request.ServerFireTime;
-	if (!HasAmmo()) return Reject(EFPShotResult::NoAmmo);
-	if (PendingNetworkShots.Num() >= MaxQueuedNetworkShots) return Reject(EFPShotResult::Busy);
+	if (!HasAmmo()) return RejectShotRequest(Request, EFPShotResult::NoAmmo);
+	if (PendingNetworkShots.Num() >= MaxQueuedNetworkShots) return RejectShotRequest(Request, EFPShotResult::Busy);
 	const float Delay = GetNextShotDelay(true);
-	if (Delay > FMath::Min(Interval + 0.002, 0.15)) return Reject(EFPShotResult::RateLimited);
+	if (Delay > FMath::Min(Interval + 0.002, 0.15)) return RejectShotRequest(Request, EFPShotResult::RateLimited);
 	const bool bMustWait = HasPendingNetworkShots() || Delay > KINDA_SMALL_NUMBER;
 	// 只记录服务器当前已授权的瞄准条件，不能让排队期间切换 ADS 改写本发散布。
 	PendingNetworkShots.Add({Request, Character->IsAiming(), FPlatformTime::Seconds()});
@@ -972,7 +1062,7 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 	{
 		Result = EFPShotResult::InvalidTime;
 #if !UE_BUILD_SHIPPING
-		LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds);
+		ReportShotTimeRejection(Request, TEXT("Execution"), GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds);
 #endif
 	}
 	else if (GetNextShotDelay(true) > KINDA_SMALL_NUMBER) Result = EFPShotResult::RateLimited;
@@ -985,7 +1075,7 @@ bool UfpstrueWeaponComponent::ExecuteNetworkShot(const FFPShotRequest& Requested
 		{
 			Result = EFPShotResult::InvalidTime;
 #if !UE_BUILD_SHIPPING
-			LogShotTimeRejection(Request, Character.Get(), GetOwner(), TEXT("Execution"), GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds, TEXT("MissingHistory"));
+			ReportShotTimeRejection(Request, TEXT("Execution"), GetWorld()->GetTimeSeconds(), MaxNetworkShotAgeSeconds, TEXT("MissingHistory"));
 #endif
 		}
 		else

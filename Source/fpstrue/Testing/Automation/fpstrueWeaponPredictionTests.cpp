@@ -21,6 +21,7 @@
 #include "ReferenceSkeleton.h"
 #include "Tests/AutomationCommon.h"
 #include "TimerManager.h"
+#include "Misc/CommandLine.h"
 #include "Serialization/BitWriter.h"
 #include "Serialization/BitReader.h"
 #include "UObject/Class.h"
@@ -448,6 +449,15 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFpstrueWeaponShotTransportTest,
 // 固定到达顺序检查真实入口与计时；网络丢包概率和吞吐量由独立进程的正常/弱网采集验证。
 bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 {
+	const auto StreamFor = [](const FFPShotRequest& Request, uint32 FirstShotId)
+	{
+		FFPShotStreamIdentity Stream;
+		Stream.Weapon = Request.Weapon;
+		Stream.EquipmentGeneration = Request.EquipmentGeneration;
+		Stream.FireSession = Request.FireSession;
+		Stream.FirstShotId = FirstShotId;
+		return Stream;
+	};
 	// 查询对象的显示年龄包含下行估计；该纯时间策略不改射手origin和开火输入的硬截止窗。
 	const double HistoryFloor = 10.0 - static_cast<double>(AfpstrueCharacter::MaxHitHistorySeconds);
 	TestTrue(TEXT("Symmetric one-way estimate and configured interpolation both contribute to target time"),
@@ -591,9 +601,9 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	Weapon->InputClosedServerSeconds = World->GetTimeSeconds();
 	ASC->RememberClosedShotStream(Spec->Handle, Key, Weapon, false);
 	const FFPShotRequest Tail = MakeRequest(7, World->GetTimeSeconds());
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, Key, 1, {Tail}, false, false);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, Key, StreamFor(Tail, 1), {Tail}, false, false);
 	TestEqual(TEXT("Reliable lifecycle tail recovers the final dropped input after normal release"), Weapon->GetCurrentAmmo(), InitialAmmo - 4);
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, Key, 1, {Tail}, false, false);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, Key, StreamFor(Tail, 1), {Tail}, false, false);
 	TestEqual(TEXT("Repeated tail closure cannot replay the final shot"), Weapon->GetCurrentAmmo(), InitialAmmo - 4);
 	ASC->AddLooseGameplayTag(FpstrueGameplayTags::State_Reloading);
 	ASC->ServerSubmitShotBatch_Implementation(Spec->Handle, Key, 1, {MakeRequest(8, World->GetTimeSeconds())});
@@ -652,7 +662,7 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	if (!Fixture.TickTestWorld(.31f)) { Fixture.ForwardErrorMessages(this); return false; }
 	TestFalse(TEXT("The oldest receipt was really evicted by the eight-entry bound"), ASC->ClosedShotStreams.ContainsByPredicate(
 		[EvictedKey](const UfpstrueHealthComponent::FClosedShotStream& Stream) { return Stream.Key == EvictedKey; }));
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, EvictedKey, 12, {EvictedInput}, false, true);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, EvictedKey, StreamFor(EvictedInput, 12), {EvictedInput}, false, true);
 	TestTrue(TEXT("Evicted authorization still emits one terminal result for its expired owned input"), Weapon->FinalizedShotInputs.Contains(12));
 	TestEqual(TEXT("Finalizing an evicted input cannot consume ammunition"), Weapon->GetCurrentAmmo(), InitialAmmo - 7);
 	Weapon->OutstandingShots = {12};
@@ -670,7 +680,7 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	ExpiredInput.FireSession = 3;
 	for (int32 Tick = 0; Tick < 21; ++Tick)
 		if (!Fixture.TickTestWorld(.1f)) { Fixture.ForwardErrorMessages(this); return false; }
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, ExpiredKey, 13, {ExpiredInput}, false, true);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, ExpiredKey, StreamFor(ExpiredInput, 13), {ExpiredInput}, false, true);
 	TestFalse(TEXT("Two-second authorization really expires instead of being extended for cleanup"), ASC->ClosedShotStreams.ContainsByPredicate(
 		[ExpiredKey](const UfpstrueHealthComponent::FClosedShotStream& Stream) { return Stream.Key == ExpiredKey; }));
 	TestTrue(TEXT("Expired authorization can finish its input without permitting execution"), Weapon->FinalizedShotInputs.Contains(13));
@@ -678,8 +688,8 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	{
 		TGuardValue<FString> Listen(World->NextURL, TEXT("?listen"));
 		const uint32 Revision = Weapon->NetworkState.Revision;
-		ASC->ServerFinishShotInputs_Implementation(Spec->Handle, ExpiredKey, 13, {ExpiredInput}, false, true);
-		ASC->ServerFinishShotInputs_Implementation(Spec->Handle, Key, 1, {Tail}, false, true);
+		ASC->ServerFinishShotInputs_Implementation(Spec->Handle, ExpiredKey, StreamFor(ExpiredInput, 13), {ExpiredInput}, false, true);
+		ASC->ServerFinishShotInputs_Implementation(Spec->Handle, Key, StreamFor(Tail, 1), {Tail}, false, true);
 		TestEqual(TEXT("Repeated expiration cannot republish rejection or change a previously accepted result"), Weapon->NetworkState.Revision, Revision);
 	}
 	FPredictionKey OwnershipKey;
@@ -690,8 +700,8 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	AActor* OtherOwner = World->SpawnActor<AActor>();
 	Actor->SetOwner(OtherOwner);
 	const int32 FinalizedBeforeOwnerChange = Weapon->FinalizedShotInputs.Num();
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, OwnershipKey, 15, {WrongOwnerInput}, false, true);
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, ExpiredKey, 15, {WrongOwnerInput}, false, true);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, OwnershipKey, StreamFor(WrongOwnerInput, 15), {WrongOwnerInput}, false, true);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, ExpiredKey, StreamFor(WrongOwnerInput, 15), {WrongOwnerInput}, false, true);
 	TestEqual(TEXT("Neither live nor expired authorization sends old-owner ACKs after actual Actor ownership changes"),
 		Weapon->FinalizedShotInputs.Num(), FinalizedBeforeOwnerChange);
 	Actor->SetOwner(Holder);
@@ -723,7 +733,7 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	Weapon->OnWeaponTraceFinished.AddDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleTraceFinished);
 	FFPShotRequest Fourteenth = MakeRequest(14, World->GetTimeSeconds());
 	Fourteenth.FireSession = 4;
-	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, SourceKey, 14, {Fourteenth}, false, false);
+	ASC->ServerFinishShotInputs_Implementation(Spec->Handle, SourceKey, StreamFor(Fourteenth, 14), {Fourteenth}, false, false);
 	Weapon->OnWeaponTraceFinished.RemoveDynamic(Observer.Get(), &UfpstrueReloadReentryObserver::HandleTraceFinished);
 	Observer->OnTraceReceived = nullptr;
 	TestTrue(TEXT("The original shot reached its real synchronous callback"), bReentered);
@@ -855,6 +865,97 @@ bool FFpstrueWeaponShotTransportTest::RunTest(const FString&)
 	TestTrue(TEXT("Build preserves the actually estimated older time instead of manufacturing a future one"),
 		ClockBackRequest.ServerFireTime < ReportedBeforeClockBack && ClockBackRequest.ServerFireTime >= ActualClockBackTime);
 	TestEqual(TEXT("Successful Build records its exact reported timestamp for the next gate"), Weapon->LastSubmittedFireTime, ClockBackRequest.ServerFireTime);
+	// 复现实机982→280→268→284→292ms启动序列，走真实接收/调度/发送入口，不手工清零variation。
+	CadenceController->ResetTimeSamples();
+	uint32 StartupSequence = 1;
+	for (const double Sample : {.982, .280, .268, .284, .292})
+	{
+		const double SampleNow = FPlatformTime::Seconds();
+		CadenceController->PendingClockSamples.Add(StartupSequence, SampleNow - Sample);
+		CadenceController->ClientReceiveClockSample_Implementation(StartupSequence++, SampleNow + 100.0 - Sample * .5);
+	}
+	const auto RecoveredStartupTiming = Weapon->GetShotRetryTiming();
+	TestTrue(TEXT("The actual send policy consumes the improved startup estimator without a guessed one-way cutoff"),
+		FMath::Abs(RecoveredStartupTiming.RoundTripSeconds - .2807890625) < .003
+		&& FMath::Abs(RecoveredStartupTiming.VariationSeconds - .064984375) < .003
+		&& FMath::IsNearlyEqual(RecoveredStartupTiming.IntervalSeconds, .06, 1.e-6));
+	auto& StartupInput = Weapon->ClientShotInputs[0];
+	StartupInput.CreatedSeconds = FPlatformTime::Seconds();
+	StartupInput.LastSentSeconds = FPlatformTime::Seconds() - .065;
+	const int32 BeforeStartupRetry = StartupInput.Attempts;
+	Weapon->SendPendingShotInputs();
+	TestEqual(TEXT("The recovered estimate actually permits a bounded resend through production"), StartupInput.Attempts, BeforeStartupRetry + 1);
+	TestFalse(TEXT("Startup recovery does not manufacture a terminal receipt"), StartupInput.bExpirationSent);
+	// 同一真实发送入口消费PC的动态观测，证明它改变实际重发门禁和单次Timer，而不只改变日志。
+	CadenceController->LastRoundTripSampleLocal = FPlatformTime::Seconds();
+	CadenceController->SmoothedRoundTripTime = .04;
+	CadenceController->RoundTripVariation = .005;
+	const auto LowLatencyTiming = Weapon->GetShotRetryTiming();
+	TestTrue(TEXT("Fresh low-latency observations wait one round trip plus twice its variation"),
+		FMath::IsNearlyEqual(LowLatencyTiming.IntervalSeconds, .05, 1.e-6));
+	CadenceController->SmoothedRoundTripTime = .2;
+	CadenceController->RoundTripVariation = .02;
+	const auto HighLatencyTiming = Weapon->GetShotRetryTiming();
+	TestTrue(TEXT("A slower volatile route requests the bounded sixty-millisecond interval"),
+		FMath::IsNearlyEqual(HighLatencyTiming.IntervalSeconds, .06, 1.e-6));
+	TestTrue(TEXT("A slower route changes the client interval without changing the server age limit"),
+		HighLatencyTiming.IntervalSeconds > LowLatencyTiming.IntervalSeconds
+		&& UfpstrueWeaponComponent::MaxNetworkShotAgeSeconds == .30);
+	const FString PreviousCommandLine(FCommandLine::Get());
+	FCommandLine::Append(TEXT(" -PvpFixedShotRetry"));
+	const auto FixedTiming = Weapon->GetShotRetryTiming();
+	FCommandLine::Set(*PreviousCommandLine);
+	TestTrue(TEXT("The reference changes only the requested interval while using the same observation and lifecycle expiry"),
+		FixedTiming.bFixedReference && FMath::IsNearlyEqual(FixedTiming.IntervalSeconds, .04, 1.e-6)
+		&& FixedTiming.RoundTripSeconds == HighLatencyTiming.RoundTripSeconds
+		&& UfpstrueWeaponComponent::ShotInputExpireSeconds == .40f);
+	auto& AdaptiveInput = Weapon->ClientShotInputs[0];
+	AdaptiveInput.CreatedSeconds = FPlatformTime::Seconds();
+	AdaptiveInput.LastSentSeconds = FPlatformTime::Seconds() - .045;
+	const int32 BeforeAdaptiveWake = AdaptiveInput.Attempts;
+	Weapon->SendPendingShotInputs();
+	TestEqual(TEXT("Forty-five milliseconds cannot bypass a freshly selected sixty-millisecond gate"), AdaptiveInput.Attempts, BeforeAdaptiveWake);
+	TestTrue(TEXT("The actual retry timer targets the pending adaptive due time rather than a fixed polling interval"),
+		World->GetTimerManager().TimerExists(Weapon->ShotRetryTimerHandle)
+		&& World->GetTimerManager().GetTimerRemaining(Weapon->ShotRetryTimerHandle) > 0.0f
+		&& World->GetTimerManager().GetTimerRate(Weapon->ShotRetryTimerHandle) < .04f);
+	AdaptiveInput.LastSentSeconds = FPlatformTime::Seconds() - .065;
+	Weapon->SendPendingShotInputs();
+	TestEqual(TEXT("The same real send entry retries when its adaptive interval is actually due"), AdaptiveInput.Attempts, BeforeAdaptiveWake + 1);
+	CadenceController->SmoothedRoundTripTime = .04;
+	CadenceController->RoundTripVariation = .005;
+	AdaptiveInput.CreatedSeconds = FPlatformTime::Seconds();
+	AdaptiveInput.LastSentSeconds = FPlatformTime::Seconds() - .055;
+	const int32 BeforeRecoveredRoute = AdaptiveInput.Attempts;
+	Weapon->SendPendingShotInputs();
+	TestEqual(TEXT("A recovered route really sends after its fifty-millisecond interval while the old sixty-millisecond gate would still wait"),
+		AdaptiveInput.Attempts, BeforeRecoveredRoute + 1);
+	CadenceController->SmoothedRoundTripTime = .2;
+	CadenceController->RoundTripVariation = .02;
+	AdaptiveInput.CreatedSeconds = FPlatformTime::Seconds();
+	AdaptiveInput.LastSentSeconds = FPlatformTime::Seconds() - .03;
+	const int32 BeforePiggyback = AdaptiveInput.Attempts;
+	Weapon->SubmitShotInput(ClockBackRequest, Spec->Handle, CadenceKey);
+	TestEqual(TEXT("A genuinely new input can carry an old unconfirmed input before its standalone due time"),
+		Weapon->ClientShotInputs[0].Attempts, BeforePiggyback + 1);
+	TestEqual(TEXT("Piggyback preserves one first send for the newly built input"), Weapon->ClientShotInputs[1].Attempts, 1);
+	const int32 AfterPiggyback = Weapon->ClientShotInputs[0].Attempts;
+	Weapon->SendPendingShotInputs();
+	TestEqual(TEXT("An immediate repeated wake cannot turn piggyback into unlimited resends"), Weapon->ClientShotInputs[0].Attempts, AfterPiggyback);
+	// 客户端不以RTT/2猜测服务器准入期限；在原400ms账本寿命内仍可用剩余次数补发，由服务器裁决。
+	auto& LateInput = Weapon->ClientShotInputs[1];
+	LateInput.CreatedSeconds = FPlatformTime::Seconds() - .32;
+	LateInput.LastSentSeconds = FPlatformTime::Seconds() - .065;
+	const int32 BeforeLateRetry = LateInput.Attempts;
+	Weapon->SendPendingShotInputs();
+	TestEqual(TEXT("A live input is not suppressed by a client-invented three-hundred-millisecond authority deadline"),
+		LateInput.Attempts, BeforeLateRetry + 1);
+	TestFalse(TEXT("A local retry does not manufacture a final verdict before the real lifecycle expiry"), LateInput.bExpirationSent);
+	CadenceController->LastRoundTripSampleLocal = FPlatformTime::Seconds() - 6.0;
+	const auto StaleTiming = Weapon->GetShotRetryTiming();
+	TestTrue(TEXT("An expired RTT observation falls back to forty milliseconds"),
+		StaleTiming.RoundTripSeconds < 0.0 && FMath::IsNearlyEqual(StaleTiming.IntervalSeconds, .04, 1.e-6));
+
 	// 不改变真实WorldTime，通过已有时间端点构造早醒/重发/过期的确定边界。
 	UfpstrueWeaponComponent::FClientShotInput& RetryInput = Weapon->ClientShotInputs[0];
 	RetryInput.CreatedSeconds = FPlatformTime::Seconds();

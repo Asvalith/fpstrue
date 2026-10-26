@@ -178,7 +178,13 @@ void AfpstruePvpPlayerController::ClientReceiveClockSample_Implementation(uint32
 	if (bHasClockReplySequence && (SequenceDelta == 0 || SequenceDelta >= 0x80000000u)) return;
 	LastClockReplySequence = Sequence;
 	bHasClockReplySequence = true;
-	if (LastRoundTripSampleLocal < 0.0 || Now - LastRoundTripSampleLocal > TimeSampleFreshnessSeconds)
+	// 新低基线同时约束校时与网络观测，必须在下方把过期Best重置前计算。
+	// 只在比既有最低往返明显改善时重建，普通拥塞回落到原基线仍照常平滑，不能丢掉拥塞样本。
+	const bool bSignificantNewLow = BestClockRoundTrip < TNumericLimits<double>::Max()
+		&& RoundTrip + 0.05 < BestClockRoundTrip;
+	const bool bRoundTripRebased = LastRoundTripSampleLocal < 0.0
+		|| Now - LastRoundTripSampleLocal > TimeSampleFreshnessSeconds || bSignificantNewLow;
+	if (bRoundTripRebased)
 	{
 		SmoothedRoundTripTime = RoundTrip;
 		RoundTripVariation = RoundTrip * 0.5;
@@ -197,7 +203,7 @@ void AfpstruePvpPlayerController::ClientReceiveClockSample_Implementation(uint32
 	const double Offset = ServerTime + RoundTrip * 0.5 - Now;
 	// 启动加载可能把首样本 RTT 拉长。明显更短的往返更能约束偏移，不能让旧的低质量
 	// 中点继续经四分之一平滑拖延数秒；重定基准也不把旧偏差算进新样本不确定度。
-	const bool bRebase = bBaselineExpired || RoundTrip + 0.05 < BestClockRoundTrip;
+	const bool bRebase = bBaselineExpired || bSignificantNewLow;
 	const double Residual = bRebase ? 0.0 : FMath::Abs(Offset - ServerClockOffset);
 	ServerClockOffset = bRebase ? Offset : FMath::Lerp(ServerClockOffset, Offset, 0.25);
 	BestClockRoundTrip = FMath::Min(BestClockRoundTrip, RoundTrip);
@@ -205,8 +211,8 @@ void AfpstruePvpPlayerController::ClientReceiveClockSample_Implementation(uint32
 	LastClockSampleLocal = Now;
 #if !UE_BUILD_SHIPPING
 	if (FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")))
-		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLOCK_SAMPLE PASS RTT=%.4f Uncertainty=%.4f Offset=%.6f Residual=%.6f BestRTT=%.6f Sequence=%u Rebased=%d SRTT=%.6f RTTVAR=%.6f"),
-			RoundTrip, ClockUncertainty, ServerClockOffset, Residual, BestClockRoundTrip, Sequence, bRebase, SmoothedRoundTripTime, RoundTripVariation);
+		UE_LOG(LogTemp, Display, TEXT("PVP_SMOKE CLOCK_SAMPLE PASS RTT=%.4f Uncertainty=%.4f Offset=%.6f Residual=%.6f BestRTT=%.6f Sequence=%u Rebased=%d SRTT=%.6f RTTVAR=%.6f RTTRebased=%d"),
+			RoundTrip, ClockUncertainty, ServerClockOffset, Residual, BestClockRoundTrip, Sequence, bRebase, SmoothedRoundTripTime, RoundTripVariation, bRoundTripRebased);
 #endif
 }
 

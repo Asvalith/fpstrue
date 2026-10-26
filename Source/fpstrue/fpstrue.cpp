@@ -11,8 +11,8 @@ public:
 	virtual void StartupModule() override
 	{
 		FDefaultGameModuleImpl::StartupModule();
-		FNetworkVersion::SetGameNetworkProtocolVersion(6);
-		FNetworkVersion::SetGameCompatibleNetworkProtocolVersion(6);
+		FNetworkVersion::SetGameNetworkProtocolVersion(7);
+		FNetworkVersion::SetGameCompatibleNetworkProtocolVersion(7);
 	}
 };
 

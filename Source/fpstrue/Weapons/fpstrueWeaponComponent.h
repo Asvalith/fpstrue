@@ -40,6 +40,17 @@ struct FFPShotRenderedView
 	int16 AgeMilliseconds = 0;
 };
 
+// 结束控制即使没有未确认尾发也必须携带原轮次身份；不能用结束回调时的新轮次补造。
+USTRUCT()
+struct FFPShotStreamIdentity
+{
+	GENERATED_BODY()
+	UPROPERTY() TObjectPtr<AActor> Weapon = nullptr;
+	UPROPERTY() uint32 EquipmentGeneration = 0;
+	UPROPERTY() uint32 FireSession = 0;
+	UPROPERTY() uint32 FirstShotId = 0;
+};
+
 // 每发只携带输入身份、时间和方向；目标、起点、伤害始终由服务器产生。
 // 【设计取舍】装备代际隔离卸下/重装，会话隔离不同按键轮次，ShotId 隔离逐发请求。
 // 三者不能只留一个“当前编号”：旧包可能在换枪或新一轮开火后才到达。
@@ -385,12 +396,20 @@ private:
 	friend class FFpstrueWeaponAmmoPredictionTest;
 	friend class FFpstrueWeaponReloadPredictionTest;
 	friend class FFpstrueWeaponShotTransportTest;
+	friend class FFpstrueShotActivationTest;
 	friend class FFpstrueShotPresentationReentryTest;
 	friend class UfpstrueHealthComponent;
 	// 只有 GA 能调用执行器；公开 Start/Stop/Request 只是 ASC 请求入口，不再直接启动业务。
 	bool CanExecuteShot() const;
 	// 纯校验，不消费 ShotId、不修改会话；准入、执行和 ACK 共用装备归属规则。
 	bool MatchesShotEquipment(const FFPShotRequest& Request) const;
+	// 激活预检与正式准入共用服务端观测Ping的同一时间窗；不消费身份、不授予能力。
+	bool IsShotRequestTimeValid(const FFPShotRequest& Request, double ServerNow, double& OutAllowedAge) const;
+	// 预授权拒绝也沿用原始时效诊断；仅显式开发采集输出，不改变裁决。
+	void ReportShotTimeRejection(const FFPShotRequest& Request, const TCHAR* Stage, double Now, double AllowedAge,
+		const TCHAR* SpecificReason = nullptr) const;
+	// 预授权和正式准入拒绝共用同一终结及状态守恒诊断；已准入请求仍由原ACK保护处理。
+	EFPShotResult RejectShotRequest(const FFPShotRequest& Request, EFPShotResult Result);
 	// 准入与执行复核元数据身份和未来界；过旧显示时间由原历史窗口自然miss，不另改较新时间。
 	EFPShotResult ValidateRenderedViews(const FFPShotRequest& Request, double ServerNow) const;
 	// 目标呈现时间按服务器观测 RTT/2 估计，受真实历史长度约束；不改变射手输入时间或准入窗口。
@@ -412,6 +431,7 @@ private:
 	void FinishShotInputStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, bool bCancelled);
 	bool ReceiveShotInputBatch(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests,
 		bool bReleasedAuthorization = false, bool bCancelled = false, bool bExpired = false);
+	uint32 SkipFinalizedShotPrefix(uint32 FirstShotId) const;
 	void DrainOrderedShotInputs();
 	void CancelOrderedShotInputs();
 	// 队头出队后复核装备、时间、生命、弹药与冷却，唯一进入 Fire 并发送终结 ACK。
@@ -613,10 +633,21 @@ private:
 	// 8 发窗口在确认前保留输入，不因丢包无限增长；每发最多 6 次常规发送。
 	static constexpr int32 ShotInputWindowSize = 8;
 	static constexpr int32 MaxShotInputAttempts = 6;
-	static constexpr float ShotRetryInterval = 0.04f;
+	static constexpr double MinShotRetryInterval = 0.02;
+	static constexpr double MaxShotRetryInterval = 0.06;
+	static constexpr double FallbackShotRetryInterval = 0.04;
 	static constexpr float ShotReorderWaitSeconds = 0.075f;
 	static constexpr float ShotInputExpireSeconds = 0.40f;
 	static constexpr double MaxNetworkShotAgeSeconds = 0.30;
+	// 同一发送实现的瞬时策略。RTT只选择本地间隔，输入能否执行始终由服务器判断。
+	struct FShotRetryTiming
+	{
+		double IntervalSeconds = FallbackShotRetryInterval;
+		double RoundTripSeconds = -1.0;
+		double VariationSeconds = -1.0;
+		bool bFixedReference = false;
+	};
+	FShotRetryTiming GetShotRetryTiming() const;
 	struct FClientShotInput
 	{
 		FFPShotRequest Request;
@@ -628,6 +659,7 @@ private:
 		bool bExpirationSent = false;
 		double LastSentSeconds = -1.0;
 	};
+	void ScheduleShotInputRetry(double Now, const FShotRetryTiming& Timing);
 	TArray<FClientShotInput, TInlineAllocator<ShotInputWindowSize>> ClientShotInputs;
 	TArray<FFPShotRequest> ShotInputScratch;
 	struct FOrderedShotInput
@@ -654,6 +686,7 @@ private:
 		uint32 Generation = 0;
 		uint32 Session = 0;
 		int32 PresentedShots = 0;
+		uint32 FirstShotId = 0;
 	};
 	TArray<FPredictedFirePresentation, TInlineAllocator<8>> PredictedPresentations;
 

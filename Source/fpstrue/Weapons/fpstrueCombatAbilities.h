@@ -36,7 +36,7 @@ public:
 	void FinishRemoteShotInputs(bool bCancelled);
 
 protected:
-	// 先建立松开任务，再开始射击；连射由能力自己的 WaitDelay 任务推进，同步失败可以立即结束能力。
+	// 先建立输入轮次再监听本地松开；连射由 WaitDelay 推进，已经松开时也能完整结束空轮次。
 	virtual void ActivateAbility(FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
 		FGameplayAbilityActivationInfo ActivationInfo, const FGameplayEventData* TriggerEventData) override;
 	// 先解绑外部事件，再停止捕获的武器；死亡、卸枪、松开都进入同一清理出口。
@@ -46,7 +46,8 @@ protected:
 private:
 	friend class UfpstrueHealthComponent;
 	friend class FFpstrueWeaponShotTransportTest;
-	// WaitInputRelease 自带客户端到服务器的释放事件，不另造一套释放 RPC。
+	friend class FFpstrueShotActivationTest;
+	// WaitInputRelease只负责本地松开检测；服务端结束由Weapon的完整轮次控制负责。
 	UFUNCTION()
 	void HandleInputReleased(float TimeHeld);
 	// 每次只结算/表现一发；空仓或失去执行资格时结束能力，等待下一发的任务与能力同生共灭。

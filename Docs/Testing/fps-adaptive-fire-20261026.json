@@ -1,0 +1,2112 @@
+{
+  "SchemaVersion": 1,
+  "Date": "2026-10-26",
+  "GameNetworkProtocol": 7,
+  "Scope": "Local UE5.5 Editor functional evidence and Shipping compilation. Not a released package, WAN or arbitrary-network guarantee.",
+  "FrozenBudgetSha256": "5D7A5A6485745A4CD47F4905D9B551885DC39E347949D352410732AFB981A795",
+  "Automation": {
+    "succeeded": 78,
+    "succeededWithWarnings": 20,
+    "failed": 0,
+    "notRun": 0,
+    "RegisteredTests": 98,
+    "WarningEntries": 43,
+    "ReportSha256": "269ED81C3290F2270AA4F61425D2727EF55C8794BB6AC4D91D1961A366C9CE6B",
+    "Tests": [
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.AssetGraphAndBindings.DefaultProjectAssets",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.AssetSafety",
+        "state": "Success",
+        "warnings": 6,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.BlackboardKeyCache",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.DefaultStructure",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.LowHealthRetreatLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.RuntimeLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.EQS.AsyncParametersAndMissingNavigation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.EQS.TemplateAndItemIdentity",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.EQS.TwoOwnersInflightGcAndRecreate",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Movement.NativeStationaryFloorCache",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Perception.AuthoritativeGunshotInvestigation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Perception.MultiplayerIdleSearchAndStop",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Perception.SightOcclusionAndFacing",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.AttackWaitingQueue",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.CacheAndSlotOwnership",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.ParticipationAndGoalAvailability",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.TacticalBoundaryAndAssignments",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.TacticalQueueAndRecovery",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.FacingTolerance",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.RotationConfig",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.GAS.CommitCancellationAndSameSpecRestart",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.RemainingCooldownAndShotFact",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ShotPresentationIdentityOnReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.StaleTransactionCallbacksIgnored",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.AttackProtectionAndCleanup",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.ConfigurationSource",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.ExplicitPlaybackAndStopReentry",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.ProjectBlueprintPlaybackIntegration",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Health.NotificationTermination",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Health.QueuedEnemyHitContext",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Health.ReentrantMutationOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.PulseAndScaling",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.RetriggerAndStepSize",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.ViewIsolation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.BodyDefaultsAndViewSeparation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RARAbilityPresentationAndCancel",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RARAssetsAndMontageBindings",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RARReceivedReloadProgress",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RemoteVelocityWithoutAcceleration",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.TemplateAssetsGripAndOriginalHud",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.TemplateDeathWeaponPhysicsAndLateReplication",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Clock.BetterSampleRebasesStartupEstimate",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Clock.DynamicRoundTripAndFreshness",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.GAS.ExternalHealthEffectsAndReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Health.AuthorityAndGASAttributeCommit",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Health.ReplicatedAttributeNotifications",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Hitscan.HistoryGeometryTimeAndLifecycle",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Lifecycle.BoundedSpawnRecovery",
+        "state": "Success",
+        "warnings": 4,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Lifecycle.SingleModeEnemyRegistrationAndSpawn",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Movement.SavedModesReplayAndAuthority",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.AmmoSnapshotAckReordering",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.BatchFireAuthorizationAndNativeIsolation",
+        "state": "Success",
+        "warnings": 3,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.ReloadPlaybackAdoptionAndAuthorityClock",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.ClientSnapshotIsPresentationOnly",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.ServerCombatAndSingleCommit",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.SimpleHitProxyLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.TargetDeathDestroyAndResourceRelease",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.WorldSharedNavigationBudget",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.CancelInvalidatesOldTravelAndRetry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.DeferredTravelAndBoundedActiveSlotRetry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.HudRebindAndCurrentSnapshot",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.ServerRetentionAndSingleUseClaim",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle",
+        "state": "Success",
+        "warnings": 5,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.AnimationSharing.StopAndSwapLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.GameplayTierReasonSnapshot",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderBudgetRetentionOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderPriorityOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderScoringSnapshotEquivalence",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderTopKSelection",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.ScopedCombatProtection",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.IndependentBudgetRetention",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.MeshOwnershipAndDeath",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle",
+        "state": "Success",
+        "warnings": 4,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.TierHysteresis",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      }
+    ]
+  },
+  "Builds": {
+    "Editor": {
+      "LogSha256": "356E8D04B6EC7E62F75B4F309D0C0B01496ADDD089DF3DBEDCF24781E601020D",
+      "Passed": true
+    },
+    "Shipping": {
+      "LogSha256": "F76D4B4BFCB2F9353E7D36CF733A05BCC07C95AF134DF4A9BDE319C0A758FC37",
+      "Passed": true
+    }
+  },
+  "Functional": [
+    {
+      "Case": "NormalMoving",
+      "ReportSha256": "A6B3D587F3C555787340D5722905003631DADC3C6013DF94C5173B82910455BE",
+      "Passed": true,
+      "AcceptanceMode": "StrictExperience",
+      "StrictZeroUnexpectedRejectionsPassed": true,
+      "MovingHitStatus": "Passed",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "InputsUnchanged": true,
+      "Network": {
+        "LossPercent": 0,
+        "OutgoingLagMs": 0,
+        "LagVarianceMs": 0
+      },
+      "ShotRetryPolicyEvidence": {
+        "Passed": true,
+        "RequestedPolicy": "Adaptive",
+        "ObservedPolicies": [
+          "Adaptive"
+        ],
+        "AdaptiveRttObserved": true,
+        "FallbackObserved": false,
+        "ActiveClients": 1,
+        "Scope": "Readback verifies the actual submit policy, interval and bounded sender lifetime. Fallback is usable but is not evidence that fresh RTT drove an adaptive decision."
+      },
+      "WeakPolicyEvidence": null,
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 34,
+          "Accepted": 34,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 26.275,
+          "PredictionToAckP95Ms": 41.491,
+          "PredictionToAckP99Ms": 42.411,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 34,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 35
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 0,
+          "Accepted": 0,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": null,
+          "PredictionToAckP95Ms": null,
+          "PredictionToAckP99Ms": null,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 0,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [],
+          "ApplicationInputSubmissions": 0
+        }
+      ],
+      "ObservedRequestedRetryIntervalMs": {
+        "Min": 34.716,
+        "Max": 53.512
+      }
+    },
+    {
+      "Case": "WeakMoving",
+      "ReportSha256": "1CE9985F5EF1C2F9D0F0A8FB2C126B33BFF25F4FF5FD83DE93F797A8981BCC54",
+      "Passed": true,
+      "AcceptanceMode": "StrictExperience",
+      "StrictZeroUnexpectedRejectionsPassed": true,
+      "MovingHitStatus": "Passed",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "InputsUnchanged": true,
+      "Network": {
+        "LossPercent": 5,
+        "LagVarianceMs": 20,
+        "OutgoingLagMs": 100
+      },
+      "ShotRetryPolicyEvidence": {
+        "Passed": true,
+        "RequestedPolicy": "Adaptive",
+        "ObservedPolicies": [
+          "Adaptive"
+        ],
+        "AdaptiveRttObserved": true,
+        "FallbackObserved": false,
+        "ActiveClients": 1,
+        "Scope": "Readback verifies the actual submit policy, interval and bounded sender lifetime. Fallback is usable but is not evidence that fresh RTT drove an adaptive decision."
+      },
+      "WeakPolicyEvidence": null,
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 66,
+          "Accepted": 66,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 260.126,
+          "PredictionToAckP95Ms": 333.093,
+          "PredictionToAckP99Ms": 336.238,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 66,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 356
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 0,
+          "Accepted": 0,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": null,
+          "PredictionToAckP95Ms": null,
+          "PredictionToAckP99Ms": null,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 0,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [],
+          "ApplicationInputSubmissions": 0
+        }
+      ],
+      "ObservedRequestedRetryIntervalMs": {
+        "Min": 60.0,
+        "Max": 60.0
+      }
+    },
+    {
+      "Case": "WeakRenderedLiveMoving",
+      "ReportSha256": "3F46CAD5DE0230569FD46F58D0F8C6AB5EE9D9801B6BDDE7C3F5BB61A4868E27",
+      "Passed": false,
+      "AcceptanceMode": "StrictExperience",
+      "StrictZeroUnexpectedRejectionsPassed": false,
+      "MovingHitStatus": "MissingEvidence",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "InputsUnchanged": true,
+      "Network": {
+        "LagVarianceMs": 20,
+        "LossPercent": 5,
+        "OutgoingLagMs": 100
+      },
+      "ShotRetryPolicyEvidence": {
+        "Passed": true,
+        "RequestedPolicy": "Adaptive",
+        "ObservedPolicies": [
+          "Adaptive"
+        ],
+        "AdaptiveRttObserved": true,
+        "FallbackObserved": false,
+        "ActiveClients": 1,
+        "Scope": "Readback verifies the actual submit policy, interval and bounded sender lifetime. Fallback is usable but is not evidence that fresh RTT drove an adaptive decision."
+      },
+      "WeakPolicyEvidence": null,
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 1,
+          "Accepted": 0,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 1,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 447.919,
+          "PredictionToAckP95Ms": 447.919,
+          "PredictionToAckP99Ms": 447.919,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 1,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 3
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 0,
+          "Accepted": 0,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": null,
+          "PredictionToAckP95Ms": null,
+          "PredictionToAckP99Ms": null,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 0,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [],
+          "ApplicationInputSubmissions": 0
+        }
+      ],
+      "ObservedRequestedRetryIntervalMs": {
+        "Min": 60.0,
+        "Max": 60.0
+      },
+      "ObservedFailure": {
+        "FirstSubmitFrame": 440,
+        "NextSubmitFrame": 442,
+        "SameClientSubmitGapMs": 274.719,
+        "FirstAdmissionAgeMs": 301.383,
+        "AllowedAgeMs": 300.0,
+        "Result": "InvalidTime",
+        "Boundary": "Co-occurring client frame gap delays game-thread retry work; no native trace was captured in this functional case, so the stall cause and individual dropped datagrams are unproven. This is a failed rendered scenario, not hidden by the passing NullRHI case."
+      }
+    },
+    {
+      "Case": "StaleRefundPolicy",
+      "ReportSha256": "5D3DFC3D90ADEFB2EE6204E2E4A32F858386419052FD0FBA31F3411078397397",
+      "Passed": true,
+      "AcceptanceMode": "WeakPolicyCorrectness",
+      "StrictZeroUnexpectedRejectionsPassed": false,
+      "MovingHitStatus": "NotRequested",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "InputsUnchanged": true,
+      "Network": {
+        "LossPercent": 0,
+        "OutgoingLagMs": 0,
+        "LagVarianceMs": 0
+      },
+      "ShotRetryPolicyEvidence": {
+        "Passed": true,
+        "RequestedPolicy": "Adaptive",
+        "ObservedPolicies": [
+          "Adaptive"
+        ],
+        "AdaptiveRttObserved": true,
+        "FallbackObserved": false,
+        "ActiveClients": 1,
+        "Scope": "Readback verifies the actual submit policy, interval and bounded sender lifetime. Fallback is usable but is not evidence that fresh RTT drove an adaptive decision."
+      },
+      "WeakPolicyEvidence": {
+        "Passed": true,
+        "Accepted": 34,
+        "TerminalRejected": 1,
+        "MeasuredStaleRejected": 1,
+        "SettledOwners": 1,
+        "Failures": [],
+        "InjectedInputs": 1,
+        "InjectedInputsRefunded": 1,
+        "RequiresDeterministicInjection": true,
+        "Scope": "Admission/execution-age policy and rejection cleanup only. The explicit stale input must receive InvalidTime without authority mutation and must refund only itself on the owning client. Not zero-rejection experience acceptance, transport optimization, hit-rate or per-packet retransmission attribution."
+      },
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 0,
+          "Accepted": 0,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": null,
+          "PredictionToAckP95Ms": null,
+          "PredictionToAckP99Ms": null,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 0,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [],
+          "ApplicationInputSubmissions": 0
+        },
+        {
+          "Client": "Client1Resume",
+          "Predicted": 0,
+          "Accepted": 0,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": null,
+          "PredictionToAckP95Ms": null,
+          "PredictionToAckP99Ms": null,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 0,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [],
+          "ApplicationInputSubmissions": 0
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 35,
+          "Accepted": 34,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 1,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 17.066,
+          "PredictionToAckP95Ms": 37.877,
+          "PredictionToAckP99Ms": 39.958,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 35,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 45
+        }
+      ],
+      "ObservedRequestedRetryIntervalMs": {
+        "Min": 28.844,
+        "Max": 49.107
+      }
+    },
+    {
+      "Case": "WeakLiveRecoveryNullRHI",
+      "ReportSha256": "6E51CB4E70AF5E472DADE6552D1BD9A21C3935593F3AF5377563BB7EEF14F3FD",
+      "Passed": true,
+      "AcceptanceMode": "StrictExperience",
+      "StrictZeroUnexpectedRejectionsPassed": true,
+      "MovingHitStatus": "NotRequested",
+      "AutomaticRetryTransportVerified": true,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "InputsUnchanged": true,
+      "Network": {
+        "LossPercent": 5,
+        "OutgoingLagMs": 100,
+        "LagVarianceMs": 20
+      },
+      "ShotRetryPolicyEvidence": {
+        "Passed": true,
+        "RequestedPolicy": "Adaptive",
+        "ObservedPolicies": [
+          "Adaptive"
+        ],
+        "AdaptiveRttObserved": true,
+        "FallbackObserved": false,
+        "ActiveClients": 1,
+        "Scope": "Readback verifies the actual submit policy, interval and bounded sender lifetime. Fallback is usable but is not evidence that fresh RTT drove an adaptive decision."
+      },
+      "WeakPolicyEvidence": null,
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 0,
+          "Accepted": 0,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": null,
+          "PredictionToAckP95Ms": null,
+          "PredictionToAckP99Ms": null,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 0,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [],
+          "ApplicationInputSubmissions": 0
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 36,
+          "Accepted": 36,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 287.139,
+          "PredictionToAckP95Ms": 354.361,
+          "PredictionToAckP99Ms": 411.138,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 36,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 206
+        }
+      ],
+      "ObservedRequestedRetryIntervalMs": {
+        "Min": 60.0,
+        "Max": 60.0
+      }
+    }
+  ],
+  "TraceDiagnostic": [
+    {
+      "Case": "FirstActivationLoss",
+      "ReportSha256": "6AC8441D145766D5B534DA26F0DE9942EB7797D900F057DFA6F25D5BA767C8A6",
+      "Passed": false,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "Adaptive",
+      "CaptureSeconds": 20,
+      "EnemyPopulation": 160,
+      "Failures": [
+        "Server: capture shorter than the frozen minimum.",
+        "Client1: capture shorter than the frozen minimum.",
+        "Client2: capture shorter than the frozen minimum.",
+        "Client1: shot rejection budget exceeded or unavailable."
+      ],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 84,
+          "Accepted": 83,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 1,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.848,
+          "PredictionToAckP95Ms": 331.07,
+          "PredictionToAckP99Ms": 431.537,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 84,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 423
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 82,
+          "Accepted": 82,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 265.024,
+          "PredictionToAckP95Ms": 364.589,
+          "PredictionToAckP99Ms": 431.849,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 82,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 415
+        }
+      ],
+      "ActivationLossEvidence": {
+        "Passed": true,
+        "Failures": [],
+        "TransportFaultConfiguredAndRestored": true,
+        "FirstStream": "16/1/1/",
+        "FirstStreamShots": 19,
+        "FirstStreamAccepted": 19,
+        "NoAuthorizationEvents": 0,
+        "Scope": "Requires an actual post-fault first-stream ledger and zero authorization waits/lost inputs/rejections. Native packet trace separately proves which datagrams were dropped; this diagnostic does not certify no-trace capacity."
+      },
+      "Roles": {
+        "Server": {
+          "CaptureSeconds": 20.02979199960828,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9983277409223451,
+            "FrameIntervalP95Ms": 35.593,
+            "WorldTickCpuMeanMs": 2.8338,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.7286,
+            "IdleOvershootP95Ms": 0.7184
+          },
+          "Connections": [
+            {
+              "Seconds": 20.02979199960828,
+              "OutKiBPerSecond": 16.43962286622546,
+              "InKiBPerSecond": 6.562831428307932,
+              "OutPacketsPerSecond": 30.055229730382287,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 20.02979199960828,
+              "OutKiBPerSecond": 16.43674629179567,
+              "InKiBPerSecond": 6.555713125481684,
+              "OutPacketsPerSecond": 30.00530409960092,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 20.001634001731873,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9991729674406963,
+            "FrameIntervalP95Ms": 17.379,
+            "WorldTickCpuMeanMs": 2.1615,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1263,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 20.001634001731873,
+              "OutKiBPerSecond": 6.9860503328328605,
+              "InKiBPerSecond": 15.56938227699476,
+              "OutPacketsPerSecond": 59.99509839526591,
+              "MovementCorrectionsPerSecond": 1.3498897138934831
+            }
+          ]
+        },
+        "Client2": {
+          "CaptureSeconds": 20.00076799839735,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9991255837060351,
+            "FrameIntervalP95Ms": 17.628,
+            "WorldTickCpuMeanMs": 1.9792,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1247,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 20.00076799839735,
+              "OutKiBPerSecond": 6.987866432113962,
+              "InKiBPerSecond": 15.698127661905712,
+              "OutPacketsPerSecond": 59.99769609327778,
+              "MovementCorrectionsPerSecond": 1.4999424023319445
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "AB": [
+    {
+      "Case": "AB_1_FixedReference",
+      "ReportSha256": "B60C43CEEB51BA9004B493C212900F0BF16E301C8B76CEE05E15CFCEE9DA12D2",
+      "Passed": true,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "FixedReference",
+      "CaptureSeconds": 45,
+      "EnemyPopulation": 160,
+      "Failures": [],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 167,
+          "Accepted": 167,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.551,
+          "PredictionToAckP95Ms": 331.664,
+          "PredictionToAckP99Ms": 415.533,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 167,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "FixedReference"
+          ],
+          "ApplicationInputSubmissions": 938
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 171,
+          "Accepted": 171,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.62,
+          "PredictionToAckP95Ms": 315.17,
+          "PredictionToAckP99Ms": 365.313,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 171,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "FixedReference"
+          ],
+          "ApplicationInputSubmissions": 963
+        }
+      ],
+      "ActivationLossEvidence": null,
+      "Roles": {
+        "Client2": {
+          "CaptureSeconds": 45.00154000148177,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996293904223925,
+            "FrameIntervalP95Ms": 17.404,
+            "WorldTickCpuMeanMs": 2.0139,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1304,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00154000148177,
+              "OutKiBPerSecond": 7.198212862311688,
+              "InKiBPerSecond": 15.463815411418945,
+              "OutPacketsPerSecond": 59.99794673495833,
+              "MovementCorrectionsPerSecond": 0.9555228554085956
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 45.00146599858999,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996272788838753,
+            "FrameIntervalP95Ms": 17.446,
+            "WorldTickCpuMeanMs": 1.956,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1257,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00146599858999,
+              "OutKiBPerSecond": 7.160183404027236,
+              "InKiBPerSecond": 15.354426002680665,
+              "OutPacketsPerSecond": 59.99804539888984,
+              "MovementCorrectionsPerSecond": 1.0666319182024862
+            }
+          ]
+        },
+        "Server": {
+          "CaptureSeconds": 45.007261000573635,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9992943583572227,
+            "FrameIntervalP95Ms": 34.909,
+            "WorldTickCpuMeanMs": 3.1921,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.7168,
+            "IdleOvershootP95Ms": 0.7214
+          },
+          "Connections": [
+            {
+              "Seconds": 45.007261000573635,
+              "OutKiBPerSecond": 16.332152042714426,
+              "InKiBPerSecond": 6.821924418119705,
+              "OutPacketsPerSecond": 30.03959738813629,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 45.007261000573635,
+              "OutKiBPerSecond": 16.312472058467247,
+              "InKiBPerSecond": 6.824680049872066,
+              "OutPacketsPerSecond": 30.03959738813629,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "Case": "AB_2_Adaptive",
+      "ReportSha256": "84A4FD5850B192E873DCDC4EFA01BDE2976060B69A3B3134AF0EC79CE1DFFBA6",
+      "Passed": true,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "Adaptive",
+      "CaptureSeconds": 45,
+      "EnemyPopulation": 160,
+      "Failures": [],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 167,
+          "Accepted": 167,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.906,
+          "PredictionToAckP95Ms": 331.747,
+          "PredictionToAckP99Ms": 398.097,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 167,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 835
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 170,
+          "Accepted": 170,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.56,
+          "PredictionToAckP95Ms": 364.716,
+          "PredictionToAckP99Ms": 498.231,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 170,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 835
+        }
+      ],
+      "ActivationLossEvidence": null,
+      "Roles": {
+        "Server": {
+          "CaptureSeconds": 44.9786630012095,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.99930089072857,
+            "FrameIntervalP95Ms": 35.742,
+            "WorldTickCpuMeanMs": 3.2407,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.6923,
+            "IdleOvershootP95Ms": 0.6875
+          },
+          "Connections": [
+            {
+              "Seconds": 44.9786630012095,
+              "OutKiBPerSecond": 16.31808887455733,
+              "InKiBPerSecond": 6.5510228703791515,
+              "OutPacketsPerSecond": 30.014231413763852,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 44.9786630012095,
+              "OutKiBPerSecond": 16.32707751156926,
+              "InKiBPerSecond": 6.5231884919992,
+              "OutPacketsPerSecond": 30.014231413763852,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 45.00248700007796,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996228208810425,
+            "FrameIntervalP95Ms": 17.491,
+            "WorldTickCpuMeanMs": 2.066,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1245,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00248700007796,
+              "OutKiBPerSecond": 6.8879656792515265,
+              "InKiBPerSecond": 15.453594716027476,
+              "OutPacketsPerSecond": 59.9966841831502,
+              "MovementCorrectionsPerSecond": 1.2221546778049115
+            }
+          ]
+        },
+        "Client2": {
+          "CaptureSeconds": 45.00298799946904,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996336021259625,
+            "FrameIntervalP95Ms": 17.563,
+            "WorldTickCpuMeanMs": 1.9676,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1212,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00298799946904,
+              "OutKiBPerSecond": 6.910500344247568,
+              "InKiBPerSecond": 15.571340195139214,
+              "OutPacketsPerSecond": 59.99601626522789,
+              "MovementCorrectionsPerSecond": 1.0888165914800616
+            }
+          ]
+        }
+      }
+    },
+    {
+      "Case": "AB_3_Adaptive",
+      "ReportSha256": "B17EBC8F3EE08D1FBB444F09A6E5994B3202ADBB46BDD716FA366C72FC57CEF2",
+      "Passed": false,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "Adaptive",
+      "CaptureSeconds": 45,
+      "EnemyPopulation": 160,
+      "Failures": [
+        "Client1: shot rejection budget exceeded or unavailable.",
+        "Client2: shot rejection budget exceeded or unavailable."
+      ],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 169,
+          "Accepted": 168,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 1,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.662,
+          "PredictionToAckP95Ms": 347.861,
+          "PredictionToAckP99Ms": 398.117,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 169,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 840
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 174,
+          "Accepted": 173,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 1,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.741,
+          "PredictionToAckP95Ms": 364.665,
+          "PredictionToAckP99Ms": 415.136,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 174,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 855
+        }
+      ],
+      "ActivationLossEvidence": null,
+      "Roles": {
+        "Client2": {
+          "CaptureSeconds": 45.03591199964285,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996436177479024,
+            "FrameIntervalP95Ms": 17.429,
+            "WorldTickCpuMeanMs": 1.9199,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1204,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.03591199964285,
+              "OutKiBPerSecond": 6.928021478225518,
+              "InKiBPerSecond": 15.475345299280873,
+              "OutPacketsPerSecond": 59.996564519919744,
+              "MovementCorrectionsPerSecond": 1.1990431103166788
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 44.993337001651525,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996170988636522,
+            "FrameIntervalP95Ms": 17.533,
+            "WorldTickCpuMeanMs": 1.8931,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1264,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 44.993337001651525,
+              "OutKiBPerSecond": 6.912677182647812,
+              "InKiBPerSecond": 15.519550531712486,
+              "OutPacketsPerSecond": 59.986659800337335,
+              "MovementCorrectionsPerSecond": 1.4668838632168448
+            }
+          ]
+        },
+        "Server": {
+          "CaptureSeconds": 44.99844599887729,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.999281375211675,
+            "FrameIntervalP95Ms": 34.63,
+            "WorldTickCpuMeanMs": 3.0787,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.6898,
+            "IdleOvershootP95Ms": 0.7088
+          },
+          "Connections": [
+            {
+              "Seconds": 44.99844599887729,
+              "OutKiBPerSecond": 16.338715272375044,
+              "InKiBPerSecond": 6.571168764803067,
+              "OutPacketsPerSecond": 30.02325902618298,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 44.99844599887729,
+              "OutKiBPerSecond": 16.35607698304433,
+              "InKiBPerSecond": 6.581672599757986,
+              "OutPacketsPerSecond": 30.02325902618298,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "Case": "AB_4_FixedReference",
+      "ReportSha256": "45445903AC10B5383D6C5D806F5C45B2F4FDB60280B6FC53BC10C327D5EE4CA4",
+      "Passed": false,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "FixedReference",
+      "CaptureSeconds": 45,
+      "EnemyPopulation": 160,
+      "Failures": [
+        "Client2: shot rejection budget exceeded or unavailable."
+      ],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 170,
+          "Accepted": 170,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 249.085,
+          "PredictionToAckP95Ms": 331.791,
+          "PredictionToAckP99Ms": 398.341,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 170,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "FixedReference"
+          ],
+          "ApplicationInputSubmissions": 944
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 169,
+          "Accepted": 167,
+          "Rejected": 2,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 2,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.311,
+          "PredictionToAckP95Ms": 331.821,
+          "PredictionToAckP99Ms": 365.884,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 169,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "FixedReference"
+          ],
+          "ApplicationInputSubmissions": 951
+        }
+      ],
+      "ActivationLossEvidence": null,
+      "Roles": {
+        "Server": {
+          "CaptureSeconds": 45.019825000315905,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9993055948316141,
+            "FrameIntervalP95Ms": 35.678,
+            "WorldTickCpuMeanMs": 2.8798,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.7254,
+            "IdleOvershootP95Ms": 0.7355
+          },
+          "Connections": [
+            {
+              "Seconds": 45.019825000315905,
+              "OutKiBPerSecond": 16.32251822518954,
+              "InKiBPerSecond": 6.789868928529932,
+              "OutPacketsPerSecond": 30.031214026054364,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 45.019825000315905,
+              "OutKiBPerSecond": 16.369372583241468,
+              "InKiBPerSecond": 6.7969838495674475,
+              "OutPacketsPerSecond": 30.031214026054364,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        },
+        "Client2": {
+          "CaptureSeconds": 44.97050499916077,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996075872804326,
+            "FrameIntervalP95Ms": 17.602,
+            "WorldTickCpuMeanMs": 2.0733,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1251,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 44.97050499916077,
+              "OutKiBPerSecond": 7.153582004883057,
+              "InKiBPerSecond": 15.625606300465462,
+              "OutPacketsPerSecond": 59.99487886672275,
+              "MovementCorrectionsPerSecond": 1.1340766575992811
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 45.002686001360416,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996219113973022,
+            "FrameIntervalP95Ms": 17.667,
+            "WorldTickCpuMeanMs": 1.8866,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1199,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.002686001360416,
+              "OutKiBPerSecond": 7.1653058175850255,
+              "InKiBPerSecond": 15.688364793740474,
+              "OutPacketsPerSecond": 59.99641887860604,
+              "MovementCorrectionsPerSecond": 1.5110209199056337
+            }
+          ]
+        }
+      }
+    },
+    {
+      "Case": "AB_5_FixedReference",
+      "ReportSha256": "4FFAA60ADD1ADB3E7867416BACB84B0B50C8A022935C96108071340990CD6881",
+      "Passed": true,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "FixedReference",
+      "CaptureSeconds": 45,
+      "EnemyPopulation": 160,
+      "Failures": [],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 169,
+          "Accepted": 169,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.56,
+          "PredictionToAckP95Ms": 348.908,
+          "PredictionToAckP99Ms": 449.067,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 169,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "FixedReference"
+          ],
+          "ApplicationInputSubmissions": 950
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 169,
+          "Accepted": 169,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.613,
+          "PredictionToAckP95Ms": 331.234,
+          "PredictionToAckP99Ms": 415.067,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 169,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "FixedReference"
+          ],
+          "ApplicationInputSubmissions": 955
+        }
+      ],
+      "ActivationLossEvidence": null,
+      "Roles": {
+        "Client2": {
+          "CaptureSeconds": 45.00253999978304,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996300430965288,
+            "FrameIntervalP95Ms": 17.511,
+            "WorldTickCpuMeanMs": 2.1065,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1248,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00253999978304,
+              "OutKiBPerSecond": 7.166348971670373,
+              "InKiBPerSecond": 15.57143010713125,
+              "OutPacketsPerSecond": 59.99661352477031,
+              "MovementCorrectionsPerSecond": 1.1110483986068576
+            }
+          ]
+        },
+        "Server": {
+          "CaptureSeconds": 44.988332998007536,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9992573852548718,
+            "FrameIntervalP95Ms": 35.172,
+            "WorldTickCpuMeanMs": 3.1227,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.6973,
+            "IdleOvershootP95Ms": 0.7062
+          },
+          "Connections": [
+            {
+              "Seconds": 44.988332998007536,
+              "OutKiBPerSecond": 16.33463867387676,
+              "InKiBPerSecond": 6.855879063715477,
+              "OutPacketsPerSecond": 30.05223598882577,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 44.988332998007536,
+              "OutKiBPerSecond": 16.35471766441282,
+              "InKiBPerSecond": 6.796944513115048,
+              "OutPacketsPerSecond": 30.05223598882577,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 45.00444000214338,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996211484518095,
+            "FrameIntervalP95Ms": 17.594,
+            "WorldTickCpuMeanMs": 2.1123,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1242,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00444000214338,
+              "OutKiBPerSecond": 7.157800707767014,
+              "InKiBPerSecond": 15.569535853665295,
+              "OutPacketsPerSecond": 59.99408058119176,
+              "MovementCorrectionsPerSecond": 1.5554020891420086
+            }
+          ]
+        }
+      }
+    },
+    {
+      "Case": "AB_6_Adaptive",
+      "ReportSha256": "8CD75126C600697DF3C55630DC6E075A66DFCF62675C3208413D7B5AE3129643",
+      "Passed": false,
+      "FormalCapacityCertified": false,
+      "ShotRetryPolicy": "Adaptive",
+      "CaptureSeconds": 45,
+      "EnemyPopulation": 160,
+      "Failures": [
+        "Client2: shot rejection budget exceeded or unavailable."
+      ],
+      "Clients": [
+        {
+          "Client": "Client1",
+          "Predicted": 169,
+          "Accepted": 169,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 0,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.757,
+          "PredictionToAckP95Ms": 315.429,
+          "PredictionToAckP99Ms": 364.491,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 169,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 835
+        },
+        {
+          "Client": "Client2",
+          "Predicted": 171,
+          "Accepted": 170,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "Cancelled": 0,
+          "LostInputs": 0,
+          "GameplayCancellations": 0,
+          "ShotsWithDiagnosticIssues": 0,
+          "AdmissionTimeRejections": 1,
+          "ExecutionTimeRejections": 0,
+          "PredictionToAckP50Ms": 264.895,
+          "PredictionToAckP95Ms": 348.338,
+          "PredictionToAckP99Ms": 414.828,
+          "RetryBoundViolations": 0,
+          "RetryPolicyVerifiedShots": 171,
+          "RetryPolicyViolations": 0,
+          "RetryPoliciesObserved": [
+            "Adaptive"
+          ],
+          "ApplicationInputSubmissions": 854
+        }
+      ],
+      "ActivationLossEvidence": null,
+      "Roles": {
+        "Client2": {
+          "CaptureSeconds": 45.003068998456,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.999637469207497,
+            "FrameIntervalP95Ms": 17.451,
+            "WorldTickCpuMeanMs": 1.8924,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1214,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.003068998456,
+              "OutKiBPerSecond": 6.92845543096622,
+              "InKiBPerSecond": 15.47040759234412,
+              "OutPacketsPerSecond": 59.99590828111375,
+              "MovementCorrectionsPerSecond": 1.2443595791638409
+            }
+          ]
+        },
+        "Server": {
+          "CaptureSeconds": 44.99275200068951,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9992882409184588,
+            "FrameIntervalP95Ms": 34.689,
+            "WorldTickCpuMeanMs": 3.0324,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.7239,
+            "IdleOvershootP95Ms": 0.6998
+          },
+          "Connections": [
+            {
+              "Seconds": 44.99275200068951,
+              "OutKiBPerSecond": 16.3533935349459,
+              "InKiBPerSecond": 6.550621058820392,
+              "OutPacketsPerSecond": 30.07151018411289,
+              "MovementCorrectionsPerSecond": null
+            },
+            {
+              "Seconds": 44.99275200068951,
+              "OutKiBPerSecond": 16.348119247934154,
+              "InKiBPerSecond": 6.539356223597771,
+              "OutPacketsPerSecond": 30.049284382055156,
+              "MovementCorrectionsPerSecond": null
+            }
+          ]
+        },
+        "Client1": {
+          "CaptureSeconds": 45.00184699892998,
+          "FrameCosts": {
+            "Coverage": 1.0,
+            "WindowCoverage": 0.9996115048408425,
+            "FrameIntervalP95Ms": 17.551,
+            "WorldTickCpuMeanMs": 1.9907,
+            "WorldTickCpuP95Ms": 15.625,
+            "ReplicationTickFlushP95Ms": 0.1246,
+            "IdleOvershootP95Ms": 0.0
+          },
+          "Connections": [
+            {
+              "Seconds": 45.00184699892998,
+              "OutKiBPerSecond": 6.8925122397170755,
+              "InKiBPerSecond": 15.78047209133184,
+              "OutPacketsPerSecond": 59.99753743583455,
+              "MovementCorrectionsPerSecond": 1.222172058878111
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "ABSummary": {
+    "FixedReference": {
+      "Rounds": 3,
+      "BudgetPassedRounds": 2,
+      "Predicted": 1015,
+      "Accepted": 1013,
+      "Rejected": 2,
+      "MissingFinalAck": 0,
+      "LostInputs": 0,
+      "ApplicationInputSubmissions": 5701,
+      "SubmissionsPerPredictedInput": 5.6167,
+      "TimeWeightedClientOutKiBPerSecond": 7.1669,
+      "PooledPredictionToAckP95Ms": 331.791,
+      "PooledPredictionToAckP99Ms": 397.865
+    },
+    "Adaptive": {
+      "Rounds": 3,
+      "BudgetPassedRounds": 1,
+      "Predicted": 1020,
+      "Accepted": 1017,
+      "Rejected": 3,
+      "MissingFinalAck": 0,
+      "LostInputs": 0,
+      "ApplicationInputSubmissions": 5054,
+      "SubmissionsPerPredictedInput": 4.9549,
+      "TimeWeightedClientOutKiBPerSecond": 6.91,
+      "PooledPredictionToAckP95Ms": 348.338,
+      "PooledPredictionToAckP99Ms": 398.18
+    }
+  },
+  "ActivationProof": {
+    "SchemaVersion": 1,
+    "Passed": true,
+    "ReportSha256": "6AC8441D145766D5B534DA26F0DE9942EB7797D900F057DFA6F25D5BA767C8A6",
+    "FirstStream": "16/1/1/",
+    "FirstStreamShots": 19,
+    "FirstStreamAccepted": 19,
+    "NoAuthorizationEvents": 0,
+    "NativeReliableActivation": {
+      "Channel": 11,
+      "BunchSequence": 111,
+      "OriginalPacket": 16846,
+      "OriginalStatus": "Dropped",
+      "RetransmittedPacket": 16861,
+      "RetransmittedStatus": "Delivered",
+      "SameClientResendIntervalMs": 251.4772
+    },
+    "SameServerTrace": {
+      "Shot1ExecutionSeconds": 83.6312203,
+      "NativeActivationArrivalSeconds": 83.8297709,
+      "ExecutionPrecededReliableActivationMs": 198.5506
+    },
+    "BatchRPCs": {
+      "Total": 184,
+      "Unreliable": 184,
+      "Reliable": 0,
+      "Scope": "Selected Client1 connection 1 to server connection 2, not both clients combined"
+    },
+    "OtherRejection": {
+      "ShotId": 43,
+      "Session": 4,
+      "Stage": "Admission",
+      "Reason": "Stale",
+      "AgeMs": 239.73,
+      "AllowedAgeMs": 229.893
+    },
+    "WholeRun": [
+      {
+        "Client": "Client1",
+        "Predicted": 84,
+        "Accepted": 83,
+        "Rejected": 1,
+        "LostInputs": 0,
+        "MissingFinalAck": 0
+      },
+      {
+        "Client": "Client2",
+        "Predicted": 82,
+        "Accepted": 82,
+        "Rejected": 0,
+        "LostInputs": 0,
+        "MissingFinalAck": 0
+      }
+    ],
+    "ArtifactSha256": {
+      "Client1.utrace": "23D29AF7DDD0C27E7F9469E59FA7717F6FBFA6BDEC7A8FE223AB95B8A6C5D298",
+      "Server.utrace": "93F5AAEBED09A23E706630547C482287F0DDA37098D60A79CF1331587489428C",
+      "Client1Packets_Final.csv": "97FEEBB9ED37C6DCCB72FEDEDEF339DC105569FB5687C910FD79816664C116F5",
+      "ServerPackets_Final.csv": "865C422BC5B73C5430AA1676F39BDC0C04C90D2D4720010808F34340A6FFA538",
+      "ServerPackets_Final.csv.bookmarks.csv": "9A3178074E6EAF6266FAA61B3CA9685284B317A916A5CD28383E006570819E3E"
+    },
+    "Boundary": "Native trace carries RPC names and packet/bunch identities, not decoded RPC parameter values. Business identity is corroborated by lifecycle logs and execution bookmarks. All time differences use one peer clock. No later reliable-RPC head-of-line blocking was observed in this gap. This diagnostic is not no-trace capacity certification."
+  },
+  "MeasurementBoundary": "ApplicationInputSubmissions count per-input entries immediately before a batched RPC, not UDP datagrams. Connection counters include UE protocol. FixedReference uses the same bounded sender with a fixed 40ms interval; it is not the whole former implementation. Pooled latency is computed from per-shot same-client durations; per-round results remain separate.",
+  "PreservedFailure": {
+    "Case": "WeakRenderedLiveMoving_R1",
+    "ReportSha256": "CEAFFD7890A2D878E0CE3499CFBFB0C936EF0D330DF2341309C9C9E5EB4E0E4A",
+    "Observed": {
+      "ShotSrttMs": 692.467,
+      "InitialRttMs": 982.368,
+      "AllowedAgeMs": 300.0,
+      "AdmissionAgeMs": 316.38,
+      "LatestUsefulSendAgeMs": 0.0,
+      "Result": "InvalidTime",
+      "ShotRttVarMs": 531.944,
+      "OrdinarySubmissions": 1,
+      "SecondClockRebased": true,
+      "SecondRttMs": 280.559
+    },
+    "Conclusion": "Startup queue observation remained in RTT EWMA after clock had established a much shorter baseline; deadline suppressed all ordinary retries. Actual server rejection was correct. First-packet loss attribution is not available without trace."
+  },
+  "ArchitectureAudit": {
+    "DuplicateTransportStack": false,
+    "DuplicateDamageExecutor": false,
+    "ApplicationBoundary": "One bounded input sender, one batch authorization route through native GAS, one weapon executor and one terminal-result consumer. UE retains packet ACK, reliable RPC retransmission and movement prediction."
+  }
+}
