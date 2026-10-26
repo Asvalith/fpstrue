@@ -17,7 +17,7 @@ enum class EFPEnemyRenderSignificanceTier : uint8
 };
 
 /**
- * 敌人全局渲染显著性策略，单机由 GameMode、多人由本端 Coordinator 配置并校验和消费。
+ * 敌人本端渲染显著性策略，统一由 GameState 所有的 Coordinator 配置、校验和消费。
  *
  * 四个权重会在运行时归一化，不要求手工相加为 1。Gameplay Significance 仍按玩法目标距离和交互状态独立计算，
  * 本结构只控制渲染评分、档位、LOD、动画、阴影和硬件光追预算。
@@ -295,10 +295,6 @@ FORCEINLINE void FPEnemyRenderTopKInsert(TArray<FFPEnemyRenderTopKEntry, Allocat
 	}
 }
 
-// Copyright Epic Games, Inc. All Rights Reserved.
-
-
-
 class AfpstrueEnemyCharacter;
 class UfpstrueEnemyAnimationSharingCoordinator;
 
@@ -322,16 +318,6 @@ public:
 	void StartMultiplayer(UfpstrueEnemyAnimationSharingCoordinator* InSharingCoordinator);
 	// 停止集中更新 Timer；GameState 结束和组件销毁都会调用。
 	void Stop();
-	// 只读诊断用于自动化验证启动、发现副本和采样端职责，不参与玩法判断。
-	bool IsRunning() const { return bRunning; }
-	// 上轮实际发现的存活敌人数，不代表所有注册 Actor 数。
-	int32 GetTrackedEnemyCount() const { return LastTrackedEnemyCount; }
-	// 上轮构建的服务器玩法视点数；插件有效时才用于评分，不是相机视锥数量。
-	int32 GetGameplayViewpointCount() const { return LastGameplayViewpointCount; }
-	// 每次进入有效更新递增，便于验证 Timer 是否持续运行。
-	uint32 GetUpdateSerial() const { return UpdateSerial; }
-	// 只在采到有效本地相机并执行表现预算更新时递增。
-	uint32 GetRenderUpdateSerial() const { return RenderUpdateSerial; }
 	// 多人模式是否曾处理非空表现候选；只读启动诊断，不代表当前可见性。
 	bool HasRenderedEnemies() const { return bReportedRenderUpdate; }
 
@@ -392,16 +378,8 @@ private:
 	bool bReportedPopulatedUpdate = false;
 	bool bReportedRenderUpdate = false;
 	bool bReportedSharingFollowers = false;
-	int32 LastTrackedEnemyCount = 0;
-	int32 LastGameplayViewpointCount = 0;
-	uint32 UpdateSerial = 0;
-	uint32 RenderUpdateSerial = 0;
 	FTimerHandle UpdateTimerHandle;
 };
-
-// Copyright Epic Games, Inc. All Rights Reserved.
-
-
 
 class AfpstrueEnemyCharacter;
 class UAnimationSharingManager;
@@ -431,7 +409,7 @@ public:
  * Animation Sharing 的唯一项目侧登记入口；World Manager 生命周期仍由引擎管理。
  * Render Significance 决定谁可进入共享池以及共享 Leader 是否值得更新，
  * Gameplay Significance 不读取视锥，也不依赖本组件。
- * 单机/客户端创建兼容池后按资格增删 Follower；联网权威端不使用共享姿态代替判定姿态。
+ * 客户端创建兼容池后按资格增删 Follower；权威端不使用共享姿态代替判定姿态。
  */
 UCLASS(ClassGroup = (Performance))
 class FPSTRUE_API UfpstrueEnemyAnimationSharingCoordinator final : public UActorComponent
@@ -444,9 +422,9 @@ public:
 
 	// ==================== 生命周期与 Follower 接口 ====================
 
-	// GameMode 在首个敌人生成前调用，创建本 World 唯一共享池。
+	// 本端 Significance 首次发现敌人后调用，创建或复用本 World 唯一共享池。
 	void Start(TSubclassOf<AfpstrueEnemyCharacter> InEnemyClass);
-	// GameMode 结束时注销全部 Follower 并停止接纳敌人。
+	// GameState 结束时注销全部 Follower 并停止接纳敌人。
 	void Stop();
 	// Render Significance 应用档位后调用，决定敌人加入、保留或退出共享池。
 	void RefreshEnemyRegistration(AfpstrueEnemyCharacter* Enemy);
@@ -465,7 +443,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Performance|Animation Sharing")
 	bool bEnableAnimationSharing = true;
 
-	// 项目 INI 提供默认素材；当前 GameMode 蓝图的组件属性可覆盖，不需要修改 C++。
+	// 项目 INI 提供默认素材；本端 GameState 的组件属性可覆盖，不需要修改 C++。
 	UPROPERTY(EditDefaultsOnly, Category = "Performance|Animation Sharing")
 	TSoftObjectPtr<UAnimSequence> IdleAnimation;
 

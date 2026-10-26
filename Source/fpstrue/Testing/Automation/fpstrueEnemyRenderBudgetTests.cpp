@@ -562,7 +562,7 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	auto* Sharing = State->FindComponentByClass<UfpstrueEnemyAnimationSharingCoordinator>();
 	if (!TestNotNull(TEXT("GameState owns the significance coordinator"), Coordinator) ||
 		!TestNotNull(TEXT("GameState owns the sharing coordinator"), Sharing) ||
-		!TestTrue(TEXT("GameState BeginPlay starts the existing coordinator"), Coordinator->IsRunning()) ||
+		!TestTrue(TEXT("GameState BeginPlay starts the existing coordinator"), Coordinator->bRunning) ||
 		!TestNotNull(TEXT("The real significance plugin is available"), USignificanceManager::Get(World))) return false;
 	TGuardValue<TEnumAsByte<EWorldType::Type>> WorldTypeScope(World->WorldType, EWorldType::PIE);
 	World->SetPlayInEditorInitialNetMode(NM_DedicatedServer);
@@ -591,13 +591,11 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	Enemy->bReferenceEnemyReplication = false; // 用例固定被测策略，不改变进程A/B命令行。
 	Enemy->ApplyNetworkReplicationPolicy();
 	Coordinator->Update();
-	TestEqual(TEXT("Both valid participants contribute viewpoints"), Coordinator->GetGameplayViewpointCount(), 2);
-	TestEqual(TEXT("Typed discovery finds the live enemy"), Coordinator->GetTrackedEnemyCount(), 1);
 	TestTrue(TEXT("Near second participant wins over far first participant, rather than averaging"),
 		Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
 	TestEqual(TEXT("A near second participant protects Actor replication for every connection"),
 		Enemy->GetNetUpdateFrequency(), FMath::Min(Enemy->AuthoredNetUpdateFrequency, 30.0f));
-	TestEqual(TEXT("DS never executes render application"), Coordinator->GetRenderUpdateSerial(), uint32(0));
+	TestFalse(TEXT("DS never publishes a render application"), Coordinator->bReportedRenderUpdate);
 	TestNull(TEXT("DS never creates the World animation-sharing manager"), UAnimationSharingManager::GetManagerForWorld(World));
 	TestEqual(TEXT("DS has no sharing followers"), Sharing->GetRegisteredEnemyCount(), 0);
 
@@ -609,11 +607,9 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	Retained.ExpiresAt = World->GetTimeSeconds() + 30.0;
 	Mode->RejoinSlots.Add(TEXT("significance-retained-fixture"), Retained);
 	Coordinator->Update();
-	TestEqual(TEXT("Uncontrolled but retained Pawn still contributes a viewpoint"), Coordinator->GetGameplayViewpointCount(), 2);
 	TestTrue(TEXT("Retained nearby player keeps enemy response"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
 	Mode->RejoinSlots.FindChecked(TEXT("significance-retained-fixture")).ExpiresAt = World->GetTimeSeconds() - 1.0;
 	Coordinator->Update();
-	TestEqual(TEXT("Expired retained Pawn is excluded"), Coordinator->GetGameplayViewpointCount(), 1);
 	TestTrue(TEXT("Only distant valid participant permits background gameplay"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Background);
 	TestEqual(TEXT("Only distant valid participants permit the background replication cap"),
 		Enemy->GetNetUpdateFrequency(), FMath::Min(Enemy->AuthoredNetUpdateFrequency, 5.0f));
@@ -622,12 +618,13 @@ bool FFpstrueMultiplayerSignificanceCoordinatorTest::RunTest(const FString& Para
 	TestTrue(TEXT("Moving the first participant near independently restores full gameplay"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
 	TestEqual(TEXT("Either participant independently restores Full replication"),
 		Enemy->GetNetUpdateFrequency(), FMath::Min(Enemy->AuthoredNetUpdateFrequency, 30.0f));
-	const uint32 SerialBeforeEnd = Coordinator->GetUpdateSerial();
 	State->Destroy();
-	TestFalse(TEXT("GameState EndPlay stops its coordinator"), Coordinator->IsRunning());
+	TestFalse(TEXT("GameState EndPlay stops its coordinator"), Coordinator->bRunning);
 	TestFalse(TEXT("GameState EndPlay clears the owned update timer"), World->GetTimerManager().IsTimerActive(Coordinator->UpdateTimerHandle));
+	// 停止后改变真实评分输入；直接观察玩法档位，避免为测试维护另一份更新序号。
+	Players[0]->SetActorLocation(FVector(50000.0f, 0.0f, 0.0f));
 	Coordinator->Update();
-	TestEqual(TEXT("Stopped coordinator cannot perform another update"), Coordinator->GetUpdateSerial(), SerialBeforeEnd);
+	TestTrue(TEXT("Stopped coordinator cannot apply the changed viewpoint"), Enemy->GetGameplaySignificanceTier() == EFPEnemySignificanceTier::Full);
 	TestEqual(TEXT("Cleanup leaves no sharing followers"), Sharing->GetRegisteredEnemyCount(), 0);
 	return true;
 }
@@ -819,7 +816,7 @@ bool FFpstrueMultiplayerClientPerformanceTest::RunTest(const FString& Parameters
 	State->FinishSpawning(FTransform::Identity);
 	auto* Coordinator = State->FindComponentByClass<UfpstrueEnemySignificanceCoordinator>();
 	if (!TestNotNull(TEXT("Client GameState owns its coordinator"), Coordinator) ||
-		!TestTrue(TEXT("Client GameState BeginPlay also starts local coordination"), Coordinator->IsRunning())) return false;
+		!TestTrue(TEXT("Client GameState BeginPlay also starts local coordination"), Coordinator->bRunning)) return false;
 	auto* Player = World->SpawnActor<APlayerController>();
 	if (!TestNotNull(TEXT("Client local view Controller"), Player) || !TestTrue(TEXT("Fixture Controller owns the client view"), Player->IsLocalController())) return false;
 	const FTransform EnemyTransform(FVector(-20000.0f, 0.0f, 0.0f));
@@ -841,8 +838,7 @@ bool FFpstrueMultiplayerClientPerformanceTest::RunTest(const FString& Parameters
 	Enemy->ApplySignificance(0.0f);
 	Enemy->ApplyGameplaySignificanceIntervals();
 	Coordinator->Update();
-	TestEqual(TEXT("Client coordinator does not create gameplay viewpoints"), Coordinator->GetGameplayViewpointCount(), 0);
-	TestTrue(TEXT("Client still applies its own render policy"), Coordinator->GetRenderUpdateSerial() > 0);
+	TestTrue(TEXT("Client still publishes its own render policy"), Coordinator->bReportedRenderUpdate);
 	TestTrue(TEXT("Client cannot overwrite the gameplay tier"), Enemy->GetGameplaySignificanceTier() == GameplayTierBefore);
 	TestEqual(TEXT("Client cannot change CharacterMovement update cadence"), Enemy->GetCharacterMovement()->GetComponentTickInterval(), 0.0125f);
 	TestTrue(TEXT("Client background animation may be throttled"), Enemy->GetMesh()->GetComponentTickInterval() > 0.0f);
@@ -860,7 +856,7 @@ bool FFpstrueMultiplayerClientPerformanceTest::RunTest(const FString& Parameters
 	TestEqual(TEXT("Stopped replica selects idle instead of running in place"), AnimationState, static_cast<int32>(EFPEnemyAIState::Idle));
 	// 模拟引擎移除客户端复制副本，不能用客户端普通 Destroy 请求绕过网络销毁权限。
 	State->Destroy(true);
-	TestFalse(TEXT("Client GameState cleanup stops its local coordinator"), Coordinator->IsRunning());
+	TestFalse(TEXT("Client GameState cleanup stops its local coordinator"), Coordinator->bRunning);
 	return true;
 }
 

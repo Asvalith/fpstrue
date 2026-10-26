@@ -1,0 +1,105 @@
+{
+  "SchemaVersion": 1,
+  "Scope": "Second dead-code removal pass. No new network or performance measurements.",
+  "EditorBuildPassed": true,
+  "ShippingBuildPassed": true,
+  "AddedSourceLines": 31,
+  "DeletedSourceLines": 486,
+  "NetDeletedSourceLines": 455,
+  "AffectedTests": {
+    "Clean": 8,
+    "Warned": 5,
+    "Failed": 0,
+    "NotRun": 0,
+    "Total": 13,
+    "ReportSha256": "C55F8D598491D5B6C81893F457EC3643EC316CCC489708A6CABDB47C9E11975F"
+  },
+  "Removed": [
+    "retired hard-coded map navigation repair commandlet",
+    "legacy pickup migration scans and counters",
+    "two duplicate reload metadata fields",
+    "unreferenced AI path-following benchmark method",
+    "duplicate immutable throttle-option cache",
+    "five test-only public getters and two update serial counters"
+  ],
+  "Tests": [
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
+      "State": "Success",
+      "Warnings": 1,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference",
+      "State": "Success",
+      "Warnings": 2,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle",
+      "State": "Success",
+      "Warnings": 2,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.AmmoSnapshotAckReordering",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.BatchFireAuthorizationAndNativeIsolation",
+      "State": "Success",
+      "Warnings": 3,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail",
+      "State": "Success",
+      "Warnings": 1,
+      "Errors": 0
+    },
+    {
+      "Name": "fpstrue.Multiplayer.Prediction.ReloadPlaybackAdoptionAndAuthorityClock",
+      "State": "Success",
+      "Warnings": 0,
+      "Errors": 0
+    }
+  ]
+}

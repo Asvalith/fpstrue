@@ -2,7 +2,7 @@
 
 基于 UE5.5、C++ 与蓝图独立实现多人 PvPvE 射击，完成装备、射击换弹、伤害死亡、计分重生、敌人战斗与 HUD。主要实践逐发同步与预测校正、群体调度和线程性能分析。
 
-> `main` 是源码展示快照，需要有授权的 Content 资源才能运行；不分发素材、原始日志、凭据或缓存。源码来自开发提交 `c9fa4e5`，Source树一致，没有另写展示玩法。[公开范围](Docs/SHOWCASE_SCOPE.md)与[资源依赖](Docs/ASSET_REQUIREMENTS.md)说明边界。
+> `main` 是源码展示快照，需要有授权的 Content 资源才能运行；不分发素材、原始日志、凭据或缓存。源码来自开发提交 `3c9b2ee`，Source树一致，没有另写展示玩法。[公开范围](Docs/SHOWCASE_SCOPE.md)与[资源依赖](Docs/ASSET_REQUIREMENTS.md)说明边界。
 
 ## 当前入口
 
@@ -60,7 +60,7 @@
 
 [本轮白名单证据](Docs/Testing/fps-adaptive-fire-20261026.json)保留完整逐轮指标、原预算及失败；[历史协议6证据](Docs/Testing/fps-network-20261026.json)保持原样。历史13.28ms与70.4%来自旧场景，未改写成本轮结果。
 
-本轮入口清理通过Editor/Shipping编译及35项受影响回归（29 clean、6 warned）；没有重跑性能或弱网矩阵，以上网络实测保留原提交口径。
+入口清理两轮均通过Editor/Shipping编译；首轮35项、第二轮13项受影响回归通过。第二轮再净删455行；没有重跑性能或弱网矩阵，以上网络实测保留原提交口径。
 
 ## 阅读与运行
 

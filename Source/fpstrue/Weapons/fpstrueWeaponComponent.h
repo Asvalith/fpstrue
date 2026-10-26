@@ -393,7 +393,7 @@ private:
 	friend class FFpstrueShotActivationTest;
 	friend class FFpstrueShotPresentationReentryTest;
 	friend class UfpstrueHealthComponent;
-	// 只有 GA 能调用执行器；公开 Start/Stop/Request 只是 ASC 请求入口，不再直接启动业务。
+	// 只有 GA 能调用执行器；公开换弹请求只进入 ASC，不直接启动事务。
 	bool CanExecuteShot() const;
 	// 纯校验，不消费 ShotId、不修改会话；准入、执行和 ACK 共用装备归属规则。
 	bool MatchesShotEquipment(const FFPShotRequest& Request) const;
@@ -474,8 +474,6 @@ private:
 	FFPReplicatedWeaponState NetworkState;
 	UPROPERTY(ReplicatedUsing = OnRep_OwnerState)
 	FFPReplicatedWeaponOwnerState OwnerState;
-	bool bNetworkEmptyReload = false;
-	EFPReloadEndReason LastNetworkReloadEndReason = EFPReloadEndReason::Completed;
 	int32 LastPresentedReloadId = INDEX_NONE;
 	// ==================== Equipment Eligibility / Read-only Action View ====================
 	// 动作阶段由 GAS 独占；装备资格和只读网络展示不构成第二套动作状态机。

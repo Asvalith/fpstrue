@@ -219,9 +219,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		// 不跨轮保存非拥有 Actor 指针，仅保留临时数组的分配容量。
 		Candidates.Reset();
 	};
-	LastTrackedEnemyCount = Candidates.Num();
-	LastGameplayViewpointCount = 0;
-	++UpdateSerial;
+	int32 GameplayViewpointCount = 0;
 	// 插件缺失只跳过 Gameplay 评分；自定义 Render 预算仍需独立执行。客户端绝不写入服务器玩法档位。
 	if (GetOwner()->HasAuthority())
 	{
@@ -231,7 +229,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 		if (const AfpstruePvpGameMode* MultiplayerMode = GetWorld()->GetAuthGameMode<AfpstruePvpGameMode>())
 			for (TActorIterator<AfpstrueCharacter> It(GetWorld()); It; ++It)
 				if (MultiplayerMode->IsCombatParticipant(*It)) GameplayViewpoints.Add(It->GetActorTransform());
-		LastGameplayViewpointCount = GameplayViewpoints.Num();
+		GameplayViewpointCount = GameplayViewpoints.Num();
 		if (USignificanceManager* Manager = USignificanceManager::Get(GetWorld()))
 		{
 			// 默认降序策略取各视点的最大评分：靠近任意有效玩家都保持相应响应，不取平均削弱远端玩家。
@@ -242,7 +240,7 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 	{
 		bReportedPopulatedUpdate = true;
 		UE_LOG(LogTemp, Display, TEXT("PVP_PERFORMANCE POPULATED NetMode=%d Enemies=%d GameplayViews=%d Render=%d"),
-			static_cast<int32>(GetNetMode()), LastTrackedEnemyCount, LastGameplayViewpointCount,
+			static_cast<int32>(GetNetMode()), Candidates.Num(), GameplayViewpointCount,
 			GetNetMode() != NM_DedicatedServer ? 1 : 0);
 	}
 	if (GetNetMode() == NM_DedicatedServer) return;
@@ -302,12 +300,11 @@ void UfpstrueEnemySignificanceCoordinator::Update()
 
 	// ★【重要边界】[线程交接] 预算选择完成后在当前游戏线程统一写回组件；候选裸指针只用于本轮同步处理，不作为 Worker 或跨轮数据。
 	ApplyAndRecordCandidates(FullBudgetDowngradeCount, ShadowBudgetRejectedCount, RayTracingBudgetRejectedCount);
-	++RenderUpdateSerial;
 	if (!Candidates.IsEmpty() && !bReportedRenderUpdate)
 	{
 		bReportedRenderUpdate = true;
 		UE_LOG(LogTemp, Display, TEXT("PVP_PERFORMANCE RENDER_APPLIED NetMode=%d Enemies=%d GameplayViews=%d"),
-			static_cast<int32>(GetNetMode()), Candidates.Num(), LastGameplayViewpointCount);
+			static_cast<int32>(GetNetMode()), Candidates.Num(), GameplayViewpointCount);
 	}
 	if (!bReportedSharingFollowers && AnimationSharingCoordinator.IsValid() &&
 		AnimationSharingCoordinator->GetRegisteredEnemyCount() > 0)
@@ -576,9 +573,6 @@ void UfpstrueEnemySignificanceCoordinator::SanitizePolicy(FFPEnemyRenderSignific
 	Policy.ReducedMinLOD = FMath::Max(Policy.ReducedMinLOD, Policy.FullMinLOD);
 	Policy.BackgroundMinLOD = FMath::Max(Policy.BackgroundMinLOD, Policy.ReducedMinLOD);
 }
-
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 
 namespace
 {

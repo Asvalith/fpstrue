@@ -127,7 +127,6 @@ void AfpstrueEnemyAIController::OnPossess(APawn* InPawn)
 		GetPerceptionComponent()->SetSenseEnabled(UAISense_Hearing::StaticClass(), false);
 		return;
 	}
-	bDisableDecisionThrottlingForBenchmark = FFPRuntimeOptions::Get().bDisableAIThrottling;
 
 	ControlledEnemy = Cast<AfpstrueEnemyCharacter>(InPawn);
 	CommandPhase = ECommandPhase::Uninitialized;
@@ -326,16 +325,6 @@ void AfpstrueEnemyAIController::HandleCombatTargetDied(AfpstrueCharacter* DeadTa
 void AfpstrueEnemyAIController::HandleCombatTargetEndPlay(AActor* EndingTarget, EEndPlayReason::Type)
 {
 	NotifyCombatTargetUnavailable(Cast<AfpstrueCharacter>(EndingTarget));
-}
-
-// 仅用于性能消融，改变 PathFollowing 的组件更新开关，不改正式玩法策略。
-void AfpstrueEnemyAIController::ApplyBenchmarkPathFollowingTickOverride(bool bDisablePathFollowingTick)
-{
-	// 仅供破坏性诊断测量 PathFollowing 成本上界；正式玩法和完整基线不会传入关闭开关。
-	if (UPathFollowingComponent* PathFollowing = GetPathFollowingComponent())
-	{
-		PathFollowing->SetComponentTickEnabled(!bDisablePathFollowingTick);
-	}
 }
 
 // 安全应用玩法重要性倍率；频率提升时唤醒旧等待，非紧急行为才会被降频。
@@ -733,7 +722,7 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 float AfpstrueEnemyAIController::GetNextDecisionInterval(const FDecisionContext& Context) const
 {
 	// 战斗响应优先于 Significance 降频；Reduced/Background 倍率只放大追击、远距和 Idle 间隔。
-	if (bDisableDecisionThrottlingForBenchmark)
+	if (FFPRuntimeOptions::Get().bDisableAIThrottling)
 	{
 		return AttackDecisionInterval;
 	}
