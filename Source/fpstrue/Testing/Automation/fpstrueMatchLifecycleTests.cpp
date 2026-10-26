@@ -19,7 +19,14 @@ bool AfpstrueSpawnTestNavigation::ProjectPoint(const FVector& Point, FNavLocatio
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
+#include "Game/fpstruePvpGameState.h"
+#include "Game/fpstruePvpPlayerController.h"
+#include "Game/fpstruePvpPlayerState.h"
+#include "Characters/Player/fpstrueCharacter.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerStart.h"
 #include "GameMapsSettings.h"
 #include "Characters/Enemies/AI/fpstrueEnemyAIController.h"
 #include "BrainComponent.h"
@@ -95,6 +102,56 @@ bool FFpstrueMultiplayerMatchLifecycleTest::RunTest(const FString& Parameters)
 		Spawned->Destroy();
 		Mode->HandlePveEnemyEndPlay(Spawned, EEndPlayReason::Destroyed);
 		TestEqual(TEXT("Destruction and duplicate cleanup leave no entry"), Mode->PveEnemies.Num(), 0);
+
+		// 正常编辑器本地预览也必须走同一死亡事务。首个断言在任何手动规则调用前验证真实伤害已登记。
+		TestEqual(TEXT("The normal preview fixture really runs in Standalone"), World->GetNetMode(), NM_Standalone);
+		TestEqual(TEXT("Preview uses the production template Blueprint rather than a legacy solo class"),
+			Mode->DefaultPawnClass->GetPathName(), FString(TEXT("/Game/FirstPerson/Blueprints/firstperson/BP_TemplateCharacter.BP_TemplateCharacter_C")));
+		Mode->RespawnDelay = 0.1f;
+		Mode->bProvideNearbySpawnPickup = false; // 隔离出生补给，不改空手重生规则。
+#if !UE_BUILD_SHIPPING
+		Mode->bSmokeTest = false;
+#endif
+		FActorSpawnParameters PlayerSpawn;
+		PlayerSpawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		auto* PreviewPawn = World->SpawnActor<AfpstrueCharacter>(Mode->DefaultPawnClass,
+			FTransform(FVector(5000.0f, 0.0f, 1000.0f)), PlayerSpawn);
+		auto* PreviewController = World->SpawnActor<AfpstruePvpPlayerController>();
+		auto* PreviewStart = World->SpawnActor<APlayerStart>(FVector(8000.0f, 0.0f, 1000.0f), FRotator::ZeroRotator);
+		if (!TestNotNull(TEXT("Preview death has its real player Blueprint"), PreviewPawn)
+			|| !TestNotNull(TEXT("Preview death has its production Controller"), PreviewController)
+			|| !TestNotNull(TEXT("Preview respawn has a real PlayerStart"), PreviewStart)) return false;
+		PreviewPawn->GetCharacterMovement()->SetComponentTickEnabled(false);
+		PreviewController->Possess(PreviewPawn);
+		auto* PreviewState = PreviewController->GetPlayerState<AfpstruePvpPlayerState>();
+		auto* MatchState = Mode->GetGameState<AfpstruePvpGameState>();
+		if (!TestNotNull(TEXT("Preview owns the persistent project PlayerState"), PreviewState)
+			|| !TestNotNull(TEXT("Preview has its active replicated match state"), MatchState)) return false;
+		const int32 DeathsBefore = PreviewState->GetDeaths();
+		const int32 EliminationsBefore = MatchState->GetEliminationCount();
+		UGameplayStatics::ApplyDamage(PreviewPawn, 100000.0f, nullptr, nullptr, nullptr);
+		if (!TestTrue(TEXT("Normal Standalone lethal damage reaches the shared authoritative respawn queue"),
+			PreviewPawn->IsDead() && Mode->PendingRespawns.Contains(PreviewController))) return false;
+		TestTrue(TEXT("The one shared respawn record owns an active production Timer"),
+			Mode->PendingRespawns.Num() == 1 && World->GetTimerManager().IsTimerActive(Mode->PendingRespawns.FindChecked(PreviewController)));
+		TestEqual(TEXT("Standalone lethal damage records one death without a manual GameMode call"), PreviewState->GetDeaths(), DeathsBefore + 1);
+		TestEqual(TEXT("Standalone lethal damage records one match elimination"), MatchState->GetEliminationCount(), EliminationsBefore + 1);
+		TestEqual(TEXT("Preview death disables the capsule just like a networked death"),
+			PreviewPawn->GetCapsuleComponent()->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+		Mode->HandlePlayerEliminated(PreviewPawn, nullptr); // 重复入口只能复用已登记的事务。
+		TestEqual(TEXT("Duplicate death cannot create a second pending respawn"), Mode->PendingRespawns.Num(), 1);
+		TestEqual(TEXT("Duplicate death cannot add another death"), PreviewState->GetDeaths(), DeathsBefore + 1);
+		TestEqual(TEXT("Duplicate death cannot add another elimination"), MatchState->GetEliminationCount(), EliminationsBefore + 1);
+		const TWeakObjectPtr<AfpstrueCharacter> DeadPreviewPawn(PreviewPawn);
+		for (int32 Frame = 0; Frame < 5; ++Frame)
+			if (!Fixture.TickTestWorld(0.05f)) { Fixture.ForwardErrorMessages(this); return false; }
+		auto* RespawnedPawn = Cast<AfpstrueCharacter>(PreviewController->GetPawn());
+		TestTrue(TEXT("Normal Standalone respawn consumes the production Timer and creates a new living Pawn"),
+			IsValid(RespawnedPawn) && RespawnedPawn != DeadPreviewPawn.Get() && !RespawnedPawn->IsDead()
+			&& RespawnedPawn->GetController() == PreviewController && !Mode->PendingRespawns.Contains(PreviewController));
+		TestTrue(TEXT("Standalone respawn preserves its PlayerState and exactly one death"),
+			PreviewController->GetPlayerState<AfpstruePvpPlayerState>() == PreviewState && PreviewState->GetDeaths() == DeathsBefore + 1);
+		TestFalse(TEXT("The replaced dead preview Pawn is reclaimed"), DeadPreviewPawn.IsValid() && !DeadPreviewPawn->IsActorBeingDestroyed());
 	}
 	return true;
 }

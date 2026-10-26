@@ -11,7 +11,8 @@
 #include "Misc/Parse.h"
 
 // 播放身份与启动配置工具；调用方保持动作状态，工具只解析明确身份或读取配置，不发网络消息。
-
+// 
+//发身份
 // 【设计取舍】同步绑定只查调用者明确指定资产的活动实例；异步 Notify/结束回调只认已保存的实例 ID。
 // 同资产重播产生新 ID，不能在旧回调里重新查询“当前 Montage”，把它冒领为新一轮播放。
 FAnimMontageInstance* FFPActionPlayback::TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage)
@@ -35,6 +36,7 @@ FAnimMontageInstance* FFPActionPlayback::TryBind(uint32 InActionId, USkeletalMes
 	return Instance;
 }
 
+//查身份
 // 将动画通知的来源与本次绑定比较，拒绝旧动作、换过 AnimInstance 或不同 Mesh 的通知。
 bool FFPActionPlayback::Matches(uint32 ExpectedActionId, USkeletalMeshComponent* PlaybackMesh, const FAnimNotifyEventReference& EventReference) const
 {
@@ -45,7 +47,8 @@ bool FFPActionPlayback::Matches(uint32 ExpectedActionId, USkeletalMeshComponent*
 		&& Context != nullptr && MontageInstanceId == Context->MontageInstanceID;
 }
 
-// 按保存的实例编号重新解析播放；资产相同但实例已替换时也返回空指针。
+
+//按保存的实例编号重新解析播放；资产相同但实例已替换时也返回空指针。
 FAnimMontageInstance* FFPActionPlayback::GetBoundInstance() const
 {
 	UAnimInstance* Anim = AnimInstance.Get();
@@ -53,7 +56,7 @@ FAnimMontageInstance* FFPActionPlayback::GetBoundInstance() const
 	return Instance != nullptr && Instance->Montage == Montage.Get() ? Instance : nullptr;
 }
 
-// 仅停止本次绑定的活动实例；混出时间限制为有限非负值，停止可能同步触发结束委托。
+//仅停止本次绑定的活动实例；混出时间限制为有限非负值，停止可能同步触发结束委托。
 void FFPActionPlayback::Stop(float BlendOutSeconds) const
 {
 	if (FAnimMontageInstance* Instance = GetBoundInstance(); Instance != nullptr && Instance->IsActive())
@@ -62,7 +65,7 @@ void FFPActionPlayback::Stop(float BlendOutSeconds) const
 	}
 }
 
-// 判断身份字段和弱引用是否完整有效，不遍历动画列表，也不推断业务动作状态。
+//判断身份字段和弱引用是否完整有效，不遍历动画列表，也不推断业务动作状态。
 bool FFPActionPlayback::IsSet() const
 {
 	return ActionId != 0 && MontageInstanceId != INDEX_NONE && Mesh.IsValid() && AnimInstance.IsValid() && Montage.IsValid();

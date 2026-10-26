@@ -1,0 +1,37 @@
+{
+  "SchemaVersion": 1,
+  "Purpose": "Explicit project engineering targets, not a claim of commercial-FPS standards or achieved capacity.",
+  "Topology": "Local Editor dedicated server at a 30 Hz target, independent NullRHI clients with t.MaxFPS 60 fixing the maximum frame/input cadence; NullRHI performs no actual GPU rendering. All clients move and fire into safe open space. Not multiplayer hit-fairness or rendered smoothness acceptance.",
+  "MinimumFormalRepeats": 3,
+  "MinimumCaptureSeconds": 40,
+  "MinimumFrameCoverage": 0.95,
+  "MinimumShotsPerClient": 40,
+  "MaximumServerConnectionOutKiBPerSecond": 64.0,
+  "MaximumClientOutKiBPerSecond": 16.0,
+  "MaximumServerConnectionOutPacketsPerSecond": 100.0,
+  "MaximumClientOutPacketsPerSecond": 100.0,
+  "MaximumServerWorldTickCpuP95Ms": 22.0,
+  "MaximumServerFrameIntervalP95Ms": 40.0,
+  "MaximumServerReplicationTickFlushP95Ms": 6.0,
+  "MaximumClientMovementCorrectionsPerSecond": 2.0,
+  "Profiles": {
+    "Normal": {
+      "OutgoingLagMs": 0,
+      "LagVarianceMs": 0,
+      "LossPercent": 0,
+      "MaximumPredictionToAckP95Ms": 150.0,
+      "MaximumPredictionToAckP99Ms": 250.0,
+      "MaximumUnexpectedRejectionPercent": 0.0
+    },
+    "Weak": {
+      "OutgoingLagMs": 100,
+      "LagVarianceMs": 20,
+      "LossPercent": 5,
+      "MaximumPredictionToAckP95Ms": 400.0,
+      "MaximumPredictionToAckP99Ms": 650.0,
+      "MaximumUnexpectedRejectionPercent": 0.0
+    }
+  },
+  "Accounting": "UNetConnection cumulative bytes/packets include engine protocol and PacketOverhead accounting, not NIC capture or payload-only bytes. ReplicationTickFlush is driver elapsed scope; WorldTickCpu is measured thread CPU. Missing measurements invalidate acceptance; no division of driver costs across connections.",
+  "ChangePolicy": "Freeze before runs. Changes require a stated gameplay or capacity requirement; never widen budgets to relabel an existing failure. Raw reports remain immutable."
+}

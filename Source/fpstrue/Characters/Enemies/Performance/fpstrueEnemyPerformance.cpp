@@ -4,7 +4,7 @@
 #include "Runtime/fpstrueRuntime.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"

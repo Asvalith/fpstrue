@@ -70,10 +70,54 @@ function Client-Interval($startEvent, $endEvent) {
     }
     return [pscustomobject]@{Ms=(Elapsed-Ms $startEvent.Stamp $endEvent.Stamp);Source='LegacySameClientLogUtc'}
 }
+function Get-WeaponPredictionEvidence([string[]]$Lines) {
+    $AmmoPredictions=0;$PredictedDeductions=0;$Settled=0;$Reloads=@{};$Issues=[Collections.Generic.List[string]]::new();$Index=0
+    foreach($Line in $Lines){
+        ++$Index
+        if($Line -match '\bPVP_SMOKE CLIENT_AMMO_(PREDICT|RECONCILE)\b'){
+            $Kind=$Matches[1];$Base=Number-Field $Line 'BaseAmmo';$Display=Number-Field $Line 'DisplayAmmo';$Outstanding=Number-Field $Line 'Outstanding'
+            if(-not(Identity $Line) -or $null -eq $Base -or $null -eq $Display -or $null -eq $Outstanding -or
+                $Base -lt 0 -or $Display -lt 0 -or $Display -gt $Base -or $Outstanding -lt 0){$Issues.Add('InvalidAmmoPredictionEvidence');continue}
+            if($Kind -eq 'PREDICT'){$AmmoPredictions++;if($Display -lt $Base){$PredictedDeductions++}}
+            elseif($Outstanding -eq 0){if($Display -eq $Base){$Settled++}else{$Issues.Add('SettledAmmoDoesNotMatchAuthority')}}
+        }
+        if($Line -notmatch '\bPVP_SMOKE CLIENT_RELOAD_(PREDICT|PROMOTE|END)\b'){continue}
+        $Kind=$Matches[1];$Key=Text-Field $Line 'Key';$Guid=Text-Field $Line 'WeaponNetGuid';$Generation=Text-Field $Line 'Generation'
+        if($Key -notmatch '^-?[1-9]\d*$' -or $Guid -notmatch '^[1-9]\d*$' -or $Generation -notmatch '^[1-9]\d*$'){
+            # Authority-only reloads have no local prediction key and are not a
+            # prediction test. Do not fabricate one from a server reload ID.
+            if($Kind -ne 'END' -or $Key -ne '0'){$Issues.Add('InvalidReloadPredictionIdentity')};continue
+        }
+        $Identity=$Guid+'/'+$Generation+'/'+$Key
+        if(-not $Reloads.ContainsKey($Identity)){$Reloads[$Identity]=@{Predicted=@();Promoted=@();Ended=@()}}
+        switch($Kind){
+            'PREDICT'{$Reloads[$Identity].Predicted+= $Index}
+            'PROMOTE'{
+                $Reloads[$Identity].Promoted+=$Index
+                if((Number-Field $Line 'Replayed') -ne 0){$Issues.Add('ConfirmedReloadReplayed')}
+            }
+            'END'{$Reloads[$Identity].Ended+=$Index}
+        }
+    }
+    $Confirmed=0
+    foreach($Identity in $Reloads.Keys){
+        $Row=$Reloads[$Identity]
+        if($Row.Predicted.Count -gt 1){$Issues.Add('RepeatedReloadPrediction:'+ $Identity)}
+        if($Row.Promoted.Count -gt 1){$Issues.Add('RepeatedReloadPromotion:'+ $Identity)}
+        if($Row.Promoted.Count -gt 0){
+            if($Row.Predicted.Count -ne 1 -or $Row.Promoted[0] -lt $Row.Predicted[0]){$Issues.Add('ReloadPromotionWithoutEarlierPrediction:'+ $Identity)}
+            else{$Confirmed++}
+        }
+    }
+    return [pscustomobject]@{AmmoPredictionEvents=$AmmoPredictions;ImmediatePredictedDeductions=$PredictedDeductions;SettledAuthoritativeAmmoEvents=$Settled
+        PredictedReloadIdentities=@($Reloads.Keys|Where-Object {$Reloads[$_].Predicted.Count -gt 0}).Count;ConfirmedReloadsWithoutReplay=$Confirmed
+        Issues=@($Issues);Clean=$Issues.Count -eq 0
+        Scope='Observed owning-client prediction/confirmation evidence. Replayed=0 is corroborated by runtime montage-instance tests; this log alone does not prove every mesh retained its animation instance. Unexercised rejection/cancel paths are not certified.'}
+}
 function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [bool]$AllowSameHostUtc) {
     $server = @{}; $invalidServer = 0
     foreach ($line in $ServerLines) {
-        if ($line -notmatch '\bPVP_SMOKE (SERVER_SHOT_ACCEPT|SERVER_SHOT_REJECT|SHOT_TIME_REJECT|SHOT_ADMISSION|SHOT_EXECUTION|SHOT_ACK_SEND)\b') { continue }
+        if ($line -notmatch '\bPVP_SMOKE (SERVER_SHOT_ACCEPT|SERVER_SHOT_REJECT|SHOT_TIME_REJECT|SHOT_ADMISSION|SHOT_EXECUTION|SHOT_ACK_SEND|SHOT_INPUT_HOLE_FINAL)\b') { continue }
         $kind = $Matches[1]; $key = Identity $line
         if (-not $key) { $invalidServer++; continue }
         Add-ShotEvent $server $key ([pscustomobject]@{Kind=$kind;Line=$line;Stamp=(Parse-Stamp $line)})
@@ -118,6 +162,8 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
                 $executions = @($serverEvents | Where-Object Kind -eq 'SHOT_EXECUTION')
                 $sends = @($serverEvents | Where-Object Kind -eq 'SHOT_ACK_SEND')
                 $timeRejects = @($serverEvents | Where-Object Kind -eq 'SHOT_TIME_REJECT')
+                $holes=@($serverEvents|Where-Object Kind -eq 'SHOT_INPUT_HOLE_FINAL')
+                $lostPayload=@($holes|Where-Object {(Text-Field $_.Line 'Reason') -eq 'MissingPayload' -and (Result-Field $_.Line) -eq 10}).Count -gt 0
                 $admission = Get-OnlyEvent $admissions; $execution = Get-OnlyEvent $executions
                 $send = Get-OnlyEvent $sends; $timeDiagnostic = Get-OnlyEvent $timeRejects
                 $clock = $null
@@ -156,9 +202,11 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
                 $predictionToAck = Client-Interval $presentation $final
                 $predictionToSubmit = Client-Interval $presentation $firstSubmit
                 $submitToPresentation = Client-Interval $firstSubmit $presentation
+                $transport=Text-Field $firstSubmit.Line 'Transport'
+                $submitTimestampKind=if($transport -eq 'UnreliableBatch'){'ImmediatelyBeforeUnreliableBatchRPC'}elseif($firstSubmit){'LegacyRequestConstruction'}else{'Unavailable'}
                 $submitTimingStatus = if (-not $firstSubmit -or -not $presentation) { 'MissingInstrumentation' }
-                    elseif ($null -ne $submitToPresentation.Ms -and $null -eq $predictionToSubmit.Ms) { 'ConstructionPrecedesPresentationNotApplicable' }
-                    elseif ($null -ne $predictionToSubmit.Ms) { 'MeasuredPredictionToConstruction' } else { 'InvalidOrMissingClockEvidence' }
+                    elseif ($null -ne $submitToPresentation.Ms -and $null -eq $predictionToSubmit.Ms) { if($transport -eq 'UnreliableBatch'){'RPCSubmissionPrecedesPresentationNotApplicable'}else{'ConstructionPrecedesPresentationNotApplicable'} }
+                    elseif ($null -ne $predictionToSubmit.Ms) { if($transport -eq 'UnreliableBatch'){'MeasuredPredictionToRPCSubmission'}else{'MeasuredPredictionToConstruction'} } else { 'InvalidOrMissingClockEvidence' }
                 $issues = @()
                 if ($presentations.Count -ne 1) { $issues += 'DuplicatePrediction' }
                 if ($ackConflict) { $issues += 'ConflictingTerminalAcknowledgements' }
@@ -168,14 +216,18 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
                 if ($null -ne $admissionTime -and $null -ne $executionTime -and $executionTime -lt $admissionTime) { $issues += 'ExecutionBeforeAdmissionServerTime' }
                 if ($final -and $verdict -and (Number-Field $final.Line 'Result') -ne (Number-Field $verdict.Line 'Result')) { $issues += 'ServerClientVerdictMismatch' }
                 if ($retryValid -eq $false) { $issues += 'InvalidOrExceededSubmitAttemptBound' }
+                if($holes.Count -gt 1){$issues+='RepeatedMissingPayloadFinalization'}
+                if($lostPayload -and $final -and (Result-Field $final.Line) -ne 10){$issues+='MissingPayloadVerdictMismatch'}
                 if (@($acks | Where-Object { $null -eq (Result-Field $_.Line) }).Count -gt 0) { $issues += 'InvalidAcknowledgementResult' }
                 if ($null -ne $fireTime -and $null -ne $serverTime) { $verdictAge = [math]::Round(($serverTime-$fireTime)*1000,3) } else { $verdictAge=$null }
                 [pscustomobject]@{
                     Identity=$key;Result=$(if($final){Number-Field $final.Line 'Result'}else{$null});FinalAck=($null -ne $final)
+                    LostInputFinalization=$lostPayload;CancellationReason=if($lostPayload){'MissingPayload'}elseif($final -and (Result-Field $final.Line) -eq 10){'GameplayCancellation'}else{$null}
                     PredictionCount=$presentations.Count;TerminalAckCount=$terminalAcks.Count;ServerTerminalVerdictCount=$verdicts.Count
                     PredictionToAckMs=$predictionToAck.Ms;PredictionToAckSource=$predictionToAck.Source
                     PredictionToSubmitMs=$predictionToSubmit.Ms;PredictionToSubmitSource=$predictionToSubmit.Source
                     SubmitToPresentationMs=$submitToPresentation.Ms;SubmitToPresentationSource=$submitToPresentation.Source;SubmitTimingStatus=$submitTimingStatus
+                    InputTransport=$transport;SubmitTimestampKind=$submitTimestampKind
                     PredictionToAdmissionSameHostWallMs=$(if($AllowSameHostUtc){Elapsed-Ms $presentation.Stamp $admission.Stamp}else{$null})
                     SubmitToAdmissionSameHostWallMs=$(if($AllowSameHostUtc){Elapsed-Ms $firstSubmit.Stamp $admission.Stamp}else{$null})
                     AdmissionToExecutionMs=$queueWait;AdmissionToExecutionSource=$queueSource
@@ -206,9 +258,12 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
         )
         $count=$rows.Count; $accepted=@($rows | Where-Object Result -eq 0).Count; $missing=@($rows | Where-Object { -not $_.FinalAck }).Count
         $rejected=$count-$accepted-$missing
+        $cancelled=@($rows|Where-Object Result -eq 10).Count
+        $lostInputs=@($rows|Where-Object LostInputFinalization -eq $true).Count
         $orphans=@($events.Keys | Where-Object { @($events[$_] | Where-Object Kind -eq 'CLIENT_SHOT_PRESENT').Count -eq 0 }).Count
         $clients += [pscustomobject]@{
             Client=$client;Predicted=$count;Accepted=$accepted;Rejected=$rejected;MissingFinalAck=$missing
+            Cancelled=$cancelled;LostInputs=$lostInputs;GameplayCancellations=$cancelled-$lostInputs;RejectedIncludesCancelled=$true
             InvalidIdentityEvents=$invalidClient;OrphanShotIdentities=$orphans;ShotsWithDiagnosticIssues=@($rows | Where-Object { $_.DiagnosticIssues.Count -gt 0 }).Count
             AdmissionTimeRejections=@($rows | Where-Object TimeRejectionStage -eq 'Admission').Count
             ExecutionTimeRejections=@($rows | Where-Object TimeRejectionStage -eq 'Execution').Count
@@ -217,6 +272,7 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
             TimeoutPercent=$(if($count){[math]::Round(100*$missing/$count,3)}else{$null})
             PredictionToAckP50Ms=(Percentile @($rows | ForEach-Object PredictionToAckMs) 0.5)
             PredictionToAckP95Ms=(Percentile @($rows | ForEach-Object PredictionToAckMs) 0.95)
+            PredictionToAckP99Ms=(Percentile @($rows | ForEach-Object PredictionToAckMs) 0.99)
             PredictionToAckMaxMs=(Percentile @($rows | ForEach-Object PredictionToAckMs) 1)
             AdmissionToExecutionP95Ms=(Percentile @($rows | ForEach-Object AdmissionToExecutionMs) 0.95)
             PredictionToAdmissionSamples=@($rows | Where-Object { $null -ne $_.PredictionToAdmissionSameHostWallMs }).Count
@@ -224,12 +280,13 @@ function Get-LatencyEvidence([string[]]$ServerLines, [hashtable]$ClientLines, [b
             ExecutionToAckSamples=@($rows | Where-Object { $null -ne $_.ExecutionToAckSameHostWallMs }).Count
             ExplicitSubmitInstrumentationShots=@($rows | Where-Object ObservedSubmitAttempts -gt 0).Count
             RetryBoundViolations=@($rows | Where-Object SubmitAttemptBoundValid -eq $false).Count
+            PredictionEvidence=(Get-WeaponPredictionEvidence $ClientLines[$client])
             Shots=$rows
         }
     }
     return [pscustomobject]@{
         SchemaVersion=2;SameHostUtcComparisonEnabled=$AllowSameHostUtc;InvalidServerIdentityEvents=$invalidServer;Clients=$clients
-        Scope='Prediction-to-ACK is same-client monotonic latency when LocalSeconds exists, otherwise legacy log UTC; not RTT. LocalSeconds is never subtracted across processes. CLIENT_SHOT_SUBMIT is request construction complete before the same-stack reliable GAS call, not a socket/NIC send timestamp. It can precede PRESENT; negative prediction-to-submit stays null. Cross-process wall intervals require explicitly same-host logs and include dispatch/scheduling, not isolated one-way network delay. Admission-to-execution uses explicit queue duration or same-server world time. Rejected admission does not invent an admitted event. Verdict age is signed and includes clock uncertainty/execution wait. FrameDelta is only co-occurring frame length, not stall causality. Null means absent, ambiguous or invalid evidence. Attempt=MaxAttempts=1 means no app retry observed. App attempts are not packet retransmissions; bursts cannot prove reliable HOL. MissingFinalAck/TimeoutPercent is end-of-run absence, not an instrumented timeout. No gameplay/strict-experience gate is evaluated here.'
+        Scope='Prediction-to-ACK is same-client monotonic latency when LocalSeconds exists, otherwise legacy log UTC; not RTT. LocalSeconds is never subtracted across processes. CLIENT_SHOT_SUBMIT Transport=UnreliableBatch is each per-input application submission immediately before the batched RPC call; legacy records without Transport mark request construction. Neither is a socket/NIC send timestamp. Submit may precede PRESENT; negative prediction-to-submit stays null. App redundancy attempts are not extra predictions, executions, ACKs or packet retransmissions. Rejected is the legacy non-accepted-final total and includes Cancelled; Cancelled and LostInputs are explicit subsets, never accepted shots. MissingPayload finalization is lost input even when a reliable cancellation ACK closes the ledger. Cross-process wall intervals require same-host logs and include dispatch/scheduling. Admission-to-execution uses explicit queue duration or same-server world time. FrameDelta is co-occurring frame length, not stall causality. Null means absent, ambiguous or invalid evidence. MissingFinalAck is end-of-run absence, not an instrumented timeout. No gameplay/strict-experience gate is evaluated here.'
     }
 }
 
@@ -273,6 +330,15 @@ if ($SelfTest) {
     $retry=$submit.Replace('Attempt=1','Attempt=2').Replace('RetryDelayMs=0','RetryDelayMs=80')
     $bounded=Get-LatencyEvidence @($verdict) @{Client1=@($present,$submit,$retry,$ack)} $false
     Assert-Latency 'Bounded app resubmit observable, not packet retransmission' ($bounded.Clients[0].Shots[0].SubmitAttemptBoundValid -eq $true -and $bounded.Clients[0].Shots[0].RetryAttemptsObserved -eq 1 -and $null -eq $bounded.Clients[0].Shots[0].ConfirmedPerShotRetransmission)
+    $BatchSubmits=@(1..6|ForEach-Object {$submit.Replace('Attempt=1',('Attempt='+$_)).Replace('MaxAttempts=3','MaxAttempts=6').Replace('RetryDelayMs=0','RetryDelayMs=40')+' Transport=UnreliableBatch'})
+    $BatchEvidence=Get-LatencyEvidence @($verdict) @{Client1=@($present)+$BatchSubmits+@($ack)} $false
+    Assert-Latency 'Six unreliable submissions preserve one prediction and one terminal result' ($BatchEvidence.Clients[0].Predicted -eq 1 -and $BatchEvidence.Clients[0].Accepted -eq 1 -and $BatchEvidence.Clients[0].Shots[0].ObservedSubmitAttempts -eq 6 -and $BatchEvidence.Clients[0].Shots[0].SubmitAttemptBoundValid -eq $true -and $BatchEvidence.Clients[0].Shots[0].SubmitTimestampKind -eq 'ImmediatelyBeforeUnreliableBatchRPC')
+    $BatchOverflow=Get-LatencyEvidence @($verdict) @{Client1=@($present)+$BatchSubmits+@($BatchSubmits[-1].Replace('Attempt=6','Attempt=7'),$ack)} $false
+    Assert-Latency 'Seventh submission exceeds the new six-attempt bound' ($BatchOverflow.Clients[0].RetryBoundViolations -eq 1)
+    $LostVerdict=$verdict.Replace('ACCEPT','REJECT').Replace('Result=0','Result=10')
+    $Hole='PVP_SMOKE SHOT_INPUT_HOLE_FINAL '+$id+' Result=10 Reason=MissingPayload'
+    $HoleEvidence=Get-LatencyEvidence @($LostVerdict,$Hole) @{Client1=@($present,$ack.Replace('Result=0','Result=10'))} $false
+    Assert-Latency 'Reliable hole finalization is cancelled lost input, never acceptance or duplicate verdict' ($HoleEvidence.Clients[0].Accepted -eq 0 -and $HoleEvidence.Clients[0].Cancelled -eq 1 -and $HoleEvidence.Clients[0].LostInputs -eq 1 -and $HoleEvidence.Clients[0].MissingFinalAck -eq 0 -and $HoleEvidence.Clients[0].Shots[0].ServerTerminalVerdictCount -eq 1 -and $HoleEvidence.Clients[0].Shots[0].CancellationReason -eq 'MissingPayload')
     $overflow=Get-LatencyEvidence @($verdict) @{Client1=@($present,$submit,$retry.Replace('Attempt=2','Attempt=4'),$ack)} $false
     Assert-Latency 'Exceeded/missing retry sequence flagged' ($overflow.Clients[0].RetryBoundViolations -eq 1)
     $missing=Get-LatencyEvidence @($verdict) @{Client1=@($present)} $false
@@ -289,6 +355,19 @@ if ($SelfTest) {
     Assert-Latency 'Invalid result is not accepted as terminal ACK' ($invalidResult.Clients[0].MissingFinalAck -eq 1 -and $invalidResult.Clients[0].Shots[0].DiagnosticIssues -contains 'InvalidAcknowledgementResult')
     $negativeAge=Get-LatencyEvidence @($verdict.Replace('ServerTime=10.2','ServerTime=9.9')) @{Client1=@($present,$ack)} $false
     Assert-Latency 'Future-request signed verdict age is preserved, not clamped' ($negativeAge.Clients[0].Shots[0].ServerVerdictAgeMs -eq -100)
+    $AmmoPredict='PVP_SMOKE CLIENT_AMMO_PREDICT '+$id+' BaseAmmo=30 DisplayAmmo=29 Outstanding=1 IncludedShotId=0'
+    $AmmoSettled='PVP_SMOKE CLIENT_AMMO_RECONCILE '+$id+' BaseAmmo=29 DisplayAmmo=29 Outstanding=0 IncludedShotId=1 Result=0'
+    $ReloadPredict='PVP_SMOKE CLIENT_RELOAD_PREDICT Key=13 ReloadId=-1 Generation=3 WeaponNetGuid=7'
+    $ReloadPromote='PVP_SMOKE CLIENT_RELOAD_PROMOTE Key=13 PredictedId=-1 ReloadId=2 Generation=3 WeaponNetGuid=7 Replayed=0 BoundMeshes=3'
+    $Prediction=Get-WeaponPredictionEvidence @($AmmoPredict,$AmmoSettled,$ReloadPredict,$ReloadPromote)
+    Assert-Latency 'Real client prediction evidence requires visible deduction and authoritative settle' ($Prediction.Clean -and $Prediction.ImmediatePredictedDeductions -eq 1 -and $Prediction.SettledAuthoritativeAmmoEvents -eq 1)
+    Assert-Latency 'Same-key reload promotion records no restart' ($Prediction.ConfirmedReloadsWithoutReplay -eq 1)
+    $Pending=Get-WeaponPredictionEvidence @($AmmoSettled.Replace('DisplayAmmo=29 Outstanding=0','DisplayAmmo=28 Outstanding=1'))
+    Assert-Latency 'Later pending shots do not require displayed ammo to equal authority yet' ($Pending.Clean -and $Pending.SettledAuthoritativeAmmoEvents -eq 0)
+    Assert-Latency 'A settled ammo mismatch fails' (-not (Get-WeaponPredictionEvidence @($AmmoSettled.Replace('DisplayAmmo=29','DisplayAmmo=28'))).Clean)
+    Assert-Latency 'Confirmed reload restart is an error' (-not (Get-WeaponPredictionEvidence @($ReloadPredict,$ReloadPromote.Replace('Replayed=0','Replayed=1'))).Clean)
+    Assert-Latency 'Another generation cannot confirm this predicted reload' (-not (Get-WeaponPredictionEvidence @($ReloadPredict,$ReloadPromote.Replace('Generation=3','Generation=4'))).Clean)
+    Assert-Latency 'Repeated promotion is not hidden' (-not (Get-WeaponPredictionEvidence @($ReloadPredict,$ReloadPromote,$ReloadPromote)).Clean)
     [pscustomobject]@{Mode='SelfTest';Passed=$true;Checks=$checks.Count;Scenarios=@($checks);Scope='Offline synthetic production-parser checks; no UE, network, credentials or disk writes. Not gameplay acceptance.'} | ConvertTo-Json -Depth 4
     return
 }

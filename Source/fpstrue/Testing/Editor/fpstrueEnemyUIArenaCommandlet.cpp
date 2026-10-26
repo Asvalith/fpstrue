@@ -20,7 +20,7 @@
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
 #include "FileHelpers.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/WorldSettings.h"
 #include "HAL/FileManager.h"

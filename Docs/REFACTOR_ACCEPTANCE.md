@@ -1,6 +1,77 @@
-# 两项目逻辑收敛与验收（2026-10-24）
+# FPS 当前验收与历史迁移记录
+
+## 2026-10-26：暂停后收口
+
+- 删除 AI 世界血条两类、枚举与指标、WBP、五项专属测试、三份专属工具，以及无人使用的旧 Profile/配置/CSV 租约。通用160AI场地保留；当前只使用网络 Baseline。
+- 动态 RTT 复用现有探测，加入 SRTT、绝对残差平滑 RTTVAR、序号去重/乱序拒绝、5秒失效及新样本重建。测量变化与时钟质量筛选分开，没有自研 UDP/RTO 或放宽射击边界。
+- 删除无消费者的公共射击字段，协议升6；GameMode 的开发场景移至 Testing，仍复用同一规则。重写职责与阅读顺序说明，保留用户原有注释。
+- 修复复制结束回调可能清掉新换弹预测的重入问题，Template/RAR真实动画资产回归通过。
+- 最终 Editor、Shipping编译成功；完整 Automation **97/97（78 clean、19 warned，0 failed/notRun）**。首轮96通过/1失败保留：测试切端未消费新代际，残留旧弹药水位；修复真实夹具流程后专项及全量重跑通过，没有改变生产预算。
+- 普通横移专项34/34，确认P95 52.425ms；弱网横移专项37/37，P95 370.646ms。两者均确认原生显示时间与实际伤害配对、输入哈希不变。均为单轮功能测试，不是容量证明。
+- 普通网络真实断包、同进程自动重连和渲染恢复通过；过期输入拒绝/预测退款专项通过。
+- **组合压力失败保留**：弱网+渲染+横移一轮超时，第一发已接纳但目标显示时间比执行时刻早约421ms，超过350ms历史，未命中玩家。没有通过扩大历史或伤害判定来消除失败。8人/160AI正式容量也未宣称通过。
+
+本轮原始记录：`Saved/FpsNetworkResume_20261026/`、`Saved/AgentTransport_Resume_20261026/`及各次`Saved/Networking/PvpSmoke_20261026_*`。血条迁移备份/前后读回位于`Saved/FpsNetworkClosure_20261025/RemoveEnemyHealthBar/`。原始日志、图片、凭据与缓存不随源码展示发布；公开摘要保留报告校验值。
+
+下面为对应日期的历史迁移记录，旧血条和旧测试数量不代表当前实现。
+
 
 本轮只保留现有玩法，不新增通用框架。每个运行状态有唯一写入者；客户端表现、服务器裁决和测试夹具不是三套玩法实现。
+
+后续 FPS 网络闭环的设计、冻结预算及验收口径见 [FPS_NETWORK_ACCEPTANCE](FPS_NETWORK_ACCEPTANCE.md)。下列蓝图迁移与历史网络结果分别保留，不自动作为新传输版本的通过证据。
+
+## 2026-10-25：蓝图表现边界后续验收
+
+### 最终资源迁移与旧链退役
+
+当前职责见 [代码归属](CODE_OWNERSHIP.md)。以下是同日后续的完整迁移，不与下面较早的 HUD/IK 验收混为同一次构建。
+
+- 角色、动画实例、移动、命中历史和开发烟测按既有职责分文件；具体相机 FOV、材质初始化、隐藏骨骼、视模投影与六份角色/动画资产的参数已迁入正式蓝图。按迁移前快照冷检资源、组件变换和实际执行接线。
+- 武器及拾取拆出各自文件；两份实际武器蓝图持有网格、Montage、附件、握持与枪口、声画资源，Data Asset 继续持有规则参数。四张项目地图的七个拾取实例已离线迁移；模板地图的外部 Actor 保持原 GUID、名称、外部包和变换。
+- CoffeeShop 历史地图接入同一个 Pvp GameMode，旧 placed Pawn 原位改为 PlayerStart，旧枪迁入正式武器。经真实图节点与连线清单核对，删除 45 个旧单机菜单/HUD/暂停/镜头节点及 3 个变量，保留场景美术、灯光和相机 Actor。
+- 删除旧角色、旧 PlayerAnim、旧武器和两个重定向包共五个包；正常删除前检查全项目硬/软入向引用只在退役集合内并逐包备份。新进程读回五个包均不存在且无入向引用，不留占位资源。
+- 删除旧瞄准/血量/受击/死亡事件桥、旧 owner 受击 RPC、空转生命桥、两项首次生成器与旧武器配置迁移脚本；正式受击广播、持久死亡快照、GAS 生命属性和唯一计分/重生路径保留。本地预览也通过真实伤害进入同一重生 Timer。
+
+原始证据位于 `Saved/FinalBlueprintMigration_20261025/`：`FPSCold_Final_R2.log` 加载/编译 21 个蓝图、1 个行为树、1 个黑板，0 加载/编译失败、0 保存；`FPSWeapons/Comparison_Final.json` 核对四图原拾取身份、数值变换与资源，0 差异。旧 Transient 枪口字段无法从旧 Python 反射读取的限制保留，由原构造来源、实际新蓝图枪口归属与 Socket 断言补充验证，不把受限读取写成成功。
+
+最终验证：
+
+- `FPSWeapons/BuildEditor_Verified_R2.log` 与 `BuildShipping_Final.log` 编译退出 0；最终回归后仅整理注释、文档与文件末尾空行，没有再改运行逻辑。
+- `FPSAutomation_Verified_R2/index.json`：**96/96，79 clean、17 warned，0 failed/notRun**。新增警告来自空原生测试夹具缺少 PhysicsAsset，以及生命周期夹具的诊断；正式玩家/武器资源另用真实蓝图断言，未屏蔽这些警告。
+- 实际 Template/RAR 的普通/空仓四种换弹均验证真实双侧 Montage、截止前不改弹药、唯一结束及弹药守恒。正常 BlendOut 可以早于装弹提交；夹具在两 Tick 间设置 Timer，原生 Pending 激活加到期分派最多量化两步，不把动画活动状态作为权威时钟。
+- `Saved/Networking/NormalPair_20261025_160012_fcb5ba30/Report.json`：Editor DS + 两个真实渲染客户端，1 AI 功能场景，正常入口走动拾枪、开火/换弹/瞄准/冲刺、敌人与玩家死亡/重生通过；没有自动发枪或传送 Avatar。抽查持枪、瞄准与换弹 PNG，未将脚本状态检查改称连续动画/音频质量验收。该运行后只修正了回归计时断言，运行时代码未改。
+- 用户 `fpstrueRuntime.h/.cpp` 和 `Floor_400x400.uasset` 的原始哈希保持一致；原注释不因尾空白检查而改写。
+
+本轮没有重新 Cook/Stage、跑完整严格弱网矩阵或性能采集。Co-op 对应的 175 项回归及资源迁移见其 `Tests/README.md`；历史性能和网络失败继续保留原构建口径。
+
+`FPSWeapons/Retire_R2.log` 记录五包正常退役；原始失败记录、迁移前快照和备份均保留。编辑器迁移工具只在显式命令下修改资产，正式启动不重新生成图、不扫描替换旧武器。
+
+本节覆盖后续 HUD/血条与脚步 IK 清理，下文的 99 项是删除三个 IK 专项测试前的历史数量，不是当前批准清单。
+
+- FPS 原生 HUD/Widget 只保留事件订阅、只读显示快照和生命周期。版式、文本颜色、淡入与控件更新在实际 `ingame_network` 蓝图；敌人血条使用实际 `WBP_EnemyHealth`，移除原生控件树和 Canvas 回退。旧 `ingame` 引用迁至正式资产，确认无引用后移除重定向文件。
+- 玩家脚部地形 IK 的类、安装入口、专用蓝图、配置、工具与三项专项测试已删除，不保留空接口；普通 CMC 地面检测和原动画流程保留。
+- FPS `FPSPresentation_Cold_R2.log`：正式 HUD 和敌人血条执行/数据接线通过，22 个蓝图、1 个行为树、1 个黑板，加载/编译失败均为零，未保存资产。目录为 `Saved/BlueprintBoundary_20261024/`。
+- FPS `FPSAutomation_R2/index.json`：83 clean + 13 warned，0 failed/notRun，共 96 项；`FPSEnemyUI_Build_R4.log` 与 `FPSShipping_R1.log` 编译退出 0。
+- 旧 CoffeeShop 源地图在清理 HUD 引用时发现已有重复 LevelScriptActor。保留 ULevel 登记的正式脚本，备份后移除一个重复实例；`LevelScriptsCold_R1.log` 新进程读回 Duplicates=0。原加载失败与供应商地图的其他警告不删除、不改称通过。
+- 误移的 Testing 目录恢复到 `Source/fpstrue/Testing`，20 个文件移动前后哈希一致；用户 Runtime 两个文件注释及 `Floor_400x400.uasset` 哈希保留。
+
+上述是编译、资产接线与功能回归，不代替最新双端正常/弱网、最终画面观感或本轮改动后的性能复测。先前 160/240/320/480 AI 梯度在 UI/IK 清理之前采集，不能移称为当前版本性能结果。
+
+## 多人框架文件整理（2026-10-24 后续）
+
+本次只整理 FPS 的物理文件与阅读顺序，不改变玩法规则或 Co-op。原 `Game/fpstrueMultiplayer.h/.cpp` 已按 GameInstance、PlayerController、GameMode、GameState、PlayerState、HUD/Widget 拆成六组；HUD 与 Widget 保留在同一 UI 文件。十四个消费文件直接包含实际所需类头，无兼容聚合头、新 Manager 或额外模块依赖。
+
+七个原反射类的声明、112 个成员函数体及其 Shipping 条件范围均与整理前逐字一致；类名、枚举名、默认配置和 `/Script/fpstrue.*` 类型路径不变。两个跨连接端复用的无状态函数集中在内部 helper 头，不复制票据验证规则。
+
+验证记录位于 `Saved/Structure_20261024/`：
+
+- `BuildEditor_Final.log`、`BuildShipping_Final.log`：最终 Editor/Shipping 编译退出 0。
+- `Automation_Final/index.json`：99/99，86 clean + 13 warned，0 failed/notRun；最终模块冷启动进程退出 0。
+- `Contracts_R1.log`：23 个蓝图、1 个行为树、1 个黑板，0 加载/编译失败，SavedPackages=0。该审查在最终三处无用 include 清理前运行；反射类、声明与函数体后续未变。
+- 首轮编译发现测试间接依赖 `AGameStateBase`，已补直接头文件，原 `BuildEditor_R1.log` 失败记录保留。文件迁移与 include 不增加新的测试或修改断言。
+- 用户原有 `Floor_400x400.uasset` SHA256 保持 `4C0ECF0AC0702CC2BD355EC050232A61C49E10F102448EFBEB735A51824ADEF6`，未修改或保存其他 Content。
+
+这次没有重跑多进程网络、画面录制或性能基线，不把结构整理称为新的帧率或弱网优化。源码入口见 [多人框架阅读顺序](MULTIPLAYER_MODE.md#源码结构与阅读顺序)。
 
 ## 基线
 

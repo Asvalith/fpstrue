@@ -278,7 +278,7 @@ flowchart TD
     SCENE["静态网格、材质、LOD 与流送纹理"]
     CONFIG["DefaultEngine.ini：查询缓冲、反射与 TSR"]
     PIPE["引擎渲染：Render Thread / RHI / GPU"]
-    TEST["RunGroupAIBaseline + 网络 Profile/Baseline"]
+    TEST["RunGroupAIBaseline + 网络 Baseline"]
     DATA["CSV / Trace / 参数读回 / 有效性检查"]
     REPORT["Frame、尾帧、线程与消费者计数报告"]
     GS --> CO
@@ -339,7 +339,7 @@ Animation Sharing 区分待交付和已注册句柄；注册失败释放待交�
 - **玩法配置**：近战和武器使用配置资产；武器首次成功装备时校验并保存参数快照，共享资产不共享弹药与动作状态。AI/Movement 属性、多人敌人人口、渲染策略及动画共享资源保留各自明确入口，业务参数不复制到实验 JSON。
 - **正式配置与实验覆盖**：引擎渲染默认值放在 INI，实验 JSON 保存地图、人数、轮次和采集时长；`Tools/Performance/ExperimentProfiles/RenderCostCases.psd1` 集中定义案例 CVar 与读回要求。采集参数优先级为显式命令行 > JSON > 脚本默认值，诊断开关不等于正式交付策略。
 - **进程外编排**：`RunGroupAIBaseline.ps1` 为联网 Editor/Shipping 客户端启动独立进程，记录参数、输入指纹及角色身份。旧 `RunRenderCostMatrix.ps1` 已归档停用；历史分析脚本和配置保留，不把旧单机口径混入新基线。
-- **进程内采集**：`fpstrueBenchmarkRunner.cpp` 只保留网络 Profile/Baseline，由 GameState 挂接；等待真实人口与固定视点、预热、采样及验盘，输出线程、物理和网络等独立口径。旧 `UfpstrueBenchmarkRunner` 单机组件已退出，不再由 GameMode 创建。本轮没有新跑性能采集，不能据删代码宣称帧率收益。
+- **进程内采集**：`fpstrueBenchmarkRunner.cpp` 只保留网络 Baseline，由 GameState 挂接；等待真实人口与固定视点、预热、采样及验盘，输出线程、物理和网络等独立口径。旧 `UfpstrueBenchmarkRunner` 单机组件已退出，不再由 GameMode 创建。本轮没有新跑性能采集，不能据删代码宣称帧率收益。
 - **功能与性能分别验证**：UE Automation 检查动作、配置、预算、共享注销与采集生命周期；脚本检查实验配置；实景 CSV/Trace 判断成本与等待。业务埋点保留在实际调用点，运行时诊断选项与埋点声明集中在 `Runtime/`，采集实现集中在 `Testing/Benchmarks/`。
 
 配置选源及资产迁移见 [CONFIGURATION.md](Docs/CONFIGURATION.md)，脚本职责见 [工具入口](Tools/README.md)。下面先列 160 敌人阶段总表，再给同批对照结果及各策略的收益依据。
@@ -495,7 +495,7 @@ Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依
 - **玩法主线**：GameMode 装配与生成 → BehaviorTree 选择行为 → AIController 执行移动或攻击 → CombatComponent 管理攻击窗口；需要群体许可和站位时再读 SurroundManager。
 - **敌人调度**：SignificanceCoordinator 采样 → Top-K 分配 → EnemyCharacter 应用到组件 → AnimationSharingCoordinator 维护共享注册。
 - **场景渲染**：[资产工具](Tools/Assets/)审计与烘焙 → 保存重载核验；[DefaultEngine.ini](Config/DefaultEngine.ini)另行提供查询缓冲、反射和 TSR 默认值。离线资产处理与运行时引擎参数分开维护。
-- **性能验证**：[RunGroupAIBaseline](Tools/Performance/RunGroupAIBaseline.ps1) 编排联网进程 → [网络 Profile/Baseline](Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkRunner.cpp) 准备、采集和验证 → 本轮结果与历史构建分别记录。旧 [RunRenderCostMatrix](Tools/LegacyPerformance/RunRenderCostMatrix.ps1) 仅归档查阅。
+- **性能验证**：[RunGroupAIBaseline](Tools/Performance/RunGroupAIBaseline.ps1) 编排联网进程 → [网络 Baseline](Source/fpstrue/Testing/Benchmarks/fpstrueBenchmarkRunner.cpp) 准备、采集和验证 → 本轮结果与历史构建分别记录。旧 [RunRenderCostMatrix](Tools/LegacyPerformance/RunRenderCostMatrix.ps1) 仅归档查阅。
 
 主要实现文件按调用流程排列：生命周期入口在前，业务入口和相邻辅助函数成组，结束与公共清理集中放置。EnemyCharacter 内依次是状态查询、战斗桥接、受击死亡、Gameplay 分级、Render 分级和动画共享；诊断开关放在末尾。预算统计与选择分开，阅读选择逻辑时不必穿过 CSV 计数代码。
 
@@ -515,7 +515,7 @@ Frame 降低约 **4.5%**，P99 降低约 **4.9%**；RHI 耗时增加，最终依
 | 角色表现与性能档位 | [EnemyCharacter](Source/fpstrue/Characters/Enemies/fpstrueEnemyCharacter.cpp) |
 | Top-K 与预算分配 | [性能策略与优先级键](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.h)、[集中采样与分配](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.cpp) |
 | 动画共享接入 | [EnemyPerformance：共享池与注册](Source/fpstrue/Characters/Enemies/Performance/fpstrueEnemyPerformance.cpp) |
-| 多人接纳、人口、计分与重生 | [Multiplayer](Source/fpstrue/Game/fpstrueMultiplayer.cpp) |
+| 多人接纳、人口、计分与重生 | [GameMode（原聚合文件已按类拆分）](Source/fpstrue/Game/fpstruePvpGameMode.cpp)、[连接流程](Source/fpstrue/Game/fpstrueMultiplayerGameInstance.cpp) |
 | 玩法配置资产 | [近战配置（CombatComponent 内）](Source/fpstrue/Characters/Enemies/fpstrueEnemyCombatComponent.h)、[WeaponConfig](Source/fpstrue/Weapons/fpstrueWeaponConfig.h) |
 | 场景静态化与资产核验 | [样条烘焙](Tools/Assets/BakeStaticLandscapeSplines.py)、[烘焙核验](Tools/Assets/VerifyBakedLandscapeSplines.py)、[资产审计工具](Tools/Assets/) |
 | 引擎渲染默认配置 | [DefaultEngine.ini](Config/DefaultEngine.ini) |

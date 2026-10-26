@@ -21,7 +21,7 @@ param(
     [switch]$SelfTest,
     [string]$ValidateAutomationReport = '',
     [ValidateRange(1, 65534)][int]$Port = 7797,
-    [ValidateRange(1, 10000)][int]$MinimumTests = 99,
+    [ValidateRange(1, 10000)][int]$MinimumTests = 97,
     [ValidateRange(1, 16)][int]$MaxParallelActions = 4,
     [ValidateRange(1, 2000)][int]$MinimumDeliveryFreeGB = 50
 )
@@ -30,7 +30,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $ProjectRoot) { $ProjectRoot = Join-Path $PSScriptRoot '..\..' }
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 
-# Approved Editor/Content suite including World-UI lifecycle and foot-placement cases. A count alone
+# Approved Editor/Content suite after removing the enemy health-bar feature. A count alone
 # cannot detect a missing asset-only test replaced by another successful test.
 # Review this list together with source registrations when adding/removing cases.
 $RequiredAutomationTests = @(
@@ -85,19 +85,12 @@ $RequiredAutomationTests = @(
     'fpstrue.Gameplay.Weapon.VisualRecoil.RetriggerAndStepSize'
     'fpstrue.Gameplay.Weapon.VisualRecoil.ViewIsolation'
     'fpstrue.Multiplayer.Animation.BodyDefaultsAndViewSeparation'
-    'fpstrue.Multiplayer.Animation.FootIK.AirDeathAndReset'
-    'fpstrue.Multiplayer.Animation.FootIK.AssetBindingsAndOwnerIsolation'
-    'fpstrue.Multiplayer.Animation.FootIK.GroundAndSlopePose'
     'fpstrue.Multiplayer.Animation.RARAbilityPresentationAndCancel'
     'fpstrue.Multiplayer.Animation.RARAssetsAndMontageBindings'
     'fpstrue.Multiplayer.Animation.RARReceivedReloadProgress'
     'fpstrue.Multiplayer.Animation.RemoteVelocityWithoutAcceleration'
     'fpstrue.Multiplayer.Animation.TemplateAssetsGripAndOriginalHud'
     'fpstrue.Multiplayer.Animation.TemplateDeathWeaponPhysicsAndLateReplication'
-    'fpstrue.Multiplayer.EnemyUI.DedicatedServerHasNoPresentation'
-    'fpstrue.Multiplayer.EnemyUI.WorldModesAndEventRedraw'
-    'fpstrue.Multiplayer.EnemyUI.WorldViewReturnAndSmoothedAnchor'
-    'fpstrue.Multiplayer.EnemyUI.WorldViewSnapshotCache'
     'fpstrue.Multiplayer.GAS.ExternalHealthEffectsAndReentry'
     'fpstrue.Multiplayer.Health.AuthorityAndGASAttributeCommit'
     'fpstrue.Multiplayer.Health.ReplicatedAttributeNotifications'
@@ -111,7 +104,6 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference'
     'fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle'
     'fpstrue.Multiplayer.PvPvE.ClientSnapshotIsPresentationOnly'
-    'fpstrue.Multiplayer.PvPvE.EnemyHealthBarAnchorAndHealth'
     'fpstrue.Multiplayer.PvPvE.ServerCombatAndSingleCommit'
     'fpstrue.Multiplayer.PvPvE.SimpleHitProxyLifecycle'
     'fpstrue.Multiplayer.PvPvE.TargetDeathDestroyAndResourceRelease'
@@ -119,6 +111,12 @@ $RequiredAutomationTests = @(
     'fpstrue.Multiplayer.Reconnect.CancelInvalidatesOldTravelAndRetry'
     'fpstrue.Multiplayer.Reconnect.HudRebindAndCurrentSnapshot'
     'fpstrue.Multiplayer.Reconnect.ServerRetentionAndSingleUseClaim'
+    'fpstrue.Multiplayer.Reconnect.DeferredTravelAndBoundedActiveSlotRetry'
+    'fpstrue.Multiplayer.Clock.BetterSampleRebasesStartupEstimate'
+    'fpstrue.Multiplayer.Clock.DynamicRoundTripAndFreshness'
+    'fpstrue.Multiplayer.Prediction.AmmoSnapshotAckReordering'
+    'fpstrue.Multiplayer.Prediction.ReloadPlaybackAdoptionAndAuthorityClock'
+    'fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail'
     'fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState'
     'fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder'
     'fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle'

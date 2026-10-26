@@ -6,14 +6,17 @@
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Camera/CameraShakeBase.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/SphereComponent.h"
 #include "Engine/HitResult.h"
 #include "GameFramework/Actor.h"
 #include "Weapons/fpstrueWeaponConfig.h"
 #include "Runtime/fpstrueRuntime.h"
+#include "GameplayAbilitySpecHandle.h"
+#include "GameplayPrediction.h"
 #include "fpstrueWeaponComponent.generated.h"
 
 class AfpstrueCharacter;
+class AfpstrueRARWeapon;
+class AfpstrueTemplateWeapon;
 class APlayerController;
 class UCameraComponent;
 class UCameraShakeBase;
@@ -27,7 +30,15 @@ class UWorld;
 class UfpstrueFireAbility;
 class UfpstrueReloadAbility;
 class UfpstrueAimAbility;
+class UfpstrueHealthComponent;
 struct FAnimNotifyEventReference;
+
+// 每个远端玩家复用原生CMC线性平滑的显示时刻；只传身份和相对时间，不传位置或命中结论。
+struct FFPShotRenderedView
+{
+	TWeakObjectPtr<AfpstrueCharacter> Target;
+	int16 AgeMilliseconds = 0;
+};
 
 // 每发只携带输入身份、时间和方向；目标、起点、伤害始终由服务器产生。
 // 【设计取舍】装备代际隔离卸下/重装，会话隔离不同按键轮次，ShotId 隔离逐发请求。
@@ -37,11 +48,26 @@ struct FFPShotRequest
 {
 	GENERATED_BODY()
 	UPROPERTY() TObjectPtr<AfpstrueCharacter> Avatar = nullptr;
+	// 两把枪可有相同代际与 ShotId；真实 Actor 身份防止旧数据被当前装备冒领。
+	UPROPERTY() TObjectPtr<AActor> Weapon = nullptr;
 	UPROPERTY() uint32 EquipmentGeneration = 0;
 	UPROPERTY() uint32 FireSession = 0;
 	UPROPERTY() uint32 ShotId = 0;
 	UPROPERTY() double ServerFireTime = 0.0;
 	UPROPERTY() FVector_NetQuantizeNormal AimDirection = FVector::ForwardVector;
+	static constexpr int32 MaxRenderedViews = 16;
+	static constexpr int32 MinRenderedViewAgeMilliseconds = -50;
+	static constexpr int32 MaxRenderedViewAgeMilliseconds = 350;
+	// 自定义NetSerialize有界传输；Inline避免每次输入重发为少量玩家时间戳单独分配。
+	TArray<FFPShotRenderedView, TInlineAllocator<MaxRenderedViews>> RenderedViews;
+	// 找不到该目标的真实显示时间才使用Fallback；找到后不clamp、不换时间以凑历史命中。
+	double GetTargetViewTime(const AfpstrueCharacter* Target, double Fallback, bool* bOutNativeView = nullptr) const;
+	bool NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess);
+};
+
+template<> struct TStructOpsTypeTraits<FFPShotRequest> : TStructOpsTypeTraitsBase2<FFPShotRequest>
+{
+	enum { WithNetSerializer = true, WithCopy = true };
 };
 
 UENUM()
@@ -49,6 +75,21 @@ enum class EFPShotResult : uint8
 {
 	Accepted, Queued, InvalidContext, InvalidIdentity, Duplicate, InvalidTime,
 	InvalidAim, RateLimited, Busy, NoAmmo, Cancelled
+};
+
+// 已经终结的同一发裁决；近期快速窗口只重复携带事实，不重新扣弹或发布状态。
+USTRUCT()
+struct FFPShotReceipt
+{
+	GENERATED_BODY()
+	UPROPERTY() uint32 EquipmentGeneration = 0;
+	UPROPERTY() uint32 Session = 0;
+	UPROPERTY() uint32 ShotId = 0;
+	UPROPERTY() EFPShotResult Result = EFPShotResult::InvalidContext;
+	UPROPERTY() int32 Ammo = 0;
+	UPROPERTY() int32 Reserve = 0;
+	UPROPERTY() uint32 StateRevision = 0;
+	UPROPERTY() uint32 IncludedShotId = 0;
 };
 
 // GAS 标签派生的武器表现状态；仅用于快照和蓝图查询，不另管动作互斥。
@@ -79,6 +120,8 @@ struct FFPReplicatedWeaponState
 	UPROPERTY() TObjectPtr<AfpstrueCharacter> Holder = nullptr;
 	UPROPERTY() EFPWeaponActionState Action = EFPWeaponActionState::Disabled;
 	UPROPERTY() int32 ReloadId = 0;
+	// 同一次 GAS 激活的键：正数客户端预测，负数服务器主动；符号隔离原生两类键。
+	UPROPERTY() int32 ReloadPredictionKey = 0;
 	// 同一 ReloadId 的表现时钟：晚加入/重连从当前阶段播放，不重新开始服务器事务。
 	UPROPERTY() double ReloadStartServerTime = 0.0;
 	UPROPERTY() float ReloadDuration = 0.0f;
@@ -86,11 +129,7 @@ struct FFPReplicatedWeaponState
 	UPROPERTY() bool bCommitted = false;
 	UPROPERTY() EFPReloadEndReason EndReason = EFPReloadEndReason::Completed;
 	UPROPERTY() uint32 Revision = 0;
-	// 公共单发表现进度；不授权客户端命中或数值结算。
-	UPROPERTY() int32 FirePresentationKey = 0;
-	UPROPERTY() int32 FirePresentationShot = 0;
 	UPROPERTY() uint32 EquipmentGeneration = 0;
-	UPROPERTY() uint32 FireSession = 0;
 	// 死亡掉落是持久终态，不用一次性 RPC；初始条件只用于首帧，后续位姿交给 UE 物理复制。
 	UPROPERTY() bool bDroppedOnDeath = false;
 	UPROPERTY() FTransform DropTransform;
@@ -106,6 +145,8 @@ struct FFPReplicatedWeaponOwnerState
 	UPROPERTY() uint32 Revision = 0;
 	UPROPERTY() int32 Ammo = 0;
 	UPROPERTY() int32 Reserve = 0;
+	// 本快照弹药已包含的最高实际射击编号；未收到 ACK 的旧射击不能再次扣减显示值。
+	UPROPERTY() uint32 IncludedShotId = 0;
 };
 
 //动态多播委托类型
@@ -187,8 +228,12 @@ public:
 	TObjectPtr<USoundBase> ImpactSound;
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Presentation")
 	TObjectPtr<UMaterialInterface> ImpactDecal;
-	// 枪口来自本枪附件的实际 Socket，不借用手臂位置或另一位玩家的相机。
-	UPROPERTY(Transient)
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Presentation")
+	FVector ImpactDecalSize = FVector::ZeroVector;
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Presentation", meta = (ClampMin = "0.0"))
+	float ImpactDecalLifeSeconds = 0.0f;
+	// 由武器蓝图绑定本枪组件；UE 实例化将默认子对象引用映射到对应实例，不跨网复制。
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Presentation")
 	TObjectPtr<USceneComponent> MuzzleSource;
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Presentation")
 	FName MuzzleSocketName;
@@ -229,10 +274,10 @@ public:
 	float GetReloadProgress() const;
 	// 查询本轮服务器选定的换弹时长，仅供本地动画对齐。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
-	float GetReloadDuration() const { return NetworkState.ReloadDuration; }
+	float GetReloadDuration() const;
 	// 查询本轮是否空仓起手，以选择对应素材，不据此决定补弹量。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
-	bool IsEmptyReloadPresentation() const { return NetworkState.bEmptyReload; }
+	bool IsEmptyReloadPresentation() const;
 
 	// 原生完成入口内部提交一次，蓝图无装弹写入权限；旧编号不能借用当前换弹。
 	bool CommitReloadForTransaction(int32 ReloadId);
@@ -272,7 +317,7 @@ public:
 	//UI可查询子弹数量相关
 	// HUD 初始化时读取当前弹匣；变化由 OnAmmoChanged 推送。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
-	int32 GetCurrentAmmo() const { return CurrentAmmo; }
+	int32 GetCurrentAmmo() const;
 
 	// HUD 初始化时读取弹匣容量。
 	UFUNCTION(BlueprintPure, Category = "Weapon|Ammo")
@@ -287,6 +332,8 @@ public:
 #if !UE_BUILD_SHIPPING
 	// 开发验收读取尚无终结 ACK 的输入数；不把它当作权威弹药。
 	int32 GetPendingPredictedShotCount() const { return OutstandingShots.Num(); }
+	// 只读监测权威执行队列，容量验收不能拿“已停止输入”冒充服务器已排空。
+	int32 GetPendingAuthoritativeShotCount() const { return PendingNetworkShots.Num(); }
 #endif
 
 	// ==================== Events ====================
@@ -335,20 +382,38 @@ private:
 	friend class FFpstrueMultiplayerShotProtocolTest;
 	friend class FFpstrueWeaponReplicationAudienceTest;
 	friend class FFpstrueMultiplayerRemoteLocomotionAnimationTest;
+	friend class FFpstrueWeaponAmmoPredictionTest;
+	friend class FFpstrueWeaponReloadPredictionTest;
+	friend class FFpstrueWeaponShotTransportTest;
+	friend class FFpstrueShotPresentationReentryTest;
+	friend class UfpstrueHealthComponent;
 	// 只有 GA 能调用执行器；公开 Start/Stop/Request 只是 ASC 请求入口，不再直接启动业务。
 	bool CanExecuteShot() const;
 	// 纯校验，不消费 ShotId、不修改会话；准入、执行和 ACK 共用装备归属规则。
 	bool MatchesShotEquipment(const FFPShotRequest& Request) const;
+	// 准入与执行复核元数据身份和未来界；过旧显示时间由原历史窗口自然miss，不另改较新时间。
+	EFPShotResult ValidateRenderedViews(const FFPShotRequest& Request, double ServerNow) const;
+	// 目标呈现时间按服务器观测 RTT/2 估计，受真实历史长度约束；不改变射手输入时间或准入窗口。
+	static double ComputeTargetTraceTime(double FireTime, double ServerNow, double ObservedRTTMilliseconds,
+		double InterpolationSeconds, bool bEnableLatencyCompensation);
 	// 检查装备、真实备弹与弹匣缺口；客户端尚未确认的射击只允许提出换弹请求。
 	bool HasReloadAmmo() const;
 	// 记录本轮能力的表现身份；只有本地拥有者生成逐发会话和预测去重记录。
 	void BeginAbilityFire(int32 PredictionKey);
-	// 停止本轮预测；强取消才撤销待执行输入与本轮弹药估计，已结算结果不回滚。
-	void EndAbilityFire(bool bDiscardOutstandingShots = false);
+	// 服务器强取消排队；GAS 激活被拒时额外撤销本轮预测，普通动作替换保留在途输入等待 ACK。
+	void EndAbilityFire(bool bCancelQueuedShots = false, bool bDiscardPredictedShots = true);
 	// 本地拥有者生成一发带时钟和装备身份的输入并登记未确认账本，不执行命中。
 	bool BuildShotRequest(FFPShotRequest& OutRequest);
 	// 固定容量的准入队列只保存合法输入；唯一执行 Timer 按绝对射速节拍消费，不在同帧补射。
-	EFPShotResult AcceptShotRequest(const FFPShotRequest& Request);
+	EFPShotResult AcceptShotRequest(const FFPShotRequest& Request, bool bReleasedAuthorization = false);
+	// 高频输入唯一使用不可靠滑窗；可靠消息仅收口生命周期/超时及最终裁决。
+	void SubmitShotInput(const FFPShotRequest& Request, FGameplayAbilitySpecHandle Handle, FPredictionKey Key);
+	void SendPendingShotInputs();
+	void FinishShotInputStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, bool bCancelled);
+	bool ReceiveShotInputBatch(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests,
+		bool bReleasedAuthorization = false, bool bCancelled = false, bool bExpired = false);
+	void DrainOrderedShotInputs();
+	void CancelOrderedShotInputs();
 	// 队头出队后复核装备、时间、生命、弹药与冷却，唯一进入 Fire 并发送终结 ACK。
 	bool ExecuteNetworkShot(const FFPShotRequest& Request);
 	// 查询服务器是否还有已准入但尚未终结的逐发输入，不代表 Fire GA 仍激活。
@@ -364,7 +429,11 @@ private:
 	// 权威端发布该发裁决和最新弹药，身份匹配时才推进持久快照的已处理编号。
 	void AcknowledgeShot(const FFPShotRequest& Request, EFPShotResult Result);
 	// Reload GA 的唯一事务入口；广播前先写 OutReloadId、状态和计时，允许监听者同步结束。
-	bool BeginAbilityReload(int32& OutReloadId);
+	bool BeginAbilityReload(int32& OutReloadId, int32 PredictionKey = 0);
+	// 客户端只预测动作，不创建装弹 Timer；确认时把同一播放实例转交权威 ReloadId。
+	bool BeginPredictedReload(int32 PredictionKey);
+	void EndPredictedReload(int32 PredictionKey, EFPReloadEndReason Reason = EFPReloadEndReason::Cancelled);
+	void PromotePredictedReload(int32 ReloadId);
 	// 网络状态仅由服务器发布；RepNotify 只建立本地关系、更新 HUD 和播放表现。
 	void PublishNetworkState();
 	// 客户端应用最新业务快照，先收尾旧播放再恢复新阶段，不反向执行伤害或补弹。
@@ -379,7 +448,14 @@ private:
 	// 拒绝也确认，客户端才能释放该发的弹药估计；版本阻止迟到 ACK 覆盖更新的弹药。
 	UFUNCTION(Client, Reliable)
 	void ClientShotResult(uint32 EquipmentGeneration, uint32 Session, uint32 ShotId, EFPShotResult Result,
-		int32 Ammo, int32 Reserve, uint32 StateRevision);
+		int32 Ammo, int32 Reserve, uint32 StateRevision, uint32 IncludedShotId = 0);
+	virtual void ClientShotResult_Implementation(uint32 EquipmentGeneration, uint32 Session, uint32 ShotId, EFPShotResult Result,
+		int32 Ammo, int32 Reserve, uint32 StateRevision, uint32 IncludedShotId = 0);
+	// 最多4条近期终结裁决，后续快速包可补回此前丢失的快速收据；尾发仍由可靠副本收口。
+	UFUNCTION(Client, Unreliable)
+	void ClientFastShotResult(const TArray<FFPShotReceipt>& Receipts);
+	void ConsumeShotResult(uint32 EquipmentGeneration, uint32 Session, uint32 ShotId, EFPShotResult Result,
+		int32 Ammo, int32 Reserve, uint32 StateRevision, uint32 IncludedShotId, bool bReliableReceipt);
 	UPROPERTY(ReplicatedUsing = OnRep_NetworkState)
 	FFPReplicatedWeaponState NetworkState;
 	UPROPERTY(ReplicatedUsing = OnRep_OwnerState)
@@ -406,10 +482,10 @@ private:
 	// ==================== Fire System ====================
 	// GA 的单机 Pulse 与网络已准入队列共用的单发执行入口，不生成新的输入。
 	bool Fire(const FFPShotRequest* Request = nullptr, bool bAimingAtAdmission = false);
-	// 提供上一发剩余冷却；松开再按不会重新等待完整间隔。
-	// GA 调度本地输入，武器执行已准入的网络请求；二者读取同一射速预算。
+	// 返回下一发等待量，松开再按不能重置预算。
+	// 服务器按世界时间执行；拥有者按单调时间生成输入，并等待校时后的报告时间满足相同射速。
 	float GetNextShotDelay(bool bAdmittedNetworkSchedule = false) const;
-	// 只预测拥有者的枪声、开火动画和后坐力；命中与弹药仍等待服务器，不伪称逐发数值回滚。
+	// 拥有者立即显示预测扣弹并播放枪声/动画/后坐力；命中只由服务器提交。
 	bool PresentPredictedShot(const FFPShotRequest& Request);
 	// 单机根据相机计算；联网使用历史服务器视点和逐发瞄准方向，再应用本发散布和命中查询。
 	// 执行一条带散布的射线，处理伤害、冲量和命中事件。
@@ -475,6 +551,12 @@ private:
 	// 动作版本归 GA；这里只用递增事务编号区别两次装填。
 	int32 ReloadSerial = 0;
 	int32 ActiveReloadId = INDEX_NONE;
+	// 负编号仅标识本地播放；服务器的正 ReloadId 与 Timer 才能装弹。
+	int32 LocalReloadPredictionKey = 0;
+	int32 LastEndedReloadPredictionKey = 0;
+	double PredictedReloadStartSeconds = 0.0;
+	float PredictedReloadDuration = 0.0f;
+	bool bPredictedEmptyReload = false;
 	TArray<FFPActionPlayback, TInlineAllocator<3>> ReloadPlaybacks;
 	// 播放/停止可同步调用动画委托：此范围允许取消，禁止重入启动另一动作或播放。
 	bool bChangingReloadPlayback = false;
@@ -511,9 +593,59 @@ private:
 	TArray<FPendingNetworkShot, TInlineAllocator<MaxQueuedNetworkShots>> PendingNetworkShots;
 	uint32 LastProcessedShotId = 0;
 	EFPShotResult LastShotResult = EFPShotResult::Accepted;
+	// 服务端为最近通过间隔检查的输入时间；客户端为最近成功Build的真实报告时间。
 	double LastSubmittedFireTime = -1.0;
 	uint32 LastAmmoStateRevision = 0;
+	uint32 LastAmmoIncludedShotId = 0;
+	uint32 LastReliableShotResultRevision = 0;
+	struct FFastShotReceipt
+	{
+		uint32 Session;
+		uint32 ShotId;
+		uint32 Revision;
+	};
+	// 只记录先于可靠副本到达的快速收据；可靠水位经过后即可回收，长阻塞时保持有界。
+	TArray<FFastShotReceipt, TInlineAllocator<64>> FastShotReceipts;
+	static constexpr int32 RecentShotReceiptCount = 4;
+	// 服务端仅保留同一装备代际最近4条已终结裁决，复用缓冲；没有额外重发时钟。
+	TArray<FFPShotReceipt> RecentShotReceipts;
 	TArray<uint32, TInlineAllocator<32>> OutstandingShots;
+	// 8 发窗口在确认前保留输入，不因丢包无限增长；每发最多 6 次常规发送。
+	static constexpr int32 ShotInputWindowSize = 8;
+	static constexpr int32 MaxShotInputAttempts = 6;
+	static constexpr float ShotRetryInterval = 0.04f;
+	static constexpr float ShotReorderWaitSeconds = 0.075f;
+	static constexpr float ShotInputExpireSeconds = 0.40f;
+	static constexpr double MaxNetworkShotAgeSeconds = 0.30;
+	struct FClientShotInput
+	{
+		FFPShotRequest Request;
+		FGameplayAbilitySpecHandle Handle;
+		FPredictionKey Key;
+		uint32 FirstShotId = 0;
+		int32 Attempts = 0;
+		double CreatedSeconds = 0.0; // 客户端FPlatformTime，不能和服务器/本地WorldTime相减。
+		bool bExpirationSent = false;
+		double LastSentSeconds = -1.0;
+	};
+	TArray<FClientShotInput, TInlineAllocator<ShotInputWindowSize>> ClientShotInputs;
+	TArray<FFPShotRequest> ShotInputScratch;
+	struct FOrderedShotInput
+	{
+		FFPShotRequest Request;
+		bool bCancelled = false;
+		bool bExpired = false;
+	};
+	TArray<FOrderedShotInput, TInlineAllocator<ShotInputWindowSize>> OrderedShotInputs;
+	uint32 InputWindowFirstShotId = 0;
+	uint32 InputWindowSession = 0;
+	uint32 NextOrderedShotId = 0;
+	double ShotHoleStartedSeconds = -1.0;
+	bool bReleasedInputWindow = false;
+	double InputClosedServerSeconds = 0.0;
+	// 最近结果已在 UE 可靠重传队列，重复输入不能再制造一份 ACK/属性发布。
+	TArray<uint32, TInlineAllocator<64>> FinalizedShotInputs;
+	// 仅拥有者使用的实际表现单调时刻；不复用帧起点WorldTime作为真实连射预算。
 	double LastPredictedShotTime = -1.0;
 	bool bPredictingFire = false;
 	struct FPredictedFirePresentation
@@ -522,7 +654,6 @@ private:
 		uint32 Generation = 0;
 		uint32 Session = 0;
 		int32 PresentedShots = 0;
-		int32 ConfirmedShots = 0;
 	};
 	TArray<FPredictedFirePresentation, TInlineAllocator<8>> PredictedPresentations;
 
@@ -537,6 +668,8 @@ private:
 	FTimerHandle ReloadTimerHandle;
 	FTimerHandle RecoilRecoveryTimerHandle;
 	FTimerHandle NetworkShotTimerHandle;
+	FTimerHandle ShotRetryTimerHandle;
+	FTimerHandle ShotReorderTimerHandle;
 };
 
 struct FFPWeaponSettings;
@@ -585,101 +718,4 @@ class FPSTRUE_API UfpstrueWeaponCameraShake : public UCameraShakeBase
 public:
 	// 创建单实例视觉脉冲 Pattern，连发复用同一类 Shake 而非无限叠加实例。
 	UfpstrueWeaponCameraShake(const FObjectInitializer& ObjectInitializer);
-};
-
-// ==================== 武器拾取入口 ====================
-class AfpstrueCharacter;
-
-// 只广播成功装备的事实，真正的资格检查与状态提交归武器组件。
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPickUp, AfpstrueCharacter*, PickUpCharacter);
-/** 一次性拾取触发器：检测玩家进入球形范围并向蓝图广播拾取事件。 */
-UCLASS(Blueprintable, BlueprintType, ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
-
-class FPSTRUE_API UfpstruePickUpComponent : public USphereComponent
-{
-	GENERATED_BODY()
-
-public:
-	//初始化UfpstruePickUpComponent组件
-	UfpstruePickUpComponent();
-	//创建拾取事件暴露给蓝图，作为事件分发器
-	UPROPERTY(BlueprintAssignable, Category = "Interaction")
-	FOnPickUp OnPickUp;
-
-protected:
-	// 绑定球形碰撞的重叠回调。
-	virtual void BeginPlay() override;
-	// 父级递归显示手臂/枪械时，拾取范围仍只作碰撞查询，不渲染红色球体。
-	virtual void OnHiddenInGameChanged() override;
-
-	// 权威重叠回调先占用拾取物，再申请完整装备；失败归还，成功通知后销毁触发器。
-	UFUNCTION()
-	void OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp,
-							  int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
-
-private:
-	//防重复拾取的标志位，初始值为false，表示未被拾取
-	bool bConsumed = false;
-};
-
-// RAR 使用独立原生拾取实体，避免继承旧 RU74 蓝图的表现事件；玩法仍由同一个武器组件和 GAS 执行。
-UCLASS()
-class FPSTRUE_API AfpstrueRARWeapon : public AActor
-{
-	GENERATED_BODY()
-
-public:
-	// 创建 RAR 网格/附件、反馈资源与拾取范围；仍复用项目唯一武器业务组件。
-	AfpstrueRARWeapon();
-	// 只修改本端实例材质：世界枪/他人枪为 0，自己的第一人称枪及附件为 1，不改共享材质或全局 MPC。
-	void SetViewmodelFOVEnabled(bool bEnabled);
-	// 根组件的服务器挂接晚到时，重新应用本端第一/第三人称挂点，不改变服务器装备归属。
-	virtual void OnRep_AttachmentReplication() override;
-	// 权威物理包到达前先确保掉落体就绪，死亡后的旧手持移动包不再应用。
-	virtual void OnRep_ReplicatedMovement() override;
-	// 保留 Actor 原生物理位姿复制，不再复制根网格的第二套手部位姿。
-	virtual void GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const override;
-	// 专服关闭纯枪械动画；游戏实例默认使用世界枪材质模式，装备后按本地视角切换。
-	virtual void PostInitializeComponents() override;
-
-private:
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UfpstrueWeaponComponent> Weapon;
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UfpstruePickUpComponent> Pickup;
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UStaticMeshComponent> Forestock;
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UStaticMeshComponent> Magazine;
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UStaticMeshComponent> FrontSight;
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UStaticMeshComponent> RearSight;
-	// -1 表示当前实例尚未初始化；只缓存材质模式，不参与任何玩法状态或网络复制。
-	int8 AppliedViewmodelFOVMode = -1;
-};
-
-// UE5.5 模板只提供匹配的枪械/动画素材；拾取、弹药、命中和联网仍复用项目现有组件与 GAS。
-UCLASS()
-class FPSTRUE_API AfpstrueTemplateWeapon : public AActor
-{
-	GENERATED_BODY()
-
-public:
-	// 创建模板整枪、配套 Montage 与拾取范围，不接入供应方的另一套玩法逻辑。
-	AfpstrueTemplateWeapon();
-	// Actor 附着与组件快照可以分批到达，始终以本端实际持有者恢复正确的第一/第三人称装配。
-	virtual void OnRep_AttachmentReplication() override;
-	// 接收权威掉落物理；忽略死亡前遗留的非物理移动状态。
-	virtual void OnRep_ReplicatedMovement() override;
-	// 仅在 Actor 开启移动复制时传送原生物理位姿，业务状态仍归组件快照。
-	virtual void GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const override;
-	// 专服不运行弹匣/枪栓等纯表现动画，保留武器业务组件及挂点。
-	virtual void PostInitializeComponents() override;
-
-private:
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UfpstrueWeaponComponent> Weapon;
-	UPROPERTY(VisibleAnywhere, Category = "Weapon")
-	TObjectPtr<UfpstruePickUpComponent> Pickup;
 };

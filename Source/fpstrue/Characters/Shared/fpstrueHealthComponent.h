@@ -8,6 +8,7 @@
 #include "AttributeSet.h"
 #include "GameplayEffect.h"
 #include "NativeGameplayTags.h"
+#include "Weapons/fpstrueWeaponComponent.h"
 #include "fpstrueHealthComponent.generated.h"
 
 class AController;
@@ -134,6 +135,17 @@ public:
 	virtual void ServerSetReplicatedTargetData_Implementation(FGameplayAbilitySpecHandle AbilityHandle,
 		FPredictionKey AbilityOriginalPredictionKey, const FGameplayAbilityTargetDataHandle& TargetData,
 		FGameplayTag ApplicationTag, FPredictionKey CurrentPredictionKey) override;
+	// GAS 可靠激活负责授权；逐发批次走不可靠窗，未激活时只等待客户端的有限重发。
+	// 激活晚过输入截止点会退款，不能补算一次过旧命中；本入口没有消除激活控制链的等待。
+	UFUNCTION(Server, Unreliable)
+	void ServerSubmitShotBatch(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, uint32 FirstShotId,
+		const TArray<FFPShotRequest>& Requests);
+	// 每次结束/明确超时至多一条控制消息；正常松开携带尾部，取消/过期绝不结算伤害。
+	UFUNCTION(Server, Reliable)
+	void ServerFinishShotInputs(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, uint32 FirstShotId,
+		const TArray<FFPShotRequest>& Requests, bool bCancelled, bool bExpired);
+	void RememberClosedShotStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
+		UfpstrueWeaponComponent* Weapon, bool bCancelled);
 
 	// ==================== 生命值管理 ====================
 	// 只重置生命数据，不复活角色；广播期间的请求排在当前伤害通知之后执行。
@@ -203,6 +215,21 @@ protected:
 
 private:
 	friend class UfpstrueHealthAttributeSet;
+	friend class FFpstrueWeaponShotTransportTest;
+	struct FClosedShotStream
+	{
+		FGameplayAbilitySpecHandle Handle;
+		FPredictionKey Key;
+		TWeakObjectPtr<AActor> Avatar;
+		TWeakObjectPtr<UfpstrueWeaponComponent> Weapon;
+		uint32 Generation = 0;
+		uint32 Session = 0;
+		double ClosedAt = 0.0;
+		bool bCancelled = false;
+	};
+	TArray<FClosedShotStream, TInlineAllocator<8>> ClosedShotStreams;
+	void RouteShotInputBatch(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, uint32 FirstShotId,
+		const TArray<FFPShotRequest>& Requests, bool bControl, bool bCancelled, bool bExpired);
 	// 属性集以所属 Actor 为 Outer，ASC 只登记它；不能把 AttributeSet 嵌套在组件下面。
 	void EnsureHealthAttributes();
 	// Standalone 与服务器拥有生命写权限；客户端 API 不隐式转成服务器 RPC。
@@ -217,6 +244,7 @@ private:
 	// 一个伤害事务先提交数值，再按 Damage -> Health -> Death 通知。
 	// 监听者重入的伤害/重置排队，不能改写外层死亡判定或令 HUD 收到倒序快照。
 	enum class EMutation : uint8 { Damage, Reset, ResetMaximum, Effect };
+
 	struct FMutation
 	{
 		EMutation Type;
@@ -227,6 +255,7 @@ private:
 		FGameplayEffectSpecHandle Effect;
 		FPredictionKey PredictionKey;
 	};
+
 	// 按值接纳伤害或重置；通知期间的新请求排队，最外层调用在当前线程依序排空。
 	void EnqueueMutation(const FMutation& Mutation);
 	// 执行一个已接纳事务，先提交血量和死亡边沿，再按固定顺序发送状态通知。

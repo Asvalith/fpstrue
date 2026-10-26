@@ -1,32 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Weapons/fpstrueCombatAbilities.h"
-#include "Abilities/GameplayAbilityTargetTypes.h"
 #include "Abilities/Tasks/AbilityTask_WaitDelay.h"
 #include "Abilities/Tasks/AbilityTask_WaitInputRelease.h"
 #include "AbilitySystemComponent.h"
 #include "Characters/Player/fpstrueCharacter.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "GameFramework/Controller.h"
-#include "Engine/PackageMapClient.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "ProfilingDebugging/MiscTrace.h"
 
 // Character 提交按下/松开 -> GAS 能力持有标签与任务 -> WeaponComponent 执行逐发或换弹事务。
 // 能力不另存弹药、伤害或动画时钟；只在可能调用外部监听者的边界保护当前激活身份。
 // 【设计取舍】InstancedPerActor 复用能力对象；外部同步回调可结束并重启它，所以保留 ActivationRevision。
 // IsActive 只能说明“当前有激活”，不能证明仍是旧调用那轮；版本只跨回调核对，不是多线程锁。
-
-// UE PackageMap 处理角色引用，剩余字段按固定协议往返；返回映射结果，bOutSuccess 报告字段序列化错误。
-bool FGameplayAbilityTargetData_FPShot::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess)
-{
-	UObject* Avatar = Request.Avatar.Get();
-	const bool bMapped = Map != nullptr && Map->SerializeObject(Ar, AfpstrueCharacter::StaticClass(), Avatar);
-	if (Ar.IsLoading()) Request.Avatar = Cast<AfpstrueCharacter>(Avatar);
-	Ar << Request.EquipmentGeneration << Request.FireSession << Request.ShotId << Request.ServerFireTime;
-	bool bDirectionValid = false;
-	Request.AimDirection.NetSerialize(Ar, Map, bDirectionValid);
-	bOutSuccess = bDirectionValid && !Ar.IsError();
-	return bMapped;
-}
 
 // 互斥由 GAS 标签管理，武器仍在服务器逐发检查弹药、射速和伤害。
 UfpstrueFireAbility::UfpstrueFireAbility()
@@ -62,6 +50,19 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 	AfpstrueCharacter* Character = ActorInfo != nullptr ? Cast<AfpstrueCharacter>(ActorInfo->AvatarActor.Get()) : nullptr;
 	UfpstrueWeaponComponent* Weapon = Character != nullptr ? Character->GetEquippedWeaponComponent() : nullptr;
 	UAbilitySystemComponent* ASC = ActorInfo != nullptr ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+#if !UE_BUILD_SHIPPING
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpShotLifecycleTrace")))
+	{
+		const uint32 Generation = IsValid(Weapon) ? Weapon->EquipmentRevision : 0;
+		const uint32 Session = IsValid(Weapon) ? Weapon->FireSession : 0;
+		TRACE_BOOKMARK(TEXT("FPShotLifecycle Activate Spec=%u Key=%d ActivationRev=%u Generation=%u Session=%u"),
+			GetTypeHash(Handle), ActivationInfo.GetActivationPredictionKey().Current, RequestedActivation, Generation, Session);
+		UE_LOG(LogTemp, Display, TEXT("PVP_SHOT_LIFECYCLE FIRE_ACTIVATE Spec=%u Key=%d ActivationRev=%u Generation=%u Session=%u Weapon=%s Authority=%d LocallyControlled=%d ServerTime=%.6f LocalSeconds=%.9f"),
+			GetTypeHash(Handle), ActivationInfo.GetActivationPredictionKey().Current, RequestedActivation, Generation, Session,
+			*GetNameSafe(IsValid(Weapon) ? Weapon->GetOwner() : nullptr), ActorInfo != nullptr && ActorInfo->IsNetAuthority(),
+			ActorInfo != nullptr && ActorInfo->IsLocallyControlled(), GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0, FPlatformTime::Seconds());
+	}
+#endif
 	if (!IsValid(Weapon) || ASC == nullptr)
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
@@ -85,14 +86,12 @@ void UfpstrueFireAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, con
 	Weapon->BeginAbilityFire(ActivationKey.Current);
 	if (!ActorInfo->IsLocallyControlled())
 	{
-		// 先挂委托再消费缓存，覆盖 TargetData 比服务端能力激活更早到达的情况。
-		ShotDataHandle = ASC->AbilityTargetDataSetDelegate(Handle, ActivationKey).AddUObject(this, &ThisClass::HandleShotData);
-		ASC->CallReplicatedTargetDataDelegatesIfSet(Handle, ActivationKey);
-		if (ActivationRevision == RequestedActivation && IsActive() && ShotDataTimeoutTask == nullptr)
+		// 服务器只接受同一原生激活下的不可靠输入窗，不订阅另一条可靠 TargetData 射击路径。
+		if (ActivationRevision == RequestedActivation && IsActive() && ShotInputTimeoutTask == nullptr)
 		{
-			ShotDataTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 3.0f);
-			ShotDataTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleShotDataTimeout);
-			ShotDataTimeoutTask->ReadyForActivation();
+			ShotInputTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 3.0f);
+			ShotInputTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleShotInputTimeout);
+			ShotInputTimeoutTask->ReadyForActivation();
 		}
 		return;
 	}
@@ -106,23 +105,36 @@ void UfpstrueFireAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const FG
 {
 	if (bEnding || !IsEndAbilityValid(Handle, ActorInfo)) return;
 	bEnding = true;
-	if (UAbilitySystemComponent* ASC = ActorInfo != nullptr ? ActorInfo->AbilitySystemComponent.Get() : nullptr)
+	if (ShotInputTimeoutTask != nullptr)
 	{
-		ASC->AbilityTargetDataSetDelegate(Handle, ActivationInfo.GetActivationPredictionKey()).Remove(ShotDataHandle);
-		ASC->ConsumeClientReplicatedTargetData(Handle, ActivationInfo.GetActivationPredictionKey());
-	}
-	ShotDataHandle.Reset();
-	if (ShotDataTimeoutTask != nullptr)
-	{
-		ShotDataTimeoutTask->EndTask();
-		ShotDataTimeoutTask = nullptr;
+		ShotInputTimeoutTask->EndTask();
+		ShotInputTimeoutTask = nullptr;
 	}
 	UfpstrueWeaponComponent* Weapon = ActiveWeapon.Get();
 	ActiveWeapon.Reset();
+#if !UE_BUILD_SHIPPING
+	if (FParse::Param(FCommandLine::Get(), TEXT("PvpShotLifecycleTrace")))
+	{
+		const uint32 Generation = IsValid(Weapon) ? Weapon->EquipmentRevision : 0;
+		const uint32 Session = IsValid(Weapon) ? Weapon->FireSession : 0;
+		TRACE_BOOKMARK(TEXT("FPShotLifecycle End Spec=%u Key=%d ActivationRev=%u Cancelled=%d Generation=%u Session=%u"),
+			GetTypeHash(Handle), ActivationInfo.GetActivationPredictionKey().Current, ActivationRevision, bWasCancelled, Generation, Session);
+		UE_LOG(LogTemp, Display, TEXT("PVP_SHOT_LIFECYCLE FIRE_END Spec=%u Key=%d CurrentKey=%d ActivationRev=%u Cancelled=%d Generation=%u Session=%u Weapon=%s Authority=%d Replicate=%d ServerTime=%.6f LocalSeconds=%.9f"),
+			GetTypeHash(Handle), ActivationInfo.GetActivationPredictionKey().Current, CurrentActivationInfo.GetActivationPredictionKey().Current,
+			ActivationRevision, bWasCancelled, Generation, Session, *GetNameSafe(IsValid(Weapon) ? Weapon->GetOwner() : nullptr),
+			ActorInfo != nullptr && ActorInfo->IsNetAuthority(), bReplicateEndAbility, GetWorld() != nullptr ? GetWorld()->GetTimeSeconds() : 0.0, FPlatformTime::Seconds());
+	}
+#endif
 	if (Weapon != nullptr)
 	{
+		const bool bRejected = ActivationInfo.ActivationMode == EGameplayAbilityActivationMode::Rejected;
+		if (HasAuthority(&ActivationInfo) && ActorInfo != nullptr && !ActorInfo->IsLocallyControlled())
+			if (auto* Health = Cast<UfpstrueHealthComponent>(ActorInfo->AbilitySystemComponent.Get()))
+				Health->RememberClosedShotStream(Handle, ActivationInfo.GetActivationPredictionKey(), Weapon, bWasCancelled);
+		if (!HasAuthority(&ActivationInfo) && !bRejected)
+			Weapon->FinishShotInputStream(Handle, ActivationInfo.GetActivationPredictionKey(), bWasCancelled);
 		// 正常松开只停止新输入，不撤销已准入事实；死亡、卸枪和换弹强取消时才清执行队列。
-		Weapon->EndAbilityFire(bWasCancelled);
+		Weapon->EndAbilityFire(bWasCancelled || bRejected, bRejected);
 	}
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 	// 先由 GAS 解除 Firing，再派生远端表现快照；武器不反向取消能力或重建动作状态机。
@@ -151,7 +163,7 @@ void UfpstrueFireAbility::Pulse()
 	// 远端拥有者的服务器 GA 只消费逐发输入，绝不再用独立 Pulse 同时结算第二发。
 	if (bAuthority && !CurrentActorInfo->IsLocallyControlled()) return;
 	float Delay = Weapon->GetNextShotDelay();
-	if ((!bAuthority || Weapon->GetCurrentAmmo() > 0) && Delay <= KINDA_SMALL_NUMBER)
+	if ((!bAuthority || Weapon->GetCurrentAmmo() > 0) && Delay <= (bAuthority ? KINDA_SMALL_NUMBER : 0.0f))
 	{
 		if (bAuthority)
 		{
@@ -167,12 +179,7 @@ void UfpstrueFireAbility::Pulse()
 			FFPShotRequest Request;
 			if (Weapon->BuildShotRequest(Request))
 			{
-				FGameplayAbilityTargetDataHandle Data(new FGameplayAbilityTargetData_FPShot());
-				static_cast<FGameplayAbilityTargetData_FPShot*>(Data.Get(0))->Request = Request;
-				UAbilitySystemComponent* ASC = CurrentActorInfo->AbilitySystemComponent.Get();
-				// ASC 的可靠数据与松开事件共用角色通道；仅按武器射速发送，不逐帧发送。
-				ASC->ServerSetReplicatedTargetData(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey(),
-					Data, FGameplayTag(), ASC->ScopedPredictionKey);
+				Weapon->SubmitShotInput(Request, CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey());
 				Weapon->PresentPredictedShot(Request);
 			}
 			else
@@ -200,51 +207,45 @@ void UfpstrueFireAbility::Pulse()
 }
 
 // 消费后保留自己的数据副本；查询、伤害或 ACK 均可能同步结束能力，旧激活不能再排任务。
-void UfpstrueFireAbility::HandleShotData(const FGameplayAbilityTargetDataHandle& Data, FGameplayTag)
+void UfpstrueFireAbility::HandleShotInputs(uint32 FirstShotId, const TArray<FFPShotRequest>& Requests)
 {
 	if (!IsActive() || bEnding || !HasAuthority(&CurrentActivationInfo)) return;
 	const uint32 RequestedActivation = ActivationRevision;
-	// Consume 会清除 ASC 缓存；先保留共享数据句柄，避免继续借用已被清空的参数。
-	const FGameplayAbilityTargetDataHandle SavedData = Data;
-	UAbilitySystemComponent* ASC = CurrentActorInfo->AbilitySystemComponent.Get();
-	ASC->ConsumeClientReplicatedTargetData(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey());
-	const FGameplayAbilityTargetData* Item = SavedData.Num() == 1 ? SavedData.Get(0) : nullptr;
-	const auto* Shot = Item != nullptr && Item->GetScriptStruct() == FGameplayAbilityTargetData_FPShot::StaticStruct()
-		? static_cast<const FGameplayAbilityTargetData_FPShot*>(Item) : nullptr;
 	UfpstrueWeaponComponent* Weapon = ActiveWeapon.Get();
-	if (Shot == nullptr || !IsValid(Weapon))
-	{
-		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, true);
-		return;
-	}
-	const FFPShotRequest Request = Shot->Request;
-	const EFPShotResult Result = Weapon->AcceptShotRequest(Request);
+	if (!IsValid(Weapon)) return;
+	const bool bReceivedNewInput = Weapon->ReceiveShotInputBatch(FirstShotId, Requests);
 	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding || ActiveWeapon.Get() != Weapon) return;
-	if (Result == EFPShotResult::Accepted || Result == EFPShotResult::Queued)
+	if (bReceivedNewInput)
 	{
-		if (ShotDataTimeoutTask != nullptr) ShotDataTimeoutTask->EndTask();
-		ShotDataTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 1.0f);
-		ShotDataTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleShotDataTimeout);
-		ShotDataTimeoutTask->ReadyForActivation();
+		if (ShotInputTimeoutTask != nullptr) ShotInputTimeoutTask->EndTask();
+		ShotInputTimeoutTask = UAbilityTask_WaitDelay::WaitDelay(this, 1.0f);
+		ShotInputTimeoutTask->OnFinish.AddDynamic(this, &ThisClass::HandleShotInputTimeout);
+		ShotInputTimeoutTask->ReadyForActivation();
 	}
-	if ((Result == EFPShotResult::Accepted || Result == EFPShotResult::NoAmmo) && Weapon->GetCurrentAmmo() == 0)
+	if (bReceivedNewInput && Weapon->GetCurrentAmmo() == 0)
 	{
 		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 		if (ActivationRevision == RequestedActivation && !IsActive() && IsValid(Weapon) && Weapon->CanExecuteShot()) Weapon->RequestReload();
 	}
 }
 
-// 没有有效逐发输入的激活不能长期占据 Firing；超时取消也会解除目标数据订阅。
-void UfpstrueFireAbility::HandleShotDataTimeout()
+// 没有有效逐发输入的激活不能长期占据 Firing；超时取消也会收口本轮输入。
+void UfpstrueFireAbility::HandleShotInputTimeout()
 {
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, true);
+}
+
+void UfpstrueFireAbility::FinishRemoteShotInputs(bool bCancelled)
+{
+	if (IsActive() && !bEnding && HasAuthority(&CurrentActivationInfo))
+		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, bCancelled);
 }
 
 // Reload 可以打断 Fire，但 Fire 不能阻止 Reload 进入，否则无法触发该取消关系。
 UfpstrueReloadAbility::UfpstrueReloadAbility()
 {
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
-	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerInitiated;
+	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 	bRetriggerInstancedAbility = false;
 	bServerRespectsRemoteAbilityCancellation = false;
 	SetAssetTags(FGameplayTagContainer(FpstrueGameplayTags::Ability_Reload));
@@ -290,10 +291,25 @@ void UfpstrueReloadAbility::ActivateAbility(FGameplayAbilitySpecHandle Handle, c
 		return;
 	}
 	ActiveWeapon = Weapon;
-	if (!HasAuthority(&ActivationInfo)) return; // 客户端只接收服务器动作标签，不伪造 ReloadId 或补弹。
+	FPredictionKey Key = ActivationInfo.GetActivationPredictionKey();
+	const int32 ReloadKey = Key.IsServerInitiatedKey() ? -int32(Key.Current) : int32(Key.Current);
+	if (!HasAuthority(&ActivationInfo))
+	{
+		const bool bStarted = Weapon->BeginPredictedReload(ReloadKey);
+		if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
+		if (!bStarted) { EndAbility(Handle, ActorInfo, ActivationInfo, true, true); return; }
+		if (Key.IsLocalClientKey())
+		{
+			Key.NewRejectedDelegate().BindWeakLambda(Weapon, [Weapon = TWeakObjectPtr<UfpstrueWeaponComponent>(Weapon), PredictionKey = int32(Key.Current)]
+			{
+				if (Weapon.IsValid()) Weapon->EndPredictedReload(PredictionKey);
+			});
+		}
+		return;
+	}
 	// 原生能力通知先于蓝图观察事件，让旧 GA 先释放标签，观察者随后才能合法重启换弹。
 	ReloadEndedHandle = Weapon->OnAbilityReloadEnded.AddUObject(this, &ThisClass::HandleReloadEnded);
-	const bool bAccepted = Weapon->BeginAbilityReload(ActiveReloadId);
+	const bool bAccepted = Weapon->BeginAbilityReload(ActiveReloadId, ReloadKey);
 	// BeginAbilityReload 广播播放请求，监听者可能同步完成、取消或重启换弹。
 	if (ActivationRevision != RequestedActivation || !IsActive() || bEnding) return;
 	if (!bAccepted || ActiveReloadId == INDEX_NONE) EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
@@ -313,6 +329,11 @@ void UfpstrueReloadAbility::EndAbility(FGameplayAbilitySpecHandle Handle, const 
 	ReloadEndedHandle.Reset();
 	// 先释放 GAS 状态，再通知组件取消旧事务；其蓝图观察者可立即发起合法的新动作。
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+	if (IsValid(Weapon) && !HasAuthority(&ActivationInfo))
+		Weapon->EndPredictedReload(ActivationInfo.GetActivationPredictionKey().IsServerInitiatedKey()
+			? -int32(ActivationInfo.GetActivationPredictionKey().Current) : int32(ActivationInfo.GetActivationPredictionKey().Current),
+			bWasCancelled || ActivationInfo.ActivationMode == EGameplayAbilityActivationMode::Rejected
+				? EFPReloadEndReason::Cancelled : EFPReloadEndReason::Completed);
 	if (bWasCancelled && IsValid(Weapon) && HasAuthority(&ActivationInfo)
 		&& ReloadToCancel != INDEX_NONE && Weapon->GetActiveReloadId() == ReloadToCancel)
 	{

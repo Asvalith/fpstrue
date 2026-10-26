@@ -21,7 +21,6 @@ param(
     [ValidateRange(0,160)][int]$EnemyPopulation = 0,
     [switch]$FullGameplay,
     [switch]$FacingReview,
-    [switch]$FootIKReview,
     [ValidateRange(1,240)][int]$FacingStartServerTime = 150,
     [switch]$DryRun
 )
@@ -51,7 +50,6 @@ $shared = @(('"' + $project + '"'),'-NoLiveCoding','-NoP4','-NoSplash','-NoSteam
 $shared += @('-PvpNormalPairWalk', ('-ini:Game:[/Script/fpstrue.fpstruePvpGameMode]:EnemyPopulation=' + $EnemyPopulation))
 if ($FullGameplay) { $shared += '-PvpNormalFullGameplay' }
 if ($FacingReview) { $shared += @('-PvpFacingReview', ('-PvpFacingStartServerTime=' + $FacingStartServerTime)) }
-if ($FootIKReview) { $shared += '-PvpFootIKReview' }
 function Read-AcceptanceLog([string]$name) {
     $path = Join-Path $run ($name + '.log')
     if (-not (Test-Path -LiteralPath $path)) { return '' }

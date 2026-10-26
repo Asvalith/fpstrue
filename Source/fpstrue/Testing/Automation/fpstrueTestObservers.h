@@ -18,9 +18,8 @@ class AfpstrueDamagePresentationTestCharacter : public AfpstrueCharacter
 {
 	GENERATED_BODY()
 public:
-	int32 OwnerDamageFeedbackRequests = 0;
 	int32 NativeHitRequests = 0;
-	// 记录两类瞬时反馈后继续原分派，用于证明无蓝图接收者时不会发送空通知。
+	// 记录唯一身体受击反馈后继续原分派，用于证明一次权威扣血只派发一次表现。
 	virtual void ProcessEvent(UFunction* Function, void* Parameters) override;
 };
 
@@ -120,6 +119,7 @@ public:
 	TWeakObjectPtr<UAnimMontage> ReloadMontage;
 	bool bAmmoChangedWhileMontageActive = false;
 	TFunction<void()> OnTraceReceived;
+	TFunction<void()> OnReloadEnded;
 
 	// 记录弹药通知，检查通知时动画是否仍在播放，并可同步禁用武器。
 	UFUNCTION()

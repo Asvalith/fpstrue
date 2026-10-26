@@ -8,7 +8,7 @@
 #include "Characters/Enemies/AI/fpstrueEnemyBehaviorTree.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Player/fpstrueCharacter.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "BrainComponent.h"

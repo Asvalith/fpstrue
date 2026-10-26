@@ -1,11 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 // 采集入口：命令行配置 → 等待真实人口与视角就绪 → 预热 → 记录 → 校验写盘 → 退出。
-// 多端 CSV/Trace Profile 与跨构建 Baseline 各自持有采集状态，不接管正式玩法。
+// 各端复用同一 Baseline 采集流程；仅显式压测参数启动，不接管正式玩法。
 // World wall-time、OS 线程 CPU、引擎 unit 与网络计数分别输出，不能相加当成整帧耗时。
 
 #include "Testing/Benchmarks/fpstrueBenchmarkRunner.h"
-#include "Async/Future.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -16,7 +15,7 @@
 #include "Characters/Enemies/Performance/fpstrueEnemyPerformance.h"
 #include "Characters/Enemies/fpstrueEnemyCharacter.h"
 #include "Characters/Enemies/fpstrueEnemyCombatComponent.h"
-#include "Game/fpstrueMultiplayer.h"
+#include "Game/fpstruePvpGameMode.h"
 #include "Characters/Shared/fpstrueHealthComponent.h"
 #include "ChartCreation.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -58,615 +57,24 @@
 #include "Misc/StringBuilder.h"
 #include "Misc/CoreDelegates.h"
 #include "HAL/IConsoleManager.h"
-#include "ProfilingDebugging/CsvProfiler.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CountersTrace.h"
 #include "ProfilingDebugging/MiscTrace.h"
-#include "ProfilingDebugging/TraceAuxiliary.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #include "UnrealClient.h"
 #include "UObject/UnrealType.h"
-#include "UObject/UObjectIterator.h"
 #include "UObject/Package.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/WindowsHWrapper.h"
 #endif
 
-CSV_DECLARE_CATEGORY_EXTERN(fpstrueEnemyUI);
-
-// Copyright Epic Games, Inc. All Rights Reserved.
-
-/*
- * 自动测试的只读命令行快照。
- * 只供采集流程使用；玩法开关复用 FFPRuntimeOptions 的进程快照，不再次解析。
- * 旧 Profile 的人数用独立存在标志区分未传参与显式赋值；当前 Baseline 另有自己的完整契约。
- */
-
-// 集中返回进程级采集配置，后续消费者不会各自重复解析或修改参数。
-const FFPBenchmarkConfig& FFPBenchmarkConfig::Get()
-{
-	// 采集器共享同一份配置；运行时覆盖由基类快照提供，不重新解析。
-	static const FFPBenchmarkConfig Config;
-	return Config;
-}
-
-// 仅保留旧网络 Profile 仍消费的人数与种子；已删除的单机采集参数不再解析。
-FFPBenchmarkConfig::FFPBenchmarkConfig()
-	: FFPRuntimeOptions(FFPRuntimeOptions::Get())
-{
-#if !UE_BUILD_SHIPPING
-	// 所有开关只在首次读取时解析一次；正式基线不传 BenchmarkDisable*，消融脚本才显式启用单项关闭。
-	const TCHAR* CommandLine = FCommandLine::Get();
-
-	bHasEnemyCountOverride = FParse::Value(CommandLine, TEXT("BenchmarkEnemies="), EnemyCount);
-	EnemyCount = FMath::Max(EnemyCount, 0);
-	FParse::Value(CommandLine, TEXT("BenchmarkSeed="), Seed);
-#endif
-}
-
-// CSV 的 BeginCapture 只排队，尚未开始时 EndCapture 无法撤销它。
-// 业务超时不能撤销底层排队命令：租约保留到实际首帧和写盘结束，不能按秒数自行释放。
-struct FFPBenchmarkCsvCapture
-{
-	enum class EState : uint8 { StartRequested, Capturing, CancelPendingStart, StopRequested, Released };
-	FString Filename;
-	FDelegateHandle FirstFrameHandle;
-	EState State = EState::StartRequested;
-	TSharedFuture<FString> WriteComplete;
-};
-
 namespace
 {
-// 此句柄不依赖 World 寿命；网络 Profile 尚有迟到启动可能时，进程入口保持隔离。
-TSharedPtr<FFPBenchmarkCsvCapture> OutstandingCsvCapture;
 bool bProcessBenchmarkConsumed = false;
-}
-
-#if !UE_BUILD_SHIPPING
-namespace
-{
-// A profiling process is disposable: no settings/assets are saved. Weak World
-// ownership lets CoreTicker finish queued CSV cleanup after a World disappears.
-struct FPvpPerformanceProfile : TSharedFromThis<FPvpPerformanceProfile>
-{
-	TWeakObjectPtr<UWorld> World;
-	FString Role, ControlPath, OutputDirectory, CsvPath, TracePath, OwnedTracePath;
-	TSharedPtr<FFPBenchmarkCsvCapture> Capture;
-	TSet<TWeakObjectPtr<AfpstrueCharacter>> PreparedPlayers;
-	TSet<TWeakObjectPtr<AfpstrueEnemyCharacter>> PreparedEnemies;
-	TWeakObjectPtr<ACameraActor> FixedCamera;
-	double StartedAt = FPlatformTime::Seconds();
-	double ReadyAt = 0.0, CaptureAt = 0.0, FlushAt = 0.0;
-	double FixedViewStableAt = 0.0;
-	double ControlUnreadableAt = -1.0;
-	double WorldTickAt = 0.0;
-	FDelegateHandle WorldTickStartHandle, WorldTickEndHandle;
-	bool bReady = false, bStarting = false, bCapturing = false, bFlushing = false;
-	bool bFailed = false, bOwnsTrace = false, bTraceStopRequested = false, bQuarantineLogged = false;
-	bool bCollectTrace = true, bFinalized = false;
-	bool bFixedView = false;
-	bool bHealthAndDeath = false, bDeathBatchApplied = false, bProfileSettingsChecked = false;
-	bool bCapturedPostDeath = false;
-	double NextHealthPulse = 2.0;
-	int32 Enemies = 0, Players = 0, Width = 0, Height = 0;
-	FFPEnemyHealthBarMetrics HealthBars;
-	FVector ViewLocation = FVector::ZeroVector;
-	FRotator ViewRotation = FRotator::ZeroRotator;
-
-	// Profile 的最终所有者消失时解除 World 采样订阅；异步写盘由采集租约继续持有。
-	~FPvpPerformanceProfile()
-	{
-		FWorldDelegates::OnWorldTickStart.Remove(WorldTickStartHandle);
-		FWorldDelegates::OnWorldTickEnd.Remove(WorldTickEndHandle);
-	}
-
-	// 仅为当前 World 的有效采集帧记录 Tick 起点，不包含引擎外层节拍等待。
-	void BeginWorldTick(UWorld* TickWorld, ELevelTick, float)
-	{
-		if (TickWorld == World.Get() && bCapturing && !bFlushing) WorldTickAt = FPlatformTime::Seconds();
-	}
-
-	// 将配对的 World Tick wall-time 写入 CSV；其他 World 或缺失起点不产生样本。
-	void EndWorldTick(UWorld* TickWorld, ELevelTick, float)
-	{
-		if (TickWorld != World.Get() || WorldTickAt == 0.0) return;
-		// DS 不写引擎 stat-unit GameThreadTime。单独记录完整 World::Tick 的实测 wall-time，
-		// 不含外部帧率等待，不冒充 CPU 占用率或扣除 Wait 后的 stat-unit GT。
-		CSV_CUSTOM_STAT_GLOBAL(PvpProfileWorldTickMs, static_cast<float>((FPlatformTime::Seconds() - WorldTickAt) * 1000.0), ECsvCustomStatOp::Set);
-		WorldTickAt = 0.0;
-	}
-
-	// 统一绝对路径与分隔符，用于采集文件归属比较；非法父目录折叠返回空串。
-	static FString Canonical(FString Path)
-	{
-		Path = FPaths::ConvertRelativePathToFull(Path);
-		FPaths::NormalizeFilename(Path);
-		if (!FPaths::CollapseRelativeDirectories(Path)) return FString();
-		return Path;
-	}
-
-	// 只接受显式采集根目录下的子路径，不允许盘根、根目录本身或越界写入。
-	static bool IsProfilePath(const FString& Path)
-	{
-		FString RequestedRoot;
-		FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRoot="), RequestedRoot);
-		RequestedRoot.TrimQuotesInline();
-		const FString Root = RequestedRoot.IsEmpty() ? Canonical(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling"))) : Canonical(RequestedRoot);
-		// 显式本机采集目录可位于另一块盘；仍拒绝盘根和目录本身，不覆写用户已有产物。
-		if (Root.Len() <= 3 || FPaths::IsRelative(Root)) return false;
-		return !Path.IsEmpty() && !Path.Equals(Root, ESearchCase::IgnoreCase) && FPaths::IsUnderDirectory(Path, Root);
-	}
-
-	// 可选 UI 实验负载：服务器定时扣血并杀死固定批次，始终调用真实生命事务。
-	void ApplyHealthWorkload()
-	{
-		if (!bHealthAndDeath || Role != TEXT("Server") || !bCapturing || bDeathBatchApplied) return;
-		const double Elapsed = FPlatformTime::Seconds() - CaptureAt;
-		if (Elapsed >= 20.0)
-		{
-			TArray<AfpstrueEnemyCharacter*> EnemiesToKill;
-			for (const auto& WeakEnemy : PreparedEnemies)
-				if (auto* Enemy = WeakEnemy.Get(); IsValid(Enemy) && !Enemy->IsDead()) EnemiesToKill.Add(Enemy);
-			EnemiesToKill.Sort([](const AfpstrueEnemyCharacter& A, const AfpstrueEnemyCharacter& B) { return A.GetUniqueID() < B.GetUniqueID(); });
-			if (EnemiesToKill.Num() != 160) { Fail(TEXT("DeathWorkloadInitialPopulationChanged")); return; }
-			// 只进入本项目真实 Health/GAS 伤害路径，不广播伪造死亡或直接隐藏 UI。
-			for (int32 Index = 0; Index < 32; ++Index)
-			{
-				if (auto* Health = EnemiesToKill[Index]->FindComponentByClass<UfpstrueHealthComponent>())
-					UGameplayStatics::ApplyDamage(EnemiesToKill[Index], Health->GetHealth() + 1.0f, nullptr, nullptr, nullptr);
-				// 保留本次死亡 Actor 到采集结束，避免对象移除令累计 UI 计数丢失；不保留 Widget/渲染资源。
-				if (IsValid(EnemiesToKill[Index])) EnemiesToKill[Index]->SetLifeSpan(60.0f);
-			}
-			bDeathBatchApplied = true;
-			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE WORKLOAD DeathBatch=32 ExpectedAlive=128 Elapsed=%.3f"), Elapsed);
-		}
-		else if (Elapsed >= NextHealthPulse && Elapsed <= 18.5)
-		{
-			if (Elapsed > NextHealthPulse + 1.0) { Fail(TEXT("HealthPulseScheduleMissedNoBurstCatchup")); return; }
-			int32 Changed = 0;
-			for (const auto& WeakEnemy : PreparedEnemies)
-				if (auto* Enemy = WeakEnemy.Get(); IsValid(Enemy) && !Enemy->IsDead())
-				{
-					UGameplayStatics::ApplyDamage(Enemy, 0.5f, nullptr, nullptr, nullptr);
-					++Changed;
-				}
-			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE WORKLOAD HealthPulse=%d Damage=0.5 Elapsed=%.3f"), Changed, Elapsed);
-			// 卡顿后不在同一采样里补发多次伤害，避免把不相同的尖峰当作 UI 模式差异。
-			NextHealthPulse += 1.0;
-		}
-	}
-
-	// 首次记录失败原因并转入异步收尾；不在出错点直接抛弃尚未写完的产物。
-	void Fail(const TCHAR* Reason)
-	{
-		if (!bFailed) UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=%s Reason=%s"), *Role, Reason);
-		bFailed = true;
-		if (!bFlushing) FlushAt = FPlatformTime::Seconds();
-		bFlushing = true;
-	}
-
-	// 读取外部原子替换的控制文件；短暂不可读留给下一次 Tick，非法命令进入失败收尾。
-	bool ReadControl(FString& Command)
-	{
-		const int64 Bytes = IFileManager::Get().FileSize(*ControlPath);
-		if (Bytes > 64)
-		{
-			Fail(TEXT("ControlMissingUnreadableOrOversized"));
-			return false;
-		}
-		// 原子替换保证不会读取半条命令，但 Windows 的替换瞬间仍可能暂时拒绝打开。
-		// 不在游戏线程 sleep，不伪造命令；下次 ticker 重试，持续不可读一秒仍判测试失败。
-		if (Bytes < 1 || !FFileHelper::LoadFileToString(Command, *ControlPath))
-		{
-			const double Now = FPlatformTime::Seconds();
-			if (ControlUnreadableAt < 0.0) ControlUnreadableAt = Now;
-			if (Now - ControlUnreadableAt >= 1.0) Fail(TEXT("ControlMissingUnreadableOrOversized"));
-			return false;
-		}
-		ControlUnreadableAt = -1.0;
-		Command.TrimStartAndEndInline();
-		Command.ToUpperInline();
-		if (Command != TEXT("WAIT") && Command != TEXT("START") && Command != TEXT("STOP") && Command != TEXT("EXIT"))
-		{
-			Fail(TEXT("InvalidControlCommand"));
-			return false;
-		}
-		return true;
-	}
-
-	// 核对人口、血条与本地视角；Out 参数区分尚未就绪的镜头和真正的无效场景。
-	bool SampleWorld(bool& bWaitingForLocalView)
-	{
-		bWaitingForLocalView = false;
-		UWorld* CurrentWorld = World.Get();
-		if (CurrentWorld == nullptr || CurrentWorld->GetWorldSettings() == nullptr || CurrentWorld->IsPaused() ||
-			!FMath::IsNearlyEqual(CurrentWorld->GetWorldSettings()->GetEffectiveTimeDilation(), 1.0f)) return false;
-		const bool bServer = Role == TEXT("Server");
-		auto* Mode = CurrentWorld->GetAuthGameMode<AfpstruePvpGameMode>();
-		Enemies = Players = Width = Height = 0;
-		HealthBars = FFPEnemyHealthBarMetrics{};
-		for (TActorIterator<AfpstrueEnemyCharacter> It(CurrentWorld); It; ++It)
-		{
-			if (const auto* Bar = It->FindComponentByClass<UfpstrueEnemyHealthBarComponent>()) Bar->AppendMetrics(HealthBars);
-			if (It->IsActorBeingDestroyed() || It->IsDead()) continue;
-			++Enemies;
-			if (bServer && !PreparedEnemies.Contains(*It))
-			{
-				// Explicit benchmark relevancy: all 160 replicas remain eligible,
-				// rather than silently comparing different client populations.
-				It->SetNetCullDistanceSquared(1.0e12f);
-				It->ForceNetUpdate();
-				PreparedEnemies.Add(*It);
-			}
-		}
-		if (bServer)
-		{
-			if (Mode == nullptr) return false;
-			if (!bProfileSettingsChecked)
-			{
-				const auto* DelayProperty = FindFProperty<FFloatProperty>(Mode->GetClass(), TEXT("EnemyRespawnDelay"));
-				const float Delay = DelayProperty != nullptr ? DelayProperty->GetPropertyValue_InContainer(Mode) : -1.0f;
-				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE SETTINGS HealthAndDeath=%d EnemyRespawnDelay=%.3f"), bHealthAndDeath, Delay);
-				if (bHealthAndDeath && Delay < 600.0f) { Fail(TEXT("DeathWorkloadRequiresRespawnDelay600")); return false; }
-				bProfileSettingsChecked = true;
-			}
-			for (TActorIterator<AfpstrueCharacter> It(CurrentWorld); It; ++It)
-			{
-				if (!Mode->IsCombatParticipant(*It) || Cast<APlayerController>(It->GetController()) == nullptr) continue;
-				++Players;
-				if (!PreparedPlayers.Contains(*It))
-				{
-					UfpstrueHealthComponent* Health = It->GetHealthComponent();
-					if (Health == nullptr) return false;
-					// One initialization per Pawn, not invulnerability or per-frame
-					// healing. Real AI attacks and damage callbacks remain enabled.
-					Health->SetMaxHealthAndReset(1000000.0f);
-					PreparedPlayers.Add(*It);
-					UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE HEALTH Role=Server Pawn=%s Max=%.1f Current=%.1f"),
-						*It->GetName(), Health->GetMaxHealth(), Health->GetHealth());
-				}
-				ViewLocation = It->GetActorLocation();
-				ViewRotation = It->GetActorRotation();
-			}
-			return true;
-		}
-		const AGameStateBase* State = CurrentWorld->GetGameState();
-		if (State != nullptr)
-			for (const APlayerState* Player : State->PlayerArray) if (IsValid(Player)) ++Players;
-		APlayerController* Local = UGameplayStatics::GetPlayerController(CurrentWorld, 0);
-		if (Local == nullptr || !Local->IsLocalController() || Local->GetPawn() == nullptr)
-		{
-			// GameState BeginPlay can precede local Controller/Pawn replication.
-			// Only the initial WAIT phase may defer this view-readiness check.
-			bWaitingForLocalView = true;
-			return false;
-		}
-		if (Local->AcknowledgedPawn != Local->GetPawn())
-		{
-			// ClientRestart 先确认占有再自动切回 Pawn；CoreTicker 要等这一整轮初始化完成后才安装专项镜头。
-			bWaitingForLocalView = true;
-			return false;
-		}
-		Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
-		if (bFixedView && !FixedCamera.IsValid())
-		{
-			// 仅此一次性采集进程固定镜头；仍保留服务器 AI、玩家受伤与真实副本更新。
-			ACameraActor* Camera = nullptr;
-			for (TActorIterator<ACameraActor> It(CurrentWorld); It; ++It)
-				if (It->ActorHasTag(TEXT("EnemyUIProfileCamera"))) { Camera = *It; break; }
-			if (Camera == nullptr)
-			{
-				Local->GetPawn()->GetActorEyesViewPoint(ViewLocation, ViewRotation);
-				Camera = CurrentWorld->SpawnActor<ACameraActor>(ViewLocation, ViewRotation);
-			}
-			if (Camera == nullptr) return false;
-			Camera->GetCameraComponent()->SetFieldOfView(90.0f);
-			Local->SetViewTarget(Camera);
-			FixedCamera = Camera;
-			// 等 PlayerCameraManager 真正更新一帧，再记录实际视图；不能把意图镜头当作已渲染镜头。
-			bWaitingForLocalView = true;
-			return false;
-		}
-		if (FixedCamera.IsValid())
-		{
-			Local->GetPlayerViewPoint(ViewLocation, ViewRotation);
-			if (Local->GetViewTarget() != FixedCamera.Get() ||
-				!ViewLocation.Equals(FixedCamera->GetActorLocation(), 1.0f) ||
-				!ViewRotation.Equals(FixedCamera->GetActorRotation(), 0.1f))
-			{
-				if (!bReady && !bStarting && !bCapturing)
-				{
-					// ClientRestart 可晚于 Pawn 首次复制；只在 WAIT 初始化阶段完成专项相机安装。
-					// READY 后绝不重设镜头来掩盖漂移，下面仍保留实际视图的硬失败门禁。
-					UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE INITIAL_VIEW_RESELECT PreviousTarget=%s"), *GetNameSafe(Local->GetViewTarget()));
-					Local->SetViewTarget(FixedCamera.Get());
-					FixedViewStableAt = 0.0;
-					bWaitingForLocalView = true;
-					return false;
-				}
-				UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE VIEW_MISMATCH Target=%s ActualLocation=%s ActualRotation=%s"),
-					*GetNameSafe(Local->GetViewTarget()), *ViewLocation.ToCompactString(), *ViewRotation.ToCompactString());
-				Fail(TEXT("FixedCameraNotActualPlayerView"));
-				return false;
-			}
-			if (!bReady)
-			{
-				if (FixedViewStableAt == 0.0) FixedViewStableAt = FPlatformTime::Seconds();
-				if (FPlatformTime::Seconds() - FixedViewStableAt < 0.5)
-				{
-					bWaitingForLocalView = true;
-					return false;
-				}
-			}
-		}
-		Local->GetViewportSize(Width, Height);
-		return true;
-	}
-
-	// 用实际输出路径确认 CSV 仍属于本轮，避免停止其他采集者接管的新会话。
-	bool OwnsCsv() const
-	{
-#if CSV_PROFILER
-		return Capture.IsValid() && Canonical(FCsvProfiler::Get()->GetOutputFilename()).Equals(CsvPath, ESearchCase::IgnoreCase);
-#else
-		return false;
-#endif
-	}
-
-	// 独占申请 CSV/可选 Trace，并建立跨 World 生命周期的写盘租约；不覆盖旧文件。
-	void BeginCapture()
-	{
-#if CSV_PROFILER
-		FCsvProfiler* Csv = FCsvProfiler::Get();
-		if ((OutstandingCsvCapture.IsValid() && OutstandingCsvCapture->State != FFPBenchmarkCsvCapture::EState::Released) ||
-			Csv->IsCapturing() || Csv->IsWritingFile() || Csv->IsEndCapturePending() || FTraceAuxiliary::IsConnected())
-		{
-			Fail(TEXT("ProfilerAlreadyOwned"));
-			return;
-		}
-		if (IFileManager::Get().FileExists(*CsvPath) || IFileManager::Get().FileExists(*TracePath))
-		{
-			Fail(TEXT("RefusingToOverwriteCaptureArtifacts"));
-			return;
-		}
-		// UE 5.5 CsvProfiler 的 Trace 元数据在启动时注册；中途打开 Counters 会漏掉类别定义，
-		// 导致 Insights 的 CSV analyzer 断言。独立 CSV 文件仍正常采集，仅关闭这条冗余 Trace 通道。
-		// Start 只启用所列通道，不会关闭已经启用的通道，因此先显式禁用 Counters。
-		if (bCollectTrace) FTraceAuxiliary::DisableChannels(TEXT("counters"));
-		if (bCollectTrace && !FTraceAuxiliary::Start(FTraceAuxiliary::EConnectionType::File, *TracePath,
-			Role == TEXT("Server") ? TEXT("cpu,frame,bookmark,task,stats") : TEXT("cpu,gpu,frame,bookmark,task,stats")))
-		{
-			Fail(TEXT("TraceStartFailed"));
-			return;
-		}
-		if (bCollectTrace)
-		{
-			TStringBuilder<512> ActiveChannels;
-			FTraceAuxiliary::GetActiveChannelsString(ActiveChannels);
-			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE TRACE_CHANNELS Role=%s Active=%s"), *Role, ActiveChannels.ToString());
-			OwnedTracePath = FTraceAuxiliary::GetTraceDestinationString();
-			bOwnsTrace = true;
-		}
-		Capture = MakeShared<FFPBenchmarkCsvCapture>();
-		Capture->Filename = Role + TEXT(".csv");
-		OutstandingCsvCapture = Capture;
-		const TSharedRef<FFPBenchmarkCsvCapture> Lease = Capture.ToSharedRef();
-		const FString ExpectedPath = CsvPath;
-		Lease->FirstFrameHandle = Csv->OnCSVProfileFirstFrame().AddLambda([Lease, ExpectedPath]()
-		{
-			FCsvProfiler* Profiler = FCsvProfiler::Get();
-			if (!Canonical(Profiler->GetOutputFilename()).Equals(ExpectedPath, ESearchCase::IgnoreCase)) return;
-			const bool bCancelled = Lease->State == FFPBenchmarkCsvCapture::EState::CancelPendingStart;
-			Lease->State = FFPBenchmarkCsvCapture::EState::Capturing;
-			Profiler->OnCSVProfileFirstFrame().Remove(Lease->FirstFrameHandle);
-			Lease->FirstFrameHandle.Reset();
-			if (bCancelled)
-			{
-				Lease->WriteComplete = Profiler->EndCapture();
-				Lease->State = FFPBenchmarkCsvCapture::EState::StopRequested;
-			}
-		});
-		// Like the single-player lease, cleanup survives World teardown and a
-		// cancelled queued start. Never release it merely because a timer expired.
-		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Lease](float)
-		{
-			if (Lease->State == FFPBenchmarkCsvCapture::EState::StopRequested && Lease->WriteComplete.IsValid() && Lease->WriteComplete.IsReady())
-				Lease->State = FFPBenchmarkCsvCapture::EState::Released;
-			if (Lease->State != FFPBenchmarkCsvCapture::EState::Released) return true;
-			if (OutstandingCsvCapture == Lease) OutstandingCsvCapture.Reset();
-			return false;
-		}), 0.1f);
-		bStarting = true;
-		Csv->BeginCapture(-1, OutputDirectory, Capture->Filename);
-#else
-		Fail(TEXT("CsvProfilerUnavailable"));
-#endif
-	}
-
-	// 只停止自己持有的 CSV/Trace；排队中的 CSV 启动改为启动后立即收尾。
-	void StopOwnedResources()
-	{
-#if CSV_PROFILER
-		if (Capture.IsValid())
-		{
-			FCsvProfiler* Csv = FCsvProfiler::Get();
-			if (Capture->State == FFPBenchmarkCsvCapture::EState::StartRequested)
-				Capture->State = FFPBenchmarkCsvCapture::EState::CancelPendingStart;
-			else if (Capture->State == FFPBenchmarkCsvCapture::EState::Capturing && Csv->IsCapturing() && OwnsCsv())
-			{
-				Capture->WriteComplete = Csv->EndCapture();
-				Capture->State = FFPBenchmarkCsvCapture::EState::StopRequested;
-			}
-		}
-#endif
-		if (bOwnsTrace && !bTraceStopRequested)
-		{
-			if (FTraceAuxiliary::GetTraceDestinationString() == OwnedTracePath)
-				bTraceStopRequested = FTraceAuxiliary::Stop();
-			else
-			{
-				Fail(TEXT("TraceOwnershipLost"));
-				bOwnsTrace = false; // Never stop a replacement session.
-			}
-		}
-	}
-
-	// 等待落盘、验证产物并等待外部 EXIT；返回 true 保留 Ticker，false 表示已请求退出。
-	bool PollFlush()
-	{
-		StopOwnedResources();
-		const bool bCsvDone = !Capture.IsValid() || (Capture->WriteComplete.IsValid() && Capture->WriteComplete.IsReady());
-		const bool bTraceDone = !bOwnsTrace || (bTraceStopRequested && !FTraceAuxiliary::IsConnected());
-		if (!bCsvDone || !bTraceDone)
-		{
-			if (!bQuarantineLogged && FPlatformTime::Seconds() - FlushAt >= 30.0)
-			{
-				bQuarantineLogged = true;
-				Fail(TEXT("ArtifactFlushTimeoutLeaseRetained"));
-				UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE QUARANTINED Role=%s CsvDone=%d TraceDone=%d"), *Role, bCsvDone, bTraceDone);
-			}
-			return true;
-		}
-		if (!bFailed && !bFinalized)
-		{
-			const FString ActualCsv = Capture.IsValid() ? Canonical(Capture->WriteComplete.Get()) : FString();
-			if (!ActualCsv.Equals(CsvPath, ESearchCase::IgnoreCase) || IFileManager::Get().FileSize(*CsvPath) <= 0 ||
-				(bCollectTrace && IFileManager::Get().FileSize(*TracePath) <= 0)) Fail(TEXT("ArtifactMissingEmptyOrWrongPath"));
-			if (Role != TEXT("Server") && !GUsingNullRHI &&
-				IFileManager::Get().FileSize(*FPaths::Combine(OutputDirectory, Role + TEXT(".png"))) <= 0)
-				Fail(TEXT("RenderedClientScreenshotMissing"));
-			if (bHealthAndDeath && Role != TEXT("Server") && !GUsingNullRHI &&
-				IFileManager::Get().FileSize(*FPaths::Combine(OutputDirectory, Role + TEXT("_AfterDeath.png"))) <= 0)
-				Fail(TEXT("DeathWorkloadScreenshotMissing"));
-		}
-		if (!bFailed && !bFinalized)
-		{
-			// 写盘完成后才检查 UObject 释放，不把强制 GC 停顿混入正式帧时；仍不把驻留量当作分配归因。
-			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
-			int32 RemainingWidgets = 0;
-			UWorld* CurrentWorld = World.Get();
-			ForEachObjectOfClass(UfpstrueEnemyHealthBarWidget::StaticClass(), [CurrentWorld, &RemainingWidgets](UObject* Object)
-			{
-				if (!Object->HasAnyFlags(RF_ClassDefaultObject) && CastChecked<UfpstrueEnemyHealthBarWidget>(Object)->GetWorld() == CurrentWorld)
-					++RemainingWidgets;
-			});
-			const int32 ExpectedWidgets = Role == TEXT("Server") || UfpstrueEnemyHealthBarComponent::GetConfiguredMode() == EFPEnemyHealthBarMode::Off
-				? 0 : (bHealthAndDeath ? 128 : 160);
-			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE UI_GC Role=%s Widgets=%d Expected=%d PhysicalMB=%.3f CaptureStopped=1"),
-				*Role, RemainingWidgets, ExpectedWidgets, FPlatformMemory::GetStats().UsedPhysical / (1024.0 * 1024.0));
-			if (RemainingWidgets != ExpectedWidgets) Fail(TEXT("ReleasedEnemyWidgetsRetainedAfterCaptureGC"));
-		}
-		if (!bFailed && !bFinalized)
-		{
-			bFinalized = true;
-			// 三端都写盘与释放检查完成后才允许退出，避免 DS 先走导致慢端掉线换图污染校验。
-			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE FLUSHED Role=%s AwaitingExit=1"), *Role);
-		}
-		if (!bFailed)
-		{
-			FString Command;
-			if (!ReadControl(Command)) { if (!bFailed) return true; }
-			else if (Command != TEXT("EXIT")) return true;
-		}
-		if (!bFailed) UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE COMPLETE Role=%s Csv=%s Trace=%s Duration=%.3f"),
-			*Role, *CsvPath, *TracePath, FPlatformTime::Seconds() - CaptureAt);
-		FPlatformMisc::RequestExitWithStatus(false, bFailed ? 2 : 0, TEXT("PvpPerformanceProfile"));
-		return false;
-	}
-
-	// 推进多端 Profile 的就绪、预热、采集和收尾阶段，拒绝人口变化及控制命令倒退。
-	bool Tick(float)
-	{
-		if (FPlatformTime::Seconds() - StartedAt >= 300.0) Fail(TEXT("Watchdog300Seconds"));
-		if (bFlushing) return PollFlush();
-		FString Command;
-		if (!ReadControl(Command)) return bFailed ? PollFlush() : true;
-		if (Command == TEXT("EXIT")) { Fail(TEXT("ExitBeforeAllPeersFlushed")); return PollFlush(); }
-		bool bWaitingForLocalView = false;
-		if (!SampleWorld(bWaitingForLocalView))
-		{
-			if (bWaitingForLocalView && !bReady && !bStarting && !bCapturing && Command == TEXT("WAIT")) return true;
-			Fail(TEXT("WorldViewOrTimeInvalid"));
-			return PollFlush();
-		}
-		const double CaptureElapsed = bCapturing ? FPlatformTime::Seconds() - CaptureAt : 0.0;
-		const bool bDeathTransition = bHealthAndDeath && bCapturing && CaptureElapsed >= 19.5;
-		const bool bNowReady = Players == 2 && (bDeathTransition ? Enemies >= 128 && Enemies <= 160 : Enemies == 160);
-		if (bReady && (!bNowReady || (bDeathTransition && CaptureElapsed >= 23.0 && Enemies != 128)))
-		{ Fail(TEXT("PopulationChangedOutsideExplicitWorkload")); return PollFlush(); }
-		if (!bReady && bNowReady)
-		{
-			bReady = true;
-			ReadyAt = FPlatformTime::Seconds();
-			UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE READY Role=%s Enemies=%d Players=%d Location=%s Rotation=%s Width=%d Height=%d"),
-				*Role, Enemies, Players, *ViewLocation.ToCompactString(), *ViewRotation.ToCompactString(), Width, Height);
-		}
-		if (!bStarting && !bCapturing)
-		{
-			if (Command == TEXT("STOP")) { Fail(TEXT("StopBeforeCapture")); return PollFlush(); }
-			if (Command == TEXT("START"))
-			{
-				if (!bReady || FPlatformTime::Seconds() - ReadyAt < 14.8) { Fail(TEXT("StartBeforeReadyAnd15SecondWarmup")); return PollFlush(); }
-				BeginCapture();
-			}
-		}
-		else
-		{
-			if (Command == TEXT("WAIT")) { Fail(TEXT("ControlRegressedAfterStart")); return PollFlush(); }
-			if (bStarting && Capture.IsValid() && Capture->State == FFPBenchmarkCsvCapture::EState::Capturing)
-			{
-				bStarting = false;
-				bCapturing = true;
-				CaptureAt = FPlatformTime::Seconds();
-				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE CAPTURING Role=%s Enemies=%d Players=%d Csv=%s Trace=%s"),
-					*Role, Enemies, Players, *CsvPath, *TracePath);
-				if (Role != TEXT("Server") && !GUsingNullRHI)
-					FScreenshotRequest::RequestScreenshot(FPaths::Combine(OutputDirectory, Role + TEXT(".png")), true, false);
-			}
-			if (bCapturing)
-			{
-				ApplyHealthWorkload();
-				if (bHealthAndDeath && !bCapturedPostDeath && Role != TEXT("Server") && !GUsingNullRHI && CaptureElapsed >= 24.0)
-				{
-					bCapturedPostDeath = true;
-					FScreenshotRequest::RequestScreenshot(FPaths::Combine(OutputDirectory, Role + TEXT("_AfterDeath.png")), true, false);
-				}
-#if CSV_PROFILER
-				if (!OwnsCsv() || !FCsvProfiler::Get()->IsCapturing() || (bCollectTrace && FTraceAuxiliary::GetTraceDestinationString() != OwnedTracePath))
-				{ Fail(TEXT("CaptureOwnershipInterrupted")); return PollFlush(); }
-#endif
-				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE SAMPLE Role=%s Enemies=%d Players=%d Elapsed=%.3f Location=%s Rotation=%s Width=%d Height=%d"),
-					*Role, Enemies, Players, FPlatformTime::Seconds() - CaptureAt, *ViewLocation.ToCompactString(), *ViewRotation.ToCompactString(), Width, Height);
-				const FPlatformMemoryStats Memory = FPlatformMemory::GetStats();
-				const double PhysicalMB = Memory.UsedPhysical / (1024.0 * 1024.0);
-				CSV_CUSTOM_STAT(fpstrueEnemyUI, ActiveWidgets, HealthBars.Widgets, ECsvCustomStatOp::Set);
-				CSV_CUSTOM_STAT(fpstrueEnemyUI, FrustumVisible, HealthBars.FrustumVisible, ECsvCustomStatOp::Set);
-				CSV_CUSTOM_STAT(fpstrueEnemyUI, ProcessPhysicalMB, PhysicalMB, ECsvCustomStatOp::Set);
-				UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE UI Role=%s Mode=%s Components=%d Widgets=%d Frustum=%d World=%d Screen=%d Manual=%d Created=%llu Updates=%llu Requests=%llu Draws=%llu PhysicalMB=%.3f PeakPhysicalMB=%.3f Elapsed=%.3f"),
-					*Role, UfpstrueEnemyHealthBarComponent::GetModeName(UfpstrueEnemyHealthBarComponent::GetConfiguredMode()),
-					HealthBars.Components, HealthBars.Widgets, HealthBars.FrustumVisible, HealthBars.WorldWidgets, HealthBars.ScreenWidgets, HealthBars.ManualWorldWidgets,
-					HealthBars.Created, HealthBars.ValueUpdates, HealthBars.RedrawRequests, HealthBars.RenderTargetDraws, PhysicalMB,
-					Memory.PeakUsedPhysical / (1024.0 * 1024.0), FPlatformTime::Seconds() - CaptureAt);
-			}
-			if (Command == TEXT("STOP"))
-			{
-				if (!bCapturing || FPlatformTime::Seconds() - CaptureAt < 29.8) Fail(TEXT("StopBefore30SecondCapture"));
-				else { bFlushing = true; FlushAt = FPlatformTime::Seconds(); }
-				return PollFlush();
-			}
-		}
-		return true;
-	}
-};
-}
-#endif
-
-namespace
-{
 TRACE_DECLARE_FLOAT_COUNTER(FpBaselineWorldWall, TEXT("Fpstrue/Baseline/WorldTickWallMs"));
 TRACE_DECLARE_INT_COUNTER(FpBaselineGTUser, TEXT("Fpstrue/Baseline/GTUser100nsCumulative"));
 TRACE_DECLARE_INT_COUNTER(FpBaselineGTKernel, TEXT("Fpstrue/Baseline/GTKernel100nsCumulative"));
@@ -776,6 +184,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	bool bCpuAccounting = false;
 	uint64 CpuQueryCount = 0, CpuQueryFailures = 0;
 	bool bCapturing = false, bRendered = false, bFailed = false, bStatusFailed = false;
+	// 人数只由显式压测参数改变；所有端必须精确达到同一人数后才能预热、采集。
+	int32 ExpectedEnemies = 160;
 	int32 Enemies = 0, Players = 0, Width = 0, Height = 0, ValidationSamples = 0;
 	int32 MinEnemies = MAX_int32, MaxEnemies = 0, MinPlayers = MAX_int32, MaxPlayers = 0;
 	// Same population scan also records authority-side activity. Clients do not
@@ -787,7 +197,6 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 	float ViewFOV = 0;
 	FVector ViewLocation = FVector::ZeroVector;
 	FRotator ViewRotation = FRotator::ZeroRotator;
-	FFPEnemyHealthBarMetrics Bars;
 	bool bQualityApplied = false;
 	bool bScreenshotRequested = false;
 	bool bContinuousFloorChecks = false, bContinuousFloorChecksPrepared = false;
@@ -1396,10 +805,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			return Fail(TEXT("WorldOrTimeChanged"));
 		Enemies = Players = 0;
 		AIControllers = BehaviorReady = Chasing = Attacking = Moving = 0;
-		Bars = {};
 		for (TActorIterator<AfpstrueEnemyCharacter> It(Current); It; ++It)
 		{
-			if (const auto* Bar = It->FindComponentByClass<UfpstrueEnemyHealthBarComponent>()) Bar->AppendMetrics(Bars);
 			if (It->IsActorBeingDestroyed() || It->IsDead()) continue;
 			++Enemies;
 			if (Role == TEXT("Server"))
@@ -1731,9 +1138,8 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 		Json += FString::Printf(TEXT(",\"traceAlignment\":{\"start\":{\"frame\":%llu,\"qpc\":%llu,\"secondsPerCycle64\":%.17g,\"threadId\":%u},\"stop\":{\"frame\":%llu,\"qpc\":%llu,\"secondsPerCycle64\":%.17g,\"threadId\":%u},\"boundary\":\"Control-phase START/STOP anchors, not individual frame boundaries. Pair bookmarks and raw Windows QPC ticks with ETL/Trace clock calibration; do not concatenate uncalibrated startup seconds.\"}"),
 			CaptureStartAnchor.Frame, CaptureStartAnchor.Qpc, CaptureStartAnchor.SecondsPerCycle, CaptureStartAnchor.ThreadId,
 			CaptureStopAnchor.Frame, CaptureStopAnchor.Qpc, CaptureStopAnchor.SecondsPerCycle, CaptureStopAnchor.ThreadId);
-		Json += FString::Printf(TEXT(",\"valid\":true,\"seed\":1337,\"map\":%s,\"validationSamples\":%d,\"minEnemies\":%d,\"maxEnemies\":%d,\"minPlayers\":%d,\"maxPlayers\":%d,\"widgets\":%d,\"worldWidgets\":%d,\"manualWorldWidgets\":%d,\"renderTargetDraws\":%llu,\"physicalMB\":%.3f,\"peakPhysicalMB\":%.3f"),
+		Json += FString::Printf(TEXT(",\"valid\":true,\"seed\":1337,\"map\":%s,\"validationSamples\":%d,\"minEnemies\":%d,\"maxEnemies\":%d,\"minPlayers\":%d,\"maxPlayers\":%d,\"physicalMB\":%.3f,\"peakPhysicalMB\":%.3f"),
 			*Quote(World.IsValid() ? World->GetMapName() : FString()), ValidationSamples, MinEnemies, MaxEnemies, MinPlayers, MaxPlayers,
-			Bars.Widgets, Bars.WorldWidgets, Bars.ManualWorldWidgets, Bars.RenderTargetDraws,
 			Memory.UsedPhysical / 1048576.0, Memory.PeakUsedPhysical / 1048576.0);
 		Json += TEXT(",\"actualMapPackage\":") + Quote(World.IsValid() ? World->GetOutermost()->GetName() : FString());
 		if (Role == TEXT("Server"))
@@ -1785,7 +1191,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 			if (!CollectNetworkConnections(Connections)) return false;
 			++NetworkIdentitySamples;
 		}
-		const bool bCountsReady = Enemies == 160 && Players == 2;
+		const bool bCountsReady = Enemies == ExpectedEnemies && Players == 2;
 		if (Phase != TEXT("STARTING") && (!bWorldReady || !bCountsReady)) return Fail(TEXT("WorldPopulationOrViewChanged"));
 		if (Phase == TEXT("STARTING") && bWorldReady && bCountsReady)
 		{
@@ -1797,11 +1203,11 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				// 首个原生 consumer 会重置 GPU 统计；在既有 20s 预热前注册，不将这个启动扰动塞进采集窗口。
 				GEngine->AddPerformanceDataConsumer(UnitConsumer);
 			}
-			// 反向消融只在显式基线 DS、完整 160 人口就绪后应用一次，发生在预热前。
+			// 反向消融只在显式基线 DS、完整目标人口就绪后应用一次，发生在预热前。
 			// 默认不写此属性；不在生成过程中或采集循环每帧覆盖真实 CMC 配置。
 			if (Role == TEXT("Server") && bContinuousFloorChecks && !bContinuousFloorChecksPrepared)
 			{
-				if (PreparedEnemies.Num() != 160) return Fail(TEXT("FloorReferenceRequiresPrepared160Enemies"));
+				if (PreparedEnemies.Num() != ExpectedEnemies) return Fail(TEXT("FloorReferenceRequiresPreparedPopulation"));
 				for (const auto& WeakEnemy : PreparedEnemies)
 				{
 					const AfpstrueEnemyCharacter* Enemy = WeakEnemy.Get();
@@ -1810,7 +1216,7 @@ struct FPvpBaselineCapture : TSharedFromThis<FPvpBaselineCapture>
 				}
 				for (const auto& WeakEnemy : PreparedEnemies) WeakEnemy->GetCharacterMovement()->bAlwaysCheckFloor = true;
 				bContinuousFloorChecksPrepared = true;
-				UE_LOG(LogTemp, Display, TEXT("PVP_BASELINE FLOOR_REFERENCE role=Server enemies=160 alwaysCheckFloor=1 appliedOnceBeforeWarmup=1"));
+				UE_LOG(LogTemp, Display, TEXT("PVP_BASELINE FLOOR_REFERENCE role=Server enemies=%d alwaysCheckFloor=1 appliedOnceBeforeWarmup=1"), ExpectedEnemies);
 			}
 			if (bRendered && bScreenshotRequested)
 				FScreenshotRequest::RequestScreenshot(FPaths::Combine(Directory, Role + TEXT("_Ready.png")), true, false);
@@ -1867,6 +1273,7 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	const auto Capture = MakeShared<FPvpBaselineCapture>();
 	Capture->World = World;
 	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineRole="), Capture->Role);
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineEnemies="), Capture->ExpectedEnemies);
 	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineControl="), Capture->ControlPath);
 	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineOutput="), Capture->Directory);
 	Capture->ControlPath = FPvpBaselineCapture::Canonical(Capture->ControlPath);
@@ -1878,18 +1285,18 @@ bool StartPvpBaselineIfRequested(UWorld* World)
 	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineView="), Capture->ViewPolicy);
 	FParse::Value(FCommandLine::Get(), TEXT("EnemyReplication="), Capture->EnemyReplication);
 	FString Root;
-	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRoot="), Root);
+	FParse::Value(FCommandLine::Get(), TEXT("PvpBaselineRoot="), Root);
 	Root = FPvpBaselineCapture::Canonical(Root.IsEmpty() ? FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling")) : Root);
 	const bool bServer = Capture->Role == TEXT("Server");
 	const bool bValidRole = bServer || Capture->Role == TEXT("Client1") || Capture->Role == TEXT("Client2");
 	const bool bPathsValid = Root.Len() > 3 && !Capture->Directory.IsEmpty() && !Capture->Directory.Equals(Root, ESearchCase::IgnoreCase) &&
 		FPaths::IsUnderDirectory(Capture->Directory, Root) && FPaths::IsUnderDirectory(Capture->ControlPath, Capture->Directory);
-	if (!bPathsValid || !bValidRole || (Capture->ViewPolicy != TEXT("Player") && Capture->ViewPolicy != TEXT("Overview")) ||
+	if (!bPathsValid || !bValidRole || Capture->ExpectedEnemies < 1 || Capture->ExpectedEnemies > 1024 ||
+		(Capture->ViewPolicy != TEXT("Player") && Capture->ViewPolicy != TEXT("Overview")) ||
 		(Capture->EnemyReplication != TEXT("Tiered") && Capture->EnemyReplication != TEXT("Reference")) ||
 		World == nullptr || World->WorldType != EWorldType::Game || GIsEditor || bProcessBenchmarkConsumed ||
 		(bServer ? (World->GetNetMode() != NM_DedicatedServer || UE_BUILD_SHIPPING) : World->GetNetMode() != NM_Client) ||
-		(bServer && Capture->bRendered) || (!bServer && Capture->bContinuousFloorChecks) || FParse::Param(FCommandLine::Get(), TEXT("PvpProfile")) ||
-		FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) || FParse::Param(FCommandLine::Get(), TEXT("AutoBenchmark")) ||
+		(bServer && Capture->bRendered) || (!bServer && Capture->bContinuousFloorChecks) || FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) || FParse::Param(FCommandLine::Get(), TEXT("AutoBenchmark")) ||
 		!IFileManager::Get().DirectoryExists(*Capture->Directory))
 	{
 		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpBaselineInvalidArguments"));
@@ -1965,53 +1372,8 @@ EFPPvpBaselineBootstrap StartPvpBaselineClient(UGameInstance* Instance)
 	return EFPPvpBaselineBootstrap::Started;
 }
 
-// GameState 的采集分流入口：优先 Baseline，否则仅在非 Shipping 构建接受旧 Profile 请求。
-void StartPvpPerformanceProfile(UWorld* World)
+// GameState 的唯一性能基线入口；未显式请求时不采集，也不修改运行参数。
+void StartPvpBaseline(UWorld* World)
 {
-	if (StartPvpBaselineIfRequested(World)) return;
-#if !UE_BUILD_SHIPPING
-	if (!FParse::Param(FCommandLine::Get(), TEXT("PvpProfile"))) return;
-	if (World == nullptr || World->WorldType != EWorldType::Game || GIsEditor || bProcessBenchmarkConsumed)
-	{
-		UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=Unknown Reason=InvalidWorldOrDuplicateProcessRun"));
-		return;
-	}
-	bProcessBenchmarkConsumed = true;
-	const TSharedRef<FPvpPerformanceProfile> Profile = MakeShared<FPvpPerformanceProfile>();
-	Profile->World = World;
-	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileRole="), Profile->Role);
-	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileControl="), Profile->ControlPath);
-	FParse::Value(FCommandLine::Get(), TEXT("PvpProfileOutput="), Profile->OutputDirectory);
-	Profile->bCollectTrace = !FParse::Param(FCommandLine::Get(), TEXT("PvpProfileNoTrace"));
-	Profile->bFixedView = FParse::Param(FCommandLine::Get(), TEXT("PvpProfileFixedView"));
-	Profile->bHealthAndDeath = FParse::Param(FCommandLine::Get(), TEXT("PvpProfileHealthAndDeath"));
-	Profile->ControlPath.TrimQuotesInline();
-	Profile->OutputDirectory.TrimQuotesInline();
-	Profile->ControlPath = FPvpPerformanceProfile::Canonical(Profile->ControlPath);
-	Profile->OutputDirectory = FPvpPerformanceProfile::Canonical(Profile->OutputDirectory);
-	const bool bServer = Profile->Role == TEXT("Server");
-	const bool bRoleValid = bServer || Profile->Role == TEXT("Client1") || Profile->Role == TEXT("Client2");
-	const auto& Config = FFPBenchmarkConfig::Get();
-	if (!bRoleValid || (bServer ? World->GetNetMode() != NM_DedicatedServer : World->GetNetMode() != NM_Client) ||
-		!Config.HasEnemyCountOverride() || Config.EnemyCount != 160 || Config.Seed != 1337 ||
-		FParse::Param(FCommandLine::Get(), TEXT("PvpSmokeTest")) || FParse::Param(FCommandLine::Get(), TEXT("AutoBenchmark")) ||
-		!FPvpPerformanceProfile::IsProfilePath(Profile->ControlPath) || !FPvpPerformanceProfile::IsProfilePath(Profile->OutputDirectory) ||
-		!IFileManager::Get().MakeDirectory(*Profile->OutputDirectory, true))
-	{
-		UE_LOG(LogTemp, Error, TEXT("PVP_PROFILE FAIL Role=%s Reason=InvalidProfileArgumentsOrPath"), *Profile->Role);
-		FPlatformMisc::RequestExitWithStatus(false, 2, TEXT("PvpPerformanceProfileArguments"));
-		return;
-	}
-	Profile->CsvPath = FPvpPerformanceProfile::Canonical(FPaths::Combine(Profile->OutputDirectory, Profile->Role + TEXT(".csv")));
-	Profile->TracePath = FPvpPerformanceProfile::Canonical(FPaths::Combine(Profile->OutputDirectory, Profile->Role + TEXT(".utrace")));
-	Profile->WorldTickStartHandle = FWorldDelegates::OnWorldTickStart.AddSP(Profile, &FPvpPerformanceProfile::BeginWorldTick);
-	Profile->WorldTickEndHandle = FWorldDelegates::OnWorldTickEnd.AddSP(Profile, &FPvpPerformanceProfile::EndWorldTick);
-	FMath::RandInit(1337);
-	UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE START Role=%s Enemies=160 Seed=1337 Warmup=15 Capture=30 Control=%s Output=%s HealthPolicy=ServerOnce1000000 RelevancyPolicy=ServerCullSquared1e12 ViewPolicy=RecordedNotFrozen"),
-		*Profile->Role, *Profile->ControlPath, *Profile->OutputDirectory);
-	UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE UI_CONFIG Role=%s Mode=%s Trace=%d NullRHI=%d FixedView=%d"), *Profile->Role,
-		UfpstrueEnemyHealthBarComponent::GetModeName(UfpstrueEnemyHealthBarComponent::GetConfiguredMode()), Profile->bCollectTrace, GUsingNullRHI, Profile->bFixedView);
-	UE_LOG(LogTemp, Display, TEXT("PVP_PROFILE TIMING_SCOPE WorldTick=OnWorldTickStartToEndWallMs StatUnitThreads=RenderedClientOnly FrameIncludesLimiterWait=1"));
-	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Profile](float Delta) { return Profile->Tick(Delta); }), 0.2f);
-#endif
+	StartPvpBaselineIfRequested(World);
 }

@@ -26,7 +26,7 @@ public class fpstrue : ModuleRules
 		if (Target.bBuildEditor)
 		{
 			// 可编辑行为树资产生成和编辑器自动化测试需要这些模块；Game 目标不依赖它们。
-			PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "UMGEditor", "AIGraph", "BehaviorTreeEditor", "BlueprintGraph", "GraphEditor", "KismetCompiler", "AnimGraph", "AnimGraphRuntime", "AssetRegistry", "RHI", "RenderCore" });
+			PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "UMGEditor", "SlateCore", "AIGraph", "BehaviorTreeEditor", "BlueprintGraph", "GraphEditor", "KismetCompiler", "AnimGraph", "AnimGraphRuntime", "AssetRegistry", "RHI", "RenderCore", "Json", "TraceServices" });
 		}
 	}
 }

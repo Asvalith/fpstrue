@@ -12,6 +12,35 @@
 
 `RestartPlayer` 是单个角色出生/重生，不表示全局重新开局。地址直连、监听主机与专服入口也不等于 Steam/EOS 匹配服务。
 
+## 断线恢复与预测的边界
+
+断线重连已经由现有连接链处理，不另建一套恢复管理器：GameInstance 发起旅行并有限重试，所属 Controller 提交票据，GameMode 验证并轮换票据，再重新接管服务器保留的 Pawn、装备和 PlayerState。离线角色仍可受伤；离线期间死亡则按正常规则重生，不回到断线前的生命或位置。客户端保存的是地址和票据，不是可信的游戏存档；本机制不覆盖服务器重启或跨服恢复。
+
+预测按业务分别处理：角色移动由 CMC 保存、确认和重放 SavedMove，本项目补充瞄准/冲刺模式位；GAS 负责能力激活与确认/拒绝。武器的客户端弹药显示由权威基准扣除尚未包含的输入，快照水位和逐发 ACK 防止重复扣减或拒绝一发时抹掉后续预测。换弹本地预测播放，服务器接管同一播放实例，仍由唯一权威时钟装弹。已播放的枪声不会反向撤销，客户端不预先提交最终伤害；历史命中查询与客户端预测拒绝也不是同一种回滚。
+
+高频射击输入使用有界不可靠批次与重发，低频激活/结束/超时控制和最终结果仍交 UE 可靠传输。服务器在原武器执行器中重排、去重和裁决，不另建第二套伤害链。8发传输窗、6次40ms发送上限、75ms缺口处理和明确终结约束资源与等待；严重丢失仍可能丢弃输入，不能称任意弱网零损失。当前网络预算、证据口径和逐项验收见 [FPS_NETWORK_ACCEPTANCE](FPS_NETWORK_ACCEPTANCE.md)，实现不等于最新构建已通过全部弱网或容量测试。
+
+网络身份、恢复准入、预测账本和权威结算保留在 C++，HUD 蓝图读取本地快照并呈现。把布局或绘制迁入蓝图，不表示将网络裁决也迁入蓝图。编译、自动化、最新双端弱网和人工画面检查分别验收，不能用历史通过记录代替当前版本的端到端验证。
+
+## 源码结构与阅读顺序
+
+多人框架按生命周期和状态所有者分文件，不再把七个类放进 `fpstrueMultiplayer.h/.cpp`。类名、模块名和 `/Script/fpstrue.*` 反射路径不变，不增加第二套玩法或兼容聚合头。
+
+以下路径相对于 `Source/fpstrue/`，每组均有同名 `.h/.cpp`：
+
+| 阅读入口 | 负责的链路 |
+| --- | --- |
+| [Game/fpstrueMultiplayerGameInstance](../Source/fpstrue/Game/fpstrueMultiplayerGameInstance.cpp) | 本地连接/离场 → 地图旅行 → 握手与复制就绪 → 有限重试；跨世界保存地址和票据 |
+| [Game/fpstruePvpPlayerController](../Source/fpstrue/Game/fpstruePvpPlayerController.cpp) | 拥有者握手 RPC、离场和时钟采样；将请求交给 GameMode，不自行恢复角色 |
+| [Game/fpstruePvpGameMode](../Source/fpstrue/Game/fpstruePvpGameMode.cpp) | 唯一服务器接纳、生成/重生、PvE 人口与目标管理器、离线保留和到期清理 |
+| [Game/fpstruePvpGameState](../Source/fpstrue/Game/fpstruePvpGameState.cpp) | 对局公共事实、计分视图与各端独立性能协调器 |
+| [Game/fpstruePvpPlayerState](../Source/fpstrue/Game/fpstruePvpPlayerState.cpp) | 玩家本局成绩与离线标记，死亡换 Pawn 不重置成绩 |
+| [UI/fpstruePvpHUD](../Source/fpstrue/UI/fpstruePvpHUD.cpp) | HUD 订阅当前 Pawn/武器，Widget 显示快照；两者同属本地界面链，保留在同一组文件 |
+
+连接实现内部只共用 `Game/fpstrueConnectionHelpers.h` 的无状态票据格式检查和诊断身份读取；它不保存数据，不增加管理器或新的握手入口。调用者直接包含所需类头，不依赖聚合头间接导入所有框架类。
+
+开发场景成员实现在 `Testing/Networking/fpstrueGameModeSmoke.cpp`；正式 GameMode 留下清晰的生成、重生和恢复流程，没有增加第二个规则对象。开发验收保持显式开关及 Shipping 边界。
+
 ## 配置与资产
 
 `DefaultEngine.ini` 的普通游戏与 Dedicated Server 默认 GameMode 均指向 `/Script/fpstrue.fpstruePvpGameMode`。旧原生 GameMode 名称只作类重定向，不保留第二套规则或空函数适配层。
@@ -22,9 +51,9 @@
 
 ## 性能采集不随单机删除而降级
 
-当前固定 160 AI 的 Editor/Shipping 客户端对照继续使用 `Tools/Performance/RunGroupAIBaseline.ps1`。保留 `StartPvpPerformanceProfile`、`StartPvpBaselineClient`、网络世界的真实人口/行为/画质门禁，以及 CSV/Trace、OS 线程 CPU、引擎 unit、物理与网络消费者统计；不同口径不相加为整帧耗时。
+当前固定 160 AI 的 Editor/Shipping 客户端对照继续使用 `Tools/Performance/RunGroupAIBaseline.ps1`。保留 `StartPvpBaseline`、`StartPvpBaselineClient`、网络世界的真实人口/行为/画质门禁，以及 CSV/Trace、OS 线程 CPU、引擎 unit、物理与网络消费者统计；不同口径不相加为整帧耗时。
 
-删除的是依赖旧单机 GameMode 的 `UfpstrueBenchmarkRunner` 组件与专属用例，不是整个 `Testing/Benchmarks/fpstrueBenchmarkRunner.*` 文件。该文件仍承载网络 Profile/Baseline。旧 `RunRenderCostMatrix`/`AutoBenchmark` 及单机视觉循环属于历史入口，不作为当前运行命令；原始 CSV、Trace、冻结报告和对应版本仍保留。
+删除的是旧单机 Benchmark 组件、AI 血条 Profile 及其专属工具；`Testing/Benchmarks/fpstrueBenchmarkRunner.*` 只保留当前网络 Baseline。旧单机视觉循环不作为当前运行命令；原始 CSV、Trace、冻结报告和对应版本仍保留。
 
 ## 验收口径
 

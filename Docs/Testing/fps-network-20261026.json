@@ -1,0 +1,866 @@
+{
+  "SchemaVersion": 1,
+  "Date": "2026-10-26",
+  "GameNetworkProtocol": 6,
+  "Scope": "Local UE5.5 Editor functional evidence and Shipping compilation. Not a shipping-package, WAN, pixel-quality or capacity certification.",
+  "Automation": {
+    "Failed": 0,
+    "Warned": 19,
+    "ReportSha256": "E84097D55526EA7A19CBB2A6DE1DA02503FFE16286996966CE40CB356961288D",
+    "NotRun": 0,
+    "Tests": [
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.AssetGraphAndBindings.DefaultProjectAssets",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.AssetSafety",
+        "state": "Success",
+        "warnings": 6,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.BlackboardKeyCache",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.DefaultStructure",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.LowHealthRetreatLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.MoveRequestOwnershipAndBackoff",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.RuntimeLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.BehaviorTree.StartupFailureAndStopIdempotence",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.EQS.AsyncParametersAndMissingNavigation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.EQS.TemplateAndItemIdentity",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.EQS.TwoOwnersInflightGcAndRecreate",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Movement.NativeStationaryFloorCache",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Perception.AuthoritativeGunshotInvestigation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Perception.MultiplayerIdleSearchAndStop",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Perception.SightOcclusionAndFacing",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.AttackWaitingQueue",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.CacheAndSlotOwnership",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.ParticipationAndGoalAvailability",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.TacticalBoundaryAndAssignments",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.AI.Surround.TacticalQueueAndRecovery",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.AnimationDefaultsConfig",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.FacingTolerance",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.AI.RotationConfig",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.GAS.CommitCancellationAndSameSpecRestart",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.AssetReloadNormalAndEmpty",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.AutoReloadConflicts",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationSnapshotAndReequip",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ConfigurationValidation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ExternalOwnerAndEquipReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.HitscanDamage",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.OwnerInputTransitionRejectsReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.PlaybackFailureAndEndOwnership",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.RecoilUsesElapsedTime",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadFinishPreservesDisabledOnReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadIdentityAndEndReasons",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadMontageInstanceIdentity",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ReloadTransitions",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.RemainingCooldownAndShotFact",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.ShotPresentationIdentityOnReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Boundaries.Weapon.StaleTransactionCallbacksIgnored",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.AttackProtectionAndCleanup",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.ConfigurationSource",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.ExplicitPlaybackAndStopReentry",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Combat.ProjectBlueprintPlaybackIntegration",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Health.NotificationTermination",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Health.QueuedEnemyHitContext",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Health.ReentrantMutationOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.PulseAndScaling",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.RetriggerAndStepSize",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Gameplay.Weapon.VisualRecoil.ViewIsolation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.BodyDefaultsAndViewSeparation",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RARAbilityPresentationAndCancel",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RARAssetsAndMontageBindings",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RARReceivedReloadProgress",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.RemoteVelocityWithoutAcceleration",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.TemplateAssetsGripAndOriginalHud",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Animation.TemplateDeathWeaponPhysicsAndLateReplication",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Clock.BetterSampleRebasesStartupEstimate",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Clock.DynamicRoundTripAndFreshness",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.GAS.ExternalHealthEffectsAndReentry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Health.AuthorityAndGASAttributeCommit",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Health.ReplicatedAttributeNotifications",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Hitscan.HistoryGeometryTimeAndLifecycle",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Lifecycle.BoundedSpawnRecovery",
+        "state": "Success",
+        "warnings": 4,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Lifecycle.EnemyBehaviorStartupRequired",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Lifecycle.SingleModeEnemyRegistrationAndSpawn",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Movement.SavedModesReplayAndAuthority",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.AuthorityPoseNeverUsesClientBudget",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.ClientLocalRenderAndVelocityState",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.EnemyReplicationTieringAndReference",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Performance.ServerAllParticipantsAndLifecycle",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.AmmoSnapshotAckReordering",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Prediction.ReloadPlaybackAdoptionAndAuthorityClock",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.ClientSnapshotIsPresentationOnly",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.ServerCombatAndSingleCommit",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.SimpleHitProxyLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.TargetDeathDestroyAndResourceRelease",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.PvPvE.WorldSharedNavigationBudget",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.CancelInvalidatesOldTravelAndRetry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.DeferredTravelAndBoundedActiveSlotRetry",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.HudRebindAndCurrentSnapshot",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Reconnect.ServerRetentionAndSingleUseClaim",
+        "state": "Success",
+        "warnings": 2,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Weapon.AuthorityAndReplicatedState",
+        "state": "Success",
+        "warnings": 1,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Weapon.ReplicationAudienceAndArrivalOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Multiplayer.Weapon.ShotIdentityCadenceAndLifecycle",
+        "state": "Success",
+        "warnings": 5,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.AnimationSharing.StopAndSwapLifecycle",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.GameplayTierReasonSnapshot",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderBudgetRetentionOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderPriorityOrder",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderScoringSnapshotEquivalence",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.RenderTopKSelection",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Performance.Significance.ScopedCombatProtection",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.IndependentBudgetRetention",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.MeshOwnershipAndDeath",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.NoPostProcessAcrossLifecycle",
+        "state": "Success",
+        "warnings": 4,
+        "errors": 0
+      },
+      {
+        "fullTestPath": "fpstrue.Rendering.EnemyBudget.TierHysteresis",
+        "state": "Success",
+        "warnings": 0,
+        "errors": 0
+      }
+    ],
+    "Clean": 78
+  },
+  "EarlierFailure": {
+    "FailedTest": "fpstrue.Multiplayer.Prediction.BoundedShotTransportReorderAndTail",
+    "ReportSha256": "7D677F43179BE5FA1FDD566B8B25AB918EBDB1EC9ABE30DCB872FAFED4EB8CA4",
+    "Cause": "Fixture retained the old included-shot watermark without consuming a real generation change.",
+    "ResolvedBy": "Automation_R2",
+    "ProductionBudgetWidened": false
+  },
+  "Builds": [
+    {
+      "Target": "Editor",
+      "LogSha256": "C5D0CA6484279D673074FE27D7D9F03D8C810406492AFBF75ACD99640A7E2F9E",
+      "Passed": true
+    },
+    {
+      "Target": "Shipping",
+      "CookedPackageVerified": false,
+      "LogSha256": "526E9414E94DE562FC7285DEF3CB6EBA37EA36BBE5B527C6B8DF89C396EA0EE1",
+      "Passed": true
+    }
+  ],
+  "Assets": {
+    "BehaviorTrees": 1,
+    "Blackboards": 1,
+    "EnemyHealthWidgetAssetExists": false,
+    "EnemyWidgetComponents": 0,
+    "LoadFailures": 0,
+    "SavedByColdAudit": 0,
+    "CompileFailures": 0,
+    "BlueprintsColdCompiled": 20,
+    "AuditLogSha256": "586C9FC2245E84D8F67A1AC0166D62BA48B4F17E09370C24DF2EF5BAB34366D8",
+    "AuditAndExportsCompleted": true,
+    "AuditHelperExitedNormally": false,
+    "Cleanup": "Owned editor helper stopped after final audit/export PASS because editor-console Quit did not exit; no gameplay test result is derived from this helper exit."
+  },
+  "Cases": [
+    {
+      "Name": "NormalMoving",
+      "Run": "PvpSmoke_20261026_090641_47794704",
+      "ReportSha256": "088C772738BE1BD5622D7C7860E73A6E0CA88DE77AA1EA94A7650090EBB900B3",
+      "Passed": true,
+      "AcceptanceMode": "StrictExperience",
+      "InputsUnchanged": true,
+      "RenderedClients": false,
+      "MovingHit": "Passed",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "Network": {
+        "OutgoingLagMs": 0,
+        "LossPercent": 0,
+        "LagVarianceMs": 0
+      },
+      "ShotClients": [
+        {
+          "Client": "Client1",
+          "Predicted": 34,
+          "Accepted": 34,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "LostInputs": 0,
+          "PredictionToAckP95Ms": 52.425,
+          "PredictionToAckP99Ms": 53.507
+        }
+      ],
+      "FormalCapacityCertified": false
+    },
+    {
+      "Name": "WeakRenderedMovingFailure",
+      "Run": "PvpSmoke_20261026_090750_036ae52e",
+      "ReportSha256": "6ED62B07B7A240121D9D11B67D4A9A9C08CECE6D987DFF52C63F7881D7039309",
+      "Passed": false,
+      "AcceptanceMode": "StrictExperience",
+      "InputsUnchanged": true,
+      "RenderedClients": true,
+      "MovingHit": "MissingEvidence",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "Network": {
+        "OutgoingLagMs": 100,
+        "LossPercent": 5,
+        "LagVarianceMs": 20
+      },
+      "ShotClients": [
+        {
+          "Client": "Client1",
+          "Predicted": 1,
+          "Accepted": 1,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "LostInputs": 0
+        }
+      ],
+      "FormalCapacityCertified": false
+    },
+    {
+      "Name": "WeakMoving",
+      "Run": "PvpSmoke_20261026_091323_cf28baae",
+      "ReportSha256": "6759C0D1958FB7626B95B17711A38618673DA705D7A2AADE3C16E68EB097318E",
+      "Passed": true,
+      "AcceptanceMode": "StrictExperience",
+      "InputsUnchanged": true,
+      "RenderedClients": false,
+      "MovingHit": "Passed",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "Network": {
+        "OutgoingLagMs": 100,
+        "LagVarianceMs": 20,
+        "LossPercent": 5
+      },
+      "ShotClients": [
+        {
+          "Client": "Client2",
+          "Predicted": 37,
+          "Accepted": 37,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "LostInputs": 0,
+          "PredictionToAckP95Ms": 370.646,
+          "PredictionToAckP99Ms": 457.853
+        }
+      ],
+      "FormalCapacityCertified": false
+    },
+    {
+      "Name": "NormalLiveRenderedReconnect",
+      "Run": "PvpSmoke_20261026_091422_debc82bd",
+      "ReportSha256": "A5F78B98C84374AF9ACD6C1F3F622B14CAF22D14030F2B3FC728E8E9841DD99A",
+      "Passed": true,
+      "AcceptanceMode": "StrictExperience",
+      "InputsUnchanged": true,
+      "RenderedClients": true,
+      "MovingHit": "NotRequested",
+      "AutomaticRetryTransportVerified": true,
+      "RenderedRecoveryVerified": true,
+      "VisualQualityReviewed": false,
+      "Network": {
+        "OutgoingLagMs": 0,
+        "LagVarianceMs": 0,
+        "LossPercent": 0
+      },
+      "ShotClients": [
+        {
+          "Client": "Client1",
+          "Predicted": 34,
+          "Accepted": 34,
+          "Rejected": 0,
+          "MissingFinalAck": 0,
+          "LostInputs": 0,
+          "PredictionToAckP95Ms": 66.74,
+          "PredictionToAckP99Ms": 102.485
+        }
+      ],
+      "FormalCapacityCertified": false
+    },
+    {
+      "Name": "DeterministicStalePolicy",
+      "Run": "PvpSmoke_20261026_091548_b4630b6b",
+      "ReportSha256": "66A8B77B2C843F756B320D833221FDF9F86C210878D163C56A2E6C4743A3AFF0",
+      "Passed": true,
+      "AcceptanceMode": "WeakPolicyCorrectness",
+      "InputsUnchanged": true,
+      "RenderedClients": false,
+      "MovingHit": "NotRequested",
+      "AutomaticRetryTransportVerified": false,
+      "RenderedRecoveryVerified": false,
+      "VisualQualityReviewed": false,
+      "Network": {
+        "OutgoingLagMs": 0,
+        "LagVarianceMs": 0,
+        "LossPercent": 0
+      },
+      "ShotClients": [
+        {
+          "Client": "Client2",
+          "Predicted": 35,
+          "Accepted": 34,
+          "Rejected": 1,
+          "MissingFinalAck": 0,
+          "LostInputs": 0,
+          "PredictionToAckP95Ms": 53.015,
+          "PredictionToAckP99Ms": 54.467
+        }
+      ],
+      "FormalCapacityCertified": false
+    }
+  ],
+  "StressFailure": {
+    "HistoryWindowMilliseconds": 350,
+    "ServerExecutionTimeSeconds": 30.604681,
+    "Scope": "Derived from the same first-shot request and server execution log, not a cross-process subtraction of monotonic clocks.",
+    "DerivedViewAgeMilliseconds": 421.289,
+    "FirstShotAccepted": true,
+    "HitPlayer": false,
+    "HistoryWindowWidened": false,
+    "ReportedTargetViewTimeSeconds": 30.183392,
+    "Scenario": "Weak + rendered clients + moving-hit first shot"
+  },
+  "ActivationLossDiagnostic": {
+    "FormalCapacityCertified": false,
+    "DiagnosticOnly": true,
+    "Enemies": 160,
+    "Clients": 2,
+    "Fault": "Client1FirstFireOneWorldFlushLoss",
+    "Run": "NetworkMatrix_20261026_091737_b9394422/Capacity_2_Weak_R1",
+    "CaptureSeconds": 20,
+    "ShotClients": [
+      {
+        "Client": "Client1",
+        "Predicted": 82,
+        "Accepted": 75,
+        "Rejected": 7,
+        "MissingFinalAck": 0,
+        "LostInputs": 1,
+        "PredictionToAckP95Ms": 541.704,
+        "PredictionToAckP99Ms": 722.681
+      },
+      {
+        "Client": "Client2",
+        "Predicted": 81,
+        "Accepted": 81,
+        "Rejected": 0,
+        "MissingFinalAck": 0,
+        "LostInputs": 0,
+        "PredictionToAckP95Ms": 349.13,
+        "PredictionToAckP99Ms": 398.046
+      }
+    ],
+    "ReportSha256": "F593FBC368B1BD967F5745335AA79276BE10141ED693674714575C71174AE625",
+    "Failures": [
+      "Server: capture shorter than the frozen minimum.",
+      "Server: frame interval P95 misses the 30 Hz workload budget.",
+      "Client1: capture shorter than the frozen minimum.",
+      "Client2: capture shorter than the frozen minimum.",
+      "Client1: P95 input-to-final-ACK exceeds budget or is missing.",
+      "Client1: P99 input-to-final-ACK exceeds budget or is missing.",
+      "Client1: shot rejection budget exceeded or unavailable."
+    ],
+    "PacketEvidence": {
+      "OriginalPacket": 19117,
+      "OriginalDropped": true,
+      "Channel": 11,
+      "ReliableBunch": 899,
+      "RetransmissionPacket": 19129,
+      "RetransmissionDelivered": true,
+      "SameClientRetransmitSendIntervalMilliseconds": 259.9003,
+      "PriorDeliveredUnreliableBatchCalls": 7,
+      "NoAuthorizationBeforeActivation": true,
+      "RpcParametersDecoded": false,
+      "LaterReliableHeadOfLineProven": false,
+      "Scope": "Application authorization dependency confirmed by native parent bunches and same-server bookmarks; no cross-process monotonic subtraction.",
+      "DiagnosisSha256": "F4BF7989FB55EFC0CC06C1F8E6518F23300B67DDF512510625C0175C6B5F8E49"
+    }
+  },
+  "FrozenBudgetSha256": "5D7A5A6485745A4CD47F4905D9B551885DC39E347949D352410732AFB981A795",
+  "ToolSelfChecks": {
+    "Delivery": 62,
+    "MatrixParser": 18,
+    "Smoke": 97,
+    "LatencyParser": 32
+  },
+  "Limits": [
+    "Native reliable GAS activation can arrive after already-delivered unreliable shot input; not eliminated by this change.",
+    "RTT/2 is a symmetric-path estimate. Dynamic RTT does not replace UE transport RTO.",
+    "No formal 2/4/8-player 160-AI capacity was certified.",
+    "Raw logs, traces, credentials, caches and third-party assets are excluded from the public evidence file."
+  ]
+}

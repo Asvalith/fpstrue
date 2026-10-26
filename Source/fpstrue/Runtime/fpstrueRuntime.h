@@ -20,6 +20,7 @@
  * 枚举槽位必须与 Config/DefaultEngine.ini 中的 DefaultChannelResponses 保持一致。
  * 业务代码使用语义名称而不是散落 ECC_GameTraceChannel3，后续调整槽位时只需修改这里。
  */
+//定义玩家 Hitscan 查询通道：场景和活体命中体阻挡；角色移动胶囊、Trigger、UI 和尸体忽略。	
 namespace FpstrueCollisionChannels
 {
 	// 玩家 Hitscan 查询通道：场景和活体命中体阻挡；角色移动胶囊、Trigger、UI 和尸体忽略。
@@ -44,6 +45,9 @@ struct FPSTRUE_API FFPActionPlayback
 	int32 MontageInstanceId = INDEX_NONE;
 	uint32 ActionId = 0;
 
+	//
+	// 记录一次动作的播放身份；同一事务只能绑定一次 Montage，旧播放不能覆盖新播放。
+	// 
 	// 只能绑定调用者明确指定的 Montage；同一事务已有不同播放时拒绝覆盖。
 	FAnimMontageInstance* TryBind(uint32 InActionId, USkeletalMeshComponent* PlaybackMesh, UAnimMontage* PlayedMontage);
 	// 校验调用者期望的动作编号，以及通知来源的 Mesh、AnimInstance 和 Montage 实例；旧播放不能提交当前动作。
@@ -91,6 +95,8 @@ DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Sweep Returned Hit Count"), STAT_fps
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Attack Window Update Count"), STAT_fpstrueAttackWindowUpdateCount, STATGROUP_fpstruePerformance,
 									  FPSTRUE_API);
 
+
+//消融开关只用于分离消费者成本；关闭碰撞、移动或攻击不能视为可交付玩法优化。
 struct FFPEnemyRenderSignificancePolicy;
 
 /**

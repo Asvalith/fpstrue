@@ -4,7 +4,7 @@
 
 | 目录 | 用途 | 常用入口 |
 |---|---|---|
-| `Gameplay/` | 行为树资产生成/验证、近战/武器配置迁移 | `CreateEnemyBehaviorTree.py`、`VerifyEnemyBehaviorTreeAssets.py`、`MigrateWeaponConfiguration.py` |
+| `Gameplay/` | 行为树资产生成/验证与近战配置维护 | `CreateEnemyBehaviorTree.py`、`VerifyEnemyBehaviorTreeAssets.py` |
 | `Networking/` | PvP 构建、功能回归、双客户端网络冒烟与交付证据 | `BuildPvpDelivery.ps1`、`RunPvpSmoke.ps1` |
 | `Assets/` | 网格、LOD、纹理、Nanite、VSM 候选审计与样条静态化 | `AuditVSMCandidates.py`、`AuditTextureAssets.py`、`BakeStaticLandscapeSplines.py`、`VerifyBakedLandscapeSplines.py` |
 | `Performance/` | 联网160 AI采集、Trace 导出、CSV/事件分析 | `RunGroupAIBaseline.ps1`、`ExportRenderWaitTrace.ps1`、`AnalyzeGpuTimingTrace.py` |
@@ -13,6 +13,10 @@
 | `LegacyPerformance/` | 冻结的历史启动、汇总和固定数据分析 | 仅用于核对旧实验，不作为新一轮采集入口 |
 
 ## 常用操作
+
+角色/动画和武器的最终迁移入口在 `Testing/Editor/`，只编译进 Editor。`fp.PreparePlayerPresentation Snapshot=<迁移前快照JSON绝对路径>` 冷检六个角色/动画资产；`fp.PrepareWeaponPresentation` 冷检正式武器、四张项目地图和 CoffeeShop 历史图。显式 `Apply` 才修改与备份，武器的 `Retire` 仅删除已经无外部引用的五包旧表现资源。不在正式启动时自动生成、修复或替换资源。
+
+旧 `PrepareRARPresentation`、`PrepareTemplatePresentation` 首次生成器和旧 `MigrateWeaponConfiguration.py` 已删除，不能再作为第二条初始化入口。
 
 项目只维护多人 PvPvE，工具也不再启动旧波次玩法。当前联网基线的只读计划命令见下方“160 AI 平地基线”，`-DryRun` 不启动 Unreal，不产生新性能证据。
 
@@ -40,7 +44,7 @@
 
 ## 160 AI 平地基线
 
-群体 AI 采集复用既有平地场地 `/Game/PerformanceCandidates/EnemyUI160/EnemyUI160_ArenaOverview55x192`，不再生成土包、坡台或台阶专项图。保持 160 AI 与两个玩家，保留玩家 IK、服务器权威、独立导航、站位缓存、请求去重、World 级限流和失败退避。切换地图后必须重新验证出生点、相机及有效人口并建立新基线；旧地图的结果只保留为历史证据，不能混入新场景成绩。
+群体 AI 采集复用既有平地场地 `/Game/PerformanceCandidates/EnemyUI160/EnemyUI160_ArenaOverview55x192`，不再生成土包、坡台或台阶专项图。默认 160 AI 与两个玩家；阶梯压测用 `-EnemyCount` 明确指定人数，三端必须精确达到同一人口。保留服务器权威、独立导航、站位缓存、请求去重、World 级限流和失败退避。切换地图后必须重新验证出生点、相机及有效人口并建立新基线；旧地图的结果只保留为历史证据，不能混入新场景成绩。
 
 ```powershell
 # 只检查计划；实际采集去掉 -DryRun，必须提供 Stage 内部的真实 Shipping EXE。
@@ -122,8 +126,7 @@
 - 多人 AI 门禁另外核对专服仅更新 Gameplay 重要性，两个客户端及恢复客户端实际应用各自表现预算。共享跟随者数量单独记录，近距离战斗中的敌人保持独立动画是正常情况，不强迫为测试进入共享池。
 - 普通入口的远端动作验收使用 `Networking/RunFpsVisualAcceptance.ps1`：两台真实渲染客户端各自走到补给并通过服务器 Overlap 拾枪，再用 CMC 行走会合，交换开火、换弹、瞄准及冲刺姿态。不是烟测自动发枪、直接装备或传送。默认隔离 AI 为 0；`-FullGameplay -EnemyPopulation 1` 另外要求沿实际导航接敌、真实射杀 AI、玩家交火死亡和自动重生，以及双端死亡即时/0.8 秒稳定截图。`-Round 2 -FirstClient 2 -PacketLagMs 100 -PacketLagVarianceMs 20 -PacketLossPercent 2` 可复验交换顺序的中档弱网。功能档为 720p/30FPS/关闭光追与运动模糊，VSM 仅将中档物理页容量提至 1024，真实溢出仍使门禁失败；不能用它声称默认画质性能或实际键盘绑定已验收。PNG 和真实 Montage/附着记录必须同时具备，仍需人工查看关键帧。
 - 上下身转向连续复验可单独加 `-FacingReview -FacingStartServerTime 130 -TimeoutSeconds 230`（不要与 `-FullGameplay` 同轮）：保留以上全部动作门禁，两端准备好后按同一服务器时间轮流输入小幅转头、左右大幅转向和上下俯仰，每端要求至少 40 张连续远端图。日志记录实际骨骼朝向、脚部位置、转身快照、网络 Mesh 平滑及相机方向；捕获短开火仍须有真实播放进度和 Slot 权重。130 秒是本机热启动复验示例，冷启动较慢时应显式延后共同起时并留足超时，不得跳过缺失画面或改写失败报告。
-- 保留玩家脚部 IK 与 `ABP_PlayerFootIK`，不保留敌人脚部 IK、专属资源和优化分支。玩家专项沿用 `Networking/RunFpsFootIKAcceptance.ps1 -Scenario Facing`，检查双端行走、冲刺、停步和转身，并保留普通入口的原门禁；原有 `Enemy` 专项不再作为当前功能或验收要求。
-- 玩家 IK 以当前输入姿态查地，保留真实鞋底／趾部标定、支撑权重和最终逐点防穿透，不移动 Actor／CMC 或改上半身动作图。该后处理类的 `CanRunParallelWork()` 固定返回 `false`，首次初始化、离地和落地都不依赖上一轮贴地资格决定线程许可；世界查询保留 Game Thread 断言。UE5.5 的主图／后处理共用 Mesh 求值门禁，因此安装此后处理的玩家身体 Mesh 主图与后处理求值均同步，不能写成“只有后处理同步、同一 Mesh 主图仍完整并行”。敌人未安装该玩家 IK，全局／敌人动画并行开关不因这项修复而关闭。初始化、起跳／落地和死亡契约检查不替代 `-useperfthreads` 下真实玩家生成的多进程验收。历史蒙皮、滑步与贴地报告保留于原 `Saved` 目录，不能当作删除专项功能后的新版本验收，也不能宣称零滑步、全地图适配或公网通过。
+- 玩家和敌人的脚部地形 IK 均已移除：不再安装专用后处理、进行鞋底探测或保留旧验收开关。普通移动、转身和主动画图继续使用原流程；当前自动化批准清单为 96 项。旧 IK 报告仅作历史记录，删除后的动画与联机表现须重新验收。
 - 原单机完整流程使用 `Networking/RunFpsStandaloneVisual.ps1 -Case Both`：保留原地图、LevelScript AnyKey 开局、原 UMG 胜败/重新开始按钮。胜利仅使用显式临时 6 秒/1 敌人验收配置，失败由正常 CMC 接敌和真实 AI 伤害触发，不写生命或直接调用结算；重开必须是同地图的新世界和满血状态。它不会替换原菜单/HUD，报告不能代替截图观感、物理键盘绑定或声音验收。
 - 严格网络体验仍默认要求 `Deep.NoUnexpectedShotRejections`。可另显式运行 `RunPvpSmoke.ps1 -WeakPolicyCorrectness`：只在有真实 stale 样本、其准入或执行年龄超过对应预算、拒绝未扣弹/进入命中执行、逐发最终 ACK 和弹药吻合、动作状态收尾后，继续验证硬断恢复；未来时间、身份、射速等错误不豁免。该模式的报告单独命名，旧零拒绝门禁仍可为 false，不能将政策正确性称为零拒绝体验或传输优化完成。没有 stale 的样本标为未覆盖，而不是这个边界通过。
 - `Networking/MeasureFpsShotLatency.ps1 -RunDirectory <本轮证据目录>` 只读汇总预测/接受/拒绝/最终 ACK 缺失及同机 UTC 预测到 ACK 的 P50/P95/max；逐发区分准入和执行时的年龄、预算、服务器 Ping、最近客户端时钟样本。旧日志没有的字段保留 null；连接累计丢包不等于已定位每发的重传，不能靠批量到达就认定 HOL。
