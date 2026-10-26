@@ -113,8 +113,7 @@ FFPRuntimeOptions::FFPRuntimeOptions()
 	bDisablePathFollowingTick = FParse::Param(CommandLine, TEXT("BenchmarkDisablePathFollowingTick"));
 	bDisableCharacterMovementTick = FParse::Param(CommandLine, TEXT("BenchmarkDisableCharacterMovementTick"));
 	bDisableSkeletalMeshTick = FParse::Param(CommandLine, TEXT("BenchmarkDisableSkeletalMeshTick"));
-	bDisableEnemySignificance = FParse::Param(CommandLine, TEXT("BenchmarkDisableEnemySignificance")) ||
-								FParse::Param(CommandLine, TEXT("BenchmarkDisableEnemyUpdateBudget"));
+	bDisableEnemySignificance = FParse::Param(CommandLine, TEXT("BenchmarkDisableEnemySignificance"));
 	bDisableMovementTiering = FParse::Param(CommandLine, TEXT("BenchmarkDisableMovementTiering"));
 	bDisableShadowTiering = FParse::Param(CommandLine, TEXT("BenchmarkDisableShadowTiering"));
 	bDisableEnemyRayTracing = FParse::Param(CommandLine, TEXT("BenchmarkEnemyRayTracingOff"));

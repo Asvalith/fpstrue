@@ -1,3 +1,5 @@
+> 历史学习笔记，包含已退役的单机接口和工具名；不作为当前入口或配置说明。当前实现以[职责归属](CODE_OWNERSHIP.md)、[配置入口](CONFIGURATION.md)和[工具入口](../Tools/README.md)为准。
+
 # 历史 FPS 架构、性能与 UE 机制说明
 
 > 历史机制笔记：正文包含旧单机 GameMode、Controller 决策 Timer、生命值镜像和早期性能实验，不作为当前源码结构或通过状态的依据。当前只维护多人 PvPvE，入口与迁移边界见 [MULTIPLAYER_MODE.md](MULTIPLAYER_MODE.md)，配置见 [CONFIGURATION.md](CONFIGURATION.md)。保留旧正文是为了追溯设计演变，不表示这些旧入口仍能运行。

@@ -82,8 +82,6 @@ public:
 
 	// 完整卸下入口：ExpectedWeapon 防止旧回调清除新装备；不能公开只改槽位的 setter。
 	void ClearEquippedWeaponComponent(const UfpstrueWeaponComponent* WeaponComponent);
-	// 完整取消瞄准/冲刺并刷新步速的公开命令，不影响开火、换弹和弹药。
-	void ResetMovementModifiers();
 	// 从 GAS 标签刷新姿态镜像、步速和蓝图表现；不能反向写标签或独立决定动作互斥。
 	void RefreshMovementAbilityState();
 	// 业务资格统一入口；临时输入迁移不会把有效装备误判为永久失效。

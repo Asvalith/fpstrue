@@ -37,7 +37,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           & .\Tools\Networking\BuildPvpDelivery.ps1 -SelfTest
           & .\Tools\Networking\RunPvpSmoke.ps1 -SelfTest
-          & .\Tools\Performance\TestRenderCostConfig.ps1
+          & .\Tools\Networking\RunFpsNetworkMatrix.ps1 -SelfTest
       - name: Build, test, package and verify
         shell: powershell
         env:

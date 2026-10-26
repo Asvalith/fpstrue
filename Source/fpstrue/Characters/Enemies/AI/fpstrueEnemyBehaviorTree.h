@@ -5,10 +5,8 @@
 #include "CoreMinimal.h"
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/Decorators/BTDecorator_Blackboard.h"
-#include "Kismet/BlueprintFunctionLibrary.h"
 #include "fpstrueEnemyBehaviorTree.generated.h"
 
-class UBehaviorTree;
 class UBlackboardData;
 
 /**
@@ -86,33 +84,12 @@ protected:
 	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
 };
 
-/** Blackboard Bool/Object 的 Set/NotSet 条件；对象键只表示本轮可见目标，不授予攻击许可。 */
+/** 保存资产使用的黑板条件类型；条件计算直接复用引擎，不再提供建树/旧树迁移入口。 */
 UCLASS()
 class FPSTRUE_API UfpstrueBTDecorator_DecisionFlag : public UBTDecorator_Blackboard
 {
 	GENERATED_BODY()
-public:
-	// 设置黑板 Set/NotSet 条件，禁用等待期间基于旧快照的分支中止。
-	void Configure(FName KeyName, bool bExpectedValue);
-	// 默认树迁移前比较条件及可编辑属性；用户改过任一规则即拒绝自动覆盖。
-	bool HasSameCondition(const UfpstrueBTDecorator_DecisionFlag& Other) const;
 };
 
-/** 初始化未配置树；创建默认 Blackboard 或复用完全匹配的已有键，供编辑器生成可编辑资产。 */
-UCLASS()
-class FPSTRUE_API UfpstrueEnemyBehaviorTreeLibrary : public UBlueprintFunctionLibrary
-{
-	GENERATED_BODY()
-public:
-	// 拒绝覆盖已有树/图，不修改既有 Blackboard；日后策划编辑不会被重建抹掉。
-	UFUNCTION(BlueprintCallable, Category = "Enemy|Behavior Tree")
-	static bool PopulateDefaultTree(UBehaviorTree* Tree, UBlackboardData* Blackboard);
-	// 严格匹配旧默认/已知错挂模板后分组并修正；自定义树拒绝，新分层树重复调用不改节点或图。
-	UFUNCTION(BlueprintCallable, Category = "Enemy|Behavior Tree")
-	static bool UpgradeDefaultTreeForRetreat(UBehaviorTree* Tree, UBlackboardData* Blackboard);
-};
-
-// 世界内共享不可变树模板，每个 Controller 的 Blackboard 和节点内存由引擎单独分配。
-UBehaviorTree* FPGetDefaultEnemyBehaviorTree(UWorld& World);
 // 自定义树必须提供这些同类型键；避免拼写错误时静默运行错误的行为分支。
 bool FPHasEnemyBlackboardSchema(const UBlackboardData* Blackboard);

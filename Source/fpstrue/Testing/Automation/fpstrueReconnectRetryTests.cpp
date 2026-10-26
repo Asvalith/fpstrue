@@ -57,7 +57,7 @@ bool FFpstrueLiveReconnectRetryTest::RunTest(const FString&)
 	TestTrue(TEXT("Exhaustion ends automatic reconnect rather than looping forever"),
 		Instance->ConnectionState == EFPConnectionState::Failed && !Instance->bAutoReconnect);
 	TestEqual(TEXT("Retry exhaustion preserves the token for explicit retry within server retention"), Instance->ResumeToken, OriginalToken);
-	Instance->CancelPvpConnection();
+	Instance->LeavePvp();
 	TestFalse(TEXT("Explicit cancel removes a deferred return from the old failure"), Instance->bPendingLocalReturn);
 	TestTrue(TEXT("Explicit cancel invalidates the old operation"), Instance->OperationRevision != uint32(17));
 	TestTrue(TEXT("Explicit cancel revokes local recovery credentials"), Instance->ResumeToken.IsEmpty());

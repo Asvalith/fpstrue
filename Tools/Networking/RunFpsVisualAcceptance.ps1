@@ -98,7 +98,7 @@ try {
         $null = New-Item -ItemType Directory -Path $capture -Force
         New-PrivateUserDirectory $user
         Start-AcceptancePeer $name ($shared + @(('127.0.0.1:' + $Port),'-game','-Multiprocess','-dx12','-Windowed','-RenderOffscreen',
-            '-ResX=1280','-ResY=720','-ForceRes','-NoVSync','-noraytracing','-PvpPickupWalk','-PvpNormalPair','-PvpSmokeVisual','-PvpSmokeObserve',
+            '-ResX=1280','-ResY=720','-ForceRes','-NoVSync','-noraytracing','-PvpNormalPair','-PvpSmokeVisual','-PvpSmokeObserve',
             ('-PvpSmokeCaptureDir="' + $capture + '"'),('-UserDir="' + $user + '"'),('-abslog="' + (Join-Path $run ($name + '.log')) + '"'),
             '-ExecCmds="t.MaxFPS 30,sg.ViewDistanceQuality 1,sg.AntiAliasingQuality 1,sg.ShadowQuality 1,sg.GlobalIlluminationQuality 1,sg.ReflectionQuality 1,sg.PostProcessQuality 1,sg.TextureQuality 1,sg.EffectsQuality 1,sg.FoliageQuality 1,r.DynamicGlobalIlluminationMethod 0,r.ReflectionMethod 0,r.MotionBlurQuality 0,r.Streaming.PoolSize 768,r.Shadow.Virtual.MaxPhysicalPages 1024"'))
         # The first player must really pick its map weapon before the second walks;

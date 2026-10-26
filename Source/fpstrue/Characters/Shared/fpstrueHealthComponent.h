@@ -159,8 +159,6 @@ public:
 	UFUNCTION(Server, Reliable)
 	void ServerFinishShotInputs(FGameplayAbilitySpecHandle Handle, FPredictionKey Key, const FFPShotStreamIdentity& Stream,
 		const TArray<FFPShotRequest>& Requests, bool bCancelled, bool bExpired);
-	void RememberClosedShotStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
-		UfpstrueWeaponComponent* Weapon, bool bCancelled);
 
 	// ==================== 生命值管理 ====================
 	// 只重置生命数据，不复活角色；广播期间的请求排在当前伤害通知之后执行。
@@ -230,6 +228,9 @@ protected:
 
 private:
 	friend class UfpstrueHealthAttributeSet;
+	friend class UfpstrueFireAbility;
+	void RememberClosedShotStream(FGameplayAbilitySpecHandle Handle, FPredictionKey Key,
+		UfpstrueWeaponComponent* Weapon, bool bCancelled);
 	friend class FFpstrueWeaponShotTransportTest;
 	friend class FFpstrueShotActivationTest;
 	struct FClosedShotStream

@@ -206,8 +206,6 @@ public:
 	bool IsDroppedOnDeath() const { return bDroppedOnDeath; }
 	// Actor 的权威物理可能早于组件快照到达；先建立无挂接物理体，再由引擎消费当前物理状态。
 	void RefreshNetworkPhysics();
-	// 显式报告本武器请求被拒绝，不能授权射击或伪造成功 ACK；ASC 旧会话只丢弃，不转交当前装备。
-	void RejectNetworkShot(const FFPShotRequest& Request, EFPShotResult Result = EFPShotResult::InvalidContext);
 	// 重新占有保留武器时作废旧连接输入身份；保留权威弹药与实际射击冷却，不重放旧请求。
 	void ResetNetworkInputGeneration();
 	// 蓝图始终读取原生装备关系；自动发枪与复制恢复不依赖旧拾取事件写入 owningactor。
@@ -257,10 +255,6 @@ public:
 	void DetachWeapon();
 
 	// ==================== Fire ====================
-	// 同步兼容入口向 ASC 提交开火按下；资格、互斥与连射任务由 Fire GA 管理。
-	void StartFire();
-	// 同步兼容入口向 ASC 提交开火松开；不结束换弹或重新启用装备。
-	void StopFire();
 	// GAS 管启动/互斥/取消；以下执行器保留唯一射速、弹药、命中及 ReloadId 事务。
 	// 先让 GAS 结束旧能力并释放标签，再把同一个完成事实通知原蓝图观察者。
 	FWeaponReloadStopped OnAbilityReloadEnded;

@@ -64,3 +64,7 @@ CMC 继续负责拥有者移动预测/重放。玩家历史命中只查询历史
 5. `Testing/Automation/` 与 [验收记录](REFACTOR_ACCEPTANCE.md)：成功、失败和未覆盖边界分别看。
 
 目录均相对 `Source/fpstrue/`。历史成绩不能直接视为当前构建通过；具体测量条件见 [FPS_NETWORK_ACCEPTANCE](FPS_NETWORK_ACCEPTANCE.md) 与 [PERFORMANCE_EVIDENCE](../PERFORMANCE_EVIDENCE.md)。
+
+## 入口清理（2026-10-26）
+
+运行时只使用正式行为树资产和完整黑板；删除动态建树/旧schema/升级入口。连接取消统一LeavePvp；测试输入改在Testing中经过真实ASC，武器不暴露测试专用StartFire/StopFire。普通双端驱动迁入现有Networking文件，由GameState的诊断入口启动；角色不再通过console启动它。已完成资产迁移器及旧单机工具删除；当前工具入口统一见[Tools/README](../Tools/README.md)。

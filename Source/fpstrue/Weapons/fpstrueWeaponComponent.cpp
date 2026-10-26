@@ -1153,15 +1153,6 @@ void UfpstrueWeaponComponent::ProcessPendingNetworkShot()
 	if (!HasAmmo()) RequestReload();
 }
 
-// ACK 同时给出该发裁决和权威弹药；快照负责当前状态，可靠 ACK 负责每个请求的结束事实。
-void UfpstrueWeaponComponent::RejectNetworkShot(const FFPShotRequest& Request, EFPShotResult Result)
-{
-	// 只能结束这把枪本轮确实可能产生的输入；不能把未知旧包交给当前装备冒领确认。
-	if (!MatchesShotEquipment(Request) || Request.FireSession == 0 || Request.FireSession != FireSession) return;
-	AcknowledgeShot(Request, Result == EFPShotResult::Accepted || Result == EFPShotResult::Queued
-		? EFPShotResult::InvalidContext : Result);
-}
-
 void UfpstrueWeaponComponent::AcknowledgeShot(const FFPShotRequest& Request, EFPShotResult Result)
 {
 	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
@@ -1559,22 +1550,6 @@ bool UfpstrueWeaponComponent::CanAcceptOwnerInput() const
 }
 
 // ==================== Fire System ====================
-
-// 将同步开火命令交给 ASC，由 Fire GA 检查资格并持有动作生命周期。
-void UfpstrueWeaponComponent::StartFire()
-{
-	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
-	if (UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr)
-		ASC->AbilityLocalInputPressed(static_cast<int32>(EFPCombatAbilityInput::Fire));
-}
-
-// 只结束正在进行的连射；松开扳机不能解除换弹或重新启用已禁用武器。
-void UfpstrueWeaponComponent::StopFire()
-{
-	if (GetOwner() == nullptr || !GetOwner()->HasAuthority()) return;
-	if (UAbilitySystemComponent* ASC = Character.IsValid() ? Character->GetAbilitySystemComponent() : nullptr)
-		ASC->AbilityLocalInputReleased(static_cast<int32>(EFPCombatAbilityInput::Fire));
-}
 
 // 一次射击的提交入口：校验射速与装备，先扣弹并命中结算，再报告这一发的事实。
 bool UfpstrueWeaponComponent::Fire(const FFPShotRequest* Request, bool bAimingAtAdmission)

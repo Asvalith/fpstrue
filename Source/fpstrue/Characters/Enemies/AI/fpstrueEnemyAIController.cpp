@@ -31,6 +31,7 @@
 #include "Perception/AISense_Sight.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/CsvProfiler.h"
+#include "UObject/ConstructorHelpers.h"
 
 DEFINE_STAT(STAT_fpstrueAIDecisionTime);
 DEFINE_STAT(STAT_fpstrueAIDecisionCount);
@@ -62,6 +63,9 @@ CSV_DEFINE_CATEGORY(fpstrueAI, true);
 AfpstrueEnemyAIController::AfpstrueEnemyAIController()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	// 原生角色和蓝图共用保存的正式树；构造期引用同时让 Cook 收集该资产。
+	static ConstructorHelpers::FObjectFinder<UBehaviorTree> DefaultTree(TEXT("/Game/FirstPerson/AI/BT_FPEnemy"));
+	BehaviorTreeAsset = DefaultTree.Object;
 	UAIPerceptionComponent* Perception = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("EnemyPerception"));
 	SetPerceptionComponent(*Perception);
 	UAISenseConfig_Sight* Sight = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("EnemySight"));
@@ -531,11 +535,8 @@ bool AfpstrueEnemyAIController::CacheDecisionBlackboardKeys(UBlackboardComponent
 	DecisionKeys.InChaseRange = Asset->GetKeyID(FPEnemyBlackboard::InChaseRange);
 	DecisionKeys.Retreating = Asset->GetKeyID(FPEnemyBlackboard::Retreating);
 	DecisionKeys.TacticalRole = Asset->GetKeyID(FPEnemyBlackboard::TacticalRole);
-	if (DecisionKeys.TacticalRole != FBlackboard::InvalidKey)
-	{
-		DecisionKeys.TacticalGoal = Asset->GetKeyID(FPEnemyBlackboard::TacticalGoal);
-		DecisionKeys.HasInnerSlot = Asset->GetKeyID(FPEnemyBlackboard::HasInnerSlot);
-	}
+	DecisionKeys.TacticalGoal = Asset->GetKeyID(FPEnemyBlackboard::TacticalGoal);
+	DecisionKeys.HasInnerSlot = Asset->GetKeyID(FPEnemyBlackboard::HasInnerSlot);
 	CachedDecisionBlackboardAsset = Asset;
 	return true;
 }
@@ -548,8 +549,8 @@ bool AfpstrueEnemyAIController::StartBehaviorLogic()
 	{
 		return false;
 	}
-	// 原生默认模板在世界内共享；运行中的 Blackboard/节点内存由 UE 分别持有。
-	ActiveBehaviorTree = BehaviorTreeAsset != nullptr ? BehaviorTreeAsset.Get() : FPGetDefaultEnemyBehaviorTree(*World);
+	// 只运行配置资产；UE 为各敌人分别维护 Blackboard 和节点内存。
+	ActiveBehaviorTree = BehaviorTreeAsset;
 	if (ActiveBehaviorTree == nullptr || !FPHasEnemyBlackboardSchema(ActiveBehaviorTree->BlackboardAsset))
 	{
 		UE_LOG(LogTemp, Error, TEXT("Enemy BehaviorTree %s has an incompatible Blackboard; activation rejected."),
@@ -719,15 +720,12 @@ void AfpstrueEnemyAIController::RefreshBehaviorDecision(UBlackboardComponent& De
 	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InAttackRange, DecisionContext.bInAttackRange);
 	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InChaseRange, DecisionContext.bInChaseRange);
 	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.Retreating, bHasTarget && (bRetreatRequested || bRetreatActive));
-	// 战术键是默认树的可读镜像；旧自定义黑板没有这些键仍保留自己的图表，不静默替换树。
-	if (DecisionKeys.TacticalRole != FBlackboard::InvalidKey)
-	{
-		DecisionBlackboard.SetValue<UBlackboardKeyType_Int>(DecisionKeys.TacticalRole, static_cast<int32>(TacticalAssignment.Role));
-		if (TacticalAssignment.bHasGoal) DecisionBlackboard.SetValue<UBlackboardKeyType_Vector>(DecisionKeys.TacticalGoal, TacticalAssignment.Goal);
-		else DecisionBlackboard.ClearValue(DecisionKeys.TacticalGoal);
-		DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasInnerSlot,
-			TacticalAssignment.Role == EFPEnemyTacticalRole::Inner && TacticalAssignment.Revision != 0);
-	}
+	// 战术字段只是 Manager 分配结果的镜像；完整契约已在启动时校验。
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Int>(DecisionKeys.TacticalRole, static_cast<int32>(TacticalAssignment.Role));
+	if (TacticalAssignment.bHasGoal) DecisionBlackboard.SetValue<UBlackboardKeyType_Vector>(DecisionKeys.TacticalGoal, TacticalAssignment.Goal);
+	else DecisionBlackboard.ClearValue(DecisionKeys.TacticalGoal);
+	DecisionBlackboard.SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasInnerSlot,
+		TacticalAssignment.Role == EFPEnemyTacticalRole::Inner && TacticalAssignment.Revision != 0);
 	DecisionBlackboard.ResumeObserverNotifications(true);
 }
 
@@ -1333,12 +1331,9 @@ void AfpstrueEnemyAIController::StopAI()
 		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InAttackRange, false);
 		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.InChaseRange, false);
 		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.Retreating, false);
-		if (DecisionKeys.TacticalRole != FBlackboard::InvalidKey)
-		{
-			DecisionBlackboard->SetValue<UBlackboardKeyType_Int>(DecisionKeys.TacticalRole, static_cast<int32>(EFPEnemyTacticalRole::Waiting));
-			DecisionBlackboard->ClearValue(DecisionKeys.TacticalGoal);
-			DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasInnerSlot, false);
-		}
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Int>(DecisionKeys.TacticalRole, static_cast<int32>(EFPEnemyTacticalRole::Waiting));
+		DecisionBlackboard->ClearValue(DecisionKeys.TacticalGoal);
+		DecisionBlackboard->SetValue<UBlackboardKeyType_Bool>(DecisionKeys.HasInnerSlot, false);
 		DecisionBlackboard->ResumeObserverNotifications(false);
 	}
 
